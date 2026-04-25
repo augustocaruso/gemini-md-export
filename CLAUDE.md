@@ -260,8 +260,24 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   `gemini_list_recent_chats`, `gemini_list_notebook_chats`,
   `gemini_get_current_chat`, `gemini_download_chat`,
   `gemini_download_notebook_chat`, `gemini_export_notebook`,
+  `gemini_export_recent_chats`, `gemini_export_job_status`,
   `gemini_exporter_update`, `gemini_cache_status`, `gemini_clear_cache`,
   `gemini_open_chat`, `gemini_reload_gemini_tabs` e `gemini_snapshot`.
+  `gemini_list_recent_chats` é paginada: `limit` é tamanho de página
+  (recomendado 25-50 para listas grandes) e `offset` pula itens já vistos
+  (`0`, `50`, `100`...). Para centenas de conversas, o agente deve avançar
+  por páginas usando `pagination.nextOffset` e parar quando
+  `pagination.reachedEnd=true`, `pagination.canLoadMore=false` ou a página
+  vier vazia. O MCP carrega mais histórico até `offset + limit` conforme
+  necessário, com teto defensivo de 1000 conversas carregáveis para não
+  travar o navegador nem estourar contexto.
+  Para o pedido de usuário "importar/exportar todo o histórico", não listar
+  centenas de conversas no chat: usar `gemini_export_recent_chats`, que inicia
+  um job em background no próprio MCP, percorre o sidebar carregável, grava os
+  `.md` localmente e emite relatório JSON; acompanhar com
+  `gemini_export_job_status` pelo `jobId`. Esse job retorna só progresso,
+  contagens, erros recentes e caminho do relatório para evitar timeout e
+  excesso de contexto no Gemini CLI.
   Downloads resolvem uma conversa por `index` 1-based,
   `chatId` ou, em cadernos, `title`; pedem o Markdown à extensão e gravam
   localmente no diretório padrão configurado, sobrescrevendo arquivos
@@ -276,7 +292,9 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   pelo browser; chamadas locais sem `Origin` seguem úteis para debug.
   Para inspeção local quando a sessão do cliente AI ainda não carregou as
   tools MCP, o bridge expõe endpoints sem CORS aberto: `/agent/clients`,
-  `/agent/recent-chats?limit=10`, `/agent/notebook-chats?limit=20`,
+  `/agent/recent-chats?limit=50&offset=0`,
+  `/agent/export-recent-chats?maxChats=1000`,
+  `/agent/export-job-status?jobId=<id>`, `/agent/notebook-chats?limit=20`,
   `/agent/current-chat`, `/agent/download-chat?index=7`,
   `/agent/download-notebook-chat?index=1`, `/agent/export-notebook`,
   `/agent/export-dir`, `/agent/set-export-dir`, `/agent/cache-status`,
@@ -399,13 +417,21 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
    `index`, a posição é 1-based na lista recente carregada; por `chatId`,
    o chat também precisa estar nessa lista.
    Já a tool `gemini_list_recent_chats` não fica mais limitada ao inventário
-   inicial: se o agente pedir, por exemplo, 50 conversas e o sidebar tiver só
-   13 carregadas, o MCP manda a aba puxar mais histórico em rodadas até
-   alcançar o limite ou `reachedSidebarEnd=true`. Esse caminho do MCP usa
-   pacing mais agressivo do que o botão manual do modal (timeouts e pausas
-   menores entre scrolls) para reduzir respostas de 20s+ quando o agente
-   pede listas maiores, mas ainda faz uma confirmação final um pouco mais
-   lenta antes de cravar o fim da lista.
+   inicial: se o agente pedir, por exemplo, `limit=50&offset=100` e o sidebar
+   tiver só 13 carregadas, o MCP manda a aba puxar mais histórico em rodadas
+   até alcançar `offset + limit` ou `reachedSidebarEnd=true`, e devolve só a
+   página solicitada. Esse caminho do MCP usa pacing mais agressivo do que o
+   botão manual do modal (timeouts e pausas menores entre scrolls) para
+   reduzir respostas de 20s+ quando o agente pede listas maiores, mas ainda
+   faz uma confirmação final um pouco mais lenta antes de cravar o fim da
+   lista. Para centenas de conversas, nunca pedir "todas" em uma chamada:
+   iterar páginas de 25-50 itens usando `pagination.nextOffset`.
+   Para exportar/importar o histórico inteiro, o fluxo preferido é
+   `gemini_export_recent_chats`: ele roda em background, continua exportando
+   enquanto o MCP estiver vivo e deve ser acompanhado com
+   `gemini_export_job_status`. Isso evita que uma chamada longa do Gemini CLI
+   precise ficar aberta enquanto centenas de conversas são hidratadas,
+   navegadas e gravadas.
    Em páginas de caderno, não trocar `collectBridgeConversationLinks()` por
    `collectConversationLinks()`: a primeira combina sidebar + caderno para o
    MCP, enquanto a segunda é a lista visual do modal. Se `gemini_list_recent_chats`

@@ -1777,7 +1777,7 @@
         await sleep(loadOptions.ensureSidebarDelayMs);
       }
 
-      const targetCount = Math.max(1, Math.min(100, Number(command.args?.targetCount || 10)));
+      const targetCount = Math.max(1, Math.min(1000, Number(command.args?.targetCount || 10)));
       const attempts = Math.max(1, Math.min(5, Number(command.args?.attempts || 2)));
       const before = collectBridgeConversationLinks().length;
       let loadedAny = false;

@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   DEFAULT_RECENT_CHATS_LOAD_ATTEMPTS_PER_ROUND,
   DEFAULT_RECENT_CHATS_LOAD_MORE_ROUNDS,
+  MAX_RECENT_CHATS_LOAD_TARGET,
   normalizeRecentChatsLoadMorePlan,
 } from '../src/recent-chats-load-more.mjs';
 
@@ -30,6 +31,12 @@ test('load more: respeita clamps de rounds e attempts', () => {
     loadMoreRounds: 999,
     loadMoreAttempts: 999,
   });
-  assert.equal(plan.rounds, 20);
+  assert.equal(plan.rounds, 30);
   assert.equal(plan.attemptsPerRound, 5);
+});
+
+test('load more: limita o alvo máximo para paginação longa', () => {
+  const plan = normalizeRecentChatsLoadMorePlan(1, 5000);
+  assert.equal(plan.targetCount, MAX_RECENT_CHATS_LOAD_TARGET);
+  assert.equal(plan.shouldLoadMore, true);
 });

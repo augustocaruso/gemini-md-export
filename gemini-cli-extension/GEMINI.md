@@ -8,6 +8,15 @@ Operational guidance:
 - Prefer listing recent chats before attempting a download.
 - Prefer the recent-chats fast path first; only force a refresh when the user
   explicitly needs the sidebar refreshed.
+- For large recent-chat lists, never request or print hundreds of chats in one
+  tool call. Page `gemini_list_recent_chats` with `limit` 25-50 and increasing
+  `offset` values, then continue from `pagination.nextOffset` until
+  `pagination.reachedEnd` is true, `pagination.canLoadMore` is false, or a page
+  returns no conversations.
+- When the user asks to import/export the whole Gemini chat history, do not list
+  the chats first. Start `gemini_export_recent_chats`, tell the user the job ID,
+  and poll `gemini_export_job_status` until the job finishes. The job writes the
+  Markdown files and a JSON report locally.
 - When the user asks to update/reinstall this exporter from Gemini CLI, prefer
   the `gemini_exporter_update` MCP tool. It starts a detached Windows updater
   from the latest GitHub release, so tell the user to close and reopen Gemini
@@ -24,6 +33,7 @@ Available capabilities include:
 - listing recent Gemini chats
 - listing notebook chats
 - exporting the current chat
+- exporting the recent-chat history in a background batch job
 - downloading a specific recent or notebook chat
 - updating this exporter from GitHub Releases on Windows
 - manually reloading connected Gemini tabs when needed

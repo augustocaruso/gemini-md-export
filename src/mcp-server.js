@@ -12,7 +12,10 @@ import {
   buildRecentChatsRefreshPlan,
   DEFAULT_RECENT_CHATS_CACHE_MAX_AGE_MS,
 } from './recent-chats-policy.mjs';
-import { normalizeRecentChatsLoadMorePlan } from './recent-chats-load-more.mjs';
+import {
+  MAX_RECENT_CHATS_LOAD_TARGET,
+  normalizeRecentChatsLoadMorePlan,
+} from './recent-chats-load-more.mjs';
 import { formatBridgeListenError } from './mcp-server-errors.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -40,6 +43,7 @@ const DEFAULT_RELEASE_REPO = process.env.GEMINI_EXPORTER_RELEASE_REPO || 'august
 
 const clients = new Map();
 const pendingCommands = new Map();
+const exportJobs = new Map();
 let configuredExportDir = DEFAULT_EXPORT_DIR;
 let shuttingDown = false;
 
@@ -346,8 +350,17 @@ const summarizeClient = (client) => ({
   notebookConversationCount: notebookConversationsForClient(client).length,
 });
 
-const normalizeLimit = (value, fallback = 10, max = 100) =>
-  Math.max(1, Math.min(max, Number(value || fallback)));
+const normalizeLimit = (value, fallback = 10, max = 100) => {
+  const parsed = Number(value || fallback);
+  const safeValue = Number.isFinite(parsed) ? parsed : fallback;
+  return Math.max(1, Math.min(max, safeValue));
+};
+
+const normalizeOffset = (value, max = MAX_RECENT_CHATS_LOAD_TARGET - 1) => {
+  const parsed = Number(value || 0);
+  const safeValue = Number.isFinite(parsed) ? parsed : 0;
+  return Math.max(0, Math.min(max, safeValue));
+};
 
 const notebookConversationsForClient = (client) =>
   (client.conversations || []).filter((conversation) => conversation.source === 'notebook');
@@ -412,6 +425,22 @@ const writeExportPayload = (payload, { outputDir } = {}) => {
     bytes: Buffer.byteLength(payload.content, 'utf-8'),
     overwritten: existed,
   };
+};
+
+const timestampForFilename = () =>
+  new Date()
+    .toISOString()
+    .replace(/[-:]/g, '')
+    .replace(/\..+$/, '')
+    .replace('T', '-');
+
+const writeExportReport = (kind, report, { outputDir } = {}) => {
+  const directory = resolveOutputDir(outputDir);
+  mkdirSync(directory, { recursive: true });
+  const filename = `gemini-md-export-${kind}-${timestampForFilename()}-${randomUUID().slice(0, 8)}.json`;
+  const filePath = resolve(directory, filename);
+  writeFileSync(filePath, `${JSON.stringify(report, null, 2)}\n`, 'utf-8');
+  return { reportFile: filePath, reportFilename: filename };
 };
 
 const writeExportFiles = (payload = {}) => {
@@ -905,7 +934,9 @@ const withTimeout = (promise, timeoutMs) =>
   });
 
 const listRecentChatsForClient = async (client, args = {}) => {
-  const limit = Math.max(1, Math.min(100, Number(args.limit || 10)));
+  const limit = normalizeLimit(args.limit, 10, 100);
+  const offset = normalizeOffset(args.offset);
+  const targetCount = Math.min(MAX_RECENT_CHATS_LOAD_TARGET, offset + limit);
   let refresh = null;
   let loadMore = null;
   const refreshPlan = buildRecentChatsRefreshPlan(client, args, {
@@ -925,9 +956,13 @@ const listRecentChatsForClient = async (client, args = {}) => {
       };
     }
   }
-  if (recentConversationsForClient(client).length < limit) {
-    loadMore = await loadMoreRecentChatsForClient(client, limit, args);
+  if (recentConversationsForClient(client).length < targetCount) {
+    loadMore = await loadMoreRecentChatsForClient(client, targetCount, args);
   }
+  const conversations = recentConversationsForClient(client);
+  const page = conversations.slice(offset, offset + limit);
+  const reachedEnd = loadMore?.reachedEnd === true || recentChatsReachedEndForClient(client);
+  const nextOffset = offset + page.length;
   return {
     client: summarizeClient(client),
     refreshAttempted: refreshPlan.shouldRefresh,
@@ -937,10 +972,224 @@ const listRecentChatsForClient = async (client, args = {}) => {
     loadMoreAttempted: loadMore?.attempted === true,
     loadMoreLoadedAny: loadMore?.loadedAny === true,
     loadMoreRoundsCompleted: loadMore?.roundsCompleted || 0,
-    loadMoreReachedEnd: loadMore?.reachedEnd === true || recentChatsReachedEndForClient(client),
+    loadMoreReachedEnd: reachedEnd,
     snapshot: loadMore?.snapshot || refresh?.snapshot || client.lastSnapshot || null,
-    conversations: recentConversationsForClient(client).slice(0, limit),
+    pagination: {
+      offset,
+      limit,
+      returned: page.length,
+      loadedCount: conversations.length,
+      maxLoadTarget: MAX_RECENT_CHATS_LOAD_TARGET,
+      nextOffset: page.length > 0 ? nextOffset : null,
+      hasMoreLoaded: nextOffset < conversations.length,
+      reachedEnd,
+      canLoadMore: !reachedEnd && conversations.length < MAX_RECENT_CHATS_LOAD_TARGET,
+    },
+    conversations: page,
   };
+};
+
+const summarizeExportJob = (job) => ({
+  jobId: job.jobId,
+  type: job.type,
+  status: job.status,
+  phase: job.phase,
+  clientId: job.clientId,
+  outputDir: job.outputDir,
+  createdAt: job.createdAt,
+  updatedAt: job.updatedAt,
+  finishedAt: job.finishedAt || null,
+  startIndex: job.startIndex,
+  maxChats: job.maxChats,
+  loadedCount: job.loadedCount,
+  requested: job.requested,
+  completed: job.completed,
+  successCount: job.successCount,
+  failureCount: job.failureCount,
+  reachedEnd: job.reachedEnd,
+  truncated: job.truncated,
+  current: job.current || null,
+  reportFile: job.reportFile || null,
+  reportFilename: job.reportFilename || null,
+  error: job.error || null,
+  recentSuccesses: job.recentSuccesses.slice(-10),
+  failures: job.failures.slice(-20),
+});
+
+const touchExportJob = (job) => {
+  job.updatedAt = new Date().toISOString();
+};
+
+const runRecentChatsExportJob = async (job, client, args = {}) => {
+  const successes = [];
+  const failures = [];
+  try {
+    job.phase = 'loading-history';
+    touchExportJob(job);
+
+    const targetCount = Math.min(MAX_RECENT_CHATS_LOAD_TARGET, job.startIndex - 1 + job.maxChats);
+    await listRecentChatsForClient(client, {
+      ...args,
+      limit: 1,
+      offset: Math.max(0, targetCount - 1),
+      refresh: args.refresh,
+    });
+
+    const conversations = recentConversationsForClient(client);
+    job.loadedCount = conversations.length;
+    job.reachedEnd = recentChatsReachedEndForClient(client);
+    job.truncated = !job.reachedEnd && conversations.length >= MAX_RECENT_CHATS_LOAD_TARGET;
+
+    const seen = new Set();
+    const selected = conversations
+      .slice(job.startIndex - 1, job.startIndex - 1 + job.maxChats)
+      .filter((conversation) => {
+        const key = stripGeminiPrefix(conversation.chatId || conversation.id) || conversation.url;
+        if (!key || seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+
+    job.requested = selected.length;
+    if (selected.length === 0) {
+      throw new Error('Nenhuma conversa recente carregada para exportar.');
+    }
+
+    job.phase = 'exporting';
+    touchExportJob(job);
+
+    for (let i = 0; i < selected.length; i += 1) {
+      const conversation = selected[i];
+      const index = job.startIndex + i;
+      job.current = {
+        index,
+        title: conversation.title || null,
+        chatId: conversation.chatId || conversation.id || null,
+      };
+      touchExportJob(job);
+
+      try {
+        const result = await downloadConversationItemForClient(client, conversation, {
+          ...args,
+          outputDir: job.outputDir,
+          returnToOriginal: true,
+        });
+        const success = {
+          index,
+          chatId: result.chatId,
+          title: result.title,
+          filename: result.filename,
+          filePath: result.filePath,
+          bytes: result.bytes,
+          turns: result.turns,
+          overwritten: result.overwritten,
+        };
+        successes.push(success);
+        job.recentSuccesses.push(success);
+        job.recentSuccesses = job.recentSuccesses.slice(-10);
+        job.successCount = successes.length;
+      } catch (err) {
+        const failure = {
+          index,
+          chatId: conversation.chatId || conversation.id || null,
+          title: conversation.title || null,
+          error: err.message,
+        };
+        failures.push(failure);
+        job.failures.push(failure);
+        job.failures = job.failures.slice(-20);
+        job.failureCount = failures.length;
+      } finally {
+        job.completed = i + 1;
+        touchExportJob(job);
+      }
+    }
+
+    job.phase = 'writing-report';
+    touchExportJob(job);
+    const report = {
+      job: {
+        jobId: job.jobId,
+        type: job.type,
+        createdAt: job.createdAt,
+        finishedAt: new Date().toISOString(),
+      },
+      client: summarizeClient(client),
+      outputDir: job.outputDir,
+      startIndex: job.startIndex,
+      maxChats: job.maxChats,
+      loadedCount: job.loadedCount,
+      requested: job.requested,
+      successCount: successes.length,
+      failureCount: failures.length,
+      reachedEnd: job.reachedEnd,
+      truncated: job.truncated,
+      successes,
+      failures,
+    };
+    const reportFile = writeExportReport('recent-chats', report, { outputDir: job.outputDir });
+    job.reportFile = reportFile.reportFile;
+    job.reportFilename = reportFile.reportFilename;
+    job.status = failures.length > 0 ? 'completed_with_errors' : 'completed';
+    job.phase = 'done';
+  } catch (err) {
+    job.status = 'failed';
+    job.phase = 'failed';
+    job.error = err.message;
+    try {
+      const reportFile = writeExportReport(
+        'recent-chats-failed',
+        {
+          job: summarizeExportJob(job),
+          error: err.message,
+          successes,
+          failures,
+        },
+        { outputDir: job.outputDir },
+      );
+      job.reportFile = reportFile.reportFile;
+      job.reportFilename = reportFile.reportFilename;
+    } catch {
+      // Se nem o relatório de falha puder ser gravado, o status em memória ainda explica o erro.
+    }
+  } finally {
+    job.current = null;
+    job.finishedAt = new Date().toISOString();
+    touchExportJob(job);
+  }
+};
+
+const startRecentChatsExportJob = (client, args = {}) => {
+  const outputDir = resolveOutputDir(args.outputDir);
+  const job = {
+    jobId: randomUUID(),
+    type: 'recent-chats-export',
+    status: 'running',
+    phase: 'queued',
+    clientId: client.clientId,
+    outputDir,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    finishedAt: null,
+    startIndex: normalizeLimit(args.startIndex, 1, MAX_RECENT_CHATS_LOAD_TARGET),
+    maxChats: normalizeLimit(args.maxChats ?? args.limit, MAX_RECENT_CHATS_LOAD_TARGET, MAX_RECENT_CHATS_LOAD_TARGET),
+    loadedCount: 0,
+    requested: 0,
+    completed: 0,
+    successCount: 0,
+    failureCount: 0,
+    reachedEnd: false,
+    truncated: false,
+    current: null,
+    reportFile: null,
+    reportFilename: null,
+    error: null,
+    recentSuccesses: [],
+    failures: [],
+  };
+  exportJobs.set(job.jobId, job);
+  void runRecentChatsExportJob(job, client, args);
+  return summarizeExportJob(job);
 };
 
 const downloadNotebookChatForClient = async (client, args = {}) => {
@@ -1200,12 +1449,25 @@ const tools = [
   {
     name: 'gemini_list_recent_chats',
     description:
-      'Retorna as conversas visíveis no sidebar do Gemini da aba ativa, ou da aba conectada mais recente como fallback.',
+      'Retorna uma página das conversas visíveis/carregáveis no sidebar do Gemini da aba ativa, ou da aba conectada mais recente como fallback.',
     inputSchema: {
       type: 'object',
       properties: {
         clientId: { type: 'string' },
-        limit: { type: 'integer', minimum: 1, maximum: 100 },
+        limit: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 100,
+          description:
+            'Tamanho da página. Para centenas de conversas, use 25-50 e avance pelo offset.',
+        },
+        offset: {
+          type: 'integer',
+          minimum: 0,
+          maximum: 999,
+          description:
+            'Quantidade de conversas a pular antes de retornar a página. Use 0, 50, 100... para paginar.',
+        },
         refresh: {
           type: 'boolean',
           description:
@@ -1330,6 +1592,74 @@ const tools = [
       const client = requireNotebookClient(args.clientId);
       const result = await downloadNotebookChatForClient(client, args);
       return toolTextResult(result);
+    },
+  },
+  {
+    name: 'gemini_export_recent_chats',
+    description:
+      'Inicia um job em background para exportar o historico recente carregavel do sidebar do Gemini em arquivos Markdown, sem listar centenas de conversas na resposta.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        clientId: { type: 'string' },
+        outputDir: {
+          type: 'string',
+          description: 'Diretório local de destino. Default: diretório MCP configurado.',
+        },
+        startIndex: {
+          type: 'integer',
+          minimum: 1,
+          description: 'Primeira posição 1-based do sidebar a exportar. Default: 1.',
+        },
+        maxChats: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 1000,
+          description:
+            'Quantidade máxima de conversas a exportar. Default: 1000 ou até o fim carregável do sidebar.',
+        },
+        limit: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 1000,
+          description: 'Alias de maxChats para compatibilidade.',
+        },
+        refresh: {
+          type: 'boolean',
+          description:
+            'Se true, força atualizar o sidebar antes de carregar o histórico. Default segue a política de cache.',
+        },
+      },
+      additionalProperties: false,
+    },
+    call: async (args = {}) => {
+      const client = requireClient(args.clientId);
+      return toolTextResult(startRecentChatsExportJob(client, args));
+    },
+  },
+  {
+    name: 'gemini_export_job_status',
+    description:
+      'Consulta o andamento de um job de exportacao em lote iniciado por gemini_export_recent_chats.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        jobId: {
+          type: 'string',
+          description: 'ID retornado por gemini_export_recent_chats.',
+        },
+      },
+      required: ['jobId'],
+      additionalProperties: false,
+    },
+    call: async (args = {}) => {
+      const job = exportJobs.get(args.jobId);
+      if (!job) {
+        return toolTextResult({ error: `Job não encontrado: ${args.jobId}` }, { isError: true });
+      }
+      return toolTextResult(summarizeExportJob(job), {
+        isError: job.status === 'failed',
+      });
     },
   },
   {
@@ -1605,12 +1935,43 @@ const bridgeServer = createServer(async (req, res) => {
         200,
         await listRecentChatsForClient(client, {
           limit: url.searchParams.get('limit'),
+          offset: url.searchParams.get('offset'),
           refresh: parseOptionalBoolean(url.searchParams.get('refresh')),
         }),
       );
     } catch (err) {
       sendAgentJson(res, 503, { error: err.message });
     }
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/agent/export-recent-chats') {
+    try {
+      const client = requireClient(url.searchParams.get('clientId'));
+      sendAgentJson(
+        res,
+        202,
+        startRecentChatsExportJob(client, {
+          outputDir: url.searchParams.get('outputDir'),
+          startIndex: url.searchParams.get('startIndex'),
+          maxChats: url.searchParams.get('maxChats') || url.searchParams.get('limit'),
+          refresh: parseOptionalBoolean(url.searchParams.get('refresh')),
+        }),
+      );
+    } catch (err) {
+      sendAgentJson(res, 503, { error: err.message });
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/agent/export-job-status') {
+    const jobId = url.searchParams.get('jobId');
+    const job = exportJobs.get(jobId);
+    if (!job) {
+      sendAgentJson(res, 404, { error: `Job não encontrado: ${jobId}` });
+      return;
+    }
+    sendAgentJson(res, 200, summarizeExportJob(job));
     return;
   }
 

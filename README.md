@@ -115,6 +115,8 @@ Tools disponíveis:
 - `gemini_get_current_chat`
 - `gemini_download_chat`
 - `gemini_download_notebook_chat`
+- `gemini_export_recent_chats`
+- `gemini_export_job_status`
 - `gemini_export_notebook`
 - `gemini_exporter_update`
 - `gemini_cache_status`
@@ -123,11 +125,28 @@ Tools disponíveis:
 - `gemini_reload_gemini_tabs`
 - `gemini_snapshot`
 
+Para listas grandes, `gemini_list_recent_chats` é paginada. Use `limit` como
+tamanho da página e avance com `offset` (`0`, `50`, `100`...). O MCP carrega
+mais histórico conforme necessário e retorna `pagination` com `nextOffset`,
+`loadedCount`, `reachedEnd` e `canLoadMore`. Evite pedir centenas de conversas
+em uma única resposta do Gemini CLI; peça páginas de 25-50 itens e continue até
+`reachedEnd=true` ou uma página vazia. O teto defensivo atual é 1000 conversas
+carregáveis por sessão.
+
+Para importar/exportar o histórico inteiro, use `gemini_export_recent_chats`.
+Ela inicia um job em background, percorre o sidebar carregável, grava os
+Markdown no diretório configurado e gera um relatório JSON; acompanhe com
+`gemini_export_job_status` pelo `jobId`. Esse é o fluxo recomendado para
+centenas de conversas, porque a resposta do Gemini CLI fica pequena e o trabalho
+pesado acontece no MCP.
+
 Endpoints locais úteis para diagnóstico quando as tools ainda não carregaram:
 
 - `http://127.0.0.1:47283/healthz`
 - `http://127.0.0.1:47283/agent/clients`
-- `http://127.0.0.1:47283/agent/recent-chats?limit=10`
+- `http://127.0.0.1:47283/agent/recent-chats?limit=50&offset=0`
+- `http://127.0.0.1:47283/agent/export-recent-chats?maxChats=1000`
+- `http://127.0.0.1:47283/agent/export-job-status?jobId=<id>`
 - `http://127.0.0.1:47283/agent/notebook-chats?limit=20`
 - `http://127.0.0.1:47283/agent/current-chat`
 - `http://127.0.0.1:47283/agent/reload-tabs`
