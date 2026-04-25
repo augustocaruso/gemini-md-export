@@ -1,0 +1,267 @@
+============================================================
+  Gemini -> Markdown Export
+  Instalador para Windows
+============================================================
+
+Esse pacote instala uma extensao de browser + um servidor
+local (MCP) que exporta conversas do Gemini web como arquivos
+Markdown, prontos para importar em Obsidian ou qualquer
+editor de notas.
+
+
+PRE-REQUISITOS
+--------------
+
+1. Windows 10 ou 11.
+
+2. Chrome ou Edge instalado.
+
+3. Node.js versao 20 ou superior.
+   Baixe em: https://nodejs.org/pt-br/download
+
+   Na instalacao do Node, mantenha a opcao
+   "Add to PATH" marcada (vem marcada por padrao).
+
+
+INSTALACAO (modo simples)
+-------------------------
+
+Se voce recebeu um comando PowerShell de update, esse e o caminho mais simples.
+Abra o PowerShell, cole o comando e aperte Enter. Ele baixa a ultima versao,
+extrai em uma pasta temporaria, instala a partir da pasta correta e apaga os
+temporarios depois que terminar.
+
+Comando padrao:
+   powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/augustocaruso/gemini-md-export/releases/latest/download/update-windows.ps1 | iex"
+
+Se o Gemini CLI ja estiver com o exporter funcionando, voce tambem pode pedir
+ao Gemini CLI:
+   /exporter:update
+
+Quando o update terminar, feche e reabra o Gemini CLI. Se a extensao do
+navegador ja estava carregada, clique no icone circular de reload do card dela
+na pagina de extensoes.
+
+Se voce recebeu um unico arquivo install-windows.exe, pode ignorar toda a
+parte de zip/pasta e simplesmente dar DUPLO CLIQUE nele. O .exe standalone
+se autoextrai em %TEMP% e roda o mesmo instalador com payload precompilado.
+
+Se voce recebeu um .zip precompilado, extraia tudo e rode o
+install-windows.cmd. Nesse pacote menor, o instalador usa o payload pronto
+e NAO roda npm install / npm run build.
+
+Se voce recebeu uma pasta/zip do projeto completo, siga os passos abaixo.
+
+!!! IMPORTANTE !!!
+NAO rode o install-windows.cmd de dentro do zip.
+Voce PRECISA descompactar o zip inteiro primeiro.
+
+Se voce der duplo-clique no .cmd enquanto o Windows
+esta mostrando o zip como uma "pasta", vai dar erro
+"Cannot find module ..." e nada sera instalado.
+
+1. Descompacte ESTE ZIP inteiro em uma pasta normal.
+   Como fazer: no Explorador de Arquivos, clique com
+   BOTAO DIREITO no arquivo do zip e escolha
+   "Extrair tudo..." (ou "Extract all...").
+   Confirme o destino (pode deixar o default).
+   Exemplo de destino:
+       C:\Users\SeuNome\Downloads\gemini-md-export-windows-...
+
+2. Entre na PASTA DESCOMPACTADA (nao no zip).
+   Nela voce vai ver os arquivos LEIA-ME.txt,
+   install-windows.cmd, a pasta scripts, a pasta src etc.
+   De DUPLO CLIQUE em:
+        install-windows.cmd
+
+   Uma janela preta vai abrir com o progresso.
+   Acompanhe ate aparecer "INSTALACAO CONCLUIDA COM SUCESSO".
+   Isto leva 1-2 minutos na primeira vez (download de
+   dependencias).
+
+   Se voce ja instalou antes, pode rodar o mesmo arquivo de novo.
+   Ele tenta localizar a instalacao antiga pelas configuracoes do
+   Gemini CLI/Claude Desktop, substitui os arquivos nessa mesma pasta
+   e cria um backup curto antes da troca. Ele tambem tenta encontrar
+   a pasta de extensao unpacked que Chrome/Edge/Brave/Dia ja estao
+   usando e sincronizar essa pasta, porque o navegador pode continuar
+   apontando para uma copia antiga se ela foi carregada manualmente.
+
+3. No fim da instalacao, o browser escolhido deve abrir sozinho
+   na pagina de extensoes.
+   Se nao abrir, abra voce.
+
+4. Nessa pagina:
+   a) Ative o "Modo do desenvolvedor" no canto superior
+      direito (em alguns browsers: "Developer mode").
+   b) Clique em "Carregar sem compactacao"
+      (em alguns browsers: "Load unpacked").
+   c) Selecione a pasta mostrada no fim do instalador.
+      Normalmente sera esta:
+         %LOCALAPPDATA%\GeminiMdExport\extension
+
+      Se o instalador detectou uma instalacao anterior em outro
+      caminho, use o caminho "extensao:" mostrado na janela preta.
+      (para colar, aperte Ctrl+L na barra de endereco do
+      seletor de pasta e cole o caminho acima -- o Windows
+      resolve o %LOCALAPPDATA%)
+
+      Se a extensao ja estava carregada, clique no icone
+      circular de reload do card dela.
+
+      Dica: depois da instalacao, a pasta instalada tambem
+      passa a ter um arquivo:
+         refresh-browser-extension.cmd
+      Ele abre de novo a pagina de extensoes no navegador
+      correto e relembra qual card/pasta conferir no update.
+
+5. A extensao vai aparecer na lista com o nome
+   "Gemini Chat -> Markdown Export".
+
+
+TESTE RAPIDO
+------------
+
+1. Abra https://gemini.google.com/app em uma aba nova
+   (ou rode open-gemini.cmd na pasta instalada).
+
+2. Entre em uma conversa especifica.
+   A URL precisa comecar com /app/ para o botao aparecer.
+
+3. No canto superior direito da conversa, ao lado do avatar
+   do Google, deve aparecer um botao redondo com icone de
+   download. Clique nele.
+
+4. Um modal abre listando suas conversas.
+   Selecione uma e clique em "Exportar selecionadas".
+   O arquivo .md aparece na sua pasta de Downloads.
+
+
+CLAUDE DESKTOP (opcional)
+-------------------------
+
+Se voce usa Claude Desktop, o instalador ja detectou e
+configurou o servidor MCP automaticamente. Basta:
+
+1. Fechar e reabrir o Claude Desktop.
+
+2. Numa conversa com Claude, ele agora tem acesso a tools
+   como gemini_list_recent_chats, gemini_get_current_chat,
+   gemini_download_chat etc.
+
+
+GEMINI CLI (opcional)
+---------------------
+
+Se voce usa o Gemini CLI (o binario "gemini" do Google), o
+instalador tambem detectou e configurou o MCP automaticamente
+pela extensao local em %USERPROFILE%\.gemini\extensions\gemini-md-export.
+Basta:
+
+1. Fechar a sessao atual do gemini (se estiver aberta).
+
+2. Rodar "gemini" de novo. Dentro da sessao, o comando /mcp
+   deve listar "gemini-md-export" com as tools disponiveis.
+
+   Dica: na pasta instalada ha um arquivo:
+      restart-gemini-cli.cmd
+   Ele tenta fechar MCPs antigos do exporter e abrir uma nova
+   janela do Gemini CLI para acelerar o refresh depois de um
+   update.
+
+Se o Gemini CLI nao estava instalado no momento do install,
+instale o CLI depois e rode install-windows.cmd novamente
+(ou passe --configure-gemini-cli para forcar).
+
+Se seu settings.json ja tinha mcp.allowed ou mcp.excluded, o
+instalador ajusta essas listas para o gemini-md-export nao ficar
+configurado mas bloqueado sem querer.
+
+
+SE DER ERRO
+-----------
+
+Causas comuns e o que fazer:
+
+- "Node.js nao encontrado no PATH"
+    Voce nao instalou o Node, ou desmarcou "Add to PATH"
+    durante a instalacao. Reinstale o Node.js a partir de
+    https://nodejs.org/pt-br/download mantendo "Add to PATH"
+    marcado.
+
+- "npm install: processo saiu com codigo ..."
+    Provavelmente sem internet, ou o antivirus bloqueou.
+    Desative o antivirus temporariamente e rode o
+    install-windows.cmd de novo.
+
+- "top-bar nao encontrado" no console do browser
+    O Gemini pode ter mudado a estrutura da pagina
+    nessa versao. Recarregue a aba; se persistir, reporte.
+
+- Botao nao aparece na conversa
+    Confirme que a extensao esta ativada em chrome://extensions.
+    Clique no icone circular de reload do card da extensao.
+    Recarregue a aba do Gemini.
+    Confirme que a URL comeca com https://gemini.google.com/app/
+
+
+REINSTALAR OU ATUALIZAR
+-----------------------
+
+Basta rodar install-windows.cmd de novo. Ele:
+- Reinstala dependencias
+- Reconstroi a extensao
+- Tenta localizar a instalacao anterior por configs legadas do Gemini CLI
+  e do Claude Desktop
+- Substitui os arquivos na pasta instalada
+- Guarda backup curto em backups\AAAA... antes de substituir
+- Refaz backup das configs do Claude Desktop/Gemini CLI antes de alterar
+- Regrava o template mcp-config.claude.json
+- Reinstala a extensao local do Gemini CLI em
+  %USERPROFILE%\.gemini\extensions\gemini-md-export
+- Deixa dois atalhos uteis na pasta instalada:
+  refresh-browser-extension.cmd
+  restart-gemini-cli.cmd
+
+Depois volte em chrome://extensions e clique no icone
+circular de reload no card da extensao, ou rode
+refresh-browser-extension.cmd.
+
+Se voce usa Gemini CLI, rode restart-gemini-cli.cmd.
+
+IMPORTANTE: se ao clicar em "Alterar" aparecer uma janela velha do
+browser, voce ainda esta usando uma extensao antiga. A versao nova nao
+abre mais esse fallback; ela mostra erro se o MCP local nao responder.
+
+IMPORTANTE: se uma UI antiga aparecer junto da nova, desative userscripts
+antigos do Tampermonkey/Violentmonkey ou outra copia da extensao. A UI
+atual usa ids gm-md-export-modern-* para nao brigar com esses restos.
+
+
+DESINSTALAR
+-----------
+
+1. chrome://extensions -> remova a extensao manualmente.
+
+2. Apague a pasta %LOCALAPPDATA%\GeminiMdExport.
+
+3. Se configurou o Claude Desktop, edite
+   %APPDATA%\Claude\claude_desktop_config.json e remova
+   a entrada "gemini-md-export" dentro de "mcpServers".
+
+4. Se configurou o Gemini CLI, edite
+   %USERPROFILE%\.gemini\extensions\gemini-md-export
+   e apague essa pasta. Se existir alguma entrada legada no
+   %USERPROFILE%\.gemini\settings.json para "gemini-md-export"
+   dentro de "mcpServers", remova tambem.
+
+
+LICENCA E SUPORTE
+-----------------
+
+Projeto pessoal do Augusto Caruso. Uso livre.
+Sem garantia; se quebrar, nao vai quebrar seu computador,
+mas pode parar de exportar do dia para a noite se o
+Google mudar o DOM do Gemini.
+
+Duvidas: fale com quem te mandou este instalador.

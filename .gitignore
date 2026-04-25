@@ -1,0 +1,12 @@
+node_modules/
+dist/
+release/
+*.log
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.claude/settings.local.json
+
+# Fixtures podem conter trechos de conversas pessoais.
+fixtures/*.html
