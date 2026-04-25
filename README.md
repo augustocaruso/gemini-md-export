@@ -59,8 +59,7 @@ Esse comando chama a tool MCP `gemini_exporter_update`, que inicia o updater em
 um processo separado. Depois que ele terminar, feche e reabra o Gemini CLI para
 carregar a nova versão. No navegador, recarregue o card da extensão em
 `chrome://extensions`/`edge://extensions`; as abas do Gemini são recarregadas
-automaticamente quando a extensão volta ou quando o updater consegue falar com
-o MCP local.
+automaticamente depois que a extensão volta.
 
 ## Uso
 

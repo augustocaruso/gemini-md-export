@@ -1486,7 +1486,7 @@ const tools = [
   {
     name: 'gemini_reload_gemini_tabs',
     description:
-      'Recarrega abas abertas do Gemini conectadas à extensão. Use após update/reload da extensão para carregar o content script novo.',
+      'Recarrega abas abertas do Gemini conectadas à extensão. Útil como comando manual; após reload do card da extensão, o service worker já tenta fazer isso automaticamente.',
     inputSchema: {
       type: 'object',
       properties: {

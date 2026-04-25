@@ -26,7 +26,7 @@ Available capabilities include:
 - exporting the current chat
 - downloading a specific recent or notebook chat
 - updating this exporter from GitHub Releases on Windows
-- reloading connected Gemini tabs after an update
+- manually reloading connected Gemini tabs when needed
 - inspecting cache/debug state
 
 Be concise and prefer the MCP tools over telling the user to manually scrape the

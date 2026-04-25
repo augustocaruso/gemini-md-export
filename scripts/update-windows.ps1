@@ -137,19 +137,6 @@ function Invoke-Installer {
   }
 }
 
-function Invoke-GeminiTabsReload {
-  param([int]$DelayMs = 800)
-
-  $uri = "http://127.0.0.1:47283/agent/reload-tabs?delayMs=$DelayMs&reason=windows-updater"
-  try {
-    $result = Invoke-RestMethod -Uri $uri -Method Get -TimeoutSec 4
-    Write-Host "Abas do Gemini recarregadas via MCP: $($result.reloaded)"
-  } catch {
-    Write-Host "[AVISO] Nao consegui recarregar abas do Gemini automaticamente."
-    Write-Host "        Recarregue manualmente as abas abertas em gemini.google.com."
-  }
-}
-
 $transcriptStarted = $false
 
 try {
@@ -221,12 +208,10 @@ try {
   Write-Step "Executando instalador precompilado"
   Invoke-Installer -PayloadRoot $payload.PayloadRoot
 
-  Write-Step "Recarregando abas abertas do Gemini"
-  Invoke-GeminiTabsReload
-
   Write-Step "Concluido"
   Write-Host "Update instalado. Feche e reabra o Gemini CLI para carregar a nova versao."
   Write-Host "Se a extensao do navegador ja estava carregada, clique no reload do card em chrome://extensions."
+  Write-Host "Depois desse reload do card, as abas abertas do Gemini devem recarregar sozinhas."
 
   if ($transcriptStarted) {
     Stop-Transcript | Out-Null
