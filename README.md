@@ -3,8 +3,8 @@
 Ferramenta para exportar conversas do [Gemini web](https://gemini.google.com)
 como arquivos Markdown, com frontmatter YAML preservando `chat_id`, URL
 original, timestamp e outros metadados — pronta para ingestão em vault do
-Obsidian. O caminho principal agora é uma extensão MV3 + servidor MCP; o
-userscript fica como fallback/protótipo.
+Obsidian. O caminho principal é uma extensão MV3 + servidor MCP local,
+instalados/atualizados pelo pacote Windows ou pelo updater via GitHub Releases.
 
 ## Instalação da extensão
 
@@ -233,13 +233,6 @@ pausas mais curtas entre scrolls/observações, para evitar respostas de 20s+
 quando o agente pede listas maiores, mas ainda faz uma última confirmação um
 pouco mais lenta antes de cravar o fim da lista.
 
-## Instalação do userscript
-
-1. Instale o [Tampermonkey](https://www.tampermonkey.net/) ou
-   [Violentmonkey](https://violentmonkey.github.io/) no seu browser.
-2. Abra [dist/gemini-export.user.js](/Users/augustocaruso/Documents/gemini-md-export/dist/gemini-export.user.js), copie o conteúdo inteiro.
-3. No Tampermonkey → "Criar novo script" → cole → salve.
-
 ## Uso
 
 1. Abra uma conversa em `https://gemini.google.com/app/<id>`.
@@ -262,17 +255,14 @@ pouco mais lenta antes de cravar o fim da lista.
    extensão MV3, se a API não aparecer no contexto principal da página,
    selecione o contexto do content script no DevTools ou use as tools MCP.
 
-Depois de um upgrade no Windows, o fluxo mais rápido costuma ser:
-1. Rodar `install-windows.cmd`
-2. Rodar `refresh-browser-extension.cmd`
-3. Rodar `restart-gemini-cli.cmd` se você usa Gemini CLI
-4. Reabrir/recarregar a aba do Gemini
+Depois de um upgrade no Windows, o fluxo mais rápido é rodar o comando
+PowerShell da seção "Update por GitHub Releases" ou, se o Gemini CLI já estiver
+com a extensão ativa, usar `/exporter:update`. Ao terminar, recarregue a
+extensão em `chrome://extensions` e reabra o Gemini CLI se ele estiver em uso.
 
 O botão e o modal atuais usam ids `gm-md-export-modern-*` e carregam versão +
-carimbo de build no DOM. Isso evita briga com nós `gm-md-export-*` de
-userscripts/content scripts antigos que ainda estejam vivos na página; se eles
-aparecerem no diagnóstico, desative a cópia antiga em vez de tentar disputar o
-mesmo botão.
+carimbo de build no DOM. Se aparecer UI antiga junto da nova, desative cópias
+antigas do exporter no navegador antes de investigar o scraper.
 
 Em páginas de caderno (`/notebook/...`), o modal lista as conversas recentes
 do próprio caderno a partir de `project-chat-history`. Ao exportar uma linha
@@ -292,22 +282,16 @@ item pendente automaticamente.
 
 ## Compatibilidade
 
-- Alvo principal de teste manual: Chrome/Chromium com Tampermonkey.
-- Alvo principal de arquitetura daqui para frente: extensão MV3 desempacotada
-  em Chrome/Chromium, com servidor MCP local.
+- Alvo principal: extensão MV3 desempacotada em Chrome/Edge/Chromium, com
+  servidor MCP local.
 - O script pode não se comportar corretamente em browsers Chromium com UI
-  customizada ou suporte parcial a extensões, mesmo quando o Tampermonkey
-  aparece como instalado/ativo.
+  customizada ou suporte parcial a extensões.
 - Se funcionar no Chrome e falhar só em outro browser, trate primeiro como
   limitação do ambiente antes de mexer no scraper.
 - Na extensão MV3, a escolha de pasta preferencial usa o MCP local:
   `/bridge/pick-directory` abre o seletor nativo do macOS/Windows e
   `/bridge/save-files` grava os Markdown no diretório escolhido. Em outras
   plataformas, use `GEMINI_MCP_EXPORT_DIR` ou o fallback de downloads.
-- No userscript ou quando o MCP não está rodando, o script tenta
-  `showDirectoryPicker()` quando o browser oferece essa API. Se o browser
-  bloquear pastas sensíveis/raiz ou não suportar a API, o fallback continua
-  sendo a pasta padrão de downloads do navegador.
 - Quando a extensão salva via MCP, arquivos com o mesmo nome são substituídos
   pelo export mais novo. Se o MCP estiver indisponível e o script cair no
   download nativo do browser, o browser pode aplicar sua própria política de
@@ -342,7 +326,7 @@ tags: [gemini-export]
 ```bash
 npm install     # uma vez
 npm test        # roda build + testes, incluindo injeção do content script
-npm run build   # gera o userscript e dist/extension/*
+npm run build   # gera dist/extension e dist/gemini-cli-extension
 npm run mcp     # sobe o servidor MCP/bridge local
 npm run install:windows # instalador assistido para Windows
 ```
@@ -364,23 +348,17 @@ e regras de contribuição.
 
 ## Debug no browser
 
-- O userscript mostra um toast de sucesso/erro no canto inferior direito.
-- Em caso de falha, ele também loga contexto útil no console do browser.
-- O script roda com `GM_download`/`unsafeWindow` em vez de `@grant none`,
-  para evitar problemas de injeção em páginas com CSP mais rígida.
-- A extensão MV3 reaproveita o mesmo bundle do scraper/shell como content
-  script e adiciona um service worker mínimo como base para integrações
-  futuras.
+- A extensão MV3 usa o scraper/shell como content script e um service worker
+  mínimo como base para integrações locais.
 - Quando a extensão está ativa numa aba do Gemini, o content script envia
   heartbeat para o bridge local do MCP server e aceita comandos do agente
   via long-poll. Se houver várias abas Gemini vivas, o MCP prefere a aba
   ativa informada pela extensão antes de cair no fallback de heartbeat mais
-  recente. O status inclui `buildStamp` para confirmar que o Chrome recarregou
+  recente. O status inclui `buildStamp` para confirmar que o navegador recarregou
   o build esperado.
-- A API `window.__geminiMdExportDebug` expõe isso diretamente no userscript.
-  Na extensão MV3, ela roda no isolated world do content script; se não
-  aparecer no console principal, selecione o contexto do content script no
-  DevTools ou use os logs/MCP.
+- A API `window.__geminiMdExportDebug` roda no isolated world do content
+  script; se não aparecer no console principal, selecione o contexto do content
+  script no DevTools ou use os logs/MCP.
   - `snapshot()` para resumo do estado atual do DOM.
   - `scrapeTurns()` para ver quantos turnos estão sendo encontrados.
   - `markdown()` para inspecionar o Markdown gerado sem baixar arquivo.
@@ -392,7 +370,7 @@ e regras de contribuição.
     histórico do sidebar ou do caderno.
 - Se houver dúvida se o problema é do script ou do browser/manager, use
   [debug/tampermonkey-probe.user.js](/Users/augustocaruso/Documents/gemini-md-export/debug/tampermonkey-probe.user.js).
-  Ele só injeta um badge `TM OK` e cria `window.__geminiProbe`.
+  Esse probe é legado e não faz parte do fluxo recomendado.
 
 ## Limitações
 

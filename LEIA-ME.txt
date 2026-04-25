@@ -233,9 +233,9 @@ IMPORTANTE: se ao clicar em "Alterar" aparecer uma janela velha do
 browser, voce ainda esta usando uma extensao antiga. A versao nova nao
 abre mais esse fallback; ela mostra erro se o MCP local nao responder.
 
-IMPORTANTE: se uma UI antiga aparecer junto da nova, desative userscripts
-antigos do Tampermonkey/Violentmonkey ou outra copia da extensao. A UI
-atual usa ids gm-md-export-modern-* para nao brigar com esses restos.
+IMPORTANTE: se uma UI antiga aparecer junto da nova, desative qualquer copia
+antiga do exporter no navegador antes de testar de novo. A UI atual usa ids
+gm-md-export-modern-* para nao brigar com restos de instalacoes antigas.
 
 
 DESINSTALAR
