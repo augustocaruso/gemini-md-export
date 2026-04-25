@@ -1072,6 +1072,76 @@ const startExporterUpdate = (args = {}) => {
   };
 };
 
+const reloadGeminiTabs = async (args = {}) => {
+  const delayMs = Math.max(0, Math.min(10_000, Number(args.delayMs || 500)));
+  const liveClients = getLiveClients();
+  if (liveClients.length === 0) {
+    return {
+      ok: false,
+      reloaded: 0,
+      error: 'Nenhuma aba viva do Gemini conectada à extensão.',
+    };
+  }
+
+  if (args.clientId) {
+    const client = requireClient(args.clientId);
+    const result = await enqueueCommand(client.clientId, 'reload-page', { delayMs });
+    return {
+      ok: !!result?.ok,
+      mode: 'single-tab',
+      requested: 1,
+      reloaded: result?.ok ? 1 : 0,
+      client: summarizeClient(client),
+      result,
+    };
+  }
+
+  const controller = liveClients[0];
+  const result = await enqueueCommand(controller.clientId, 'reload-gemini-tabs', {
+    reason: args.reason || 'mcp-command',
+  });
+
+  if (result?.ok) {
+    return {
+      ok: true,
+      mode: 'extension-tabs-api',
+      requested: liveClients.length,
+      reloaded: result.reloaded ?? liveClients.length,
+      controller: summarizeClient(controller),
+      result,
+    };
+  }
+
+  const settled = await Promise.allSettled(
+    liveClients.map((client) =>
+      enqueueCommand(client.clientId, 'reload-page', { delayMs }).then((itemResult) => ({
+        client: summarizeClient(client),
+        result: itemResult,
+      })),
+    ),
+  );
+  const successes = settled
+    .filter((item) => item.status === 'fulfilled' && item.value?.result?.ok)
+    .map((item) => item.value);
+  const failures = settled
+    .filter((item) => item.status === 'rejected' || !item.value?.result?.ok)
+    .map((item) =>
+      item.status === 'rejected'
+        ? { error: item.reason?.message || String(item.reason) }
+        : item.value,
+    );
+
+  return {
+    ok: failures.length === 0,
+    mode: 'per-client-fallback',
+    requested: liveClients.length,
+    reloaded: successes.length,
+    controllerResult: result,
+    successes,
+    failures,
+  };
+};
+
 const tools = [
   {
     name: 'gemini_browser_status',
@@ -1414,6 +1484,31 @@ const tools = [
     },
   },
   {
+    name: 'gemini_reload_gemini_tabs',
+    description:
+      'Recarrega abas abertas do Gemini conectadas à extensão. Use após update/reload da extensão para carregar o content script novo.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        clientId: {
+          type: 'string',
+          description: 'Opcional: recarrega apenas uma aba específica. Sem isso, tenta recarregar todas as abas Gemini.',
+        },
+        delayMs: {
+          type: 'integer',
+          minimum: 0,
+          maximum: 10000,
+          description: 'Atraso antes do reload no fallback por aba. Default: 500.',
+        },
+      },
+      additionalProperties: false,
+    },
+    call: async (args = {}) => {
+      const result = await reloadGeminiTabs(args);
+      return toolTextResult(result, { isError: !result.ok });
+    },
+  },
+  {
     name: 'gemini_snapshot',
     description:
       'Pede para a aba conectada retornar um snapshot de debug do estado atual do Gemini.',
@@ -1652,6 +1747,20 @@ const bridgeServer = createServer(async (req, res) => {
         client: summarizeClient(client),
         ...result,
       });
+    } catch (err) {
+      sendAgentJson(res, 503, { error: err.message });
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/agent/reload-tabs') {
+    try {
+      const result = await reloadGeminiTabs({
+        clientId: url.searchParams.get('clientId') || undefined,
+        delayMs: url.searchParams.has('delayMs') ? Number(url.searchParams.get('delayMs')) : undefined,
+        reason: url.searchParams.get('reason') || 'agent-endpoint',
+      });
+      sendAgentJson(res, result.ok ? 200 : 503, result);
     } catch (err) {
       sendAgentJson(res, 503, { error: err.message });
     }

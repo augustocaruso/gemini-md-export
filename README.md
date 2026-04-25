@@ -40,7 +40,8 @@ recarregar a extensão unpacked:
 4. Selecione a pasta mostrada pelo instalador, normalmente:
    `%LOCALAPPDATA%\GeminiMdExport\extension`.
 5. Se a extensão já estava carregada, clique no ícone circular de reload no
-   card dela.
+   card dela. Depois desse reload, a própria extensão tenta recarregar as abas
+   abertas do Gemini automaticamente.
 
 Depois abra uma conversa em `https://gemini.google.com/app/<id>` e procure o
 botão circular de download no canto superior direito da conversa.
@@ -57,7 +58,9 @@ por dentro dele:
 Esse comando chama a tool MCP `gemini_exporter_update`, que inicia o updater em
 um processo separado. Depois que ele terminar, feche e reabra o Gemini CLI para
 carregar a nova versão. No navegador, recarregue o card da extensão em
-`chrome://extensions`/`edge://extensions`.
+`chrome://extensions`/`edge://extensions`; as abas do Gemini são recarregadas
+automaticamente quando a extensão volta ou quando o updater consegue falar com
+o MCP local.
 
 ## Uso
 
@@ -118,6 +121,7 @@ Tools disponíveis:
 - `gemini_cache_status`
 - `gemini_clear_cache`
 - `gemini_open_chat`
+- `gemini_reload_gemini_tabs`
 - `gemini_snapshot`
 
 Endpoints locais úteis para diagnóstico quando as tools ainda não carregaram:
@@ -127,6 +131,7 @@ Endpoints locais úteis para diagnóstico quando as tools ainda não carregaram:
 - `http://127.0.0.1:47283/agent/recent-chats?limit=10`
 - `http://127.0.0.1:47283/agent/notebook-chats?limit=20`
 - `http://127.0.0.1:47283/agent/current-chat`
+- `http://127.0.0.1:47283/agent/reload-tabs`
 
 ## Build e Release
 

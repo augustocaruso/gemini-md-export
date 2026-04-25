@@ -217,9 +217,13 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   usuário já estava colado no fundo ou `reachedSidebarEnd` bateu. **Não
   reintroduzir `scroll-behavior: smooth`** no container — fazia o restore
   programático do scrollTop animar visivelmente a cada heartbeat.
-- `src/extension-background.js` — service worker mínimo da extensão MV3.
-  Nesta etapa ele firma a arquitetura da extensão e serve de ponto de
-  integração futura com helper local, native messaging ou automações.
+- `src/extension-background.js` — service worker MV3. Além de responder ao
+  ping do content script, usa a API `chrome.tabs` para recarregar abas
+  `https://gemini.google.com/*` quando a extensão é instalada/recarregada e
+  quando recebe a mensagem `gemini-md-export/reload-gemini-tabs`. Isso
+  automatiza a parte "recarregar páginas do Gemini" após updates; o clique de
+  reload no card da extensão unpacked continua manual por restrição do
+  Chrome/Edge.
 - `gemini-cli-extension/` — fonte da extensão do Gemini CLI. Hoje contém
   pelo menos um `GEMINI.md` próprio da extensão; o build gera
   `dist/gemini-cli-extension/gemini-extension.json` + bundle mínimo do MCP
@@ -257,7 +261,8 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   `gemini_get_current_chat`, `gemini_download_chat`,
   `gemini_download_notebook_chat`, `gemini_export_notebook`,
   `gemini_exporter_update`, `gemini_cache_status`, `gemini_clear_cache`,
-  `gemini_open_chat` e `gemini_snapshot`. Downloads resolvem uma conversa por `index` 1-based,
+  `gemini_open_chat`, `gemini_reload_gemini_tabs` e `gemini_snapshot`.
+  Downloads resolvem uma conversa por `index` 1-based,
   `chatId` ou, em cadernos, `title`; pedem o Markdown à extensão e gravam
   localmente no diretório padrão configurado, sobrescrevendo arquivos
   existentes com o export mais novo.
@@ -275,7 +280,7 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   `/agent/current-chat`, `/agent/download-chat?index=7`,
   `/agent/download-notebook-chat?index=1`, `/agent/export-notebook`,
   `/agent/export-dir`, `/agent/set-export-dir`, `/agent/cache-status`,
-  `/agent/clear-cache` e `/agent/open-chat`.
+  `/agent/clear-cache`, `/agent/open-chat` e `/agent/reload-tabs`.
 - `scripts/build.mjs` — gera `dist/gemini-export.user.js` concatenando o
   shell com o conteúdo de `extract.mjs` inlined, além de `dist/extension/*`
   para instalação como extensão desempacotada e `dist/gemini-cli-extension/*`
@@ -534,7 +539,8 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   **Load unpacked**, apontando para a pasta `extension` exibida no final do
   instalador. Em upgrades, o launcher `refresh-browser-extension.cmd`
   acelera a volta para essa página e relembra o card correto, mas o clique
-  no reload continua sendo manual.
+  no reload do card continua sendo manual. Depois que a extensão recarrega, o
+  service worker tenta recarregar automaticamente as abas abertas do Gemini.
 - O launcher `open-gemini.cmd` abre `https://gemini.google.com/app`. O teste
   manual do botão precisa de uma conversa `/app/<id>`; abrir só a home do
   Gemini pode parecer "página errada" porque o top-bar da conversa ainda não

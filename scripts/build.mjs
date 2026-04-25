@@ -140,6 +140,7 @@ const manifest = {
       run_at: 'document_idle',
     },
   ],
+  permissions: ['tabs'],
   host_permissions: ['https://gemini.google.com/*', 'http://127.0.0.1/*', 'http://localhost/*'],
   action: {
     default_title: 'Gemini Export',

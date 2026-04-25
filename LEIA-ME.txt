@@ -40,7 +40,8 @@ ao Gemini CLI:
 
 Quando o update terminar, feche e reabra o Gemini CLI. Se a extensao do
 navegador ja estava carregada, clique no icone circular de reload do card dela
-na pagina de extensoes.
+na pagina de extensoes. Depois desse reload, a extensao tenta recarregar as
+abas abertas do Gemini automaticamente.
 
 Se voce recebeu um unico arquivo install-windows.exe, pode ignorar toda a
 parte de zip/pasta e simplesmente dar DUPLO CLIQUE nele. O .exe standalone
@@ -107,7 +108,8 @@ esta mostrando o zip como uma "pasta", vai dar erro
       resolve o %LOCALAPPDATA%)
 
       Se a extensao ja estava carregada, clique no icone
-      circular de reload do card dela.
+      circular de reload do card dela. As abas abertas do Gemini devem
+      recarregar sozinhas em seguida.
 
       Dica: depois da instalacao, a pasta instalada tambem
       passa a ter um arquivo:

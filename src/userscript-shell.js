@@ -1719,6 +1719,42 @@
       };
     }
 
+    if (command.type === 'reload-page') {
+      const delayMs = Math.max(0, Math.min(10_000, Number(command.args?.delayMs || 250)));
+      setTimeout(() => {
+        location.reload();
+      }, delayMs);
+      return {
+        ok: true,
+        reloading: true,
+        delayMs,
+        url: location.href,
+      };
+    }
+
+    if (command.type === 'reload-gemini-tabs') {
+      const response = await new Promise((resolve) => {
+        if (typeof chrome === 'undefined' || !chrome?.runtime?.sendMessage) {
+          resolve({ ok: false, reason: 'runtime-message-unavailable', reloaded: 0 });
+          return;
+        }
+        chrome.runtime.sendMessage(
+          {
+            type: 'gemini-md-export/reload-gemini-tabs',
+            reason: command.args?.reason || 'bridge-command',
+          },
+          (result) => {
+            if (chrome.runtime.lastError) {
+              resolve({ ok: false, reason: chrome.runtime.lastError.message, reloaded: 0 });
+              return;
+            }
+            resolve(result || { ok: false, reason: 'empty-response', reloaded: 0 });
+          },
+        );
+      });
+      return response;
+    }
+
     if (command.type === 'list-conversations') {
       if (command.args?.ensureSidebar !== false) {
         await ensureSidebarOpen();
