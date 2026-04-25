@@ -46,6 +46,12 @@ Se esse update por dentro do Gemini CLI falhar, use o comando PowerShell acima.
 Ele e o caminho de recuperacao quando a copia instalada do MCP/updater ficou
 velha ou inconsistente.
 
+O instalador tenta registrar a extensao pelo comando oficial
+"gemini extensions install". Isso deve fazer o exporter aparecer como
+atualizavel quando voce listar as extensoes no Gemini CLI. Se o binario
+"gemini" nao estiver no PATH ou esse comando falhar, ele ainda instala por
+copia manual e avisa no resumo.
+
 Quando o update terminar, feche e reabra o Gemini CLI. Se a extensao do
 navegador ja estava carregada, clique no icone circular de reload do card dela
 na pagina de extensoes. Depois desse reload, a extensao tenta recarregar as

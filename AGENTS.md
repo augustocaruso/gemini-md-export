@@ -350,7 +350,14 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   backup curto em `backups\<timestamp>` e mantém os 5 backups mais recentes.
   Para Gemini CLI, instala `dist\gemini-cli-extension` em
   `%USERPROFILE%\.gemini\extensions\gemini-md-export`, preservando o
-  `GEMINI.md` próprio da extensão. Se `settings.json` ainda contiver
+  `GEMINI.md` próprio da extensão. O instalador agora tenta usar o fluxo
+  oficial `gemini extensions uninstall gemini-md-export` (ignora falha) +
+  `gemini extensions install <installDir>\gemini-cli-extension --consent` para
+  registrar a extensão como gerenciável/atualizável pelo Gemini CLI. Se o
+  binário `gemini` não estiver no PATH ou o comando oficial falhar, cai para a
+  cópia manual em `%USERPROFILE%\.gemini\extensions\gemini-md-export` e grava
+  `method: manual-copy-fallback` no manifesto, deixando claro que a extensão
+  pode aparecer como "not updatable". Se `settings.json` ainda contiver
   `mcpServers.gemini-md-export`, remove a entrada para ela não sobrescrever a
   config/contexto da extensão; se `mcp.allowed` existir, inclui
   `gemini-md-export`, e se `mcp.excluded` contiver o servidor, remove. Não
@@ -371,7 +378,8 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   ponteiro temporário `%TEMP%\gemini-md-export-last-install.env` para o
   `.cmd` exibir a pasta real da extensão mesmo em upgrades fora do default. O
   instalador também gera launchers `refresh-browser-extension.cmd` (abre a
-  página de extensões no executável real do browser escolhido e relembra qual
+  página de extensões no executável real do browser escolhido usando
+  `--new-tab`, para preferir uma aba na janela existente, e relembra qual
   card/pasta recarregar) e `restart-gemini-cli.cmd` (encerra MCPs antigos do
   exporter e abre uma nova janela `gemini` se o binário estiver no PATH),
   para tornar updates menos manuais. O

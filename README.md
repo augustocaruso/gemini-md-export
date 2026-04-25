@@ -68,6 +68,12 @@ Se o Gemini CLI não conseguir atualizar por dentro dele, use o comando
 PowerShell da seção anterior. Esse é o fallback principal quando a versão
 instalada do MCP/updater ficou velha ou inconsistente.
 
+Durante a instalação no Windows, o instalador tenta registrar a extensão pelo
+comando oficial `gemini extensions install`, em vez de apenas copiar arquivos
+para `~/.gemini/extensions`. Isso faz a extensão aparecer como atualizável no
+Gemini CLI. Se o binário `gemini` não estiver no PATH ou esse comando falhar, o
+instalador ainda faz uma cópia manual como fallback e avisa no resumo.
+
 ## Uso
 
 1. Abra uma conversa em `https://gemini.google.com/app/<id>`.
@@ -195,7 +201,8 @@ publica esses assets em GitHub Releases quando uma tag `v*` é enviada.
 Para testar a extensão sem o instalador:
 
 1. Rode `npm install` e `npm run build`.
-2. Abra `chrome://extensions` ou `edge://extensions`.
+2. Abra `chrome://extensions` ou `edge://extensions`. Os launchers gerados usam
+   `--new-tab` para tentar abrir essa página como aba na janela existente.
 3. Ative **Developer mode**.
 4. Clique em **Load unpacked**.
 5. Selecione `dist/extension`.

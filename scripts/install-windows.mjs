@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   copyFileSync,
   cpSync,
@@ -452,11 +452,34 @@ const extensionPath = resolve(installDir, 'extension');
 const geminiCliExtensionBundlePath = resolve(installDir, 'gemini-cli-extension');
 const mcpServerPath = resolve(geminiCliExtensionBundlePath, 'src', 'mcp-server.js');
 const browserLaunchTarget = resolveBrowserLaunchTarget(options.browser);
+const browserLaunchArgs = (url) => ['--new-tab', url];
+const browserLaunchCmd = (url) =>
+  browserLaunchTarget.binary
+    ? `start "" ${quoteCmd(browserLaunchTarget.binary)} --new-tab ${quoteCmd(url)}`
+    : `echo [AVISO] Navegador ${browserLaunchTarget.name} nao encontrado automaticamente. Abra manualmente: ${url}`;
 const browserUrlForLoadedExtension = (loadedExtension) => {
   const browserKey = String(loadedExtension?.browser || options.browser || 'chrome').trim().toLowerCase();
   const target = browserLaunchTargets()[browserKey] || browserLaunchTarget;
   if (!loadedExtension?.extensionId) return target.url;
   return `${target.url}/?id=${loadedExtension.extensionId}`;
+};
+
+const findGeminiCommand = () => {
+  const candidates = process.platform === 'win32' ? ['gemini.cmd', 'gemini.exe', 'gemini'] : ['gemini'];
+  for (const candidate of candidates) {
+    const probe = spawnSync(process.platform === 'win32' ? 'where' : 'which', [candidate], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+      encoding: 'utf-8',
+      shell: false,
+    });
+    if (probe.status !== 0) continue;
+    const first = String(probe.stdout || '')
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find(Boolean);
+    if (first) return first;
+  }
+  return null;
 };
 
 const run = (command, commandArgs, label) => {
@@ -548,6 +571,38 @@ const copyDir = (from, to) => {
   cpSync(from, to, { recursive: true });
 };
 
+const runGeminiCommand = (geminiCommand, commandArgs, label, { ignoreFailure = false } = {}) => {
+  log(`    $ ${geminiCommand} ${commandArgs.join(' ')}`);
+  if (options.dryRun) {
+    return { ok: true, status: 0, dryRun: true };
+  }
+
+  const needsShell =
+    process.platform === 'win32' && /\.(cmd|bat)$/i.test(geminiCommand);
+  const result = spawnSync(geminiCommand, commandArgs, {
+    cwd: ROOT,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    encoding: 'utf-8',
+    shell: needsShell,
+  });
+
+  const stdout = String(result.stdout || '').trim();
+  const stderr = String(result.stderr || '').trim();
+  if (stdout) log(stdout.split(/\r?\n/).map((line) => `      ${line}`).join('\n'));
+  if (stderr) log(stderr.split(/\r?\n/).map((line) => `      ${line}`).join('\n'));
+
+  if (result.error) {
+    if (ignoreFailure) return { ok: false, error: result.error.message };
+    throw new Error(`${label}: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    const message = `${label}: processo saiu com codigo ${result.status}`;
+    if (ignoreFailure) return { ok: false, status: result.status, stdout, stderr, error: message };
+    throw new Error(message);
+  }
+  return { ok: true, status: result.status, stdout, stderr };
+};
+
 const mcpServerConfig = () => {
   const config = {
     command: resolvedNodeCommand,
@@ -590,6 +645,18 @@ const writeInstalledGeminiCliExtension = (targetDir) => {
   }
 
   copyDir(sourceGeminiCliExtensionPath, targetDir);
+  writeFileSync(
+    resolve(targetDir, 'gemini-extension.json'),
+    JSON.stringify(patchedGeminiCliExtensionManifest(), null, 2) + '\n',
+    'utf-8',
+  );
+};
+
+const patchGeminiCliExtensionBundle = (targetDir) => {
+  if (options.dryRun) {
+    log(`[dry-run] atualizaria manifest Gemini CLI em ${targetDir}`);
+    return;
+  }
   writeFileSync(
     resolve(targetDir, 'gemini-extension.json'),
     JSON.stringify(patchedGeminiCliExtensionManifest(), null, 2) + '\n',
@@ -777,18 +844,14 @@ const writeLaunchers = () => {
   const openExtensionsCmd = [
     '@echo off',
     'setlocal',
-    browserLaunchTarget.binary
-      ? `start "" ${quoteCmd(browserLaunchTarget.binary)} ${quoteCmd(browserLaunchTarget.url)}`
-      : `echo [AVISO] Navegador ${browserLaunchTarget.name} nao encontrado automaticamente. Abra manualmente: ${browserLaunchTarget.url}`,
+    browserLaunchCmd(browserLaunchTarget.url),
     '',
   ].join('\r\n');
 
   const openGeminiCmd = [
     '@echo off',
     'setlocal',
-    browserLaunchTarget.binary
-      ? `start "" ${quoteCmd(browserLaunchTarget.binary)} ${quoteCmd(GEMINI_APP_URL)}`
-      : `echo [AVISO] Navegador ${browserLaunchTarget.name} nao encontrado automaticamente. Abra manualmente: ${GEMINI_APP_URL}`,
+    browserLaunchCmd(GEMINI_APP_URL),
     '',
   ].join('\r\n');
 
@@ -805,9 +868,7 @@ const writeLaunchers = () => {
     'echo   Gemini -> Markdown Export   |   Refresh da extensao',
     'echo ============================================================',
     'echo.',
-    browserLaunchTarget.binary
-      ? `start "" ${quoteCmd(browserLaunchTarget.binary)} ${quoteCmd(browserUrlForLoadedExtension(preferredLoadedExtension))}`
-      : `echo [AVISO] Navegador ${browserLaunchTarget.name} nao encontrado automaticamente. Abra manualmente: ${browserUrlForLoadedExtension(preferredLoadedExtension)}`,
+    browserLaunchCmd(browserUrlForLoadedExtension(preferredLoadedExtension)),
     'echo A pagina de extensoes foi aberta.',
     'echo.',
     'echo Proximo passo:',
@@ -958,7 +1019,9 @@ const configureGeminiCli = () => {
     };
   }
 
+  const geminiCommand = findGeminiCommand();
   log(`    config: ${configPath}`);
+  log(`    gemini binario: ${geminiCommand || '(nao encontrado no PATH)'}`);
 
   if (options.dryRun) {
     log('    [dry-run] instalaria a extensao Gemini CLI e atualizaria settings.json');
@@ -1005,9 +1068,53 @@ const configureGeminiCli = () => {
   }
 
   writeFileSync(configPath, JSON.stringify(config, null, 2) + '\n', 'utf-8');
+  patchGeminiCliExtensionBundle(geminiCliExtensionBundlePath);
+
+  if (geminiCommand) {
+    const uninstallResult = runGeminiCommand(
+      geminiCommand,
+      ['extensions', 'uninstall', SERVER_NAME],
+      'gemini extensions uninstall',
+      { ignoreFailure: true },
+    );
+    if (!uninstallResult.ok) {
+      log('    Gemini CLI: uninstall previo ignorado (extensao podia nao existir ou era manual)');
+    }
+
+    const installArgs = ['extensions', 'install', geminiCliExtensionBundlePath, '--consent'];
+    const installResult = runGeminiCommand(
+      geminiCommand,
+      installArgs,
+      'gemini extensions install',
+      { ignoreFailure: true },
+    );
+    if (installResult.ok) {
+      log('    Gemini CLI configurado via comando oficial; deve aparecer como atualizavel.');
+      log('    Reinicie a sessao do gemini para ativar.');
+      return {
+        status: 'configured',
+        method: 'gemini-extensions-install',
+        configPath,
+        extensionInstallPath: geminiCliExtensionInstallPath(),
+        sourcePath: geminiCliExtensionBundlePath,
+        geminiCommand,
+      };
+    }
+
+    log('    Gemini CLI: install oficial falhou; usando copia manual como fallback.');
+  }
+
   writeInstalledGeminiCliExtension(geminiCliExtensionInstallPath());
-  log('    Gemini CLI configurado via extensao local. Reinicie a sessao do gemini para ativar.');
-  return { status: 'configured', configPath, extensionInstallPath: geminiCliExtensionInstallPath() };
+  log('    Gemini CLI configurado via copia manual fallback. Reinicie a sessao do gemini para ativar.');
+  return {
+    status: 'configured',
+    method: 'manual-copy-fallback',
+    configPath,
+    extensionInstallPath: geminiCliExtensionInstallPath(),
+    sourcePath: geminiCliExtensionBundlePath,
+    geminiCommand,
+    warning: 'Extensao pode aparecer como nao atualizavel porque o comando oficial do Gemini CLI nao foi usado.',
+  };
 };
 
 const openBrowserExtensions = () => {
@@ -1016,12 +1123,13 @@ const openBrowserExtensions = () => {
     log(`Aviso: nao encontrei o executavel do ${browserLaunchTarget.name}. Abra manualmente ${browserLaunchTarget.url}`);
     return;
   }
-  spawnSync(browserLaunchTarget.binary, [browserLaunchTarget.url], {
+  const child = spawn(browserLaunchTarget.binary, browserLaunchArgs(browserLaunchTarget.url), {
     cwd: ROOT,
     stdio: 'ignore',
-    shell: false,
     detached: true,
+    windowsHide: false,
   });
+  child.unref();
 };
 
 const generatedFilePaths = () => [
