@@ -20,7 +20,10 @@ Operational guidance:
   stop the import/export, call `gemini_export_job_cancel`; already written
   Markdown files and the report are preserved. Do not pass `maxChats` unless the
   user explicitly asks for a partial export; with no `maxChats`, the MCP loads
-  until the sidebar reaches its real end.
+  until the sidebar reaches its real end. If individual chats fail because the
+  extension could not prove it reached the beginning of the conversation, report
+  those failures from the job status instead of treating them as completed
+  exports.
 - When the user asks to update/reinstall this exporter from Gemini CLI, prefer
   the `gemini_exporter_update` MCP tool. It starts a detached Windows updater
   from the latest GitHub release, so tell the user to close and reopen Gemini

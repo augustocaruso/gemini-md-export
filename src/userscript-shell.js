@@ -1801,9 +1801,11 @@
         beforeCount: before,
         afterCount: collectBridgeConversationLinks().length,
         reachedEnd: state.reachedSidebarEnd,
-        conversations: collectBridgeConversationLinks(),
-        modalConversations: collectConversationLinks(),
-        snapshot: debugSnapshot(),
+        conversations:
+          command.args?.includeConversations === false ? undefined : collectBridgeConversationLinks(),
+        modalConversations:
+          command.args?.includeConversations === false ? undefined : collectConversationLinks(),
+        snapshot: command.args?.includeSnapshot === false ? undefined : debugSnapshot(),
       };
     }
 
@@ -1938,15 +1940,27 @@
   };
 
   const getGeminiScrollHost = (doc, win) => {
+    const scrollableEnough = (el) => {
+      if (!el) return false;
+      if (el === doc.documentElement || el === doc.scrollingElement) {
+        const viewportHeight = win.innerHeight || doc.documentElement.clientHeight || 0;
+        return (doc.scrollingElement?.scrollHeight || doc.documentElement.scrollHeight || 0) > viewportHeight + 8;
+      }
+      return (el.scrollHeight || 0) > (el.clientHeight || 0) + 8;
+    };
+
     const directMatches = [
       ['#chat-history[data-test-id="chat-history-container"]', 'chat-history data-test-id'],
       ['infinite-scroller.chat-history', 'infinite-scroller.chat-history'],
       ['.chat-history-scroll-container', 'chat-history-scroll-container'],
     ];
 
+    const fallbackMatches = [];
     for (const [selector, matchedBy] of directMatches) {
       const el = doc.querySelector(selector);
-      if (el) return { el, matchedBy };
+      if (!el) continue;
+      if (scrollableEnough(el)) return { el, matchedBy };
+      fallbackMatches.push({ el, matchedBy: `${matchedBy} (non-scrollable)` });
     }
 
     const mainArea = doc.querySelector('main .conversation-area');
@@ -1955,20 +1969,32 @@
       for (const el of candidates) {
         const style = win.getComputedStyle(el);
         const scrollable = style.overflowY === 'auto' || style.overflowY === 'scroll';
-        if (scrollable && el.clientHeight > 300) {
+        if (scrollable && el.clientHeight > 300 && scrollableEnough(el)) {
           return { el, matchedBy: 'scrollable div inside main .conversation-area' };
         }
       }
     }
 
     const fallbackScroller = doc.querySelector('infinite-scroller');
-    if (fallbackScroller) {
+    if (fallbackScroller && scrollableEnough(fallbackScroller)) {
       return { el: fallbackScroller, matchedBy: 'infinite-scroller fallback' };
     }
 
+    const documentScroller = doc.scrollingElement || doc.documentElement;
+    if (scrollableEnough(documentScroller)) {
+      return {
+        el: documentScroller,
+        matchedBy: 'document scrollingElement fallback',
+      };
+    }
+
+    if (fallbackMatches.length > 0) {
+      return fallbackMatches[0];
+    }
+
     return {
-      el: doc.scrollingElement || doc.documentElement,
-      matchedBy: 'document scrollingElement fallback',
+      el: documentScroller,
+      matchedBy: 'document scrollingElement fallback (non-scrollable)',
     };
   };
 
@@ -1992,6 +2018,14 @@
     if (inScroller > 0) return inScroller;
     const inDocument = doc.querySelectorAll(CONVERSATION_CONTAINER_SELECTOR).length;
     return inDocument || scrapeTurns(doc).length;
+  };
+
+  const firstConversationSignature = (scroller, doc) => {
+    const first =
+      scroller?.querySelector?.(CONVERSATION_CONTAINER_SELECTOR) ||
+      doc.querySelector(CONVERSATION_CONTAINER_SELECTOR) ||
+      doc.querySelector('user-query, model-response');
+    return String(first?.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 240);
   };
 
   const hydrateConversationToTop = async (
@@ -2029,15 +2063,19 @@
       };
     }
 
-    const waitForContainerGrowth = async (beforeCount) => {
+    const waitForHydrationChange = async (beforeCount, beforeSignature) => {
       const waitStartedAt = Date.now();
       let count = beforeCount;
+      let signature = beforeSignature;
       while (Date.now() - waitStartedAt < loadWaitMs) {
         await sleep(100);
         count = countConversationContainers(scroller, doc);
-        if (count > beforeCount) return { count, grew: true };
+        signature = firstConversationSignature(scroller, doc);
+        if (count > beforeCount || signature !== beforeSignature) {
+          return { count, signature, changed: true };
+        }
       }
-      return { count, grew: false };
+      return { count, signature, changed: false };
     };
 
     while (attempts < maxAttempts) {
@@ -2048,23 +2086,24 @@
 
       attempts += 1;
       const beforeCount = countConversationContainers(scroller, doc);
+      const beforeSignature = firstConversationSignature(scroller, doc);
       const beforeTop = getScrollTop(scrollTarget, win);
 
       if (beforeTop <= 2 && attempts > 1) {
-        const finalCheck = await waitForContainerGrowth(beforeCount);
+        const finalCheck = await waitForHydrationChange(beforeCount, beforeSignature);
         lastContainerCount = finalCheck.count;
-        if (!finalCheck.grew) {
+        if (!finalCheck.changed) {
           reachedTop = true;
           break;
         }
       }
 
       setScrollTop(scrollTarget, win, 0);
-      const growth = await waitForContainerGrowth(beforeCount);
+      const growth = await waitForHydrationChange(beforeCount, beforeSignature);
       lastContainerCount = growth.count;
 
       const afterTop = getScrollTop(scrollTarget, win);
-      if (!growth.grew && afterTop <= 2) {
+      if (!growth.changed && afterTop <= 2) {
         reachedTop = true;
         break;
       }
@@ -2083,6 +2122,9 @@
         timedOut,
         conversationContainers: lastContainerCount,
         turnsAfterHydration: turns.length,
+        scrollTop: getScrollTop(scrollTarget, win),
+        scrollHeight: scrollElement?.scrollHeight || null,
+        clientHeight: scrollElement?.clientHeight || null,
         elapsedMs: Date.now() - startedAt,
       },
     };
@@ -2369,6 +2411,11 @@
 
   const collectExportForCurrentConversation = async () => {
     const hydrated = await hydrateConversationToTop(document, window);
+    if (!hydrated.stats.reachedTop || hydrated.stats.timedOut) {
+      throw new Error(
+        `Nao consegui carregar o inicio da conversa com seguranca antes de exportar (scroller: ${hydrated.stats.matchedBy}, tentativas: ${hydrated.stats.attempts}). Recarregue a aba e tente novamente.`,
+      );
+    }
     return buildExportPayload(document, location.href, {
       turns: hydrated.turns,
       hydration: hydrated.stats,
@@ -4158,6 +4205,7 @@
       notebookChatUrlCache: () => notebookChatUrlCacheSummary(),
       clearNotebookChatUrlCache: (notebookId) => clearNotebookChatUrlCache(notebookId),
       snapshot: debugSnapshot,
+      hydrateCurrentConversation: () => hydrateConversationToTop(document, window),
       findTopBar: () => {
         const res = findTopBar();
         if (!res) return { matchedBy: null, target: null };

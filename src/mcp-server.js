@@ -931,27 +931,37 @@ const loadAllRecentChatsForClient = async (client, args = {}) => {
       attempts,
       targetCount,
       fastMode: true,
+      includeConversations: false,
+      includeSnapshot: false,
     });
 
     if (!result?.ok) {
       throw new Error(result?.error || 'Falha ao puxar historico completo no browser.');
     }
 
-    if (Array.isArray(result.conversations)) {
-      client.conversations = result.conversations;
-    }
     if (result.snapshot) {
       client.lastSnapshot = result.snapshot;
       latestSnapshot = result.snapshot;
     }
 
-    const currentCount = recentConversationsForClient(client).length;
+    const currentCount = Math.max(
+      recentConversationsForClient(client).length,
+      Number(result.afterCount || 0),
+    );
     reachedEnd = result.reachedEnd === true || recentChatsReachedEndForClient(client);
     roundsCompleted += 1;
     loadedAny = loadedAny || result.loadedAny === true || currentCount > previousCount;
 
     if (currentCount <= previousCount && result.loadedAny !== true) break;
     previousCount = currentCount;
+  }
+
+  try {
+    await refreshClientConversations(client, { ensureSidebar: false });
+    latestSnapshot = client.lastSnapshot || latestSnapshot;
+    reachedEnd = recentChatsReachedEndForClient(client);
+  } catch {
+    // Se a leitura final falhar, ainda preservamos o estado/cache já conhecido.
   }
 
   return {
@@ -1227,7 +1237,7 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
         const result = await downloadConversationItemForClient(client, conversation, {
           ...args,
           outputDir: job.outputDir,
-          returnToOriginal: true,
+          returnToOriginal: false,
         });
         const success = {
           index,

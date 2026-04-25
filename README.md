@@ -157,6 +157,10 @@ pesado acontece no MCP e o relatório parcial preserva o que já foi feito.
 Quando `maxChats` é omitido, o job tenta carregar até o fim real do sidebar,
 usando o mesmo caminho de lazy-load do modal.
 
+Para evitar arquivos truncados, cada conversa é hidratada até o início antes da
+extração. Se a extensão não conseguir provar que chegou ao topo da conversa, o
+item falha no relatório em vez de salvar um Markdown incompleto.
+
 Endpoints locais úteis para diagnóstico quando as tools ainda não carregaram:
 
 - `http://127.0.0.1:47283/healthz`

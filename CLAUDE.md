@@ -503,10 +503,24 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
    ao SaveChat: encontra o scroller real do chat
    (`#chat-history[data-test-id="chat-history-container"]`,
    `infinite-scroller.chat-history`, `.chat-history-scroll-container` ou
-   fallback), seta o scroll no topo, aguarda o número de
-   `div.conversation-container` estabilizar e só então extrai o DOM. O MCP
-   aguarda comandos por 180s por padrão, mas a hidratação deve parar antes
-   quando o topo estabiliza.
+   fallback), mas **só aceita o candidato como host se ele tiver overflow
+   real** (`scrollHeight > clientHeight + 8`). Não voltar a escolher o
+   primeiro seletor encontrado sem esse teste: um wrapper não rolável faz a
+   hidratação concluir cedo e gera Markdown truncado. Depois de escolher o
+   scroller, seta o scroll no topo e aguarda mudança por contagem de
+   `div.conversation-container` **ou** pela assinatura textual do primeiro
+   turno, porque loaders virtuais podem trocar blocos sem aumentar a contagem.
+   Só exporta quando `reachedTop=true` e `timedOut=false`; se não conseguir
+   provar que chegou ao início, o export falha em vez de gravar arquivo
+   truncado. `__geminiMdExportDebug.hydrateCurrentConversation()` expõe essa
+   hidratação para diagnóstico. O MCP aguarda comandos por 180s por padrão, mas
+   a hidratação deve parar antes quando o topo estabiliza.
+   Performance do export total: `gemini_export_recent_chats` carrega o sidebar
+   em rodadas sem devolver a lista inteira a cada `load-more-conversations`
+   (`includeConversations=false`, `includeSnapshot=false`) e só coleta a lista
+   completa no fim. Durante o batch, não retornar para a conversa original
+   entre cada item; isso evitaria duas navegações por chat e degrada muito
+   centenas de exports.
 9. **Chat ID da URL ≠ chat ID do gemini-webapi**: a URL pública usa um ID
    hexadecimal em `/app/<hex>` (normalmente 16+ chars; o scraper aceita 12+
    para tolerar variações); o `gemini-webapi` usa formato `c_<alfanum>`.
