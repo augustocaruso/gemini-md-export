@@ -24,6 +24,10 @@ Operational guidance:
   from the latest GitHub release, so tell the user to close and reopen Gemini
   CLI after the updater finishes.
 - Users can also run `/exporter:update` as a shortcut for the same update flow.
+- If `/exporter:update` or `gemini_exporter_update` fails, tell the user to run
+  the external PowerShell recovery command from the project README. Updating
+  from inside Gemini CLI depends on the currently installed MCP, so an old or
+  inconsistent updater may need that external bootstrap.
 - When the user reports the MCP as disconnected on Windows, suggest running:
   `powershell -ExecutionPolicy Bypass -File .\diagnose-windows-mcp.ps1`
 - If the MCP looks disconnected, suspect a stale `node.exe` or a bridge port

@@ -329,9 +329,12 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   `release/gemini-md-export-windows-prebuilt.zip` e
   `release/update-windows.ps1` para GitHub Releases.
 - `scripts/update-windows.ps1` — updater Windows pensado para ser executado por
-  comando único (`irm .../update-windows.ps1 | iex`) ou pela tool MCP
-  `gemini_exporter_update`. Baixa o zip precompilado da última release do repo
-  público default `augustocaruso/gemini-md-export`, extrai em `%TEMP%`, valida
+  comando único externo via `WebClient.DownloadString(raw.githubusercontent...)`
+  ou pela tool MCP `gemini_exporter_update`. Quando `-ZipUrl`/`GME_RELEASE_ZIP_URL`
+  não é passado, consulta a API `repos/<repo>/releases/latest`, procura o asset
+  estável `gemini-md-export-windows-prebuilt.zip` e só cai para
+  `/releases/latest/download/...` como fallback. Baixa com headers explícitos,
+  tenta `Invoke-WebRequest` e depois `WebClient`, extrai em `%TEMP%`, valida
   `package.json`, manifest da extensão MV3 e `gemini-extension.json`, roda o
   instalador com `GEMINI_INSTALL_PREBUILT_PAYLOAD=1`, apaga temporários em
   sucesso e preserva temp/log em falha. Aceita override por `GME_RELEASE_REPO`,
@@ -537,9 +540,12 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
 
 - Requer Node.js ≥20 instalado e disponível no PATH.
 - O instalador assistido é `install-windows.cmd` ou `npm run install:windows`.
-- Caminho recomendado para usuário final: comando PowerShell que baixa
-  `update-windows.ps1` da última GitHub Release:
-  `powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/augustocaruso/gemini-md-export/releases/latest/download/update-windows.ps1 | iex"`.
+- Caminho recomendado para usuário final: comando PowerShell externo que baixa
+  `update-windows.ps1` do `main` via `raw.githubusercontent.com`; o script então
+  consulta a API de releases do GitHub e baixa o zip da última release. Esse
+  caminho evita depender do redirect `/releases/latest/download` no PowerShell
+  e serve como recuperação quando `/exporter:update` falhar dentro do Gemini CLI:
+  `powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; iex ((New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/augustocaruso/gemini-md-export/main/scripts/update-windows.ps1'))"`.
 - Para distribuir/atualizar releases, use `npm run release:windows:prebuilt`;
   ele gera `release/gemini-md-export-windows-prebuilt.zip`,
   `release/update-windows.ps1` e um zip versionado. O workflow

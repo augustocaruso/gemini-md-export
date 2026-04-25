@@ -20,8 +20,11 @@ if ([string]::IsNullOrWhiteSpace($Browser)) {
 }
 
 if ([string]::IsNullOrWhiteSpace($ZipUrl)) {
-  $ZipUrl = "https://github.com/$Repo/releases/latest/download/gemini-md-export-windows-prebuilt.zip"
+  $ZipUrl = ''
 }
+
+$releaseAssetName = 'gemini-md-export-windows-prebuilt.zip'
+$fallbackZipUrl = "https://github.com/$Repo/releases/latest/download/$releaseAssetName"
 
 $timestamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) "gemini-md-export-update-$timestamp"
@@ -41,6 +44,93 @@ function Write-Step {
 function Fail-Update {
   param([string]$Message)
   throw $Message
+}
+
+function New-DownloadHeaders {
+  return @{
+    'Accept' = 'application/vnd.github+json, application/octet-stream, */*'
+    'User-Agent' = 'gemini-md-export-updater'
+    'X-GitHub-Api-Version' = '2022-11-28'
+  }
+}
+
+function Resolve-LatestZipUrl {
+  param([string]$RepoName)
+
+  $apiUrl = "https://api.github.com/repos/$RepoName/releases/latest"
+  try {
+    Write-Host "Consultando ultima release via GitHub API..."
+    $release = Invoke-RestMethod -Uri $apiUrl -Headers (New-DownloadHeaders) -UseBasicParsing
+    $asset = $release.assets |
+      Where-Object { $_.name -eq $releaseAssetName } |
+      Select-Object -First 1
+
+    if (-not $asset) {
+      $asset = $release.assets |
+        Where-Object { $_.name -like 'gemini-md-export-windows-prebuilt*.zip' } |
+        Select-Object -First 1
+    }
+
+    if ($asset -and -not [string]::IsNullOrWhiteSpace($asset.browser_download_url)) {
+      Write-Host "Release encontrada: $($release.tag_name)"
+      Write-Host "Asset encontrado: $($asset.name)"
+      return [string]$asset.browser_download_url
+    }
+
+    Write-Host "[AVISO] Release encontrada, mas asset esperado nao apareceu. Vou usar fallback /latest/download."
+  } catch {
+    Write-Host "[AVISO] Nao consegui consultar a API do GitHub: $($_.Exception.Message)"
+    Write-Host "[AVISO] Vou usar fallback /latest/download."
+  }
+
+  return $fallbackZipUrl
+}
+
+function Download-File {
+  param(
+    [string]$Url,
+    [string]$OutFile
+  )
+
+  $headers = New-DownloadHeaders
+  $attempts = @(
+    @{ Name = 'Invoke-WebRequest'; Kind = 'iwr' },
+    @{ Name = 'WebClient'; Kind = 'webclient' }
+  )
+
+  foreach ($attempt in $attempts) {
+    try {
+      if (Test-Path -LiteralPath $OutFile) {
+        Remove-Item -LiteralPath $OutFile -Force
+      }
+
+      Write-Host "Baixando com $($attempt.Name)..."
+      if ($attempt.Kind -eq 'iwr') {
+        Invoke-WebRequest -Uri $Url -OutFile $OutFile -Headers $headers -UseBasicParsing
+      } else {
+        $client = New-Object System.Net.WebClient
+        foreach ($key in $headers.Keys) {
+          $client.Headers.Set($key, [string]$headers[$key])
+        }
+        $client.DownloadFile($Url, $OutFile)
+      }
+
+      if ((Test-Path -LiteralPath $OutFile) -and ((Get-Item -LiteralPath $OutFile).Length -gt 0)) {
+        return
+      }
+
+      throw "Download terminou, mas o arquivo veio vazio."
+    } catch {
+      Write-Host "[AVISO] Falha em $($attempt.Name): $($_.Exception.Message)"
+    } finally {
+      if ($client) {
+        $client.Dispose()
+        $client = $null
+      }
+    }
+  }
+
+  Fail-Update "Nao consegui baixar o pacote de update. URL: $Url"
 }
 
 function Find-PayloadRoot {
@@ -152,6 +242,10 @@ try {
 
   Write-Host "Gemini Markdown Export - update Windows"
   Write-Host "Repo: $Repo"
+  if ([string]::IsNullOrWhiteSpace($ZipUrl)) {
+    $ZipUrl = Resolve-LatestZipUrl -RepoName $Repo
+  }
+
   Write-Host "URL:  $ZipUrl"
   Write-Host "Temp: $tempRoot"
   Write-Host "Log:  $LogPath"
@@ -161,7 +255,7 @@ try {
     Write-Host "DRY-RUN: baixaria $ZipUrl"
   } else {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    Invoke-WebRequest -Uri $ZipUrl -OutFile $zipPath -UseBasicParsing
+    Download-File -Url $ZipUrl -OutFile $zipPath
   }
 
   Write-Step "Extraindo pacote"

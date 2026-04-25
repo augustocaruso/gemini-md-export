@@ -24,12 +24,15 @@ Pré-requisitos:
 No PowerShell, rode:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/augustocaruso/gemini-md-export/releases/latest/download/update-windows.ps1 | iex"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; iex ((New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/augustocaruso/gemini-md-export/main/scripts/update-windows.ps1'))"
 ```
 
 Esse comando baixa a última release, extrai em uma pasta temporária, valida o
 pacote, instala/atualiza o MCP e a extensão, sincroniza cópias unpacked já
 carregadas no navegador quando possível e apaga os temporários após sucesso.
+Ele baixa o script bruto do GitHub e o próprio script resolve a última release
+via API, evitando depender do redirect `/releases/latest/download` do GitHub no
+PowerShell.
 
 O passo que continua manual por restrição do Chrome/Edge é carregar ou
 recarregar a extensão unpacked:
@@ -60,6 +63,10 @@ um processo separado. Depois que ele terminar, feche e reabra o Gemini CLI para
 carregar a nova versão. No navegador, recarregue o card da extensão em
 `chrome://extensions`/`edge://extensions`; as abas do Gemini são recarregadas
 automaticamente depois que a extensão volta.
+
+Se o Gemini CLI não conseguir atualizar por dentro dele, use o comando
+PowerShell da seção anterior. Esse é o fallback principal quando a versão
+instalada do MCP/updater ficou velha ou inconsistente.
 
 ## Uso
 

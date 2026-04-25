@@ -32,11 +32,19 @@ extrai em uma pasta temporaria, instala a partir da pasta correta e apaga os
 temporarios depois que terminar.
 
 Comando padrao:
-   powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/augustocaruso/gemini-md-export/releases/latest/download/update-windows.ps1 | iex"
+   powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; iex ((New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/augustocaruso/gemini-md-export/main/scripts/update-windows.ps1'))"
+
+Esse comando e mais robusto que baixar pelo link "latest" da pagina de
+releases: ele baixa o script direto do GitHub e o script descobre a ultima
+release pela API antes de baixar o pacote.
 
 Se o Gemini CLI ja estiver com o exporter funcionando, voce tambem pode pedir
 ao Gemini CLI:
    /exporter:update
+
+Se esse update por dentro do Gemini CLI falhar, use o comando PowerShell acima.
+Ele e o caminho de recuperacao quando a copia instalada do MCP/updater ficou
+velha ou inconsistente.
 
 Quando o update terminar, feche e reabra o Gemini CLI. Se a extensao do
 navegador ja estava carregada, clique no icone circular de reload do card dela
