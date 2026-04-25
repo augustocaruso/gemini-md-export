@@ -912,6 +912,58 @@ const loadMoreRecentChatsForClient = async (client, requestedLimit, args = {}) =
   };
 };
 
+const loadAllRecentChatsForClient = async (client, args = {}) => {
+  let latestSnapshot = client.lastSnapshot || null;
+  let reachedEnd = recentChatsReachedEndForClient(client);
+  let loadedAny = false;
+  let roundsCompleted = 0;
+  let previousCount = recentConversationsForClient(client).length;
+  const batchSize = Math.max(10, Math.min(200, Number(args.batchSize || 50)));
+  const maxRounds = Math.max(1, Math.min(500, Number(args.maxLoadMoreRounds || args.loadMoreRounds || 200)));
+  const attempts = Math.max(1, Math.min(5, Number(args.loadMoreAttempts || 3)));
+
+  for (let round = 0; round < maxRounds && !reachedEnd; round += 1) {
+    if (args.shouldStop?.()) break;
+
+    const targetCount = previousCount + batchSize;
+    const result = await enqueueCommand(client.clientId, 'load-more-conversations', {
+      ensureSidebar: true,
+      attempts,
+      targetCount,
+      fastMode: true,
+    });
+
+    if (!result?.ok) {
+      throw new Error(result?.error || 'Falha ao puxar historico completo no browser.');
+    }
+
+    if (Array.isArray(result.conversations)) {
+      client.conversations = result.conversations;
+    }
+    if (result.snapshot) {
+      client.lastSnapshot = result.snapshot;
+      latestSnapshot = result.snapshot;
+    }
+
+    const currentCount = recentConversationsForClient(client).length;
+    reachedEnd = result.reachedEnd === true || recentChatsReachedEndForClient(client);
+    roundsCompleted += 1;
+    loadedAny = loadedAny || result.loadedAny === true || currentCount > previousCount;
+
+    if (currentCount <= previousCount && result.loadedAny !== true) break;
+    previousCount = currentCount;
+  }
+
+  return {
+    attempted: roundsCompleted > 0,
+    loadedAny,
+    roundsCompleted,
+    reachedEnd,
+    snapshot: latestSnapshot,
+    conversations: recentConversationsForClient(client),
+  };
+};
+
 const parseOptionalBoolean = (value) => {
   if (typeof value === 'boolean') return value;
   if (typeof value !== 'string' || value.length === 0) return undefined;
@@ -1005,6 +1057,7 @@ const summarizeExportJob = (job) => ({
   updatedAt: job.updatedAt,
   finishedAt: job.finishedAt || null,
   startIndex: job.startIndex,
+  exportAll: job.exportAll,
   maxChats: job.maxChats,
   loadedCount: job.loadedCount,
   requested: job.requested,
@@ -1019,6 +1072,8 @@ const summarizeExportJob = (job) => ({
   reportFile: job.reportFile || null,
   reportFilename: job.reportFilename || null,
   error: job.error || null,
+  refreshError: job.refreshError || null,
+  loadMoreRoundsCompleted: job.loadMoreRoundsCompleted || 0,
   recentSuccesses: job.recentSuccesses.slice(-10),
   failures: job.failures.slice(-20),
 });
@@ -1053,6 +1108,7 @@ const buildRecentChatsExportReport = (job, client, successes, failures) => ({
   client: summarizeClient(client),
   outputDir: job.outputDir,
   startIndex: job.startIndex,
+  exportAll: job.exportAll,
   maxChats: job.maxChats,
   loadedCount: job.loadedCount,
   requested: job.requested,
@@ -1088,13 +1144,37 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
     touchExportJob(job);
     persistRecentChatsExportReport(job, client, successes, failures);
 
-    const targetCount = Math.min(MAX_RECENT_CHATS_LOAD_TARGET, job.startIndex - 1 + job.maxChats);
-    await listRecentChatsForClient(client, {
-      ...args,
-      limit: 1,
-      offset: Math.max(0, targetCount - 1),
-      refresh: args.refresh,
-    });
+    if (job.exportAll) {
+      const refreshPlan = buildRecentChatsRefreshPlan(client, args, {
+        maxAgeMs: RECENT_CHATS_CACHE_MAX_AGE_MS,
+      });
+      if (refreshPlan.shouldRefresh) {
+        try {
+          const refreshPromise = refreshClientConversations(client, { ensureSidebar: true });
+          const refresh = refreshPlan.preferFastRefresh
+            ? await withTimeout(refreshPromise, RECENT_CHATS_REFRESH_BUDGET_MS)
+            : await refreshPromise;
+          if (refresh?.snapshot) {
+            client.lastSnapshot = refresh.snapshot;
+          }
+        } catch (err) {
+          job.refreshError = err.message;
+        }
+      }
+      const loadMore = await loadAllRecentChatsForClient(client, {
+        ...args,
+        shouldStop: () => job.cancelRequested === true,
+      });
+      job.loadMoreRoundsCompleted = loadMore.roundsCompleted;
+    } else {
+      const targetCount = Math.min(MAX_RECENT_CHATS_LOAD_TARGET, job.startIndex - 1 + job.maxChats);
+      await listRecentChatsForClient(client, {
+        ...args,
+        limit: 1,
+        offset: Math.max(0, targetCount - 1),
+        refresh: args.refresh,
+      });
+    }
 
     if (job.cancelRequested) {
       job.status = 'cancelled';
@@ -1105,12 +1185,13 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
     const conversations = recentConversationsForClient(client);
     job.loadedCount = conversations.length;
     job.reachedEnd = recentChatsReachedEndForClient(client);
-    job.truncated = !job.reachedEnd && conversations.length >= MAX_RECENT_CHATS_LOAD_TARGET;
+    job.truncated = !job.exportAll && !job.reachedEnd && conversations.length >= MAX_RECENT_CHATS_LOAD_TARGET;
 
     const seen = new Set();
-    const selected = conversations
-      .slice(job.startIndex - 1, job.startIndex - 1 + job.maxChats)
-      .filter((conversation) => {
+    const requestedSlice = job.exportAll
+      ? conversations.slice(job.startIndex - 1)
+      : conversations.slice(job.startIndex - 1, job.startIndex - 1 + job.maxChats);
+    const selected = requestedSlice.filter((conversation) => {
         const key = stripGeminiPrefix(conversation.chatId || conversation.id) || conversation.url;
         if (!key || seen.has(key)) return false;
         seen.add(key);
@@ -1216,6 +1297,7 @@ const startRecentChatsExportJob = (client, args = {}) => {
   }
 
   const outputDir = resolveOutputDir(args.outputDir);
+  const hasExplicitMaxChats = args.maxChats !== undefined || args.limit !== undefined;
   const job = {
     jobId: randomUUID(),
     type: 'recent-chats-export',
@@ -1226,8 +1308,11 @@ const startRecentChatsExportJob = (client, args = {}) => {
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     finishedAt: null,
-    startIndex: normalizeLimit(args.startIndex, 1, MAX_RECENT_CHATS_LOAD_TARGET),
-    maxChats: normalizeLimit(args.maxChats ?? args.limit, MAX_RECENT_CHATS_LOAD_TARGET, MAX_RECENT_CHATS_LOAD_TARGET),
+    startIndex: normalizeLimit(args.startIndex, 1, 20000),
+    exportAll: !hasExplicitMaxChats,
+    maxChats: hasExplicitMaxChats
+      ? normalizeLimit(args.maxChats ?? args.limit, MAX_RECENT_CHATS_LOAD_TARGET, MAX_RECENT_CHATS_LOAD_TARGET)
+      : null,
     loadedCount: 0,
     requested: 0,
     completed: 0,
@@ -1241,6 +1326,8 @@ const startRecentChatsExportJob = (client, args = {}) => {
     reportFile: null,
     reportFilename: null,
     error: null,
+    refreshError: null,
+    loadMoreRoundsCompleted: 0,
     recentSuccesses: [],
     failures: [],
   };
@@ -1673,7 +1760,7 @@ const tools = [
           minimum: 1,
           maximum: 1000,
           description:
-            'Quantidade máxima de conversas a exportar. Default: 1000 ou até o fim carregável do sidebar.',
+            'Quantidade máxima de conversas a exportar. Se omitido, exporta até o fim carregável do sidebar.',
         },
         limit: {
           type: 'integer',
