@@ -1,9 +1,10 @@
 # Gemini → Markdown Export
 
-Projeto de extensão/userscript + servidor MCP que exporta conversas do Gemini
-web (https://gemini.google.com/app/*) como arquivos Markdown para ingestão em
-vault do Obsidian. O alvo principal agora é uma extensão MV3 + MCP; o
-userscript permanece como fallback/protótipo.
+Projeto de extensão MV3 + servidor MCP que exporta conversas do Gemini web
+(https://gemini.google.com/app/*) como arquivos Markdown para ingestão em vault
+do Obsidian. O caminho principal é extensão unpacked + MCP local + updater
+Windows via GitHub Releases/Gemini CLI. O userscript gerado pelo build é legado
+de debug e não deve ser apresentado como fluxo recomendado ao usuário final.
 
 ## Contexto
 
@@ -14,20 +15,19 @@ userscript permanece como fallback/protótipo.
 - Chat ID é extraído da URL (`/app/<hex>`, hoje aceito com pelo menos 12
   caracteres hexadecimais; normalmente aparece com 16+) e vira o nome do
   arquivo (`<chatId>.md`).
-- O download cai em `~/Downloads`/pasta padrão do browser por fallback. Na
+- O download cai em `~/Downloads`/pasta padrão do navegador por fallback. Na
   extensão com MCP local rodando, o botão **Alterar** do modal abre seletor
   nativo de pasta no macOS (`osascript`) e Windows (`powershell.exe` +
   `IFileOpenDialog` estilo Explorer com owner topmost) via bridge local, e o
-  servidor grava os arquivos no diretório escolhido. No userscript ou sem MCP,
-  ainda pode usar `showDirectoryPicker()` quando o browser suportar; se o browser bloquear
-  pastas sensíveis/raiz, orientar o usuário a escolher subpasta comum ou usar
-  a extensão+MCP.
-- Baseline de teste manual: Chrome/Chromium com Tampermonkey. Browsers com
-  UI/arquitetura de extensões customizada podem falhar mesmo quando o script
-  está correto.
-- Há um probe mínimo em `debug/tampermonkey-probe.user.js` para validar se o
-  Tampermonkey está injetando qualquer userscript no Gemini antes de culpar
-  o scraper.
+  servidor grava os arquivos no diretório escolhido. Na extensão MV3, se o MCP
+  não responder, mostrar erro em português simples e manter Downloads como
+  fallback; não reintroduzir a janelinha antiga de `showDirectoryPicker()` no
+  fluxo principal.
+- Baseline de teste manual: Chrome/Edge/Chromium com extensão MV3 unpacked e
+  MCP local rodando. Browsers com UI/arquitetura de extensões customizada podem
+  falhar mesmo quando o scraper está correto.
+- Há um probe legado em `debug/tampermonkey-probe.user.js` apenas para debug de
+  injeção antiga; não documentar como instalação recomendada.
 
 ## Formato de saída
 
@@ -70,20 +70,18 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
 - `src/batch-session.mjs` — helpers puros para serializar e retomar sessão de
   exportação em lote via `sessionStorage` da aba. Se navegação do Gemini matar
   o content script no meio do lote, o próximo bootstrap retoma do item pendente.
-- `src/userscript-shell.js` — camada de browser: captura metadata da URL e
-  título da aba, invoca a lógica pura, dispara download, injeta botão
+- `src/userscript-shell.js` — camada de browser/content script (nome histórico):
+  captura metadata da URL e título da aba, invoca a lógica pura, dispara download, injeta botão
   no `top-bar-actions` do Gemini (sem FAB fallback), registra hotkey e
   instala a API de debug `__geminiMdExportDebug` para
-  inspeção manual no DevTools durante debug. No userscript ela fica no
-  contexto da página (`window.__geminiMdExportDebug`); na extensão MV3 ela
-  roda no isolated world do content script, então pode ser necessário
-  selecionar o contexto do content script no DevTools ou usar os logs/MCP.
+  inspeção manual no DevTools durante debug. Na extensão MV3 ela roda no
+  isolated world do content script, então pode ser necessário selecionar o
+  contexto do content script no DevTools ou usar os logs/MCP.
   Importa funções de
   `extract.mjs` via comentário marcador que o build resolve. O bloco
-  `==UserScript==` deve permanecer literalmente no topo do arquivo para o
-  Tampermonkey reconhecer os metadados. Em páginas com CSP rígida como o
-  Gemini, preferir grants explícitos (ex.: `GM_download`, `unsafeWindow`)
-  em vez de `@grant none`. O shell também hospeda o modal de exportação em
+  `==UserScript==` ainda existe porque o build também emite
+  `dist/gemini-export.user.js` como artefato legado de debug; não usar isso
+  como fluxo principal. O shell também hospeda o modal de exportação em
   lote, a listagem das conversas carregadas no sidebar e a escrita
   sequencial via pasta escolhida pelo bridge MCP, File System Access ou
   Downloads, incluindo tentativa de abrir o
@@ -121,8 +119,8 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   avatar, share) dos outros botões do top-bar. A UI atual usa namespace
   `gm-md-export-modern-*` e o botão recebe assinatura
   `data-gm-md-export-version` + `data-gm-md-export-build-stamp`. Não tocar,
-  remover nem substituir nós legados `gm-md-export-*`: se um userscript ou
-  content script antigo ainda estiver vivo, disputar o mesmo nó por
+  remover nem substituir nós legados `gm-md-export-*`: se uma cópia antiga do
+  exporter ainda estiver viva, disputar o mesmo nó por
   `MutationObserver` pode travar o Gemini. A função de estilo
   `styleAsTopBarIconButton` é aplicada tanto na criação quanto no
   re-parenting do botão atual, protegendo contra estilos de FAB sem brigar
@@ -166,7 +164,8 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   'insertBefore'" no console do usuário. Se o botão ficar fora de lugar,
   o próximo tick do `MutationObserver` reposiciona.
   **Carimbo de build**: `scripts/build.mjs` injeta um stamp `YYYYMMDD-HHMM`
-  UTC no log de boot (`userscript carregado (v<version> build <stamp>)`).
+  UTC no log de boot (`userscript carregado (v<version> build <stamp>)`; texto
+  histórico mantido pelo bundle).
   Quando o usuário reportar bug no console, confirmar que o stamp
   impresso bate com a build atual — se bater, a extensão foi recarregada
   corretamente; se não, o Chrome/Edge ainda está com cache do content
@@ -374,13 +373,15 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
    (e equivalentes em inglês) como nós de texto. Remover por match exato de
    conteúdo textual, não por classe — mais robusto a mudanças de CSS.
 2. **Seletores de turno**: hoje `user-query, model-response`. Pode mudar
-   sem aviso. Se quebrar, o fluxo de debug é: usuário abre DevTools, copia
-   `window.__geminiMdExportDebug.snapshot()` no userscript ou no contexto do
-   content script da extensão, verifica a contagem dos seletores, copia
+   sem aviso. Se quebrar, o fluxo de debug é: usuário abre DevTools, seleciona
+   o contexto do content script da extensão se necessário, copia
+   `window.__geminiMdExportDebug.snapshot()`, verifica a contagem dos seletores, copia
    outerHTML do nó de turno, salva em `fixtures/`, adapta seletor + teste.
-3. **CSP / contexto de execução**: se o userscript estiver ativo no
-   Tampermonkey mas não aparecer botão nem logs, suspeitar de injeção
-   bloqueada pelo contexto da página. Evitar `@grant none`.
+3. **Contexto de execução MV3**: a API de debug roda no isolated world do
+   content script. Se `window.__geminiMdExportDebug` não aparecer no console
+   principal, selecionar o contexto do content script no DevTools ou usar logs
+   e tools MCP. Não diagnosticar isso como falha do scraper antes de confirmar
+   contexto e build stamp.
 4. **Compatibilidade entre browsers**: sucesso no Chrome não garante
    sucesso em browsers Chromium alternativos. Se o problema só reproduz em
    um browser específico, priorizar validar no Chrome e na extensão MV3
@@ -459,8 +460,9 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
 
 ## Regras de contribuição
 
-- **Nunca adicionar dependências de runtime.** O userscript final precisa
-  ser um arquivo único, copiável para Tampermonkey.
+- **Nunca adicionar dependências de runtime.** O bundle da extensão e o MCP
+  instalado devem continuar leves e autossuficientes; dependências de runtime
+  novas exigem justificativa explícita.
 - Dependências de dev (testes, build) em `package.json`, tudo bem, mas
   mantenha mínimas. Hoje: apenas `jsdom`.
 - Toda mudança em `src/extract.mjs` deve ter teste correspondente em
@@ -495,14 +497,18 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
 ## Ambiente de instalação (Windows)
 
 - Requer Node.js ≥20 instalado e disponível no PATH.
-- O instalador assistido é [install-windows.cmd](/Users/augustocaruso/Documents/gemini-md-export/install-windows.cmd)
-  ou `npm run install:windows`.
-- Para distribuir um único arquivo ao usuário final, use
-  `npm run release:windows`; o artefato final sai em `release/*.exe`.
-- Para distribuir um pacote bem menor, use
-  `npm run release:windows:prebuilt`; o artefato sai em `release/*.zip` e o
-  `install-windows.cmd` desse bundle já detecta o payload precompilado e pula
-  `npm install`/`npm run build`.
+- O instalador assistido é `install-windows.cmd` ou `npm run install:windows`.
+- Caminho recomendado para usuário final: comando PowerShell que baixa
+  `update-windows.ps1` da última GitHub Release:
+  `powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://github.com/augustocaruso/gemini-md-export/releases/latest/download/update-windows.ps1 | iex"`.
+- Para distribuir/atualizar releases, use `npm run release:windows:prebuilt`;
+  ele gera `release/gemini-md-export-windows-prebuilt.zip`,
+  `release/update-windows.ps1` e um zip versionado. O workflow
+  `.github/workflows/release-windows.yml` publica esses assets quando uma tag
+  `v*` é enviada.
+- `npm run release:windows` ainda gera o `.exe` standalone, mas esse caminho é
+  secundário porque o `.exe` foi menos confiável no ambiente real e ainda
+  depende de Node.js instalado para o MCP final.
 - Por padrão instala os arquivos em `%LOCALAPPDATA%\GeminiMdExport`; a extensão
   fica na subpasta `extension`. Se já houver config do Gemini CLI ou Claude
   Desktop apontando para outra instalação, o instalador reaproveita esse
@@ -545,23 +551,20 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
 ## Fluxo de desenvolvimento
 
 1. `npm install` uma vez.
-2. Editar `src/extract.mjs` ou `src/userscript-shell.js`.
+2. Editar `src/extract.mjs`, `src/userscript-shell.js`, MCP ou scripts.
 3. `npm test` — roda `npm run build` e depois os testes; deve passar.
 4. `npm run build` — opcional quando quiser apenas regenerar `dist/`.
 5. Para extensão: carregar `dist/extension/` como unpacked extension.
-6. Para userscript: copiar conteúdo de `dist/gemini-export.user.js` para o
-   Tampermonkey.
-7. Para MCP local: `npm run mcp` ou configurar `src/mcp-server.js` no cliente
+6. Para MCP local: `npm run mcp` ou configurar `src/mcp-server.js` no cliente
    MCP via `stdio`.
-8. Para instalação assistida em Windows: `install-windows.cmd` ou
+7. Para instalação assistida em Windows: `install-windows.cmd` ou
    `npm run install:windows`.
-9. Se mudou content script ou comandos do bridge, recarregar a extensão
+8. Se mudou content script ou comandos do bridge, recarregar a extensão
    desempacotada no browser.
-10. Recarregar aba do Gemini, testar manualmente.
-11. Se falhar no browser, abrir o Console e usar
-   `window.__geminiMdExportDebug.snapshot()` / `markdown()` no userscript; na
-   extensão MV3, selecionar o contexto do content script no DevTools se a API
-   não aparecer no contexto principal da página.
+9. Recarregar aba do Gemini, testar manualmente.
+10. Se falhar no navegador, abrir o Console e usar
+   `window.__geminiMdExportDebug.snapshot()` / `markdown()` no contexto do
+   content script, ou consultar as tools/endpoints MCP.
 
 ## Como adicionar uma fixture nova (quando algo quebrar)
 
