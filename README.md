@@ -117,6 +117,7 @@ Tools disponíveis:
 - `gemini_download_notebook_chat`
 - `gemini_export_recent_chats`
 - `gemini_export_job_status`
+- `gemini_export_job_cancel`
 - `gemini_export_notebook`
 - `gemini_exporter_update`
 - `gemini_cache_status`
@@ -135,10 +136,11 @@ carregáveis por sessão.
 
 Para importar/exportar o histórico inteiro, use `gemini_export_recent_chats`.
 Ela inicia um job em background, percorre o sidebar carregável, grava os
-Markdown no diretório configurado e gera um relatório JSON; acompanhe com
-`gemini_export_job_status` pelo `jobId`. Esse é o fluxo recomendado para
-centenas de conversas, porque a resposta do Gemini CLI fica pequena e o trabalho
-pesado acontece no MCP.
+Markdown no diretório configurado e mantém um relatório JSON incremental;
+acompanhe com `gemini_export_job_status` pelo `jobId` e cancele com
+`gemini_export_job_cancel` se necessário. Esse é o fluxo recomendado para
+centenas de conversas, porque a resposta do Gemini CLI fica pequena, o trabalho
+pesado acontece no MCP e o relatório parcial preserva o que já foi feito.
 
 Endpoints locais úteis para diagnóstico quando as tools ainda não carregaram:
 
@@ -147,6 +149,7 @@ Endpoints locais úteis para diagnóstico quando as tools ainda não carregaram:
 - `http://127.0.0.1:47283/agent/recent-chats?limit=50&offset=0`
 - `http://127.0.0.1:47283/agent/export-recent-chats?maxChats=1000`
 - `http://127.0.0.1:47283/agent/export-job-status?jobId=<id>`
+- `http://127.0.0.1:47283/agent/export-job-cancel?jobId=<id>`
 - `http://127.0.0.1:47283/agent/notebook-chats?limit=20`
 - `http://127.0.0.1:47283/agent/current-chat`
 - `http://127.0.0.1:47283/agent/reload-tabs`

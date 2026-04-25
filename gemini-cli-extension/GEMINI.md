@@ -16,7 +16,9 @@ Operational guidance:
 - When the user asks to import/export the whole Gemini chat history, do not list
   the chats first. Start `gemini_export_recent_chats`, tell the user the job ID,
   and poll `gemini_export_job_status` until the job finishes. The job writes the
-  Markdown files and a JSON report locally.
+  Markdown files and an incremental JSON report locally. If the user asks to
+  stop the import/export, call `gemini_export_job_cancel`; already written
+  Markdown files and the report are preserved.
 - When the user asks to update/reinstall this exporter from Gemini CLI, prefer
   the `gemini_exporter_update` MCP tool. It starts a detached Windows updater
   from the latest GitHub release, so tell the user to close and reopen Gemini
@@ -34,6 +36,7 @@ Available capabilities include:
 - listing notebook chats
 - exporting the current chat
 - exporting the recent-chat history in a background batch job
+- checking or cancelling a background export job
 - downloading a specific recent or notebook chat
 - updating this exporter from GitHub Releases on Windows
 - manually reloading connected Gemini tabs when needed

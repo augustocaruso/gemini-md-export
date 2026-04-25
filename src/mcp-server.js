@@ -443,6 +443,11 @@ const writeExportReport = (kind, report, { outputDir } = {}) => {
   return { reportFile: filePath, reportFilename: filename };
 };
 
+const overwriteExportReport = (filePath, report) => {
+  if (!filePath) return;
+  writeFileSync(filePath, `${JSON.stringify(report, null, 2)}\n`, 'utf-8');
+};
+
 const writeExportFiles = (payload = {}) => {
   const files = Array.isArray(payload.files)
     ? payload.files
@@ -1008,6 +1013,8 @@ const summarizeExportJob = (job) => ({
   failureCount: job.failureCount,
   reachedEnd: job.reachedEnd,
   truncated: job.truncated,
+  cancelRequested: job.cancelRequested,
+  cancelledAt: job.cancelledAt || null,
   current: job.current || null,
   reportFile: job.reportFile || null,
   reportFilename: job.reportFilename || null,
@@ -1020,12 +1027,66 @@ const touchExportJob = (job) => {
   job.updatedAt = new Date().toISOString();
 };
 
+const isTerminalExportJobStatus = (status) =>
+  ['completed', 'completed_with_errors', 'failed', 'cancelled'].includes(status);
+
+const findRunningRecentChatsExportJob = (clientId) =>
+  Array.from(exportJobs.values()).find(
+    (job) =>
+      job.type === 'recent-chats-export' &&
+      job.clientId === clientId &&
+      !isTerminalExportJobStatus(job.status),
+  );
+
+const buildRecentChatsExportReport = (job, client, successes, failures) => ({
+  job: {
+    jobId: job.jobId,
+    type: job.type,
+    status: job.status,
+    phase: job.phase,
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+    finishedAt: job.finishedAt || null,
+    cancelRequested: job.cancelRequested,
+    cancelledAt: job.cancelledAt || null,
+  },
+  client: summarizeClient(client),
+  outputDir: job.outputDir,
+  startIndex: job.startIndex,
+  maxChats: job.maxChats,
+  loadedCount: job.loadedCount,
+  requested: job.requested,
+  completed: job.completed,
+  successCount: successes.length,
+  failureCount: failures.length,
+  reachedEnd: job.reachedEnd,
+  truncated: job.truncated,
+  current: job.current || null,
+  successes,
+  failures,
+});
+
+const persistRecentChatsExportReport = (job, client, successes, failures) => {
+  if (!job.reportFile) {
+    const reportFile = writeExportReport(
+      'recent-chats',
+      buildRecentChatsExportReport(job, client, successes, failures),
+      { outputDir: job.outputDir },
+    );
+    job.reportFile = reportFile.reportFile;
+    job.reportFilename = reportFile.reportFilename;
+    return;
+  }
+  overwriteExportReport(job.reportFile, buildRecentChatsExportReport(job, client, successes, failures));
+};
+
 const runRecentChatsExportJob = async (job, client, args = {}) => {
   const successes = [];
   const failures = [];
   try {
     job.phase = 'loading-history';
     touchExportJob(job);
+    persistRecentChatsExportReport(job, client, successes, failures);
 
     const targetCount = Math.min(MAX_RECENT_CHATS_LOAD_TARGET, job.startIndex - 1 + job.maxChats);
     await listRecentChatsForClient(client, {
@@ -1034,6 +1095,12 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
       offset: Math.max(0, targetCount - 1),
       refresh: args.refresh,
     });
+
+    if (job.cancelRequested) {
+      job.status = 'cancelled';
+      job.phase = 'cancelled';
+      return;
+    }
 
     const conversations = recentConversationsForClient(client);
     job.loadedCount = conversations.length;
@@ -1057,8 +1124,15 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
 
     job.phase = 'exporting';
     touchExportJob(job);
+    persistRecentChatsExportReport(job, client, successes, failures);
 
     for (let i = 0; i < selected.length; i += 1) {
+      if (job.cancelRequested) {
+        job.status = 'cancelled';
+        job.phase = 'cancelled';
+        break;
+      }
+
       const conversation = selected[i];
       const index = job.startIndex + i;
       job.current = {
@@ -1102,53 +1176,22 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
       } finally {
         job.completed = i + 1;
         touchExportJob(job);
+        persistRecentChatsExportReport(job, client, successes, failures);
       }
     }
 
-    job.phase = 'writing-report';
-    touchExportJob(job);
-    const report = {
-      job: {
-        jobId: job.jobId,
-        type: job.type,
-        createdAt: job.createdAt,
-        finishedAt: new Date().toISOString(),
-      },
-      client: summarizeClient(client),
-      outputDir: job.outputDir,
-      startIndex: job.startIndex,
-      maxChats: job.maxChats,
-      loadedCount: job.loadedCount,
-      requested: job.requested,
-      successCount: successes.length,
-      failureCount: failures.length,
-      reachedEnd: job.reachedEnd,
-      truncated: job.truncated,
-      successes,
-      failures,
-    };
-    const reportFile = writeExportReport('recent-chats', report, { outputDir: job.outputDir });
-    job.reportFile = reportFile.reportFile;
-    job.reportFilename = reportFile.reportFilename;
-    job.status = failures.length > 0 ? 'completed_with_errors' : 'completed';
-    job.phase = 'done';
+    if (!job.cancelRequested) {
+      job.phase = 'writing-report';
+      touchExportJob(job);
+      job.status = failures.length > 0 ? 'completed_with_errors' : 'completed';
+      job.phase = 'done';
+    }
   } catch (err) {
     job.status = 'failed';
     job.phase = 'failed';
     job.error = err.message;
     try {
-      const reportFile = writeExportReport(
-        'recent-chats-failed',
-        {
-          job: summarizeExportJob(job),
-          error: err.message,
-          successes,
-          failures,
-        },
-        { outputDir: job.outputDir },
-      );
-      job.reportFile = reportFile.reportFile;
-      job.reportFilename = reportFile.reportFilename;
+      persistRecentChatsExportReport(job, client, successes, failures);
     } catch {
       // Se nem o relatório de falha puder ser gravado, o status em memória ainda explica o erro.
     }
@@ -1156,10 +1199,22 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
     job.current = null;
     job.finishedAt = new Date().toISOString();
     touchExportJob(job);
+    try {
+      persistRecentChatsExportReport(job, client, successes, failures);
+    } catch {
+      // Status em memória permanece disponível mesmo se o relatório final falhar.
+    }
   }
 };
 
 const startRecentChatsExportJob = (client, args = {}) => {
+  const running = findRunningRecentChatsExportJob(client.clientId);
+  if (running) {
+    throw new Error(
+      `Já existe um job de exportação recente em andamento para esta aba: ${running.jobId}. Consulte o status ou cancele antes de iniciar outro.`,
+    );
+  }
+
   const outputDir = resolveOutputDir(args.outputDir);
   const job = {
     jobId: randomUUID(),
@@ -1180,6 +1235,8 @@ const startRecentChatsExportJob = (client, args = {}) => {
     failureCount: 0,
     reachedEnd: false,
     truncated: false,
+    cancelRequested: false,
+    cancelledAt: null,
     current: null,
     reportFile: null,
     reportFilename: null,
@@ -1663,6 +1720,35 @@ const tools = [
     },
   },
   {
+    name: 'gemini_export_job_cancel',
+    description:
+      'Solicita cancelamento de um job de exportacao em lote. O job para antes da proxima conversa, preservando arquivos e relatório já gravados.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        jobId: {
+          type: 'string',
+          description: 'ID retornado por gemini_export_recent_chats.',
+        },
+      },
+      required: ['jobId'],
+      additionalProperties: false,
+    },
+    call: async (args = {}) => {
+      const job = exportJobs.get(args.jobId);
+      if (!job) {
+        return toolTextResult({ error: `Job não encontrado: ${args.jobId}` }, { isError: true });
+      }
+      if (!isTerminalExportJobStatus(job.status)) {
+        job.cancelRequested = true;
+        job.cancelledAt = new Date().toISOString();
+        job.status = 'cancel_requested';
+        touchExportJob(job);
+      }
+      return toolTextResult(summarizeExportJob(job));
+    },
+  },
+  {
     name: 'gemini_export_notebook',
     description:
       'Exporta em lote todas as conversas carregadas no caderno Gemini Notebook da aba conectada.',
@@ -1970,6 +2056,23 @@ const bridgeServer = createServer(async (req, res) => {
     if (!job) {
       sendAgentJson(res, 404, { error: `Job não encontrado: ${jobId}` });
       return;
+    }
+    sendAgentJson(res, 200, summarizeExportJob(job));
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/agent/export-job-cancel') {
+    const jobId = url.searchParams.get('jobId');
+    const job = exportJobs.get(jobId);
+    if (!job) {
+      sendAgentJson(res, 404, { error: `Job não encontrado: ${jobId}` });
+      return;
+    }
+    if (!isTerminalExportJobStatus(job.status)) {
+      job.cancelRequested = true;
+      job.cancelledAt = new Date().toISOString();
+      job.status = 'cancel_requested';
+      touchExportJob(job);
     }
     sendAgentJson(res, 200, summarizeExportJob(job));
     return;
