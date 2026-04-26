@@ -188,8 +188,8 @@ configure_gemini_cli() {
 
   log "Configurando Gemini CLI"
   gemini extensions uninstall gemini-md-export >/dev/null 2>&1 || true
-  if gemini extensions install "$GEMINI_EXTENSION_SOURCE" "--ref=$GEMINI_EXTENSION_REF" --consent; then
-    printf 'Gemini CLI configurado via GitHub (%s --ref=%s).\n' "$GEMINI_EXTENSION_SOURCE" "$GEMINI_EXTENSION_REF"
+  if gemini extensions install "$GEMINI_EXTENSION_SOURCE" "--ref=$GEMINI_EXTENSION_REF" --auto-update --consent; then
+    printf 'Gemini CLI configurado via GitHub (%s --ref=%s --auto-update).\n' "$GEMINI_EXTENSION_SOURCE" "$GEMINI_EXTENSION_REF"
   else
     warn "gemini extensions install via GitHub falhou; copiando extensao como fallback manual. Ela pode aparecer como not updatable."
     mkdir -p "$HOME/.gemini/extensions"
@@ -249,7 +249,7 @@ Installed app: $INSTALL_DIR
 Browser extension path: $INSTALL_DIR/extension
 Visible browser extension shortcut: ${EXTENSION_LINK:-"(disabled)"}
 Gemini CLI extension bundle: $INSTALL_DIR/gemini-cli-extension
-Gemini CLI install source: $GEMINI_EXTENSION_SOURCE --ref=$GEMINI_EXTENSION_REF
+Gemini CLI install source: $GEMINI_EXTENSION_SOURCE --ref=$GEMINI_EXTENSION_REF --auto-update
 MCP server: $INSTALL_DIR/gemini-cli-extension/src/mcp-server.js
 Node: $(command -v node)
 Export dir override: ${EXPORT_DIR:-"(none; default is Downloads or folder chosen in modal)"}

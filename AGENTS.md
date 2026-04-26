@@ -338,7 +338,7 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   `dist/gemini-cli-extension` no branch `gemini-cli-extension` com
   `gemini-extension.json` na raiz. Esse branch é o alvo de
   `gemini extensions install augustocaruso/gemini-md-export
-  --ref=gemini-cli-extension`; não instalar a extensão CLI a partir de
+  --ref=gemini-cli-extension --auto-update`; não instalar a extensão CLI a partir de
   `dist/gemini-cli-extension` local com `--auto-update`, porque o Gemini CLI
   atual responde `--ref and --auto-update are not applicable for local
   extensions` e a extensão fica `not updatable`.
@@ -351,7 +351,7 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   `~/GeminiMdExport-extension` para driblar o `~/Library` escondido no Finder,
   ajusta o bundle local para Claude/fallback, tenta registrar a extensão pelo
   comando oficial `gemini extensions install augustocaruso/gemini-md-export
-  --ref=gemini-cli-extension --consent`, copia para
+  --ref=gemini-cli-extension --auto-update --consent`, copia para
   `~/.gemini/extensions/gemini-md-export` como fallback se o Gemini CLI não
   estiver no PATH ou falhar, configura Claude Desktop quando detectado, gera
   launchers `.command`, escreve `INSTALL-SUMMARY.txt` e abre a página de
@@ -380,7 +380,7 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   Para Gemini CLI, tenta usar o fluxo oficial
   `gemini extensions uninstall gemini-md-export` (ignora falha) +
   `gemini extensions install augustocaruso/gemini-md-export
-  --ref=gemini-cli-extension --consent` para registrar a extensão como
+  --ref=gemini-cli-extension --auto-update --consent` para registrar a extensão como
   gerenciável/atualizável pelo Gemini CLI. Se o binário `gemini`/`git` não
   estiver no PATH ou o comando oficial falhar, cai para a
   cópia manual em `%USERPROFILE%\.gemini\extensions\gemini-md-export` e grava

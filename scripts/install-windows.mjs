@@ -114,6 +114,7 @@ const sourceMcpRuntimeDir = resolve(sourceGeminiCliExtensionPath, 'src');
 const geminiCliExtensionSource =
   process.env.GME_GEMINI_EXTENSION_SOURCE || 'augustocaruso/gemini-md-export';
 const geminiCliExtensionRef = process.env.GME_GEMINI_EXTENSION_REF || 'gemini-cli-extension';
+const geminiCliExtensionInstallSource = `${geminiCliExtensionSource} --ref=${geminiCliExtensionRef} --auto-update`;
 
 const timestamp = () =>
   new Date()
@@ -1028,7 +1029,7 @@ const configureGeminiCli = () => {
 
   if (options.dryRun) {
     log(
-      `    [dry-run] instalaria a extensao Gemini CLI de ${geminiCliExtensionSource} --ref=${geminiCliExtensionRef} e atualizaria settings.json`,
+      `    [dry-run] instalaria a extensao Gemini CLI de ${geminiCliExtensionInstallSource} e atualizaria settings.json`,
     );
     return {
       status: 'configured',
@@ -1036,7 +1037,7 @@ const configureGeminiCli = () => {
       method: 'gemini-extensions-install',
       configPath,
       extensionInstallPath: geminiCliExtensionInstallPath(),
-      sourcePath: `${geminiCliExtensionSource} --ref=${geminiCliExtensionRef}`,
+      sourcePath: geminiCliExtensionInstallSource,
     };
   }
 
@@ -1093,6 +1094,7 @@ const configureGeminiCli = () => {
       'install',
       geminiCliExtensionSource,
       `--ref=${geminiCliExtensionRef}`,
+      '--auto-update',
       '--consent',
     ];
     const installResult = runGeminiCommand(
@@ -1103,7 +1105,7 @@ const configureGeminiCli = () => {
     );
     if (installResult.ok) {
       log(
-        `    Gemini CLI configurado via GitHub (${geminiCliExtensionSource} --ref=${geminiCliExtensionRef}); deve aparecer como atualizavel.`,
+        `    Gemini CLI configurado via GitHub (${geminiCliExtensionInstallSource}); deve aparecer como atualizavel.`,
       );
       log('    Reinicie a sessao do gemini para ativar.');
       return {
@@ -1111,7 +1113,7 @@ const configureGeminiCli = () => {
         method: 'gemini-extensions-install',
         configPath,
         extensionInstallPath: geminiCliExtensionInstallPath(),
-        sourcePath: `${geminiCliExtensionSource} --ref=${geminiCliExtensionRef}`,
+        sourcePath: geminiCliExtensionInstallSource,
         geminiCommand,
       };
     }
