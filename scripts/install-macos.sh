@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPO="${GME_RELEASE_REPO:-augustocaruso/gemini-md-export}"
 BRANCH="${GME_RELEASE_BRANCH:-main}"
-GEMINI_EXTENSION_SOURCE="${GME_GEMINI_EXTENSION_SOURCE:-$REPO}"
+GEMINI_EXTENSION_SOURCE="${GME_GEMINI_EXTENSION_SOURCE:-https://github.com/$REPO.git}"
 GEMINI_EXTENSION_REF="${GME_GEMINI_EXTENSION_REF:-gemini-cli-extension}"
 INSTALL_DIR="${GME_INSTALL_DIR:-$HOME/Library/Application Support/GeminiMdExport}"
 EXTENSION_LINK="${GME_EXTENSION_LINK:-$HOME/GeminiMdExport-extension}"

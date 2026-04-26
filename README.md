@@ -32,7 +32,7 @@ Esse comando baixa o projeto, roda `npm install`/`npm run build`, instala em
 `~/Library/Application Support/GeminiMdExport`, cria o atalho visível
 `~/GeminiMdExport-extension` para facilitar o carregamento no navegador, tenta
 registrar a extensão do Gemini CLI pelo GitHub com
-`gemini extensions install augustocaruso/gemini-md-export --ref=gemini-cli-extension --auto-update`,
+`gemini extensions install https://github.com/augustocaruso/gemini-md-export.git --ref=gemini-cli-extension --auto-update`,
 configura Claude Desktop quando detectado e abre a página de extensões do
 navegador.
 
@@ -113,7 +113,7 @@ PowerShell da seção anterior. Esse é o fallback principal quando a versão
 instalada do MCP/updater ficou velha ou inconsistente.
 
 Durante a instalação no Windows, o instalador tenta registrar a extensão pelo
-comando oficial `gemini extensions install augustocaruso/gemini-md-export
+comando oficial `gemini extensions install https://github.com/augustocaruso/gemini-md-export.git
 --ref=gemini-cli-extension --auto-update`, em vez de apenas copiar arquivos para
 `~/.gemini/extensions`. Isso faz a extensão aparecer como atualizável no Gemini
 CLI. Se o binário `gemini` não estiver no PATH, `git` não estiver instalado ou
