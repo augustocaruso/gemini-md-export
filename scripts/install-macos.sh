@@ -7,6 +7,7 @@ GEMINI_EXTENSION_SOURCE="${GME_GEMINI_EXTENSION_SOURCE:-https://github.com/$REPO
 GEMINI_EXTENSION_REF="${GME_GEMINI_EXTENSION_REF:-gemini-cli-extension}"
 INSTALL_DIR="${GME_INSTALL_DIR:-$HOME/Library/Application Support/GeminiMdExport}"
 EXTENSION_LINK="${GME_EXTENSION_LINK:-$HOME/GeminiMdExport-extension}"
+GEMINI_CLI_EXTENSION_DIR="$HOME/.gemini/extensions/gemini-md-export"
 EXPORT_DIR="${GME_EXPORT_DIR:-}"
 BROWSER="${GME_BROWSER:-chrome}"
 CONFIGURE_CLAUDE="${GME_CONFIGURE_CLAUDE:-auto}"
@@ -61,7 +62,25 @@ copy_dir() {
   cp -R "$src" "$dst"
 }
 
-create_visible_extension_link() {
+browser_extension_dir() {
+  if [ -d "$GEMINI_CLI_EXTENSION_DIR/browser-extension" ]; then
+    printf '%s/browser-extension' "$GEMINI_CLI_EXTENSION_DIR"
+  else
+    printf '%s/gemini-cli-extension/browser-extension' "$INSTALL_DIR"
+  fi
+}
+
+link_browser_extension_dirs() {
+  local browser_dir
+  browser_dir="$(browser_extension_dir)"
+  if [ ! -d "$browser_dir" ]; then
+    warn "Pasta da extensao do navegador nao encontrada: $browser_dir"
+    return
+  fi
+
+  rm -rf "$INSTALL_DIR/extension"
+  ln -sfn "$browser_dir" "$INSTALL_DIR/extension"
+
   if [ -z "$EXTENSION_LINK" ]; then
     return
   fi
@@ -71,7 +90,15 @@ create_visible_extension_link() {
     return
   fi
 
-  ln -sfn "$INSTALL_DIR/extension" "$EXTENSION_LINK"
+  ln -sfn "$browser_dir" "$EXTENSION_LINK"
+}
+
+browser_extension_select_path() {
+  if [ -n "$EXTENSION_LINK" ] && [ -e "$EXTENSION_LINK" ]; then
+    printf '%s' "$EXTENSION_LINK"
+  else
+    browser_extension_dir
+  fi
 }
 
 browser_url() {
@@ -246,7 +273,7 @@ write_summary() {
 Gemini Markdown Export - macOS install summary
 
 Installed app: $INSTALL_DIR
-Browser extension path: $INSTALL_DIR/extension
+Browser extension path: $(browser_extension_dir)
 Visible browser extension shortcut: ${EXTENSION_LINK:-"(disabled)"}
 Gemini CLI extension bundle: $INSTALL_DIR/gemini-cli-extension
 Gemini CLI install source: $GEMINI_EXTENSION_SOURCE --ref=$GEMINI_EXTENSION_REF --auto-update
@@ -258,7 +285,7 @@ Manual browser step:
 1. Open $(browser_url).
 2. Enable Developer mode.
 3. Click Load unpacked.
-4. Select this visible shortcut: ${EXTENSION_LINK:-"$INSTALL_DIR/extension"}
+4. Select this folder: $(browser_extension_select_path)
 5. If the extension already existed, click reload on its card.
 
 Gemini CLI:
@@ -294,10 +321,10 @@ main() {
   mkdir -p "$INSTALL_DIR"
   copy_dir "$source_dir/dist/extension" "$INSTALL_DIR/extension"
   copy_dir "$source_dir/dist/gemini-cli-extension" "$INSTALL_DIR/gemini-cli-extension"
-  create_visible_extension_link
   patch_gemini_manifest
   write_launchers
   configure_gemini_cli
+  link_browser_extension_dirs
   configure_claude
   write_summary
   open_browser_extensions
@@ -305,13 +332,13 @@ main() {
   printf '\n============================================================\n'
   printf '  Instalacao macOS concluida.\n'
   printf '============================================================\n\n'
-  printf 'Extensao do navegador:\n  %s/extension\n\n' "$INSTALL_DIR"
+  printf 'Extensao do navegador:\n  %s\n\n' "$(browser_extension_dir)"
   if [ -n "$EXTENSION_LINK" ] && [ -e "$EXTENSION_LINK" ]; then
     printf 'Atalho visivel para selecionar no Chrome:\n  %s\n\n' "$EXTENSION_LINK"
     open -R "$EXTENSION_LINK" >/dev/null 2>&1 || true
   fi
   printf 'Resumo:\n  %s/INSTALL-SUMMARY.txt\n\n' "$INSTALL_DIR"
-  printf 'Proximo passo manual: em chrome://extensions, Load unpacked nessa pasta:\n  %s\n\n' "${EXTENSION_LINK:-"$INSTALL_DIR/extension"}"
+  printf 'Proximo passo manual: em chrome://extensions, Load unpacked nessa pasta:\n  %s\n\n' "$(browser_extension_select_path)"
   printf 'Depois feche e reabra o Gemini CLI.\n'
 }
 

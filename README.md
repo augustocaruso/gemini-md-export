@@ -30,8 +30,9 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/augustocaruso/gemini-md-
 
 Esse comando baixa o projeto, roda `npm install`/`npm run build`, instala em
 `~/Library/Application Support/GeminiMdExport`, cria o atalho visível
-`~/GeminiMdExport-extension` para facilitar o carregamento no navegador, tenta
-registrar a extensão do Gemini CLI pelo GitHub com
+`~/GeminiMdExport-extension` apontando para a cópia da extensão do navegador
+baixada junto com a extensão do Gemini CLI, tenta registrar a extensão do
+Gemini CLI pelo GitHub com
 `gemini extensions install https://github.com/augustocaruso/gemini-md-export.git --ref=gemini-cli-extension --auto-update`,
 configura Claude Desktop quando detectado e abre a página de extensões do
 navegador.
@@ -50,7 +51,7 @@ Se preferir colar o caminho completo no seletor de arquivos, pressione
 `Cmd+Shift+G` e cole:
 
 ```text
-~/Library/Application Support/GeminiMdExport/extension
+~/.gemini/extensions/gemini-md-export/browser-extension
 ```
 
 Depois feche e reabra o Gemini CLI, abra uma conversa em
@@ -85,7 +86,7 @@ recarregar a extensão unpacked:
 2. Ative **Developer mode**.
 3. Clique em **Load unpacked** / **Carregar sem compactação**.
 4. Selecione a pasta mostrada pelo instalador, normalmente:
-   `%LOCALAPPDATA%\GeminiMdExport\extension`.
+   `%USERPROFILE%\.gemini\extensions\gemini-md-export\browser-extension`.
 5. Se a extensão já estava carregada, clique no ícone circular de reload no
    card dela. Depois desse reload, a própria extensão tenta recarregar as abas
    abertas do Gemini automaticamente.
@@ -108,10 +109,10 @@ ou:
 gemini extensions update --all
 ```
 
-Depois feche e reabra o Gemini CLI. Para atualizar também a extensão unpacked
-do navegador e a pasta instalada no Windows, rode novamente o comando
-PowerShell da seção anterior e recarregue o card da extensão em
-`chrome://extensions`/`edge://extensions`.
+Depois feche e reabra o Gemini CLI. Como a extensão do navegador fica dentro da
+extensão do Gemini CLI, esse update também baixa os novos arquivos do
+Chrome/Edge. O passo manual que continua necessário é recarregar o card da
+extensão em `chrome://extensions`/`edge://extensions`.
 
 Durante a instalação no Windows, o instalador tenta registrar a extensão pelo
 comando oficial `gemini extensions install https://github.com/augustocaruso/gemini-md-export.git
@@ -234,9 +235,11 @@ npm run release:windows:prebuilt
 
 `npm run build` gera:
 
-- `dist/extension` para carregar como extensão unpacked;
+- `dist/extension` como cópia standalone da extensão unpacked;
 - `dist/gemini-cli-extension` para instalação em
-  `~/.gemini/extensions/gemini-md-export`;
+  `~/.gemini/extensions/gemini-md-export`, incluindo
+  `browser-extension/` para o Chrome/Edge carregar de uma pasta que o
+  `gemini extensions update` também atualiza;
 - `dist/gemini-export.user.js` como artefato legado de debug, fora do fluxo
   recomendado.
 

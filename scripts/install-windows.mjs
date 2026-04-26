@@ -10,6 +10,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
@@ -455,6 +456,7 @@ const installDir = selectedInstallDir.dir;
 const GEMINI_APP_URL = 'https://gemini.google.com/app';
 const extensionPath = resolve(installDir, 'extension');
 const geminiCliExtensionBundlePath = resolve(installDir, 'gemini-cli-extension');
+const geminiCliBrowserExtensionPath = resolve(geminiCliExtensionInstallPath(), 'browser-extension');
 const mcpServerPath = resolve(geminiCliExtensionBundlePath, 'src', 'mcp-server.js');
 const browserLaunchTarget = resolveBrowserLaunchTarget(options.browser);
 const browserLaunchArgs = (url) => ['--new-tab', url];
@@ -745,8 +747,9 @@ const stageInstall = () => {
   ensureDir(installDir);
   copyDir(sourceExtensionPath, extensionPath);
   copyDir(sourceGeminiCliExtensionPath, geminiCliExtensionBundlePath);
-  log(`    extensao: ${extensionPath}`);
+  log(`    extensao legado: ${extensionPath}`);
   log(`    gemini:   ${geminiCliExtensionBundlePath}`);
+  log(`    extensao atualizavel pelo Gemini CLI: ${geminiCliBrowserExtensionPath}`);
   log(`    mcp:      ${mcpServerPath}`);
 };
 
@@ -766,9 +769,11 @@ const syncLoadedBrowserExtensions = () => {
   for (const loaded of discoveredLoadedExtensions) {
     const target = loaded.extensionPath;
     const sameAsInstalled = normalizeKey(target) === normalizeKey(extensionPath);
+    const sameAsGeminiCliBrowserExtension =
+      normalizeKey(target) === normalizeKey(geminiCliBrowserExtensionPath);
     const sameAsCurrentBuild = normalizeKey(target) === normalizeKey(sourceExtensionPath);
 
-    if (sameAsInstalled || sameAsCurrentBuild) {
+    if (sameAsInstalled || sameAsGeminiCliBrowserExtension || sameAsCurrentBuild) {
       syncedLoadedExtensions.push({
         ...loaded,
         status: 'already-current-path',
@@ -820,6 +825,25 @@ const syncLoadedBrowserExtensions = () => {
   }
 
   return syncedLoadedExtensions;
+};
+
+const linkLegacyBrowserExtensionPath = () => {
+  if (options.dryRun) {
+    log(`[dry-run] apontaria ${extensionPath} para ${geminiCliBrowserExtensionPath}`);
+    return;
+  }
+  if (!existsSync(geminiCliBrowserExtensionPath)) {
+    log(`    [AVISO] pasta atualizavel da extensao do browser nao encontrada: ${geminiCliBrowserExtensionPath}`);
+    return;
+  }
+  try {
+    rmSync(extensionPath, { recursive: true, force: true });
+    mkdirSync(dirname(extensionPath), { recursive: true });
+    symlinkSync(geminiCliBrowserExtensionPath, extensionPath, 'junction');
+    log(`    extensao legado agora aponta para: ${geminiCliBrowserExtensionPath}`);
+  } catch (err) {
+    log(`    [AVISO] nao consegui criar junction ${extensionPath}: ${err.message}`);
+  }
 };
 
 const writeLaunchers = () => {
@@ -880,7 +904,7 @@ const writeLaunchers = () => {
     'echo   1. Ache o card "Gemini Chat -^> Markdown Export".',
     'echo   2. Clique no icone circular de reload do card.',
     'echo   3. Confira que a pasta carregada e:',
-    `echo        ${extensionPath}`,
+    `echo        ${geminiCliBrowserExtensionPath}`,
     ...(preferredLoadedExtension
       ? [
           'echo.',
@@ -1171,6 +1195,7 @@ const writeLastInstallPointer = () => {
     [
       `installDir=${installDir}`,
       `extensionPath=${extensionPath}`,
+      `browserExtensionPath=${geminiCliBrowserExtensionPath}`,
       `summaryPath=${resolve(installDir, 'INSTALL-SUMMARY.txt')}`,
       `manifestPath=${resolve(installDir, 'INSTALL-MANIFEST.json')}`,
       '',
@@ -1190,6 +1215,7 @@ const writeInstallManifest = (claudeResult, geminiCliResult) => {
     syncedLoadedExtensions,
     backupPath: installBackupPath,
     extensionPath,
+    browserExtensionPath: geminiCliBrowserExtensionPath,
     geminiCliExtensionBundlePath,
     mcpServerPath,
     runtimeNodeCommand: resolvedNodeCommand,
@@ -1212,7 +1238,8 @@ const writeSummary = (claudeResult, geminiCliResult) => {
     `Installed app: ${installDir}`,
     `Install dir source: ${selectedInstallDir.source}`,
     `Previous install backup: ${installBackupPath || '(none)'}`,
-    `Extension path: ${extensionPath}`,
+    `Extension path: ${geminiCliBrowserExtensionPath}`,
+    `Legacy extension link: ${extensionPath}`,
     `Gemini CLI extension bundle: ${geminiCliExtensionBundlePath}`,
     `MCP server: ${mcpServerPath}`,
     `Browser extensions page: ${browserLaunchTarget.url}`,
@@ -1249,7 +1276,7 @@ const writeSummary = (claudeResult, geminiCliResult) => {
     `1. Open ${browserLaunchTarget.url}.`,
     '2. Enable Developer mode.',
     '3. Click Load unpacked.',
-    `4. Select: ${extensionPath}`,
+    `4. Select: ${geminiCliBrowserExtensionPath}`,
     '',
     'MCP clients configured:',
     claudeResult.status === 'configured'
@@ -1337,6 +1364,7 @@ const claudeResult = configureClaude();
 
 step('Configurando Gemini CLI (se detectado/solicitado)');
 const geminiCliResult = configureGeminiCli();
+linkLegacyBrowserExtensionPath();
 
 step('Escrevendo resumo');
 writeInstallManifest(claudeResult, geminiCliResult);
@@ -1358,7 +1386,8 @@ log('============================================================');
 log('');
 log('Arquivos instalados:');
 log(`  app:       ${installDir}`);
-log(`  extensao:  ${extensionPath}`);
+log(`  extensao:  ${geminiCliBrowserExtensionPath}`);
+log(`  link legado: ${extensionPath}`);
 log(`  gemini:    ${geminiCliExtensionBundlePath}`);
 log(`  mcp:       ${mcpServerPath}`);
 if (normalizedExportDir) log(`  export:    ${normalizedExportDir}`);
@@ -1395,7 +1424,7 @@ log('     aberto sozinho se a flag --open-browser rodou.');
 log('  2. Ative "Modo do desenvolvedor" / "Developer mode".');
 log('  3. Clique em "Carregar sem compactacao" / "Load unpacked".');
 log('  4. Selecione a pasta:');
-log(`        ${extensionPath}`);
+log(`        ${geminiCliBrowserExtensionPath}`);
 log('  5. Em upgrades, se o card ja existir, rode refresh-browser-extension.cmd');
 log('     e clique no icone de reload da extensao.');
 log('  6. Se o Gemini CLI estiver aberto, rode restart-gemini-cli.cmd.');

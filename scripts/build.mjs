@@ -202,6 +202,9 @@ if (existsSync(resolve(ROOT, 'gemini-cli-extension', 'commands'))) {
     { recursive: true },
   );
 }
+cpSync(extensionDir, resolve(geminiCliExtensionDir, 'browser-extension'), {
+  recursive: true,
+});
 cpSync(resolve(ROOT, 'src', 'mcp-server.js'), resolve(geminiCliExtensionDir, 'src', 'mcp-server.js'));
 cpSync(
   resolve(ROOT, 'src', 'recent-chats-policy.mjs'),
@@ -219,4 +222,5 @@ cpSync(
 console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'gemini-extension.json')}`);
 console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'GEMINI.md')}`);
 console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'package.json')}`);
+console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'browser-extension')}`);
 console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'src', 'mcp-server.js')}`);

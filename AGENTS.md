@@ -335,7 +335,10 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   `release/update-windows.ps1` para GitHub Releases.
 - `scripts/publish-gemini-cli-extension-branch.mjs` — publica
   `dist/gemini-cli-extension` no branch `gemini-cli-extension` com
-  `gemini-extension.json` na raiz. Esse branch é o alvo de
+  `gemini-extension.json` na raiz. O bundle também contém
+  `browser-extension/` com a MV3 unpacked; assim `gemini extensions update
+  gemini-md-export` baixa MCP e extensão de navegador juntos, restando ao
+  usuário apenas recarregar manualmente o card do Chrome/Edge. Esse branch é o alvo de
   `gemini extensions install https://github.com/augustocaruso/gemini-md-export.git
   --ref=gemini-cli-extension --auto-update`; não instalar a extensão CLI a partir de
   `dist/gemini-cli-extension` local com `--auto-update`, porque o Gemini CLI
@@ -347,7 +350,10 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   `npm run build`, instala em
   `~/Library/Application Support/GeminiMdExport`, copia `dist/extension` e
   `dist/gemini-cli-extension`, cria o atalho visível
-  `~/GeminiMdExport-extension` para driblar o `~/Library` escondido no Finder,
+  `~/GeminiMdExport-extension` apontando para
+  `~/.gemini/extensions/gemini-md-export/browser-extension` quando o Gemini CLI
+  está instalado, driblando o `~/Library` escondido no Finder e permitindo que
+  o update nativo do Gemini CLI baixe também os arquivos da extensão Chrome,
   ajusta o bundle local para Claude/fallback, tenta registrar a extensão pelo
   comando oficial `gemini extensions install https://github.com/augustocaruso/gemini-md-export.git
   --ref=gemini-cli-extension --auto-update --consent`, copia para
@@ -372,7 +378,7 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   para Windows. Automatiza `npm install`, `npm run build`, localização de
   instalação anterior por configs legadas do Gemini CLI/Claude Desktop ou pela pasta
   default, criação/atualização de uma instalação estável, cópia de
-  `dist\extension` para a subpasta `extension`, launchers/templates MCP na
+  `dist\extension` para compatibilidade legada, launchers/templates MCP na
   pasta instalada, e configuração do Claude Desktop/Gemini CLI quando
   detectados/solicitados. Antes de substituir uma instalação existente, salva
   backup curto em `backups\<timestamp>` e mantém os 5 backups mais recentes.
@@ -388,6 +394,12 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   `mcpServers.gemini-md-export`, remove a entrada para ela não sobrescrever a
   config/contexto da extensão; se `mcp.allowed` existir, inclui
   `gemini-md-export`, e se `mcp.excluded` contiver o servidor, remove. Não
+  pedir mais ao usuário para carregar `%LOCALAPPDATA%\GeminiMdExport\extension`
+  como caminho principal: o caminho recomendado para Chrome/Edge é
+  `%USERPROFILE%\.gemini\extensions\gemini-md-export\browser-extension`.
+  O instalador tenta transformar a subpasta legada `extension` em junction para
+  esse caminho, para instalações antigas passarem a receber os arquivos baixados
+  por `gemini extensions update` depois de recarregar o card do navegador. Não
   duplica mais outra cópia do runtime em `src\`; o MCP local instalado aponta
   para `gemini-cli-extension\src\mcp-server.js`. Quando o bundle já traz
   `dist/gemini-cli-extension/src/mcp-server.js`, o `.cmd` marca

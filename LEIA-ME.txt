@@ -41,8 +41,13 @@ release pela API antes de baixar o pacote.
 Se voce quer atualizar apenas a extensao do Gemini CLI, use o comando nativo:
    gemini extensions update gemini-md-export
 
-Para atualizar tambem a extensao unpacked do navegador e a pasta instalada no
-Windows, use o comando PowerShell acima.
+Depois da instalacao atual, esse comando tambem baixa os arquivos novos da
+extensao unpacked do navegador, porque eles ficam dentro da extensao do Gemini
+CLI. O passo manual que continua necessario e clicar no reload do card da
+extensao em chrome://extensions ou edge://extensions.
+
+Para refazer a instalacao completa da pasta do Windows, use o comando
+PowerShell acima.
 
 O instalador tenta registrar a extensao pelo comando oficial
 "gemini extensions install". Isso deve fazer o exporter aparecer como

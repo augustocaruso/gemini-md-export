@@ -12,10 +12,12 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   const manifestPath = resolve(extensionDir, 'gemini-extension.json');
   const contextPath = resolve(extensionDir, 'GEMINI.md');
   const serverPath = resolve(extensionDir, 'src', 'mcp-server.js');
+  const browserManifestPath = resolve(extensionDir, 'browser-extension', 'manifest.json');
 
   assert.equal(existsSync(manifestPath), true);
   assert.equal(existsSync(contextPath), true);
   assert.equal(existsSync(serverPath), true);
+  assert.equal(existsSync(browserManifestPath), true);
 
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8'));
   assert.equal(manifest.contextFileName, 'GEMINI.md');
