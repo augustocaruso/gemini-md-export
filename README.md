@@ -7,11 +7,46 @@ O caminho principal hoje é:
 
 - extensão MV3 no Chrome/Edge/Chromium;
 - servidor MCP local que conversa com a extensão;
-- updater Windows via GitHub Releases;
+- instaladores macOS/Windows via GitHub;
 - integração opcional com Gemini CLI e Claude Desktop.
 
 O projeto não usa API oficial do Gemini, cookies ou automação de login. Ele lê
 apenas o DOM já renderizado em uma aba do Gemini aberta pelo usuário.
+
+## Instalação Rápida no macOS
+
+Pré-requisitos:
+
+- macOS;
+- Chrome, Edge ou Brave;
+- Node.js 20+ (`brew install node`);
+- Gemini CLI opcional, mas recomendado.
+
+No Terminal, rode:
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/augustocaruso/gemini-md-export/main/scripts/install-macos.sh)"
+```
+
+Esse comando baixa o projeto, roda `npm install`/`npm run build`, instala em
+`~/Library/Application Support/GeminiMdExport`, tenta registrar a extensão pelo
+`gemini extensions install --auto-update`, configura Claude Desktop quando
+detectado e abre a página de extensões do navegador.
+
+O passo que continua manual por restrição do Chrome/Edge/Brave é carregar ou
+recarregar a extensão unpacked:
+
+1. Abra `chrome://extensions`, `edge://extensions` ou `brave://extensions`.
+2. Ative **Developer mode**.
+3. Clique em **Load unpacked** / **Carregar sem compactação**.
+4. Selecione:
+   `~/Library/Application Support/GeminiMdExport/extension`.
+5. Se a extensão já estava carregada, clique no ícone circular de reload no
+   card dela.
+
+Depois feche e reabra o Gemini CLI, abra uma conversa em
+`https://gemini.google.com/app/<id>` e procure o botão circular de download no
+canto superior direito.
 
 ## Instalação Rápida no Windows
 
@@ -182,6 +217,7 @@ npm install
 npm test
 npm run build
 npm run mcp
+npm run install:macos
 npm run release:windows:prebuilt
 ```
 

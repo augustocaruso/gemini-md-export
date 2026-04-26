@@ -331,6 +331,19 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   runtime do Node. Também grava assets estáveis
   `release/gemini-md-export-windows-prebuilt.zip` e
   `release/update-windows.ps1` para GitHub Releases.
+- `scripts/install-macos.sh` — instalador assistido para macOS. É pensado para
+  rodar por comando único via `bash -c "$(curl -fsSL .../install-macos.sh)"`.
+  Baixa o tarball do branch `main` do GitHub, roda `npm install` e
+  `npm run build`, instala em
+  `~/Library/Application Support/GeminiMdExport`, copia `dist/extension` e
+  `dist/gemini-cli-extension`, ajusta `gemini-extension.json` para usar o
+  `node` real do PATH, tenta registrar a extensão pelo comando oficial
+  `gemini extensions install <bundle> --auto-update --consent`, copia para
+  `~/.gemini/extensions/gemini-md-export` como fallback se o Gemini CLI não
+  estiver no PATH ou falhar, configura Claude Desktop quando detectado, gera
+  launchers `.command`, escreve `INSTALL-SUMMARY.txt` e abre a página de
+  extensões do navegador. O carregamento/reload da extensão unpacked continua
+  manual por restrição do Chrome/Edge/Brave.
 - `scripts/update-windows.ps1` — updater Windows pensado para ser executado por
   comando único externo via `WebClient.DownloadString(raw.githubusercontent...)`
   ou pela tool MCP `gemini_exporter_update`. Quando `-ZipUrl`/`GME_RELEASE_ZIP_URL`
@@ -562,6 +575,11 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   ainda não carregou o profile do brew, ou o usuário precisa adicionar
   `eval "$(/opt/homebrew/bin/brew shellenv)"` ao `~/.zshrc`.
 - Versão atual verificada: Node 25, npm 11 (qualquer Node ≥20 serve).
+- Para instalar em macOS de forma assistida, usar:
+  `bash -c "$(curl -fsSL https://raw.githubusercontent.com/augustocaruso/gemini-md-export/main/scripts/install-macos.sh)"`.
+  Variáveis úteis: `GME_INSTALL_DIR`, `GME_EXPORT_DIR`, `GME_BROWSER`
+  (`chrome`/`edge`/`brave`), `GME_CONFIGURE_GEMINI`, `GME_CONFIGURE_CLAUDE`,
+  `GME_KEEP_TEMP`.
 
 ## Ambiente de instalação (Windows)
 
@@ -630,12 +648,14 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
 5. Para extensão: carregar `dist/extension/` como unpacked extension.
 6. Para MCP local: `npm run mcp` ou configurar `src/mcp-server.js` no cliente
    MCP via `stdio`.
-7. Para instalação assistida em Windows: `install-windows.cmd` ou
+7. Para instalação assistida em macOS: `npm run install:macos` ou o comando
+   `curl | bash` documentado no README.
+8. Para instalação assistida em Windows: `install-windows.cmd` ou
    `npm run install:windows`.
-8. Se mudou content script ou comandos do bridge, recarregar a extensão
+9. Se mudou content script ou comandos do bridge, recarregar a extensão
    desempacotada no browser.
-9. Recarregar aba do Gemini, testar manualmente.
-10. Se falhar no navegador, abrir o Console e usar
+10. Recarregar aba do Gemini, testar manualmente.
+11. Se falhar no navegador, abrir o Console e usar
    `window.__geminiMdExportDebug.snapshot()` / `markdown()` no contexto do
    content script, ou consultar as tools/endpoints MCP.
 
