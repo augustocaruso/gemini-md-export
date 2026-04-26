@@ -336,8 +336,9 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   Baixa o tarball do branch `main` do GitHub, roda `npm install` e
   `npm run build`, instala em
   `~/Library/Application Support/GeminiMdExport`, copia `dist/extension` e
-  `dist/gemini-cli-extension`, ajusta `gemini-extension.json` para usar o
-  `node` real do PATH, tenta registrar a extensão pelo comando oficial
+  `dist/gemini-cli-extension`, cria o atalho visível
+  `~/GeminiMdExport-extension` para driblar o `~/Library` escondido no Finder,
+  ajusta `gemini-extension.json` para usar o `node` real do PATH, tenta registrar a extensão pelo comando oficial
   `gemini extensions install <bundle> --auto-update --consent`, copia para
   `~/.gemini/extensions/gemini-md-export` como fallback se o Gemini CLI não
   estiver no PATH ou falhar, configura Claude Desktop quando detectado, gera
@@ -579,7 +580,7 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   `bash -c "$(curl -fsSL https://raw.githubusercontent.com/augustocaruso/gemini-md-export/main/scripts/install-macos.sh)"`.
   Variáveis úteis: `GME_INSTALL_DIR`, `GME_EXPORT_DIR`, `GME_BROWSER`
   (`chrome`/`edge`/`brave`), `GME_CONFIGURE_GEMINI`, `GME_CONFIGURE_CLAUDE`,
-  `GME_KEEP_TEMP`.
+  `GME_EXTENSION_LINK` (atalho visível; vazio desativa), `GME_KEEP_TEMP`.
 
 ## Ambiente de instalação (Windows)
 

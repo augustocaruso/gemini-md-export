@@ -29,9 +29,10 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/augustocaruso/gemini-md-
 ```
 
 Esse comando baixa o projeto, roda `npm install`/`npm run build`, instala em
-`~/Library/Application Support/GeminiMdExport`, tenta registrar a extensão pelo
-`gemini extensions install --auto-update`, configura Claude Desktop quando
-detectado e abre a página de extensões do navegador.
+`~/Library/Application Support/GeminiMdExport`, cria o atalho visível
+`~/GeminiMdExport-extension` para facilitar o carregamento no navegador, tenta
+registrar a extensão pelo `gemini extensions install --auto-update`, configura
+Claude Desktop quando detectado e abre a página de extensões do navegador.
 
 O passo que continua manual por restrição do Chrome/Edge/Brave é carregar ou
 recarregar a extensão unpacked:
@@ -39,10 +40,16 @@ recarregar a extensão unpacked:
 1. Abra `chrome://extensions`, `edge://extensions` ou `brave://extensions`.
 2. Ative **Developer mode**.
 3. Clique em **Load unpacked** / **Carregar sem compactação**.
-4. Selecione:
-   `~/Library/Application Support/GeminiMdExport/extension`.
+4. Selecione o atalho visível `~/GeminiMdExport-extension`.
 5. Se a extensão já estava carregada, clique no ícone circular de reload no
    card dela.
+
+Se preferir colar o caminho completo no seletor de arquivos, pressione
+`Cmd+Shift+G` e cole:
+
+```text
+~/Library/Application Support/GeminiMdExport/extension
+```
 
 Depois feche e reabra o Gemini CLI, abra uma conversa em
 `https://gemini.google.com/app/<id>` e procure o botão circular de download no
