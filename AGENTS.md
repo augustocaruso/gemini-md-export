@@ -227,7 +227,10 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
 - `gemini-cli-extension/` — fonte da extensão do Gemini CLI. Hoje contém
   pelo menos um `GEMINI.md` próprio da extensão; o build gera
   `dist/gemini-cli-extension/gemini-extension.json` + bundle mínimo do MCP
-  para instalação em `~/.gemini/extensions/gemini-md-export`.
+  para instalação em `~/.gemini/extensions/gemini-md-export`. O workflow de
+  release também publica esse bundle no branch `gemini-cli-extension`, onde o
+  `gemini-extension.json` fica na raiz; os instaladores usam esse branch como
+  fonte oficial do Gemini CLI para a extensão aparecer como atualizável.
 - `src/mcp-server.js` — servidor MCP local via `stdio`. No mesmo processo,
   ele também sobe um bridge HTTP local em `127.0.0.1:47283` para a extensão.
   A extensão/content script faz heartbeat do estado da aba do Gemini e aceita
@@ -331,6 +334,14 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   runtime do Node. Também grava assets estáveis
   `release/gemini-md-export-windows-prebuilt.zip` e
   `release/update-windows.ps1` para GitHub Releases.
+- `scripts/publish-gemini-cli-extension-branch.mjs` — publica
+  `dist/gemini-cli-extension` no branch `gemini-cli-extension` com
+  `gemini-extension.json` na raiz. Esse branch é o alvo de
+  `gemini extensions install augustocaruso/gemini-md-export
+  --ref=gemini-cli-extension`; não instalar a extensão CLI a partir de
+  `dist/gemini-cli-extension` local com `--auto-update`, porque o Gemini CLI
+  atual responde `--ref and --auto-update are not applicable for local
+  extensions` e a extensão fica `not updatable`.
 - `scripts/install-macos.sh` — instalador assistido para macOS. É pensado para
   rodar por comando único via `bash -c "$(curl -fsSL .../install-macos.sh)"`.
   Baixa o tarball do branch `main` do GitHub, roda `npm install` e
@@ -338,8 +349,9 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   `~/Library/Application Support/GeminiMdExport`, copia `dist/extension` e
   `dist/gemini-cli-extension`, cria o atalho visível
   `~/GeminiMdExport-extension` para driblar o `~/Library` escondido no Finder,
-  ajusta `gemini-extension.json` para usar o `node` real do PATH, tenta registrar a extensão pelo comando oficial
-  `gemini extensions install <bundle> --auto-update --consent`, copia para
+  ajusta o bundle local para Claude/fallback, tenta registrar a extensão pelo
+  comando oficial `gemini extensions install augustocaruso/gemini-md-export
+  --ref=gemini-cli-extension --consent`, copia para
   `~/.gemini/extensions/gemini-md-export` como fallback se o Gemini CLI não
   estiver no PATH ou falhar, configura Claude Desktop quando detectado, gera
   launchers `.command`, escreve `INSTALL-SUMMARY.txt` e abre a página de
@@ -365,13 +377,12 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   pasta instalada, e configuração do Claude Desktop/Gemini CLI quando
   detectados/solicitados. Antes de substituir uma instalação existente, salva
   backup curto em `backups\<timestamp>` e mantém os 5 backups mais recentes.
-  Para Gemini CLI, instala `dist\gemini-cli-extension` em
-  `%USERPROFILE%\.gemini\extensions\gemini-md-export`, preservando o
-  `GEMINI.md` próprio da extensão. O instalador agora tenta usar o fluxo
-  oficial `gemini extensions uninstall gemini-md-export` (ignora falha) +
-  `gemini extensions install <installDir>\gemini-cli-extension --consent` para
-  registrar a extensão como gerenciável/atualizável pelo Gemini CLI. Se o
-  binário `gemini` não estiver no PATH ou o comando oficial falhar, cai para a
+  Para Gemini CLI, tenta usar o fluxo oficial
+  `gemini extensions uninstall gemini-md-export` (ignora falha) +
+  `gemini extensions install augustocaruso/gemini-md-export
+  --ref=gemini-cli-extension --consent` para registrar a extensão como
+  gerenciável/atualizável pelo Gemini CLI. Se o binário `gemini`/`git` não
+  estiver no PATH ou o comando oficial falhar, cai para a
   cópia manual em `%USERPROFILE%\.gemini\extensions\gemini-md-export` e grava
   `method: manual-copy-fallback` no manifesto, deixando claro que a extensão
   pode aparecer como "not updatable". Se `settings.json` ainda contiver
@@ -580,7 +591,8 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   `bash -c "$(curl -fsSL https://raw.githubusercontent.com/augustocaruso/gemini-md-export/main/scripts/install-macos.sh)"`.
   Variáveis úteis: `GME_INSTALL_DIR`, `GME_EXPORT_DIR`, `GME_BROWSER`
   (`chrome`/`edge`/`brave`), `GME_CONFIGURE_GEMINI`, `GME_CONFIGURE_CLAUDE`,
-  `GME_EXTENSION_LINK` (atalho visível; vazio desativa), `GME_KEEP_TEMP`.
+  `GME_EXTENSION_LINK` (atalho visível; vazio desativa),
+  `GME_GEMINI_EXTENSION_SOURCE`, `GME_GEMINI_EXTENSION_REF`, `GME_KEEP_TEMP`.
 
 ## Ambiente de instalação (Windows)
 

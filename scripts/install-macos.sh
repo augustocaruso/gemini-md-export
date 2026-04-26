@@ -3,6 +3,8 @@ set -euo pipefail
 
 REPO="${GME_RELEASE_REPO:-augustocaruso/gemini-md-export}"
 BRANCH="${GME_RELEASE_BRANCH:-main}"
+GEMINI_EXTENSION_SOURCE="${GME_GEMINI_EXTENSION_SOURCE:-$REPO}"
+GEMINI_EXTENSION_REF="${GME_GEMINI_EXTENSION_REF:-gemini-cli-extension}"
 INSTALL_DIR="${GME_INSTALL_DIR:-$HOME/Library/Application Support/GeminiMdExport}"
 EXTENSION_LINK="${GME_EXTENSION_LINK:-$HOME/GeminiMdExport-extension}"
 EXPORT_DIR="${GME_EXPORT_DIR:-}"
@@ -44,7 +46,9 @@ download_source() {
 
   log "Baixando codigo fonte"
   printf 'Repo: %s\nBranch: %s\n' "$REPO" "$BRANCH" >&2
-  curl -fL "$url" -o "$tgz"
+  if ! curl --retry 4 --retry-delay 2 --retry-all-errors -fL "$url" -o "$tgz"; then
+    return 1
+  fi
   tar -xzf "$tgz" -C "$temp_dir"
   find "$temp_dir" -mindepth 1 -maxdepth 1 -type d -name 'gemini-md-export-*' | head -n 1
 }
@@ -176,7 +180,7 @@ configure_gemini_cli() {
     if [ "$CONFIGURE_GEMINI" = "1" ] || [ "$CONFIGURE_GEMINI" = "true" ]; then
       fail "gemini nao encontrado no PATH."
     fi
-    warn "Gemini CLI nao encontrado; copiando extensao como fallback manual."
+    warn "Gemini CLI nao encontrado; copiando extensao como fallback manual. Ela nao aparecera como atualizavel ate o Gemini CLI ser instalado."
     mkdir -p "$HOME/.gemini/extensions"
     copy_dir "$INSTALL_DIR/gemini-cli-extension" "$HOME/.gemini/extensions/gemini-md-export"
     return
@@ -184,10 +188,10 @@ configure_gemini_cli() {
 
   log "Configurando Gemini CLI"
   gemini extensions uninstall gemini-md-export >/dev/null 2>&1 || true
-  if gemini extensions install "$INSTALL_DIR/gemini-cli-extension" --auto-update --consent; then
-    printf 'Gemini CLI configurado via comando oficial.\n'
+  if gemini extensions install "$GEMINI_EXTENSION_SOURCE" "--ref=$GEMINI_EXTENSION_REF" --consent; then
+    printf 'Gemini CLI configurado via GitHub (%s --ref=%s).\n' "$GEMINI_EXTENSION_SOURCE" "$GEMINI_EXTENSION_REF"
   else
-    warn "gemini extensions install falhou; copiando extensao como fallback manual."
+    warn "gemini extensions install via GitHub falhou; copiando extensao como fallback manual. Ela pode aparecer como not updatable."
     mkdir -p "$HOME/.gemini/extensions"
     copy_dir "$INSTALL_DIR/gemini-cli-extension" "$HOME/.gemini/extensions/gemini-md-export"
   fi
@@ -245,6 +249,7 @@ Installed app: $INSTALL_DIR
 Browser extension path: $INSTALL_DIR/extension
 Visible browser extension shortcut: ${EXTENSION_LINK:-"(disabled)"}
 Gemini CLI extension bundle: $INSTALL_DIR/gemini-cli-extension
+Gemini CLI install source: $GEMINI_EXTENSION_SOURCE --ref=$GEMINI_EXTENSION_REF
 MCP server: $INSTALL_DIR/gemini-cli-extension/src/mcp-server.js
 Node: $(command -v node)
 Export dir override: ${EXPORT_DIR:-"(none; default is Downloads or folder chosen in modal)"}
@@ -259,6 +264,7 @@ Manual browser step:
 Gemini CLI:
 - Close and reopen Gemini CLI.
 - Run /mcp to check gemini-md-export.
+- If it says "not updatable", rerun this installer after confirming git is installed.
 
 Launchers:
 - $INSTALL_DIR/start-mcp.command

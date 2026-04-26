@@ -31,8 +31,10 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/augustocaruso/gemini-md-
 Esse comando baixa o projeto, roda `npm install`/`npm run build`, instala em
 `~/Library/Application Support/GeminiMdExport`, cria o atalho visível
 `~/GeminiMdExport-extension` para facilitar o carregamento no navegador, tenta
-registrar a extensão pelo `gemini extensions install --auto-update`, configura
-Claude Desktop quando detectado e abre a página de extensões do navegador.
+registrar a extensão do Gemini CLI pelo GitHub com
+`gemini extensions install augustocaruso/gemini-md-export --ref=gemini-cli-extension`,
+configura Claude Desktop quando detectado e abre a página de extensões do
+navegador.
 
 O passo que continua manual por restrição do Chrome/Edge/Brave é carregar ou
 recarregar a extensão unpacked:
@@ -111,10 +113,12 @@ PowerShell da seção anterior. Esse é o fallback principal quando a versão
 instalada do MCP/updater ficou velha ou inconsistente.
 
 Durante a instalação no Windows, o instalador tenta registrar a extensão pelo
-comando oficial `gemini extensions install`, em vez de apenas copiar arquivos
-para `~/.gemini/extensions`. Isso faz a extensão aparecer como atualizável no
-Gemini CLI. Se o binário `gemini` não estiver no PATH ou esse comando falhar, o
-instalador ainda faz uma cópia manual como fallback e avisa no resumo.
+comando oficial `gemini extensions install augustocaruso/gemini-md-export
+--ref=gemini-cli-extension`, em vez de apenas copiar arquivos para
+`~/.gemini/extensions`. Isso faz a extensão aparecer como atualizável no Gemini
+CLI. Se o binário `gemini` não estiver no PATH, `git` não estiver instalado ou
+esse comando falhar, o instalador ainda faz uma cópia manual como fallback e
+avisa no resumo.
 
 ## Uso
 

@@ -25,6 +25,11 @@ jobs:
 
       - run: npm run release:windows:prebuilt
 
+      - name: Publish Gemini CLI extension branch
+        run: node scripts/publish-gemini-cli-extension-branch.mjs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
       - name: Publish GitHub Release assets
         uses: softprops/action-gh-release@v2
         with:

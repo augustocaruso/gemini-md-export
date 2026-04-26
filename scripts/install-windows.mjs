@@ -111,6 +111,9 @@ const prebuiltPayload = process.env.GEMINI_INSTALL_PREBUILT_PAYLOAD === '1';
 const sourceExtensionPath = resolve(ROOT, 'dist', 'extension');
 const sourceGeminiCliExtensionPath = resolve(ROOT, 'dist', 'gemini-cli-extension');
 const sourceMcpRuntimeDir = resolve(sourceGeminiCliExtensionPath, 'src');
+const geminiCliExtensionSource =
+  process.env.GME_GEMINI_EXTENSION_SOURCE || 'augustocaruso/gemini-md-export';
+const geminiCliExtensionRef = process.env.GME_GEMINI_EXTENSION_REF || 'gemini-cli-extension';
 
 const timestamp = () =>
   new Date()
@@ -1024,12 +1027,16 @@ const configureGeminiCli = () => {
   log(`    gemini binario: ${geminiCommand || '(nao encontrado no PATH)'}`);
 
   if (options.dryRun) {
-    log('    [dry-run] instalaria a extensao Gemini CLI e atualizaria settings.json');
+    log(
+      `    [dry-run] instalaria a extensao Gemini CLI de ${geminiCliExtensionSource} --ref=${geminiCliExtensionRef} e atualizaria settings.json`,
+    );
     return {
       status: 'configured',
       dryRun: true,
+      method: 'gemini-extensions-install',
       configPath,
       extensionInstallPath: geminiCliExtensionInstallPath(),
+      sourcePath: `${geminiCliExtensionSource} --ref=${geminiCliExtensionRef}`,
     };
   }
 
@@ -1081,7 +1088,13 @@ const configureGeminiCli = () => {
       log('    Gemini CLI: uninstall previo ignorado (extensao podia nao existir ou era manual)');
     }
 
-    const installArgs = ['extensions', 'install', geminiCliExtensionBundlePath, '--consent'];
+    const installArgs = [
+      'extensions',
+      'install',
+      geminiCliExtensionSource,
+      `--ref=${geminiCliExtensionRef}`,
+      '--consent',
+    ];
     const installResult = runGeminiCommand(
       geminiCommand,
       installArgs,
@@ -1089,14 +1102,16 @@ const configureGeminiCli = () => {
       { ignoreFailure: true },
     );
     if (installResult.ok) {
-      log('    Gemini CLI configurado via comando oficial; deve aparecer como atualizavel.');
+      log(
+        `    Gemini CLI configurado via GitHub (${geminiCliExtensionSource} --ref=${geminiCliExtensionRef}); deve aparecer como atualizavel.`,
+      );
       log('    Reinicie a sessao do gemini para ativar.');
       return {
         status: 'configured',
         method: 'gemini-extensions-install',
         configPath,
         extensionInstallPath: geminiCliExtensionInstallPath(),
-        sourcePath: geminiCliExtensionBundlePath,
+        sourcePath: `${geminiCliExtensionSource} --ref=${geminiCliExtensionRef}`,
         geminiCommand,
       };
     }
@@ -1238,7 +1253,7 @@ const writeSummary = (claudeResult, geminiCliResult) => {
       ? `- Claude Desktop: ${claudeResult.configPath}`
       : `- Claude Desktop: not changed (${claudeResult.reason})`,
     geminiCliResult.status === 'configured'
-      ? `- Gemini CLI: ${geminiCliResult.configPath} (extension: ${geminiCliResult.extensionInstallPath})`
+      ? `- Gemini CLI: ${geminiCliResult.configPath} (method: ${geminiCliResult.method || 'unknown'}, source: ${geminiCliResult.sourcePath || geminiCliResult.extensionInstallPath})`
       : `- Gemini CLI: not changed (${geminiCliResult.reason})`,
     '- If using another MCP client, use mcp-config.claude.json as a template.',
     '',
@@ -1368,7 +1383,7 @@ log('Claude Desktop: ' +
     : `nao alterado (${claudeResult.reason}).`));
 log('Gemini CLI:     ' +
   (geminiCliResult.status === 'configured'
-    ? `configurado via extensao local em ${geminiCliResult.extensionInstallPath} (reinicie a sessao do gemini para ativar).`
+    ? `configurado via ${geminiCliResult.method || 'metodo desconhecido'} (${geminiCliResult.sourcePath || geminiCliResult.extensionInstallPath}; reinicie a sessao do gemini para ativar).`
     : `nao alterado (${geminiCliResult.reason}).`));
 log('');
 log('PROXIMO PASSO MANUAL (obrigatorio):');
