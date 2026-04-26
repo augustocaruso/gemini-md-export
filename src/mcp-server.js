@@ -2,7 +2,7 @@
 
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { execFile, spawn } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { basename, dirname, resolve } from 'node:path';
@@ -39,7 +39,6 @@ const RECENT_CHATS_CACHE_MAX_AGE_MS = Number(
 const RECENT_CHATS_REFRESH_BUDGET_MS = Number(
   process.env.GEMINI_MCP_RECENT_CHATS_REFRESH_BUDGET_MS || 2500,
 );
-const DEFAULT_RELEASE_REPO = process.env.GEMINI_EXPORTER_RELEASE_REPO || 'augustocaruso/gemini-md-export';
 
 const clients = new Map();
 const pendingCommands = new Map();
@@ -1395,86 +1394,6 @@ const exportNotebookForClient = async (client, args = {}) => {
   };
 };
 
-const updateLogPath = () => {
-  const stamp = new Date()
-    .toISOString()
-    .replace(/[-:]/g, '')
-    .replace(/\..+$/, '')
-    .replace('T', '-');
-  return resolve(
-    process.env.TEMP || process.env.TMP || DEFAULT_EXPORT_DIR,
-    `gemini-md-export-update-${stamp}.log`,
-  );
-};
-
-const powershellCommand = () => {
-  const systemRoot = process.env.SystemRoot || process.env.windir;
-  const bundled =
-    systemRoot &&
-    resolve(systemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
-  if (bundled && existsSync(bundled)) return bundled;
-  return 'powershell.exe';
-};
-
-const appendPsArg = (args, name, value) => {
-  if (value === undefined || value === null || value === '') return;
-  args.push(name, String(value));
-};
-
-const startExporterUpdate = (args = {}) => {
-  if (process.platform !== 'win32') {
-    throw new Error('Update automatico pelo MCP esta disponivel apenas no Windows.');
-  }
-
-  const scriptPath = resolve(ROOT, 'scripts', 'update-windows.ps1');
-  if (!existsSync(scriptPath)) {
-    throw new Error(`Script de update nao encontrado: ${scriptPath}`);
-  }
-
-  const repo = args.repo || DEFAULT_RELEASE_REPO;
-  const logPath = args.logPath || updateLogPath();
-  const psArgs = [
-    '-NoProfile',
-    '-ExecutionPolicy',
-    'Bypass',
-    '-File',
-    scriptPath,
-    '-Repo',
-    repo,
-    '-LogPath',
-    logPath,
-  ];
-
-  appendPsArg(psArgs, '-ZipUrl', args.zipUrl);
-  appendPsArg(psArgs, '-Browser', args.browser);
-  appendPsArg(psArgs, '-InstallDir', args.installDir);
-  if (args.keepTemp) psArgs.push('-KeepTemp');
-  if (args.dryRun) psArgs.push('-DryRun');
-  if (args.noOpenBrowser) psArgs.push('-NoOpenBrowser');
-
-  const child = spawn(powershellCommand(), psArgs, {
-    cwd: ROOT,
-    detached: true,
-    stdio: 'ignore',
-    windowsHide: false,
-    env: process.env,
-  });
-  child.unref();
-
-  return {
-    ok: true,
-    pid: child.pid || null,
-    repo,
-    zipUrl:
-      args.zipUrl ||
-      `https://github.com/${repo}/releases/latest/download/gemini-md-export-windows-prebuilt.zip`,
-    scriptPath,
-    logPath,
-    message:
-      'Update iniciado em processo separado. Feche e reabra o Gemini CLI depois que ele terminar.',
-  };
-};
-
 const reloadGeminiTabs = async (args = {}) => {
   const delayMs = Math.max(0, Math.min(10_000, Number(args.delayMs || 500)));
   const liveClients = getLiveClients();
@@ -1876,46 +1795,6 @@ const tools = [
       const result = await exportNotebookForClient(client, args);
       return toolTextResult(result, { isError: result.failureCount > 0 });
     },
-  },
-  {
-    name: 'gemini_exporter_update',
-    description:
-      'Inicia um update do Gemini Markdown Export no Windows a partir da ultima release do GitHub. Roda em processo separado para nao sobrescrever o MCP ativo.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        repo: {
-          type: 'string',
-          description: 'Repositorio GitHub owner/repo. Default: augustocaruso/gemini-md-export.',
-        },
-        zipUrl: {
-          type: 'string',
-          description: 'URL direta do zip precompilado. Sobrescreve repo quando informado.',
-        },
-        browser: {
-          type: 'string',
-          description: 'Navegador para abrir a pagina de extensoes: chrome, edge, brave ou dia.',
-        },
-        installDir: {
-          type: 'string',
-          description: 'Diretorio de instalacao opcional. Normalmente nao precisa.',
-        },
-        keepTemp: {
-          type: 'boolean',
-          description: 'Preserva arquivos temporarios mesmo em sucesso.',
-        },
-        dryRun: {
-          type: 'boolean',
-          description: 'Simula o fluxo sem instalar.',
-        },
-        noOpenBrowser: {
-          type: 'boolean',
-          description: 'Nao abre a pagina de extensoes do navegador no fim.',
-        },
-      },
-      additionalProperties: false,
-    },
-    call: async (args = {}) => toolTextResult(startExporterUpdate(args)),
   },
   {
     name: 'gemini_cache_status',
@@ -2322,24 +2201,6 @@ const bridgeServer = createServer(async (req, res) => {
         reason: url.searchParams.get('reason') || 'agent-endpoint',
       });
       sendAgentJson(res, result.ok ? 200 : 503, result);
-    } catch (err) {
-      sendAgentJson(res, 503, { error: err.message });
-    }
-    return;
-  }
-
-  if (req.method === 'GET' && url.pathname === '/agent/exporter-update') {
-    try {
-      const result = startExporterUpdate({
-        repo: url.searchParams.get('repo') || undefined,
-        zipUrl: url.searchParams.get('zipUrl') || undefined,
-        browser: url.searchParams.get('browser') || undefined,
-        installDir: url.searchParams.get('installDir') || undefined,
-        keepTemp: url.searchParams.get('keepTemp') === 'true',
-        dryRun: url.searchParams.get('dryRun') === 'true',
-        noOpenBrowser: url.searchParams.get('noOpenBrowser') === 'true',
-      });
-      sendAgentJson(res, 200, result);
     } catch (err) {
       sendAgentJson(res, 503, { error: err.message });
     }

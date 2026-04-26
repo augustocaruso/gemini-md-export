@@ -93,24 +93,25 @@ recarregar a extensão unpacked:
 Depois abra uma conversa em `https://gemini.google.com/app/<id>` e procure o
 botão circular de download no canto superior direito da conversa.
 
-## Atualização pelo Gemini CLI
+## Atualização
 
-Quando o exporter já estiver instalado no Gemini CLI, você também pode atualizar
-por dentro dele:
+Quando o exporter já estiver instalado no Gemini CLI como extensão atualizável,
+use o fluxo nativo do Gemini CLI:
 
 ```text
-/exporter:update
+gemini extensions update gemini-md-export
 ```
 
-Esse comando chama a tool MCP `gemini_exporter_update`, que inicia o updater em
-um processo separado. Depois que ele terminar, feche e reabra o Gemini CLI para
-carregar a nova versão. No navegador, recarregue o card da extensão em
-`chrome://extensions`/`edge://extensions`; as abas do Gemini são recarregadas
-automaticamente depois que a extensão volta.
+ou:
 
-Se o Gemini CLI não conseguir atualizar por dentro dele, use o comando
-PowerShell da seção anterior. Esse é o fallback principal quando a versão
-instalada do MCP/updater ficou velha ou inconsistente.
+```text
+gemini extensions update --all
+```
+
+Depois feche e reabra o Gemini CLI. Para atualizar também a extensão unpacked
+do navegador e a pasta instalada no Windows, rode novamente o comando
+PowerShell da seção anterior e recarregue o card da extensão em
+`chrome://extensions`/`edge://extensions`.
 
 Durante a instalação no Windows, o instalador tenta registrar a extensão pelo
 comando oficial `gemini extensions install https://github.com/augustocaruso/gemini-md-export.git
@@ -178,7 +179,6 @@ Tools disponíveis:
 - `gemini_export_job_status`
 - `gemini_export_job_cancel`
 - `gemini_export_notebook`
-- `gemini_exporter_update`
 - `gemini_cache_status`
 - `gemini_clear_cache`
 - `gemini_open_chat`
@@ -240,7 +240,8 @@ npm run release:windows:prebuilt
 - `dist/gemini-export.user.js` como artefato legado de debug, fora do fluxo
   recomendado.
 
-`npm run release:windows:prebuilt` gera os assets usados pelo updater:
+`npm run release:windows:prebuilt` gera os assets usados pelo instalador/update
+externo do Windows:
 
 - `release/gemini-md-export-windows-prebuilt.zip`;
 - `release/update-windows.ps1`;

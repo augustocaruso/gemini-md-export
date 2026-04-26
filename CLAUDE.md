@@ -2,8 +2,8 @@
 
 Projeto de extensão MV3 + servidor MCP que exporta conversas do Gemini web
 (https://gemini.google.com/app/*) como arquivos Markdown para ingestão em vault
-do Obsidian. O caminho principal é extensão unpacked + MCP local + updater
-Windows via GitHub Releases/Gemini CLI. O userscript gerado pelo build é legado
+do Obsidian. O caminho principal é extensão unpacked + MCP local + instaladores
+macOS/Windows via GitHub. O userscript gerado pelo build é legado
 de debug e não deve ser apresentado como fluxo recomendado ao usuário final.
 
 ## Contexto
@@ -264,9 +264,8 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   `gemini_get_current_chat`, `gemini_download_chat`,
   `gemini_download_notebook_chat`, `gemini_export_notebook`,
   `gemini_export_recent_chats`, `gemini_export_job_status`,
-  `gemini_export_job_cancel`, `gemini_exporter_update`, `gemini_cache_status`,
-  `gemini_clear_cache`, `gemini_open_chat`, `gemini_reload_gemini_tabs` e
-  `gemini_snapshot`.
+  `gemini_export_job_cancel`, `gemini_cache_status`, `gemini_clear_cache`,
+  `gemini_open_chat`, `gemini_reload_gemini_tabs` e `gemini_snapshot`.
   `gemini_list_recent_chats` é paginada: `limit` é tamanho de página
   (recomendado 25-50 para listas grandes) e `offset` pula itens já vistos
   (`0`, `50`, `100`...). Para centenas de conversas, o agente deve avançar
@@ -358,10 +357,10 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   extensões do navegador. O carregamento/reload da extensão unpacked continua
   manual por restrição do Chrome/Edge/Brave.
 - `scripts/update-windows.ps1` — updater Windows pensado para ser executado por
-  comando único externo via `WebClient.DownloadString(raw.githubusercontent...)`
-  ou pela tool MCP `gemini_exporter_update`. Quando `-ZipUrl`/`GME_RELEASE_ZIP_URL`
-  não é passado, consulta a API `repos/<repo>/releases/latest`, procura o asset
-  estável `gemini-md-export-windows-prebuilt.zip` e só cai para
+  comando único externo via `WebClient.DownloadString(raw.githubusercontent...)`.
+  Quando `-ZipUrl`/`GME_RELEASE_ZIP_URL` não é passado, consulta a API
+  `repos/<repo>/releases/latest`, procura o asset estável
+  `gemini-md-export-windows-prebuilt.zip` e só cai para
   `/releases/latest/download/...` como fallback. Baixa com headers explícitos,
   tenta `Invoke-WebRequest` e depois `WebClient`, extrai em `%TEMP%`, valida
   `package.json`, manifest da extensão MV3 e `gemini-extension.json`, roda o
@@ -601,8 +600,7 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
 - Caminho recomendado para usuário final: comando PowerShell externo que baixa
   `update-windows.ps1` do `main` via `raw.githubusercontent.com`; o script então
   consulta a API de releases do GitHub e baixa o zip da última release. Esse
-  caminho evita depender do redirect `/releases/latest/download` no PowerShell
-  e serve como recuperação quando `/exporter:update` falhar dentro do Gemini CLI:
+  caminho evita depender do redirect `/releases/latest/download` no PowerShell:
   `powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; iex ((New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/augustocaruso/gemini-md-export/main/scripts/update-windows.ps1'))"`.
 - Para distribuir/atualizar releases, use `npm run release:windows:prebuilt`;
   ele gera `release/gemini-md-export-windows-prebuilt.zip`,

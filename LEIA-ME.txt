@@ -38,13 +38,11 @@ Esse comando e mais robusto que baixar pelo link "latest" da pagina de
 releases: ele baixa o script direto do GitHub e o script descobre a ultima
 release pela API antes de baixar o pacote.
 
-Se o Gemini CLI ja estiver com o exporter funcionando, voce tambem pode pedir
-ao Gemini CLI:
-   /exporter:update
+Se voce quer atualizar apenas a extensao do Gemini CLI, use o comando nativo:
+   gemini extensions update gemini-md-export
 
-Se esse update por dentro do Gemini CLI falhar, use o comando PowerShell acima.
-Ele e o caminho de recuperacao quando a copia instalada do MCP/updater ficou
-velha ou inconsistente.
+Para atualizar tambem a extensao unpacked do navegador e a pasta instalada no
+Windows, use o comando PowerShell acima.
 
 O instalador tenta registrar a extensao pelo comando oficial
 "gemini extensions install". Isso deve fazer o exporter aparecer como

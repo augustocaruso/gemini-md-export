@@ -24,15 +24,10 @@ Operational guidance:
   extension could not prove it reached the beginning of the conversation, report
   those failures from the job status instead of treating them as completed
   exports.
-- When the user asks to update/reinstall this exporter from Gemini CLI, prefer
-  the `gemini_exporter_update` MCP tool. It starts a detached Windows updater
-  from the latest GitHub release, so tell the user to close and reopen Gemini
-  CLI after the updater finishes.
-- Users can also run `/exporter:update` as a shortcut for the same update flow.
-- If `/exporter:update` or `gemini_exporter_update` fails, tell the user to run
-  the external PowerShell recovery command from the project README. Updating
-  from inside Gemini CLI depends on the currently installed MCP, so an old or
-  inconsistent updater may need that external bootstrap.
+- When the user asks to update this exporter inside Gemini CLI, use Gemini CLI's
+  built-in extension update flow instead of an MCP tool: tell the user to run
+  `gemini extensions update gemini-md-export` or `gemini extensions update --all`
+  from a fresh terminal, then restart Gemini CLI.
 - When the user reports the MCP as disconnected on Windows, suggest running:
   `powershell -ExecutionPolicy Bypass -File .\diagnose-windows-mcp.ps1`
 - If the MCP looks disconnected, suspect a stale `node.exe` or a bridge port
@@ -47,7 +42,6 @@ Available capabilities include:
 - exporting the recent-chat history in a background batch job
 - checking or cancelling a background export job
 - downloading a specific recent or notebook chat
-- updating this exporter from GitHub Releases on Windows
 - manually reloading connected Gemini tabs when needed
 - inspecting cache/debug state
 

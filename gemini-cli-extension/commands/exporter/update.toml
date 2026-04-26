@@ -1,6 +1,0 @@
-description = "Atualiza o Gemini Markdown Export pela ultima release do GitHub."
-prompt = """
-Atualize o Gemini Markdown Export agora.
-
-Use a tool MCP `gemini_exporter_update` com os argumentos padrao, a menos que o usuario tenha pedido explicitamente outro navegador, repo ou modo dry-run. Depois de chamar a tool, explique em portugues simples que o update roda em um processo separado e que o usuario deve fechar e reabrir o Gemini CLI quando terminar.
-"""
