@@ -24,6 +24,13 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
 
 const pkg = JSON.parse(readFileSync(resolve(ROOT, 'package.json'), 'utf-8'));
+const bridgeVersion = JSON.parse(readFileSync(resolve(ROOT, 'bridge-version.json'), 'utf-8'));
+if (bridgeVersion.extensionVersion !== pkg.version) {
+  console.error(
+    `[build] bridge-version.json extensionVersion (${bridgeVersion.extensionVersion}) precisa bater com package.json (${pkg.version})`,
+  );
+  process.exit(1);
+}
 const extractSrc = readFileSync(resolve(ROOT, 'src/extract.mjs'), 'utf-8');
 const notebookReturnPlanSrc = readFileSync(
   resolve(ROOT, 'src/notebook-return-plan.mjs'),
@@ -107,6 +114,7 @@ const output = shellSrc
   .replace(notebookReturnPlanMarker, inlinedNotebookReturnPlan)
   .replace(batchSessionMarker, inlinedBatchSession)
   .replace(/__VERSION__/g, pkg.version)
+  .replace(/__EXTENSION_PROTOCOL_VERSION__/g, String(bridgeVersion.protocolVersion))
   .replace(/__BUILD_STAMP__/g, buildStamp);
 
 const distDir = resolve(ROOT, 'dist');
@@ -140,8 +148,14 @@ const manifest = {
       run_at: 'document_idle',
     },
   ],
-  permissions: ['tabs'],
-  host_permissions: ['https://gemini.google.com/*', 'http://127.0.0.1/*', 'http://localhost/*'],
+  permissions: ['tabs', 'storage'],
+  host_permissions: [
+    'https://gemini.google.com/*',
+    'https://lh3.google.com/*',
+    'https://*.googleusercontent.com/*',
+    'http://127.0.0.1/*',
+    'http://localhost/*',
+  ],
   action: {
     default_title: 'Gemini Export',
   },
@@ -152,6 +166,7 @@ writeFileSync(
   resolve(extensionDir, 'background.js'),
   extensionBackgroundSrc
     .replace(/__VERSION__/g, pkg.version)
+    .replace(/__EXTENSION_PROTOCOL_VERSION__/g, String(bridgeVersion.protocolVersion))
     .replace(/__BUILD_STAMP__/g, buildStamp),
   'utf-8',
 );
@@ -195,6 +210,11 @@ writeFileSync(
   JSON.stringify(pkg, null, 2) + '\n',
   'utf-8',
 );
+writeFileSync(
+  resolve(geminiCliExtensionDir, 'bridge-version.json'),
+  JSON.stringify(bridgeVersion, null, 2) + '\n',
+  'utf-8',
+);
 if (existsSync(resolve(ROOT, 'gemini-cli-extension', 'commands'))) {
   cpSync(
     resolve(ROOT, 'gemini-cli-extension', 'commands'),
@@ -206,6 +226,10 @@ cpSync(extensionDir, resolve(geminiCliExtensionDir, 'browser-extension'), {
   recursive: true,
 });
 cpSync(resolve(ROOT, 'src', 'mcp-server.js'), resolve(geminiCliExtensionDir, 'src', 'mcp-server.js'));
+cpSync(
+  resolve(ROOT, 'src', 'chrome-extension-guard.mjs'),
+  resolve(geminiCliExtensionDir, 'src', 'chrome-extension-guard.mjs'),
+);
 cpSync(
   resolve(ROOT, 'src', 'recent-chats-policy.mjs'),
   resolve(geminiCliExtensionDir, 'src', 'recent-chats-policy.mjs'),
@@ -222,5 +246,6 @@ cpSync(
 console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'gemini-extension.json')}`);
 console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'GEMINI.md')}`);
 console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'package.json')}`);
+console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'bridge-version.json')}`);
 console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'browser-extension')}`);
 console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'src', 'mcp-server.js')}`);

@@ -391,6 +391,109 @@ test('extractMarkdown: não cola heading com parágrafo seguinte (regressão rea
   assert.equal(lines[idx + 1], '', 'linha depois do heading deve ser vazia');
 });
 
+test('extractMarkdown: marca imagem como mídia não exportada', () => {
+  const el = makeEl(`
+    <model-response>
+      <p>Veja o achado:</p>
+      <img src="https://example.com/rx.png" alt="Radiografia de tórax">
+      <p>Depois da imagem.</p>
+    </model-response>
+  `);
+  const md = extractMarkdown(el);
+  assert.match(md, /Veja o achado:/);
+  assert.match(md, /> \[!warning\] Mídia não exportada/);
+  assert.match(md, /> Tipo: Imagem/);
+  assert.match(md, /> Descrição: Radiografia de tórax/);
+  assert.match(md, /> Origem detectada: https:\/\/example\.com\/rx\.png/);
+  assert.match(md, /Depois da imagem\./);
+});
+
+test('extractMarkdown: preserva mídia em turno do usuário com query-text-line', () => {
+  const el = makeEl(`
+    <user-query>
+      <div>
+        <p class="query-text-line">interprete esta imagem</p>
+        <img src="blob:https://gemini.google.com/abc" alt="foto enviada">
+      </div>
+    </user-query>
+  `);
+  const md = extractMarkdown(el);
+  assert.match(md, /^interprete esta imagem/);
+  assert.match(md, /> Tipo: Imagem/);
+  assert.match(md, /> Descrição: foto enviada/);
+  assert.doesNotMatch(md, /blob:https:\/\/gemini\.google\.com/);
+});
+
+test('extractMarkdown: não duplica placeholder em div simples do usuário', () => {
+  const el = makeEl(`
+    <user-query>
+      <div>olhe isso <img src="https://example.com/foto.webp" alt="foto"></div>
+    </user-query>
+  `);
+  const md = extractMarkdown(el);
+  assert.equal((md.match(/Mídia não exportada/g) || []).length, 1);
+  assert.match(md, /^olhe isso/);
+});
+
+test('scrapeTurns: não ignora turno que contém somente mídia', () => {
+  const doc = makeDoc(`
+    <model-response>
+      <video src="https://example.com/demo.mp4" title="demonstração"></video>
+    </model-response>
+  `);
+  const turns = scrapeTurns(doc);
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0].role, 'assistant');
+  assert.match(turns[0].text, /> Tipo: Vídeo/);
+  assert.match(turns[0].text, /> Descrição: demonstração/);
+});
+
+test('scrapeTurns: preserva imagem dentro de botão de lightbox do Gemini', () => {
+  const doc = makeDoc(`
+    <model-response>
+      <button aria-label="Show the uploaded image in a lightbox">
+        <img src="https://example.com/generated.png" alt="Uploaded image preview">
+      </button>
+      <button>Share image</button>
+    </model-response>
+  `);
+  const turns = scrapeTurns(doc);
+  assert.equal(turns.length, 1);
+  assert.equal(turns[0].role, 'assistant');
+  assert.match(turns[0].text, /> Tipo: Imagem/);
+  assert.match(turns[0].text, /> Descrição: Uploaded image preview/);
+  assert.match(turns[0].text, /> Origem detectada: https:\/\/example\.com\/generated\.png/);
+  assert.doesNotMatch(turns[0].text, /Share image/);
+});
+
+test('extractMarkdown: marca links de anexos conhecidos', () => {
+  const el = makeEl(`
+    <model-response>
+      <a href="https://example.com/laudo.pdf">laudo.pdf</a>
+    </model-response>
+  `);
+  const md = extractMarkdown(el);
+  assert.match(md, /> Tipo: Anexo/);
+  assert.match(md, /> Descrição: laudo\.pdf/);
+  assert.match(md, /> Origem detectada: https:\/\/example\.com\/laudo\.pdf/);
+});
+
+test('extractMarkdown: trata ícone de PDF do Gemini como anexo, não imagem', () => {
+  const el = makeEl(`
+    <user-query>
+      <p class="query-text-line">analise este arquivo</p>
+      <img
+        src="https://drive-thirdparty.googleusercontent.com/32/type/application/pdf"
+        alt="PDF icon"
+      >
+    </user-query>
+  `);
+  const md = extractMarkdown(el);
+  assert.match(md, /^analise este arquivo/);
+  assert.match(md, /> Tipo: Anexo/);
+  assert.doesNotMatch(md, /> Tipo: Imagem/);
+});
+
 // --- scrapeTurns --------------------------------------------------------
 
 test('scrapeTurns: extrai user e assistant em ordem', () => {

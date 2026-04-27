@@ -3,6 +3,63 @@
 // de extensão e servir de ponto de integração futura com helper local,
 // native messaging ou automações.
 
+const EXTENSION_PROTOCOL_VERSION = Number('__EXTENSION_PROTOCOL_VERSION__');
+const PENDING_GEMINI_TABS_RELOAD_KEY = 'gemini-md-export.pendingGeminiTabsReload';
+
+const extensionInfo = (sender = {}) => {
+  const manifest = chrome.runtime.getManifest();
+  const tab = sender.tab || null;
+  return {
+    ok: true,
+    extensionVersion: manifest.version,
+    version: manifest.version,
+    protocolVersion: EXTENSION_PROTOCOL_VERSION,
+    extensionId: chrome.runtime.id,
+    manifestVersion: manifest.manifest_version,
+    buildStamp: '__BUILD_STAMP__',
+    tabId: tab?.id ?? null,
+    windowId: tab?.windowId ?? null,
+    isActiveTab: tab?.active ?? null,
+  };
+};
+
+const storageGet = (key) =>
+  new Promise((resolve) => {
+    if (!chrome.storage?.local) {
+      resolve(null);
+      return;
+    }
+    chrome.storage.local.get(key, (items = {}) => {
+      if (chrome.runtime.lastError) {
+        resolve(null);
+        return;
+      }
+      resolve(items[key] || null);
+    });
+  });
+
+const storageSet = (value) =>
+  new Promise((resolve) => {
+    if (!chrome.storage?.local) {
+      resolve(false);
+      return;
+    }
+    chrome.storage.local.set({ [PENDING_GEMINI_TABS_RELOAD_KEY]: value }, () => {
+      resolve(!chrome.runtime.lastError);
+    });
+  });
+
+const storageRemove = (key) =>
+  new Promise((resolve) => {
+    if (!chrome.storage?.local) {
+      resolve(false);
+      return;
+    }
+    chrome.storage.local.remove(key, () => {
+      resolve(!chrome.runtime.lastError);
+    });
+  });
+
 chrome.runtime.onInstalled.addListener((details) => {
   console.log('[gemini-md-export/ext]', 'instalada', {
     reason: details.reason,
@@ -48,22 +105,116 @@ const reloadGeminiTabs = (reason = 'manual') =>
     });
   });
 
+const consumePendingGeminiTabsReload = async () => {
+  const pending = await storageGet(PENDING_GEMINI_TABS_RELOAD_KEY);
+  if (!pending) return;
+  await storageRemove(PENDING_GEMINI_TABS_RELOAD_KEY);
+  setTimeout(() => {
+    reloadGeminiTabs(pending.reason || 'extension-self-reload');
+  }, 500);
+};
+
+setTimeout(() => {
+  consumePendingGeminiTabsReload();
+}, 250);
+
+const arrayBufferToBase64 = (buffer) => {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+};
+
+const fetchAsset = async (source) => {
+  const url = new URL(String(source || ''));
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+    throw new Error('URL de mídia inválida.');
+  }
+
+  const fetchWithCredentials = async (credentials) => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 4000);
+    try {
+      const response = await fetch(url.href, {
+        credentials,
+        cache: 'force-cache',
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      return response;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  };
+
+  let response;
+  try {
+    response = await fetchWithCredentials('omit');
+  } catch (omitErr) {
+    try {
+      response = await fetchWithCredentials('include');
+    } catch (includeErr) {
+      throw new Error(
+        `omit: ${omitErr?.message || String(omitErr)}; include: ${
+          includeErr?.message || String(includeErr)
+        }`,
+      );
+    }
+  }
+
+  const blob = await response.blob();
+  return {
+    ok: true,
+    mimeType: blob.type || response.headers.get('content-type') || 'application/octet-stream',
+    contentBase64: arrayBufferToBase64(await blob.arrayBuffer()),
+  };
+};
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === 'gemini-md-export/ping') {
-    const tab = sender.tab || null;
-    sendResponse({
-      ok: true,
-      version: chrome.runtime.getManifest().version,
-      buildStamp: '__BUILD_STAMP__',
-      tabId: tab?.id ?? null,
-      windowId: tab?.windowId ?? null,
-      isActiveTab: tab?.active ?? null,
-    });
+    sendResponse(extensionInfo(sender));
     return;
+  }
+
+  if (message?.type === 'GET_EXTENSION_INFO' || message?.type === 'gemini-md-export/get-info') {
+    sendResponse(extensionInfo(sender));
+    return;
+  }
+
+  if (message?.type === 'RELOAD_SELF' || message?.type === 'gemini-md-export/reload-self') {
+    storageSet({
+      reason: message.reason || 'self-reload',
+      expectedExtensionVersion: message.expectedExtensionVersion || null,
+      expectedProtocolVersion: message.expectedProtocolVersion || null,
+      requestedAt: new Date().toISOString(),
+    }).then(() => {
+      sendResponse({ ok: true, reloading: true });
+      setTimeout(() => {
+        chrome.runtime.reload();
+      }, 300);
+    });
+    return true;
   }
 
   if (message?.type === 'gemini-md-export/reload-gemini-tabs') {
     reloadGeminiTabs(message.reason || 'content-script').then(sendResponse);
+    return true;
+  }
+
+  if (message?.type === 'gemini-md-export/fetch-asset') {
+    fetchAsset(message.source)
+      .then(sendResponse)
+      .catch((err) => {
+        sendResponse({
+          ok: false,
+          error: err?.message || String(err),
+        });
+      });
     return true;
   }
 

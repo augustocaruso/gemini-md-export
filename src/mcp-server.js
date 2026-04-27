@@ -2,10 +2,10 @@
 
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { basename, dirname, resolve } from 'node:path';
+import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import readline from 'node:readline';
 import {
@@ -17,13 +17,16 @@ import {
   normalizeRecentChatsLoadMorePlan,
 } from './recent-chats-load-more.mjs';
 import { formatBridgeListenError } from './mcp-server-errors.mjs';
+import { ensureChromeExtensionReady } from './chrome-extension-guard.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
 const pkg = JSON.parse(readFileSync(resolve(ROOT, 'package.json'), 'utf-8'));
+const bridgeVersion = JSON.parse(readFileSync(resolve(ROOT, 'bridge-version.json'), 'utf-8'));
 
 const SERVER_NAME = 'gemini-md-export';
 const SERVER_VERSION = pkg.version;
+const EXTENSION_PROTOCOL_VERSION = Number(bridgeVersion.protocolVersion);
 const PROTOCOL_VERSION = '2025-03-26';
 const DEFAULT_HOST = process.env.GEMINI_MCP_BRIDGE_HOST || '127.0.0.1';
 const DEFAULT_PORT = Number(process.env.GEMINI_MCP_BRIDGE_PORT || 47283);
@@ -39,6 +42,21 @@ const RECENT_CHATS_CACHE_MAX_AGE_MS = Number(
 const RECENT_CHATS_REFRESH_BUDGET_MS = Number(
   process.env.GEMINI_MCP_RECENT_CHATS_REFRESH_BUDGET_MS || 2500,
 );
+const CHROME_GUARD_CONFIG = {
+  profileDirectory:
+    process.env.GEMINI_MCP_CHROME_PROFILE_DIRECTORY ||
+    process.env.GME_CHROME_PROFILE_DIRECTORY ||
+    'Default',
+  launchIfClosed: process.env.GEMINI_MCP_CHROME_LAUNCH_IF_CLOSED !== 'false',
+  reloadTimeoutMs: Number(process.env.GEMINI_MCP_CHROME_RELOAD_TIMEOUT_MS || 15_000),
+  maxReloadAttempts: Number(process.env.GEMINI_MCP_CHROME_MAX_RELOAD_ATTEMPTS || 1),
+  useExtensionsReloaderFallback:
+    process.env.GEMINI_MCP_USE_EXTENSIONS_RELOADER_FALLBACK === 'true',
+};
+const EXPECTED_CHROME_EXTENSION_INFO = {
+  extensionVersion: bridgeVersion.extensionVersion || SERVER_VERSION,
+  protocolVersion: EXTENSION_PROTOCOL_VERSION,
+};
 
 const clients = new Map();
 const pendingCommands = new Map();
@@ -224,6 +242,8 @@ const upsertClient = (payload) => {
   next.windowId = payload.windowId ?? next.windowId ?? null;
   next.isActiveTab = payload.isActiveTab ?? next.isActiveTab ?? null;
   next.extensionVersion = payload.extensionVersion || next.extensionVersion || null;
+  next.protocolVersion =
+    payload.protocolVersion !== undefined ? payload.protocolVersion : next.protocolVersion ?? null;
   next.buildStamp = payload.buildStamp || payload.page?.buildStamp || next.buildStamp || null;
   next.page = payload.page || next.page || null;
   next.conversations = Array.isArray(payload.conversations)
@@ -335,12 +355,101 @@ const requireNotebookClient = (clientId) => {
   return client;
 };
 
+const launchChromeForGemini = async ({ profileDirectory } = {}) => {
+  if (process.platform !== 'win32') {
+    return {
+      attempted: false,
+      supported: false,
+      reason: 'unsupported-platform',
+    };
+  }
+
+  const profileArg = profileDirectory ? `--profile-directory=${profileDirectory}` : null;
+  const args = [profileArg, 'https://gemini.google.com/app'].filter(Boolean);
+  const quotedArgs = args.map((arg) => `'${String(arg).replace(/'/g, "''")}'`).join(',');
+  const explicitChrome = process.env.GEMINI_MCP_CHROME_EXE || process.env.GME_CHROME_EXE || '';
+  const candidates = [
+    explicitChrome,
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    'chrome.exe',
+  ].filter(Boolean);
+  const quotedCandidates = candidates
+    .map((candidate) => `'${String(candidate).replace(/'/g, "''")}'`)
+    .join(',');
+  const script = [
+    "$ErrorActionPreference = 'Stop'",
+    `$candidates = @(${quotedCandidates})`,
+    `$arguments = @(${quotedArgs})`,
+    'foreach ($candidate in $candidates) {',
+    "  if ($candidate -eq 'chrome.exe' -or (Test-Path -LiteralPath $candidate)) {",
+    '    Start-Process -FilePath $candidate -ArgumentList $arguments -WindowStyle Minimized',
+    '    exit 0',
+    '  }',
+    '}',
+    'exit 1',
+  ].join('; ');
+
+  try {
+    const child = spawn(
+      'powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
+      {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+      },
+    );
+    child.unref();
+    return {
+      attempted: true,
+      supported: true,
+      method: 'powershell-start-process-minimized',
+      profileDirectory: profileDirectory || null,
+    };
+  } catch (err) {
+    return {
+      attempted: true,
+      supported: true,
+      error: err?.message || String(err),
+    };
+  }
+};
+
+const getChromeExtensionInfo = async (client) => {
+  const result = await enqueueCommand(client.clientId, 'get-extension-info');
+  return result || null;
+};
+
+const reloadChromeExtension = async (client, args = {}) => {
+  const result = await enqueueCommand(client.clientId, 'reload-extension-self', args);
+  return result || null;
+};
+
+const ensureBrowserExtensionReady = (args = {}, options = {}) =>
+  ensureChromeExtensionReady(
+    {
+      expected: EXPECTED_CHROME_EXTENSION_INFO,
+      config: CHROME_GUARD_CONFIG,
+      getLiveClients,
+      getChromeExtensionInfo,
+      reloadChromeExtension,
+      launchChromeForGemini,
+      log,
+    },
+    {
+      clientId: args.clientId || null,
+      ...options,
+    },
+  );
+
 const summarizeClient = (client) => ({
   clientId: client.clientId,
   tabId: client.tabId ?? null,
   windowId: client.windowId ?? null,
   isActiveTab: client.isActiveTab ?? null,
   extensionVersion: client.extensionVersion ?? null,
+  protocolVersion: client.protocolVersion ?? null,
   buildStamp: client.buildStamp ?? client.page?.buildStamp ?? null,
   lastSeenAt: new Date(client.lastSeenAt).toISOString(),
   page: client.page || null,
@@ -398,30 +507,45 @@ const resolveOutputDir = (outputDir) => {
 };
 
 const safeFilename = (filename) => {
-  const name = basename(String(filename || '').trim());
-  if (!name || name === '.' || name === '..') {
+  const raw = String(filename || '').trim().replace(/\\/g, '/');
+  if (
+    !raw ||
+    raw.startsWith('/') ||
+    /^[a-zA-Z]:/.test(raw) ||
+    raw.includes('\0') ||
+    raw.split('/').some((part) => !part || part === '.' || part === '..')
+  ) {
     throw new Error('Nome de arquivo inválido retornado pela extensão.');
   }
-  return name;
+  return raw;
 };
 
 const writeExportPayload = (payload, { outputDir } = {}) => {
-  if (!payload?.content) {
-    throw new Error('A extensão não retornou conteúdo Markdown.');
+  if (!payload?.content && !payload?.contentBase64) {
+    throw new Error('A extensão não retornou conteúdo para salvar.');
   }
 
   const directory = resolveOutputDir(outputDir);
   const filename = safeFilename(payload.filename || `${payload.chatId || 'gemini-chat'}.md`);
   const filePath = resolve(directory, filename);
-  mkdirSync(directory, { recursive: true });
+  const relativePath = relative(directory, filePath);
+  if (relativePath.startsWith('..') || relativePath === '' || isAbsolute(relativePath)) {
+    throw new Error('Caminho de arquivo inválido retornado pela extensão.');
+  }
+  mkdirSync(dirname(filePath), { recursive: true });
   const existed = existsSync(filePath);
-  writeFileSync(filePath, payload.content, 'utf-8');
+  const content = payload.contentBase64
+    ? Buffer.from(payload.contentBase64, 'base64')
+    : String(payload.content);
+  writeFileSync(filePath, content, payload.contentBase64 ? undefined : 'utf-8');
 
   return {
     outputDir: directory,
     filename,
     filePath,
-    bytes: Buffer.byteLength(payload.content, 'utf-8'),
+    bytes: Buffer.isBuffer(content)
+      ? content.length
+      : Buffer.byteLength(content, 'utf-8'),
     overwritten: existed,
   };
 };
@@ -457,8 +581,8 @@ const writeExportFiles = (payload = {}) => {
   if (files.length === 0) {
     throw new Error('Nenhum arquivo recebido para salvar.');
   }
-  if (files.length > 100) {
-    throw new Error('Muitos arquivos em uma única requisição; limite atual: 100.');
+  if (files.length > 200) {
+    throw new Error('Muitos arquivos em uma única requisição; limite atual: 200.');
   }
 
   return files.map((file) =>
@@ -1464,7 +1588,7 @@ const reloadGeminiTabs = async (args = {}) => {
   };
 };
 
-const tools = [
+const rawTools = [
   {
     name: 'gemini_browser_status',
     description: 'Lista as abas do Gemini atualmente conectadas à extensão.',
@@ -1475,6 +1599,7 @@ const tools = [
     },
     call: async () =>
       toolTextResult({
+        expectedChromeExtension: EXPECTED_CHROME_EXTENSION_INFO,
         connectedClients: getLiveClients().map(summarizeClient),
       }),
   },
@@ -1922,6 +2047,37 @@ const tools = [
   },
 ];
 
+const BROWSER_DEPENDENT_TOOL_NAMES = new Set([
+  'gemini_list_recent_chats',
+  'gemini_list_notebook_chats',
+  'gemini_get_current_chat',
+  'gemini_download_chat',
+  'gemini_download_notebook_chat',
+  'gemini_export_recent_chats',
+  'gemini_export_notebook',
+  'gemini_cache_status',
+  'gemini_clear_cache',
+  'gemini_open_chat',
+  'gemini_reload_gemini_tabs',
+  'gemini_snapshot',
+]);
+
+const withChromeExtensionGuard = (tool) => ({
+  ...tool,
+  call: async (args = {}) => {
+    const ready = await ensureBrowserExtensionReady(args);
+    const guardedArgs = {
+      ...args,
+      clientId: ready.client?.clientId || args.clientId,
+    };
+    return tool.call(guardedArgs);
+  },
+});
+
+const tools = rawTools.map((tool) =>
+  BROWSER_DEPENDENT_TOOL_NAMES.has(tool.name) ? withChromeExtensionGuard(tool) : tool,
+);
+
 const toolByName = new Map(tools.map((tool) => [tool.name, tool]));
 
 const bridgeServer = createServer(async (req, res) => {
@@ -2203,6 +2359,21 @@ const bridgeServer = createServer(async (req, res) => {
       sendAgentJson(res, result.ok ? 200 : 503, result);
     } catch (err) {
       sendAgentJson(res, 503, { error: err.message });
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/agent/inspect-media') {
+    try {
+      const clientId = url.searchParams.get('clientId') || undefined;
+      const client = requireClient(clientId);
+      const result = await enqueueCommand(client.clientId, 'inspect-media');
+      sendJson(res, 200, {
+        client: summarizeClient(client),
+        ...result,
+      });
+    } catch (err) {
+      sendJson(res, err.statusCode || 400, { error: err.message });
     }
     return;
   }

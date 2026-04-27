@@ -217,13 +217,37 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   usuário já estava colado no fundo ou `reachedSidebarEnd` bateu. **Não
   reintroduzir `scroll-behavior: smooth`** no container — fazia o restore
   programático do scrollTop animar visivelmente a cada heartbeat.
+  (10) **Fluidez da barra de progresso (progress dock)**: o dock fixo no
+  rodapé central usa três mecanismos para evitar a sensação de "barra
+  travada" durante etapas longas de uma única conversa (hidratação, scroll,
+  salvar). Primeiro, um shimmer CSS (`@keyframes gm-dock-shimmer`) varre a
+  porção preenchida com gradiente diagonal — feedback visual constante
+  mesmo quando `current` não mudou. Segundo, transição da largura usa
+  `cubic-bezier(0.22, 0.61, 0.36, 1)` em 420ms (Material easing), bem mais
+  suave do que o `.18s ease` antigo. Terceiro, **creep assintótico**:
+  `state.progressCreepTimer` é um `setInterval` (240ms) que avança
+  `displayPercent` exponencialmente em direção ao próximo milestone, sem
+  ultrapassar `PROGRESS_CREEP_MAX_FRACTION = 0.85` do caminho — quando o
+  `current` real avança, a barra pula pra base nova e o creep recomeça.
+  Quando bate o total, o dock recebe a classe `gm-dock-done` que desliga o
+  shimmer (sinal claro de "concluído"). Em `finishExportProgress`, antes
+  do fade, força largura 100% + `gm-dock-done` pra evitar o sumiço abrupto
+  de meio-caminho. **Não remova o creep** sem repensar o feedback de
+  hidratação: o usuário fica olhando 30s+ pra uma barra que aparenta
+  congelada, e isso já gerou ticket.
 - `src/extension-background.js` — service worker MV3. Além de responder ao
   ping do content script, usa a API `chrome.tabs` para recarregar abas
   `https://gemini.google.com/*` quando a extensão é instalada/recarregada e
-  quando recebe a mensagem `gemini-md-export/reload-gemini-tabs`. Isso
-  automatiza a parte "recarregar páginas do Gemini" após updates; o clique de
-  reload no card da extensão unpacked continua manual por restrição do
-  Chrome/Edge.
+  quando recebe a mensagem `gemini-md-export/reload-gemini-tabs`. Também
+  responde `GET_EXTENSION_INFO` com versão da extensão, `protocolVersion`,
+  `extensionId`, `manifestVersion`, `tabId`/`windowId` e `buildStamp`, e aceita
+  `RELOAD_SELF`: responde antes, grava em `chrome.storage.local` um marcador
+  de reload pendente, chama `chrome.runtime.reload()` depois de um curto delay e,
+  quando o service worker novo sobe, consome o marcador para recarregar as
+  abas Gemini. Isso automatiza a parte "recarregar páginas do Gemini" após
+  updates; o clique manual no card da extensão unpacked continua necessário em
+  migrações que mudam permissões/manifest ou quando a versão carregada ainda
+  não tem o protocolo de auto-reload.
 - `gemini-cli-extension/` — fonte da extensão do Gemini CLI. Hoje contém
   pelo menos um `GEMINI.md` próprio da extensão; o build gera
   `dist/gemini-cli-extension/gemini-extension.json` + bundle mínimo do MCP
@@ -241,8 +265,22 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   (`source: "sidebar"`) + conversas do caderno (`source: "notebook"`). O
   service worker informa `tabId`, `windowId` e `isActiveTab` a cada heartbeat;
   quando há várias abas Gemini vivas, o MCP prefere a aba ativa antes do
-  fallback por heartbeat mais recente. O heartbeat também inclui `buildStamp`
-  para verificar rapidamente se a extensão recarregada é o build esperado.
+  fallback por heartbeat mais recente. O heartbeat também inclui
+  `extensionVersion`, `protocolVersion` e `buildStamp` para verificar
+  rapidamente se a extensão recarregada é o build esperado.
+  Antes de executar tools que dependem do navegador, o MCP passa por
+  `ensureChromeExtensionReady()` em `src/chrome-extension-guard.mjs`: lê
+  `bridge-version.json`, chama o comando interno `get-extension-info`, compara
+  versão/protocolo, pede `reload-extension-self` quando os arquivos da
+  extensão Chrome foram atualizados pelo Gemini CLI mas o runtime do Chrome
+  ainda está velho, espera a reconexão e evita loop infinito (default: 1
+  tentativa). Se não houver heartbeat, em Windows ele tenta abrir Chrome no
+  perfil configurado (`GEMINI_MCP_CHROME_PROFILE_DIRECTORY`, default
+  `Default`) diretamente em `https://gemini.google.com/app`, em janela
+  minimizada best-effort, e só então espera a extensão conectar. O launch é
+  controlado por `GEMINI_MCP_CHROME_LAUNCH_IF_CLOSED` (default ligado);
+  timeout e tentativas vêm de `GEMINI_MCP_CHROME_RELOAD_TIMEOUT_MS` e
+  `GEMINI_MCP_CHROME_MAX_RELOAD_ATTEMPTS`.
   `gemini_list_recent_chats` e `/agent/recent-chats` agora priorizam a lista
   trazida pelo heartbeat recente da extensão para responder rápido. Só
   mandam `list-conversations` para abrir/atualizar o sidebar quando o cache
@@ -312,7 +350,10 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
 - `scripts/build.mjs` — gera `dist/gemini-export.user.js` concatenando o
   shell com o conteúdo de `extract.mjs` inlined, além de `dist/extension/*`
   para instalação como extensão desempacotada e `dist/gemini-cli-extension/*`
-  como bundle da extensão do Gemini CLI.
+  como bundle da extensão do Gemini CLI. O build valida que
+  `bridge-version.json.extensionVersion` bate com `package.json`, injeta
+  `protocolVersion` no content/background e copia `bridge-version.json` +
+  `src/chrome-extension-guard.mjs` para o bundle Gemini CLI.
 - `scripts/install-windows-launcher.cjs` — launcher empacotável para Windows.
   Em modo normal, delega para `scripts/install-windows.mjs` na pasta real do
   projeto. Em modo `pkg`, lê `release-manifest.json` embutido, extrai o payload

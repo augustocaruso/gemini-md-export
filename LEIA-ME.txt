@@ -55,10 +55,12 @@ atualizavel quando voce listar as extensoes no Gemini CLI. Se o binario
 "gemini" nao estiver no PATH ou esse comando falhar, ele ainda instala por
 copia manual e avisa no resumo.
 
-Quando o update terminar, feche e reabra o Gemini CLI. Se a extensao do
-navegador ja estava carregada, clique no icone circular de reload do card dela
-na pagina de extensoes. Depois desse reload, a extensao tenta recarregar as
-abas abertas do Gemini automaticamente.
+Quando o update terminar, feche e reabra o Gemini CLI. A partir da versao com
+auto-reload, a primeira ferramenta MCP que precisar do navegador confere se a
+extensao do Chrome esta na versao certa e tenta recarrega-la sozinha. O reload
+manual do card na pagina de extensoes fica como fallback para primeira
+migracao, troca de permissoes/manifest ou perfil errado. Depois do reload, as
+abas abertas do Gemini devem recarregar automaticamente.
 
 Se voce recebeu um unico arquivo install-windows.exe, pode ignorar toda a
 parte de zip/pasta e simplesmente dar DUPLO CLIQUE nele. O .exe standalone
@@ -116,7 +118,7 @@ esta mostrando o zip como uma "pasta", vai dar erro
       (em alguns browsers: "Load unpacked").
    c) Selecione a pasta mostrada no fim do instalador.
       Normalmente sera esta:
-         %LOCALAPPDATA%\GeminiMdExport\extension
+         %USERPROFILE%\.gemini\extensions\gemini-md-export\browser-extension
 
       Se o instalador detectou uma instalacao anterior em outro
       caminho, use o caminho "extensao:" mostrado na janela preta.
@@ -124,7 +126,8 @@ esta mostrando o zip como uma "pasta", vai dar erro
       seletor de pasta e cole o caminho acima -- o Windows
       resolve o %LOCALAPPDATA%)
 
-      Se a extensao ja estava carregada, clique no icone
+      Se a extensao ja estava carregada, a nova versao tenta pedir esse reload
+      automaticamente quando o MCP for usado. Se isso falhar, clique no icone
       circular de reload do card dela. As abas abertas do Gemini devem
       recarregar sozinhas em seguida.
 

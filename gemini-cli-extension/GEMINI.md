@@ -27,7 +27,12 @@ Operational guidance:
 - When the user asks to update this exporter inside Gemini CLI, use Gemini CLI's
   built-in extension update flow instead of an MCP tool: tell the user to run
   `gemini extensions update gemini-md-export` or `gemini extensions update --all`
-  from a fresh terminal, then restart Gemini CLI.
+  from a fresh terminal, then restart Gemini CLI. The update also downloads the
+  companion unpacked Chrome/Edge extension files into `browser-extension/`.
+  After this self-healing version, browser-dependent MCP tools verify the
+  browser extension version/protocol and ask it to reload itself when it is
+  stale; manual reload in `chrome://extensions` is only the fallback for first
+  migration, manifest/permission changes, or the wrong browser profile.
 - When the user reports the MCP as disconnected on Windows, suggest running:
   `powershell -ExecutionPolicy Bypass -File .\diagnose-windows-mcp.ps1`
 - If the MCP looks disconnected, suspect a stale `node.exe` or a bridge port

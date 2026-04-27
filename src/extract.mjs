@@ -33,6 +33,21 @@ const A11Y_BLOCK_CHILD_SELECTOR = [
   'h6',
 ].join(',');
 
+const MEDIA_LINK_EXTENSIONS =
+  /\.(?:avif|bmp|gif|heic|heif|jpe?g|m4a|mov|mp3|mp4|ogg|pdf|png|tiff?|wav|webm|webp)(?:[?#].*)?$/i;
+const MAX_MEDIA_SOURCE_LENGTH = 500;
+
+const MEDIA_SELECTOR = [
+  'img',
+  'video',
+  'audio',
+  'canvas',
+  'iframe',
+  'object',
+  'embed',
+  'a[href]',
+].join(',');
+
 // --- chat id ------------------------------------------------------------
 
 /**
@@ -173,6 +188,125 @@ const normalizePreservingBlankLines = (s) =>
     .replace(/[ \t]+\n/g, '\n')
     .trim();
 
+const firstNonEmpty = (...values) => {
+  for (const value of values) {
+    const text = normalizeWhitespace(value || '');
+    if (text) return text;
+  }
+  return '';
+};
+
+const humanMediaKind = (kind) => {
+  if (kind === 'image') return 'Imagem';
+  if (kind === 'video') return 'Vídeo';
+  if (kind === 'audio') return 'Áudio';
+  if (kind === 'canvas') return 'Imagem/canvas';
+  if (kind === 'embed') return 'Mídia incorporada';
+  if (kind === 'attachment') return 'Anexo';
+  return 'Mídia';
+};
+
+const mediaKindOf = (el) => {
+  const tag = el.tagName?.toLowerCase();
+  if (tag === 'img') {
+    const source = mediaSourceOf(el);
+    const description = describeMedia(el);
+    if (
+      /drive-thirdparty\.googleusercontent\.com\/\d+\/type\/application\//i.test(source) ||
+      /\b(?:pdf|document|spreadsheet|presentation)\s+icon\b/i.test(description)
+    ) {
+      return 'attachment';
+    }
+    return 'image';
+  }
+  if (tag === 'video') return 'video';
+  if (tag === 'audio') return 'audio';
+  if (tag === 'canvas') return 'canvas';
+  if (tag === 'iframe' || tag === 'object' || tag === 'embed') return 'embed';
+  if (tag === 'a' && MEDIA_LINK_EXTENSIONS.test(el.getAttribute('href') || '')) {
+    return 'attachment';
+  }
+  return null;
+};
+
+const mediaSourceOf = (el) =>
+  firstNonEmpty(
+    el.currentSrc,
+    el.getAttribute('currentSrc'),
+    el.src,
+    el.getAttribute('src'),
+    el.getAttribute('srcset'),
+    el.getAttribute('data-src'),
+    el.data,
+    el.getAttribute('data'),
+    el.href,
+    el.getAttribute('href'),
+    el.getAttribute('data-download-url'),
+    el.querySelector?.('source[src]')?.getAttribute('src'),
+    el.querySelector?.('source[srcset]')?.getAttribute('srcset'),
+  );
+
+const shouldPrintMediaSource = (source) => {
+  if (!source) return false;
+  return !/^(?:blob|data|javascript):/i.test(source);
+};
+
+const formatMediaSource = (source) =>
+  source.length > MAX_MEDIA_SOURCE_LENGTH
+    ? `${source.slice(0, MAX_MEDIA_SOURCE_LENGTH - 3)}...`
+    : source;
+
+const describeMedia = (el) =>
+  firstNonEmpty(
+    el.getAttribute('alt'),
+    el.getAttribute('aria-label'),
+    el.getAttribute('title'),
+    el.textContent,
+  );
+
+const mediaPlaceholderFor = (el) => {
+  const kind = mediaKindOf(el);
+  if (!kind) return '';
+
+  const label = humanMediaKind(kind);
+  const lines = [
+    '> [!warning] Mídia não exportada',
+    `> Tipo: ${label}`,
+    '> Arquivo detectado no Gemini neste ponto, mas não salvo automaticamente.',
+  ];
+  const description = describeMedia(el);
+  const source = mediaSourceOf(el);
+  if (description) lines.push(`> Descrição: ${description}`);
+  if (shouldPrintMediaSource(source)) {
+    lines.push(`> Origem detectada: ${formatMediaSource(source)}`);
+  }
+  return lines.join('\n');
+};
+
+const mediaReplacementTarget = (el, root) => {
+  const interactive = el.closest?.('button, [role="button"]');
+  if (interactive && interactive !== root && root.contains(interactive)) {
+    return interactive;
+  }
+  return el;
+};
+
+const replaceMediaWithPlaceholders = (root) => {
+  const placeholders = [];
+  const replaced = new Set();
+  const elements = Array.from(root.querySelectorAll(MEDIA_SELECTOR));
+  elements.forEach((el) => {
+    const target = mediaReplacementTarget(el, root);
+    if (replaced.has(target) || !root.contains(target)) return;
+    const placeholder = mediaPlaceholderFor(el);
+    if (!placeholder) return;
+    replaced.add(target);
+    placeholders.push(placeholder);
+    replaceAsBlock(target, placeholder);
+  });
+  return placeholders;
+};
+
 const extractUserQueryLines = (root) => {
   const queryLines = Array.from(root.querySelectorAll('p.query-text-line'));
   if (queryLines.length > 0) {
@@ -230,6 +364,7 @@ const extractUserLines = (root) => {
 export const extractMarkdown = (node) => {
   const clone = node.cloneNode(true);
 
+  const mediaPlaceholders = replaceMediaWithPlaceholders(clone);
   stripUIChrome(clone);
   stripAccessibilityLabels(clone);
 
@@ -276,8 +411,12 @@ export const extractMarkdown = (node) => {
   // Antes de tratarmos divs como blocos genéricos, preservamos essas quebras
   // como newline simples para não transformar a pergunta em vários parágrafos.
   if (clone.tagName?.toLowerCase() === 'user-query') {
+    const hasQueryTextLines = clone.querySelectorAll('p.query-text-line').length > 0;
     const userLines = extractUserQueryLines(clone) ?? extractUserLines(clone);
     if (userLines !== null) {
+      if (hasQueryTextLines) {
+        return [userLines, ...mediaPlaceholders].filter(Boolean).join('\n\n');
+      }
       return userLines;
     }
   }

@@ -111,8 +111,12 @@ gemini extensions update --all
 
 Depois feche e reabra o Gemini CLI. Como a extensão do navegador fica dentro da
 extensão do Gemini CLI, esse update também baixa os novos arquivos do
-Chrome/Edge. O passo manual que continua necessário é recarregar o card da
-extensão em `chrome://extensions`/`edge://extensions`.
+Chrome/Edge. A partir da versão com auto-reload, a primeira tool MCP que
+precisar do navegador confere versão/protocolo da extensão do Chrome e pede
+`chrome.runtime.reload()` quando o runtime carregado ainda estiver antigo; a
+própria extensão recarrega as abas do Gemini em seguida. O reload manual do
+card em `chrome://extensions`/`edge://extensions` continua sendo o fallback
+para a primeira migração, mudança de permissões/manifest ou perfil errado.
 
 Durante a instalação no Windows, o instalador tenta registrar a extensão pelo
 comando oficial `gemini extensions install https://github.com/augustocaruso/gemini-md-export.git
@@ -240,6 +244,8 @@ npm run release:windows:prebuilt
   `~/.gemini/extensions/gemini-md-export`, incluindo
   `browser-extension/` para o Chrome/Edge carregar de uma pasta que o
   `gemini extensions update` também atualiza;
+- `bridge-version.json`, fonte de verdade para a versão/protocolo esperados
+  pelo MCP ao validar a extensão do Chrome;
 - `dist/gemini-export.user.js` como artefato legado de debug, fora do fluxo
   recomendado.
 

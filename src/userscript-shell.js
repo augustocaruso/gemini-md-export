@@ -28,6 +28,7 @@
   // --- config -----------------------------------------------------------
 
   const HOTKEY = { key: 'e', ctrl: true, shift: true }; // Ctrl+Shift+E
+  const EXTENSION_PROTOCOL_VERSION = Number('__EXTENSION_PROTOCOL_VERSION__');
   // Namespace de UI isolado. Versões antigas usavam `gm-md-export-*`; se um
   // userscript/content script velho ainda estiver vivo, compartilhar ids faz
   // os MutationObservers brigarem pelo mesmo nó e pode travar o Gemini.
@@ -342,6 +343,7 @@
     browserDownloadFallbackNotified: false,
     isExporting: false,
     progress: null,
+    progressCreepTimer: null,
     isLoadingMore: false,
     loadMoreFailures: 0,
     filterQuery: '',
@@ -378,6 +380,7 @@
     windowId: null,
     isActiveTab: null,
     extensionVersion: '__VERSION__',
+    protocolVersion: EXTENSION_PROTOCOL_VERSION,
     buildStamp: '__BUILD_STAMP__',
     lastError: null,
     heartbeatTimer: 0,
@@ -1362,6 +1365,7 @@
 
   const debugSnapshot = () => ({
     version: '__VERSION__',
+    protocolVersion: EXTENSION_PROTOCOL_VERSION,
     buildStamp: '__BUILD_STAMP__',
     url: location.href,
     pathname: location.pathname,
@@ -1388,6 +1392,88 @@
     batchExportSession: loadBatchExportSession(),
   });
 
+  const compactOuterHtml = (el, maxLength = 1200) => {
+    const html = String(el?.outerHTML || '');
+    return html.length > maxLength ? `${html.slice(0, maxLength)}...` : html;
+  };
+
+  const inspectMediaElement = (el, { includeHtml = true } = {}) => {
+    const rect = visibleRect(el);
+    const target = mediaReplacementTarget(el, document.body);
+    const targetRect = visibleRect(target);
+    const turn = el.closest?.('user-query, model-response');
+    const targetTurn = target?.closest?.('user-query, model-response') || turn;
+    const targetButton = el.closest?.('button, [role="button"]');
+    const source = mediaSourceOf(el);
+    const kind = mediaKindOf(el);
+    return {
+      kind,
+      tag: el.tagName?.toLowerCase() || null,
+      role: targetTurn ? roleOf(targetTurn) : null,
+      inTurn: !!targetTurn,
+      turnIndex: targetTurn
+        ? Array.from(document.querySelectorAll('user-query, model-response')).indexOf(targetTurn)
+        : -1,
+      source,
+      description: describeMedia(el),
+      alt: el.getAttribute?.('alt') || '',
+      ariaLabel: el.getAttribute?.('aria-label') || '',
+      title: el.getAttribute?.('title') || '',
+      className: String(el.getAttribute?.('class') || ''),
+      visible: !!rect,
+      rect: rect
+        ? {
+            x: Math.round(rect.x),
+            y: Math.round(rect.y),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height),
+          }
+        : null,
+      targetTag: target?.tagName?.toLowerCase() || null,
+      targetAriaLabel: target?.getAttribute?.('aria-label') || '',
+      targetText: normalizeWhitespace(target?.textContent || '').slice(0, 240),
+      targetVisible: !!targetRect,
+      targetRect: targetRect
+        ? {
+            x: Math.round(targetRect.x),
+            y: Math.round(targetRect.y),
+            width: Math.round(targetRect.width),
+            height: Math.round(targetRect.height),
+          }
+        : null,
+      buttonAriaLabel: targetButton?.getAttribute?.('aria-label') || '',
+      buttonText: normalizeWhitespace(targetButton?.textContent || '').slice(0, 240),
+      outerHTML: includeHtml ? compactOuterHtml(el) : '',
+      targetOuterHTML: includeHtml && target && target !== el ? compactOuterHtml(target) : '',
+    };
+  };
+
+  const inspectMediaDom = () => {
+    const allElements = Array.from(document.querySelectorAll(MEDIA_ASSET_SELECTOR));
+    const mediaElements = allElements.filter((el) => mediaKindOf(el));
+    const maxItems = 80;
+    const items = mediaElements
+      .slice(0, maxItems)
+      .map((el) => inspectMediaElement(el, { includeHtml: mediaElements.length <= 30 }));
+    return {
+      url: location.href,
+      chatId: currentChatId(),
+      buildStamp: BUILD_STAMP,
+      selector: MEDIA_ASSET_SELECTOR,
+      matchedSelectorCount: allElements.length,
+      total: mediaElements.length,
+      returned: items.length,
+      truncated: mediaElements.length > items.length,
+      inTurns: items.filter((item) => item.inTurn).length,
+      byKind: items.reduce((acc, item) => {
+        const key = item.kind || 'unknown';
+        acc[key] = (acc[key] || 0) + 1;
+        return acc;
+      }, {}),
+      items,
+    };
+  };
+
   const reportFailure = (message) => {
     const snapshot = debugSnapshot();
     warn(message, snapshot);
@@ -1403,26 +1489,48 @@
     }
   };
 
-  const extensionSendMessage = (message) =>
+  const withTimeout = (promise, timeoutMs, message) =>
     new Promise((resolve, reject) => {
-      if (!isExtensionContext) {
-        resolve(null);
-        return;
-      }
-
-      try {
-        chrome.runtime.sendMessage(message, (response) => {
-          const error = chrome.runtime.lastError;
-          if (error) {
-            reject(new Error(error.message));
-            return;
-          }
-          resolve(response || null);
-        });
-      } catch (err) {
-        reject(err);
-      }
+      const timeoutId = setTimeout(
+        () => reject(new Error(message || 'timeout')),
+        timeoutMs,
+      );
+      Promise.resolve(promise).then(
+        (value) => {
+          clearTimeout(timeoutId);
+          resolve(value);
+        },
+        (err) => {
+          clearTimeout(timeoutId);
+          reject(err);
+        },
+      );
     });
+
+  const extensionSendMessage = (message, { timeoutMs = 12000 } = {}) =>
+    withTimeout(
+      new Promise((resolve, reject) => {
+        if (!isExtensionContext) {
+          resolve(null);
+          return;
+        }
+
+        try {
+          chrome.runtime.sendMessage(message, (response) => {
+            const error = chrome.runtime.lastError;
+            if (error) {
+              reject(new Error(error.message));
+              return;
+            }
+            resolve(response || null);
+          });
+        } catch (err) {
+          reject(err);
+        }
+      }),
+      timeoutMs,
+      `Tempo esgotado ao falar com a extensão (${message?.type || 'mensagem'}).`,
+    );
 
   const fetchWithTimeout = async (url, options = {}, timeoutMs = 10000) => {
     const controller = new AbortController();
@@ -1540,6 +1648,7 @@
             filename: payload.filename,
             content: payload.content,
           },
+          ...(payload.mediaFiles || []),
         ],
       },
       timeoutMs: BRIDGE_FILE_TIMEOUT_MS,
@@ -1552,6 +1661,46 @@
     return response.files?.[0] || null;
   };
 
+  const writeBrowserFile = async (directoryHandle, filename, file) => {
+    const parts = String(filename || '')
+      .split('/')
+      .map((part) => part.trim())
+      .filter(Boolean);
+    if (parts.length === 0 || parts.some((part) => part === '.' || part === '..')) {
+      throw new Error('Nome de arquivo inválido para salvar no navegador.');
+    }
+
+    let parent = directoryHandle;
+    for (const part of parts.slice(0, -1)) {
+      parent = await parent.getDirectoryHandle(part, { create: true });
+    }
+
+    const fileHandle = await parent.getFileHandle(parts[parts.length - 1], {
+      create: true,
+    });
+    const writable = await fileHandle.createWritable({ keepExistingData: false });
+    if (file.contentBase64) {
+      const binary = atob(file.contentBase64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+      await writable.write(
+        new Blob([bytes], { type: file.mimeType || 'application/octet-stream' }),
+      );
+    } else {
+      await writable.write(file.content || '');
+    }
+    await writable.close();
+  };
+
+  const saveExportViaDirectoryHandle = async (payload) => {
+    await writeBrowserFile(state.directoryHandle, payload.filename, {
+      content: payload.content,
+    });
+    for (const file of payload.mediaFiles || []) {
+      await writeBrowserFile(state.directoryHandle, file.filename, file);
+    }
+  };
+
   const buildBridgeSummary = () => {
     const modalConversations = collectConversationLinks();
     const bridgeConversations = collectBridgeConversationLinks();
@@ -1561,6 +1710,7 @@
       windowId: bridgeState.windowId,
       isActiveTab: bridgeState.isActiveTab,
       extensionVersion: bridgeState.extensionVersion,
+      protocolVersion: bridgeState.protocolVersion,
       buildStamp: bridgeState.buildStamp,
       observedAt: new Date().toISOString(),
       staleAfterMs: BRIDGE_CLIENT_STALE_MS,
@@ -1582,6 +1732,7 @@
         notebookCacheCount: notebookChatUrlCacheSummary().size,
         reachedSidebarEnd: state.reachedSidebarEnd,
         isActiveTab: bridgeState.isActiveTab,
+        protocolVersion: bridgeState.protocolVersion,
         buildStamp: bridgeState.buildStamp,
       },
       conversations: bridgeConversations.slice(0, 100),
@@ -1591,7 +1742,254 @@
 
   // --- ação de exportar -------------------------------------------------
 
-  const buildExportPayload = (doc, url, options = {}) => {
+  const MEDIA_ASSET_SELECTOR = MEDIA_SELECTOR;
+
+  const mediaAssetExtensionFor = (mimeType, source) => {
+    const type = String(mimeType || '').toLowerCase().split(';')[0].trim();
+    if (type === 'image/jpeg' || type === 'image/jpg') return 'jpg';
+    if (type === 'image/png') return 'png';
+    if (type === 'image/webp') return 'webp';
+    if (type === 'image/gif') return 'gif';
+    if (type === 'image/avif') return 'avif';
+    if (type === 'image/svg+xml') return 'svg';
+
+    const sourceExt = String(source || '').match(
+      /\.([a-z0-9]{2,5})(?:[?#].*)?$/i,
+    )?.[1];
+    if (sourceExt && /^(?:avif|gif|jpe?g|png|svg|webp)$/i.test(sourceExt)) {
+      return sourceExt.toLowerCase() === 'jpeg' ? 'jpg' : sourceExt.toLowerCase();
+    }
+    return 'png';
+  };
+
+  const escapeMarkdownAlt = (value) =>
+    normalizeWhitespace(value || 'Imagem do Gemini')
+      .replace(/\\/g, '\\\\')
+      .replace(/\]/g, '\\]');
+
+  const arrayBufferToBase64 = (buffer) => {
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+    }
+    return btoa(binary);
+  };
+
+  const parseDataUrlAsset = (source) => {
+    const match = String(source || '').match(/^data:([^;,]+)?(;base64)?,(.*)$/i);
+    if (!match) return null;
+    const mimeType = match[1] || 'application/octet-stream';
+    const isBase64 = !!match[2];
+    const data = match[3] || '';
+    return {
+      mimeType,
+      contentBase64: isBase64
+        ? data
+        : arrayBufferToBase64(new TextEncoder().encode(decodeURIComponent(data)).buffer),
+    };
+  };
+
+  const shouldFetchWithCredentials = (source) => {
+    try {
+      const url = new URL(source, location.href);
+      return url.origin === location.origin;
+    } catch {
+      return false;
+    }
+  };
+
+  const shouldFetchViaBackgroundFirst = (source) => {
+    if (!isExtensionContext) return false;
+    try {
+      const url = new URL(source, location.href);
+      return (
+        (url.protocol === 'https:' || url.protocol === 'http:') &&
+        url.origin !== location.origin
+      );
+    } catch {
+      return false;
+    }
+  };
+
+  const canvasToAsset = (canvas) => {
+    const dataUrl = canvas.toDataURL('image/png');
+    return parseDataUrlAsset(dataUrl);
+  };
+
+  const imageElementToAsset = async (img) => {
+    if (!(img instanceof HTMLImageElement)) return null;
+    if (!img.complete) {
+      await withTimeout(
+        img.decode?.() || Promise.resolve(),
+        1500,
+        'Tempo esgotado ao decodificar imagem renderizada.',
+      );
+    }
+    if (!img.naturalWidth || !img.naturalHeight) return null;
+
+    const canvas = document.createElement('canvas');
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    const context = canvas.getContext('2d');
+    if (!context) return null;
+    context.drawImage(img, 0, 0);
+    return canvasToAsset(canvas);
+  };
+
+  const fetchImageAssetViaBackground = async (source) => {
+    const response = await extensionSendMessage(
+      {
+        type: 'gemini-md-export/fetch-asset',
+        source,
+      },
+      { timeoutMs: 6500 },
+    );
+    if (!response?.ok || !response.contentBase64) {
+      throw new Error(response?.error || 'background-fetch-failed');
+    }
+    return {
+      mimeType: response.mimeType || 'application/octet-stream',
+      contentBase64: response.contentBase64,
+    };
+  };
+
+  const fetchImageAsset = async (source) => {
+    if (!source) return null;
+    if (/^data:/i.test(source)) return parseDataUrlAsset(source);
+
+    if (shouldFetchViaBackgroundFirst(source)) {
+      return fetchImageAssetViaBackground(source);
+    }
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
+    try {
+      const response = await fetch(source, {
+        credentials: shouldFetchWithCredentials(source) ? 'include' : 'omit',
+        cache: 'force-cache',
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      const blob = await response.blob();
+      return {
+        mimeType: blob.type || 'application/octet-stream',
+        contentBase64: arrayBufferToBase64(await blob.arrayBuffer()),
+      };
+    } catch (err) {
+      if (isExtensionContext) {
+        return fetchImageAssetViaBackground(source);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  };
+
+  const collectMediaCandidatesForTurn = (turnNode) => {
+    const candidates = [];
+    const replaced = new Set();
+    Array.from(turnNode.querySelectorAll(MEDIA_ASSET_SELECTOR)).forEach((el) => {
+      const kind = mediaKindOf(el);
+      if (kind !== 'image' && kind !== 'canvas') return;
+
+      const target = mediaReplacementTarget(el, turnNode);
+      if (replaced.has(target) || !turnNode.contains(target)) return;
+
+      const placeholder = mediaPlaceholderFor(el);
+      if (!placeholder) return;
+
+      replaced.add(target);
+      candidates.push({
+        el,
+        kind,
+        placeholder,
+        description: describeMedia(el),
+        source: mediaSourceOf(el),
+      });
+    });
+    return candidates;
+  };
+
+  const replaceFirst = (text, search, replacement) => {
+    const index = text.indexOf(search);
+    if (index < 0) return text;
+    return text.slice(0, index) + replacement + text.slice(index + search.length);
+  };
+
+  const collectMediaAssetsForExport = async (doc, chatId, turns) => {
+    const nodes = Array.from(doc.querySelectorAll('user-query, model-response'));
+    const updatedTurns = turns.map((turn) => ({ ...turn }));
+    const files = [];
+    let exportedTurnIndex = 0;
+
+    for (const node of nodes) {
+      const role = roleOf(node);
+      if (!role) continue;
+
+      const extracted = extractMarkdown(node);
+      if (!extracted.trim()) continue;
+
+      const turn = updatedTurns[exportedTurnIndex];
+      if (!turn) break;
+
+      const candidates = collectMediaCandidatesForTurn(node);
+      let mediaIndex = 0;
+      for (const candidate of candidates) {
+        mediaIndex += 1;
+        try {
+          let asset = null;
+          if (candidate.kind === 'canvas') {
+            asset = canvasToAsset(candidate.el);
+          } else {
+            try {
+              asset = await fetchImageAsset(candidate.source);
+            } catch (fetchErr) {
+              try {
+                asset = await imageElementToAsset(candidate.el);
+              } catch {
+                asset = null;
+              }
+              if (!asset?.contentBase64) throw fetchErr;
+            }
+          }
+          if (!asset?.contentBase64) continue;
+
+          const ext = mediaAssetExtensionFor(asset.mimeType, candidate.source);
+          const rolePrefix = role === 'user' ? 'user' : 'gemini';
+          const filename = `assets/${chatId}/${rolePrefix}-${String(
+            exportedTurnIndex + 1,
+          ).padStart(2, '0')}-image-${String(mediaIndex).padStart(2, '0')}.${ext}`;
+          const markdownPath = filename;
+          const markdownImage = `![${escapeMarkdownAlt(candidate.description)}](${markdownPath})`;
+
+          files.push({
+            filename,
+            contentBase64: asset.contentBase64,
+            mimeType: asset.mimeType,
+          });
+          turn.text = replaceFirst(turn.text, candidate.placeholder, markdownImage);
+        } catch (err) {
+          warn('Não consegui baixar a mídia; mantendo warning no Markdown.', {
+            source: candidate.source,
+            error: err?.message || String(err),
+          });
+        }
+      }
+
+      exportedTurnIndex += 1;
+    }
+
+    return {
+      turns: updatedTurns,
+      files,
+    };
+  };
+
+  const buildExportPayload = async (doc, url, options = {}) => {
     const chatId = extractChatId(new URL(url).pathname);
     const turns = options.turns || scrapeTurns(doc);
     if (!chatId) {
@@ -1609,12 +2007,20 @@
       model: scrapeModelFromDocument(doc),
     };
 
+    const fallbackContent = buildDocument({ meta, turns });
+    if (state.progress) {
+      updateExportProgress({ label: 'Baixando mídias da conversa...' });
+    }
+    const media = await collectMediaAssetsForExport(doc, chatId, turns);
+
     return {
       chatId,
-      turns,
+      turns: media.turns,
       title: meta.title || chatId,
       filename: buildFilename(chatId),
-      content: buildDocument({ meta, turns }),
+      content: buildDocument({ meta, turns: media.turns }),
+      fallbackContent,
+      mediaFiles: media.files,
       hydration: options.hydration || null,
     };
   };
@@ -1719,6 +2125,14 @@
       };
     }
 
+    if (command.type === 'inspect-media') {
+      return {
+        ok: true,
+        media: inspectMediaDom(),
+        snapshot: debugSnapshot(),
+      };
+    }
+
     if (command.type === 'reload-page') {
       const delayMs = Math.max(0, Math.min(10_000, Number(command.args?.delayMs || 250)));
       setTimeout(() => {
@@ -1753,6 +2167,28 @@
         );
       });
       return response;
+    }
+
+    if (command.type === 'get-extension-info') {
+      const response = await extensionSendMessage({ type: 'GET_EXTENSION_INFO' });
+      if (response?.ok && response.protocolVersion !== undefined) {
+        bridgeState.protocolVersion = response.protocolVersion;
+      }
+      if (response?.version || response?.extensionVersion) {
+        bridgeState.extensionVersion = response.extensionVersion || response.version;
+      }
+      if (response?.buildStamp) bridgeState.buildStamp = response.buildStamp;
+      return response || { ok: false, reason: 'empty-extension-info-response' };
+    }
+
+    if (command.type === 'reload-extension-self') {
+      const response = await extensionSendMessage({
+        type: 'RELOAD_SELF',
+        reason: command.args?.reason || 'bridge-command',
+        expectedExtensionVersion: command.args?.expectedExtensionVersion || null,
+        expectedProtocolVersion: command.args?.expectedProtocolVersion || null,
+      });
+      return response || { ok: false, reason: 'empty-reload-response' };
     }
 
     if (command.type === 'list-conversations') {
@@ -2416,7 +2852,7 @@
         `Nao consegui carregar o inicio da conversa com seguranca antes de exportar (scroller: ${hydrated.stats.matchedBy}, tentativas: ${hydrated.stats.attempts}). Recarregue a aba e tente novamente.`,
       );
     }
-    return buildExportPayload(document, location.href, {
+    return await buildExportPayload(document, location.href, {
       turns: hydrated.turns,
       hydration: hydrated.stats,
     });
@@ -2484,12 +2920,7 @@
     }
 
     if (state.directoryHandle) {
-      const fileHandle = await state.directoryHandle.getFileHandle(payload.filename, {
-        create: true,
-      });
-      const writable = await fileHandle.createWritable({ keepExistingData: false });
-      await writable.write(payload.content);
-      await writable.close();
+      await saveExportViaDirectoryHandle(payload);
       return;
     }
 
@@ -2509,7 +2940,7 @@
       }
     }
 
-    await downloadBlob(payload.filename, payload.content);
+    await downloadBlob(payload.filename, payload.fallbackContent || payload.content);
   };
 
   const exportNow = async () => {
@@ -2702,17 +3133,78 @@
       width: 'min(360px, calc(100vw - 24px))',
     });
 
+    // Estilos do dock injetados como <style> próprio do nó porque keyframes
+    // não funcionam via style inline. O shimmer é o que dá a sensação de
+    // fluidez quando o `current` ainda não mudou (ex.: hidratação longa de
+    // uma única conversa) — uma faixa diagonal varre a parte preenchida e
+    // mantém o feedback vivo.
     setHtml(
       dock,
       `
-        <div style="font-family:var(--gm-font);display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:18px;background:var(--gm-dock-bg);color:var(--gm-dock-text);border:1px solid var(--gm-dock-border);box-shadow:0 10px 30px rgba(0,0,0,0.16);backdrop-filter:blur(10px);">
+        <style>
+          #${PROGRESS_DOCK_ID} .gm-dock-card {
+            font-family: var(--gm-font);
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            padding: 12px 14px;
+            border-radius: 18px;
+            background: var(--gm-dock-bg);
+            color: var(--gm-dock-text);
+            border: 1px solid var(--gm-dock-border);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.16);
+            backdrop-filter: blur(10px);
+          }
+          #${PROGRESS_DOCK_ID} .gm-dock-track {
+            height: 6px;
+            background: var(--gm-dock-track);
+            border-radius: 999px;
+            overflow: hidden;
+            position: relative;
+          }
+          #${PROGRESS_DOCK_ID} .gm-dock-bar {
+            height: 100%;
+            width: 0%;
+            background: var(--gm-accent);
+            border-radius: 999px;
+            position: relative;
+            overflow: hidden;
+            /* Easing Material para movimento natural de avanço; mais longo
+               que .18s pra conseguir ler o crescimento mesmo em incrementos
+               pequenos vindos do "creep" assintótico. */
+            transition: width 420ms cubic-bezier(0.22, 0.61, 0.36, 1);
+            will-change: width;
+          }
+          #${PROGRESS_DOCK_ID} .gm-dock-bar::after {
+            content: "";
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(
+              90deg,
+              rgba(255,255,255,0) 0%,
+              rgba(255,255,255,0.55) 50%,
+              rgba(255,255,255,0) 100%
+            );
+            transform: translateX(-100%);
+            animation: gm-dock-shimmer 1500ms linear infinite;
+          }
+          #${PROGRESS_DOCK_ID}.gm-dock-done .gm-dock-bar::after {
+            animation: none;
+            opacity: 0;
+          }
+          @keyframes gm-dock-shimmer {
+            0%   { transform: translateX(-100%); }
+            100% { transform: translateX(100%); }
+          }
+        </style>
+        <div class="gm-dock-card">
           <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
             <strong style="font-size:12px;font-weight:600;letter-spacing:0.01em;">Exportando conversas</strong>
             <span id="${PROGRESS_DOCK_ID}-count" style="font-size:11px;color:var(--gm-dock-muted);white-space:nowrap;"></span>
           </div>
           <div id="${PROGRESS_DOCK_ID}-label" style="font-size:12px;color:var(--gm-dock-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
-          <div style="height:4px;background:var(--gm-dock-track);border-radius:999px;overflow:hidden;">
-            <div id="${PROGRESS_DOCK_ID}-bar" style="height:100%;width:0%;background:var(--gm-accent);border-radius:999px;transition:width .18s ease;"></div>
+          <div class="gm-dock-track">
+            <div id="${PROGRESS_DOCK_ID}-bar" class="gm-dock-bar"></div>
           </div>
         </div>
       `,
@@ -2722,11 +3214,58 @@
     return dock;
   };
 
+  // "Creep" assintótico: entre uma chamada de updateExportProgress e a
+  // próxima, deslocamos a porcentagem visual em direção ao próximo
+  // milestone (sem ultrapassá-lo). Isso evita a sensação de barra
+  // travada durante etapas lentas dentro de uma única conversa
+  // (hidratação, scroll, salvar). Quando o current de fato avança,
+  // pulamos pra esse alvo (animação CSS suaviza). Mecânica clássica
+  // de YouTube/GitHub progress bar.
+  const PROGRESS_CREEP_INTERVAL_MS = 240;
+  const PROGRESS_CREEP_MAX_FRACTION = 0.85; // não passa de 85% até o próximo milestone
+
+  const computeProgressMilestone = (progress) => {
+    const total = Math.max(progress?.total || 1, 1);
+    const current = Math.max(0, Math.min(progress?.current || 0, total));
+    const base = (current / total) * 100;
+    const next = (Math.min(current + 1, total) / total) * 100;
+    return { base, next };
+  };
+
+  const stopProgressCreep = () => {
+    if (state.progressCreepTimer) {
+      clearInterval(state.progressCreepTimer);
+      state.progressCreepTimer = null;
+    }
+  };
+
+  const startProgressCreep = () => {
+    stopProgressCreep();
+    state.progressCreepTimer = setInterval(() => {
+      if (!state.isExporting || !state.progress) {
+        stopProgressCreep();
+        return;
+      }
+      const { base, next } = computeProgressMilestone(state.progress);
+      const ceiling = base + (next - base) * PROGRESS_CREEP_MAX_FRACTION;
+      const display = state.progress.displayPercent ?? base;
+      if (display >= ceiling - 0.05) return;
+      // Fração aproxima exponencialmente: andamos 18% do caminho restante
+      // por tick. Bem rápido no começo, vai diminuindo.
+      const next_display = display + (ceiling - display) * 0.18;
+      state.progress.displayPercent = next_display;
+      const barEl = document.getElementById(`${PROGRESS_DOCK_ID}-bar`);
+      if (barEl) barEl.style.width = `${next_display}%`;
+    }, PROGRESS_CREEP_INTERVAL_MS);
+  };
+
   const updateProgressDock = () => {
     const dock = ensureProgressDock();
     if (!state.isExporting || !state.progress) {
+      stopProgressCreep();
       dock.hidden = true;
       dock.style.display = 'none';
+      dock.classList.remove('gm-dock-done');
       return;
     }
 
@@ -2768,9 +3307,24 @@
       labelEl.textContent = state.progress.label || 'Preparando exportação...';
     }
     if (barEl) {
-      const total = Math.max(state.progress.total || 1, 1);
-      const percent = Math.max(0, Math.min(100, (state.progress.current / total) * 100));
-      barEl.style.width = `${percent}%`;
+      const { base, next } = computeProgressMilestone(state.progress);
+      // Se o `current` real avançou, pulamos a barra pra base nova; caso
+      // contrário, mantemos o valor que o creep está alimentando (sem
+      // regredir nem ultrapassar a base nova).
+      const prevDisplay = state.progress.displayPercent ?? 0;
+      const display = Math.max(prevDisplay, base);
+      state.progress.displayPercent = display;
+      barEl.style.width = `${display}%`;
+      // Quando bate o total, marca como pronto pra parar o shimmer.
+      if (state.progress.current >= state.progress.total) {
+        dock.classList.add('gm-dock-done');
+      } else {
+        dock.classList.remove('gm-dock-done');
+      }
+      // Garante que o creep está rodando (idempotente).
+      if (!state.progressCreepTimer && next > base + 0.5) {
+        startProgressCreep();
+      }
     }
 
     dock.hidden = false;
@@ -2786,9 +3340,11 @@
       label,
       errorCount: 0,
       startedAt: Date.now(),
+      displayPercent: 0,
     };
     hideExportModal();
     updateProgressDock();
+    startProgressCreep();
     await nextPaint();
   };
 
@@ -2801,6 +3357,18 @@
   const finishExportProgress = async () => {
     const startedAt = state.progress?.startedAt || Date.now();
     const remaining = PROGRESS_MIN_VISIBLE_MS - (Date.now() - startedAt);
+    // Antes de sumir, pula a barra para 100% e desliga o shimmer pra dar
+    // a sensação de "concluído" — caso contrário ela some de 60% direto
+    // pra invisível, o que parecia um fade abrupto.
+    if (state.progress) {
+      state.progress.current = state.progress.total || 0;
+      state.progress.displayPercent = 100;
+    }
+    stopProgressCreep();
+    const dock = document.getElementById(PROGRESS_DOCK_ID);
+    const barEl = document.getElementById(`${PROGRESS_DOCK_ID}-bar`);
+    if (dock) dock.classList.add('gm-dock-done');
+    if (barEl) barEl.style.width = '100%';
     if (remaining > 0) await sleep(remaining);
     state.isExporting = false;
     state.progress = null;
@@ -3750,6 +4318,9 @@
         bridgeState.isActiveTab = extensionContext.isActiveTab;
       }
       if (extensionContext?.version) bridgeState.extensionVersion = extensionContext.version;
+      if (extensionContext?.protocolVersion !== undefined) {
+        bridgeState.protocolVersion = extensionContext.protocolVersion;
+      }
       if (extensionContext?.buildStamp) bridgeState.buildStamp = extensionContext.buildStamp;
     } catch {
       // O service worker pode acordar entre heartbeats; o bridge HTTP continua tentando.
@@ -3819,6 +4390,7 @@
       if (response?.windowId !== undefined) bridgeState.windowId = response.windowId;
       if (response?.isActiveTab !== undefined) bridgeState.isActiveTab = response.isActiveTab;
       if (response?.version) bridgeState.extensionVersion = response.version;
+      if (response?.protocolVersion !== undefined) bridgeState.protocolVersion = response.protocolVersion;
       if (response?.buildStamp) bridgeState.buildStamp = response.buildStamp;
     } catch (err) {
       warn('Falha ao obter contexto da extensão.', err);

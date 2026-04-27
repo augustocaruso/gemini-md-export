@@ -12,11 +12,15 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   const manifestPath = resolve(extensionDir, 'gemini-extension.json');
   const contextPath = resolve(extensionDir, 'GEMINI.md');
   const serverPath = resolve(extensionDir, 'src', 'mcp-server.js');
+  const guardPath = resolve(extensionDir, 'src', 'chrome-extension-guard.mjs');
+  const bridgeVersionPath = resolve(extensionDir, 'bridge-version.json');
   const browserManifestPath = resolve(extensionDir, 'browser-extension', 'manifest.json');
 
   assert.equal(existsSync(manifestPath), true);
   assert.equal(existsSync(contextPath), true);
   assert.equal(existsSync(serverPath), true);
+  assert.equal(existsSync(guardPath), true);
+  assert.equal(existsSync(bridgeVersionPath), true);
   assert.equal(existsSync(browserManifestPath), true);
 
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8'));
@@ -26,4 +30,12 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
     manifest.mcpServers?.['gemini-md-export']?.args?.[0] || '',
     /mcp-server\.js$/,
   );
+
+  const browserManifest = JSON.parse(readFileSync(browserManifestPath, 'utf-8'));
+  const bridgeVersion = JSON.parse(readFileSync(bridgeVersionPath, 'utf-8'));
+  assert.ok(browserManifest.host_permissions.includes('https://lh3.google.com/*'));
+  assert.ok(browserManifest.host_permissions.includes('https://*.googleusercontent.com/*'));
+  assert.ok(browserManifest.permissions.includes('storage'));
+  assert.equal(browserManifest.version, bridgeVersion.extensionVersion);
+  assert.equal(typeof bridgeVersion.protocolVersion, 'number');
 });
