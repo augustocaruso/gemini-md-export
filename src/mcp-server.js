@@ -54,6 +54,9 @@ const RECENT_CHATS_CACHE_MAX_AGE_MS = Number(
 const RECENT_CHATS_REFRESH_BUDGET_MS = Number(
   process.env.GEMINI_MCP_RECENT_CHATS_REFRESH_BUDGET_MS || 2500,
 );
+const RECENT_CHATS_LOAD_MORE_BUDGET_MS = Number(
+  process.env.GEMINI_MCP_RECENT_CHATS_LOAD_MORE_BUDGET_MS || 6000,
+);
 const CHROME_GUARD_CONFIG = {
   profileDirectory:
     process.env.GEMINI_MCP_CHROME_PROFILE_DIRECTORY ||
@@ -1315,12 +1318,25 @@ const loadMoreRecentChatsForClient = async (client, requestedLimit, args = {}) =
   let previousCount = initialCount;
 
   for (let round = 0; round < plan.rounds; round += 1) {
-    const result = await enqueueCommand(client.clientId, 'load-more-conversations', {
-      ensureSidebar: true,
-      attempts: plan.attemptsPerRound,
-      targetCount: plan.targetCount,
-      fastMode: true,
-    });
+    const commandTimeoutMs = Math.max(
+      1000,
+      Number(
+        args.loadMoreCommandTimeoutMs ||
+          args.loadMoreTimeoutMs ||
+          RECENT_CHATS_LOAD_MORE_BUDGET_MS,
+      ),
+    );
+    const result = await enqueueCommand(
+      client.clientId,
+      'load-more-conversations',
+      {
+        ensureSidebar: true,
+        attempts: plan.attemptsPerRound,
+        targetCount: plan.targetCount,
+        fastMode: true,
+      },
+      { timeoutMs: commandTimeoutMs },
+    );
 
     if (!result?.ok) {
       throw new Error(result?.error || 'Falha ao puxar mais conversas no browser.');
@@ -1468,7 +1484,27 @@ const listRecentChatsForClient = async (client, args = {}) => {
     }
   }
   if (recentConversationsForClient(client).length < targetCount) {
-    loadMore = await loadMoreRecentChatsForClient(client, targetCount, args);
+    try {
+      const loadMorePromise = loadMoreRecentChatsForClient(client, targetCount, args);
+      loadMore = await withTimeout(
+        loadMorePromise,
+        Math.max(1000, Number(args.loadMoreTimeoutMs || RECENT_CHATS_LOAD_MORE_BUDGET_MS)),
+      );
+    } catch (err) {
+      loadMore = {
+        attempted: true,
+        loadedAny: false,
+        roundsCompleted: 0,
+        reachedEnd: recentChatsReachedEndForClient(client),
+        snapshot: client.lastSnapshot || null,
+        conversations: recentConversationsForClient(client),
+        ok: false,
+        error: err.message,
+        timedOut:
+          err.message.includes('Timeout após') ||
+          err.code === 'command_timeout',
+      };
+    }
   }
   const conversations = recentConversationsForClient(client);
   const page = conversations.slice(offset, offset + limit);
@@ -1484,6 +1520,8 @@ const listRecentChatsForClient = async (client, args = {}) => {
     loadMoreLoadedAny: loadMore?.loadedAny === true,
     loadMoreRoundsCompleted: loadMore?.roundsCompleted || 0,
     loadMoreReachedEnd: reachedEnd,
+    loadMoreTimedOut: loadMore?.timedOut === true,
+    loadMoreError: loadMore?.ok === false ? loadMore.error : null,
     snapshot: loadMore?.snapshot || refresh?.snapshot || client.lastSnapshot || null,
     pagination: {
       offset,
