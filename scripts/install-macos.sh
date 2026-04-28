@@ -126,6 +126,16 @@ open_browser_extensions() {
   esac
 }
 
+remove_installed_gemini_cli_extension() {
+  local reason="${1:-reinstalacao}"
+  if [ -d "$GEMINI_CLI_EXTENSION_DIR" ] || [ -L "$GEMINI_CLI_EXTENSION_DIR" ]; then
+    rm -rf "$GEMINI_CLI_EXTENSION_DIR"
+    log "Gemini CLI: pasta anterior removida ($reason): $GEMINI_CLI_EXTENSION_DIR"
+  else
+    log "Gemini CLI: nenhuma pasta anterior para remover em $GEMINI_CLI_EXTENSION_DIR"
+  fi
+}
+
 write_launchers() {
   local mcp_server="$INSTALL_DIR/gemini-cli-extension/src/mcp-server.js"
   local node_bin
@@ -209,17 +219,21 @@ configure_gemini_cli() {
     fi
     warn "Gemini CLI nao encontrado; copiando extensao como fallback manual. Ela nao aparecera como atualizavel ate o Gemini CLI ser instalado."
     mkdir -p "$HOME/.gemini/extensions"
+    remove_installed_gemini_cli_extension "fallback manual"
     copy_dir "$INSTALL_DIR/gemini-cli-extension" "$HOME/.gemini/extensions/gemini-md-export"
     return
   fi
 
   log "Configurando Gemini CLI"
+  log "Gemini CLI: desinstalando gemini-md-export antes de instalar novamente"
   gemini extensions uninstall gemini-md-export >/dev/null 2>&1 || true
+  remove_installed_gemini_cli_extension "pre-install"
   if gemini extensions install "$GEMINI_EXTENSION_SOURCE" "--ref=$GEMINI_EXTENSION_REF" --auto-update --consent; then
     printf 'Gemini CLI configurado via GitHub (%s --ref=%s --auto-update).\n' "$GEMINI_EXTENSION_SOURCE" "$GEMINI_EXTENSION_REF"
   else
     warn "gemini extensions install via GitHub falhou; copiando extensao como fallback manual. Ela pode aparecer como not updatable."
     mkdir -p "$HOME/.gemini/extensions"
+    remove_installed_gemini_cli_extension "fallback manual"
     copy_dir "$INSTALL_DIR/gemini-cli-extension" "$HOME/.gemini/extensions/gemini-md-export"
   fi
 }

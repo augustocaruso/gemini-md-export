@@ -50,9 +50,11 @@ PowerShell acima.
 
 O instalador tenta registrar a extensao pelo comando oficial
 "gemini extensions install". Isso deve fazer o exporter aparecer como
-atualizavel quando voce listar as extensoes no Gemini CLI. Se o binario
-"gemini" nao estiver no PATH ou esse comando falhar, ele ainda instala por
-copia manual e avisa no resumo.
+atualizavel quando voce listar as extensoes no Gemini CLI. Antes disso, ele
+desinstala `gemini-md-export` no Gemini CLI e remove a pasta antiga da extensao
+para evitar mistura de arquivos velhos com novos. Se o binario "gemini" nao
+estiver no PATH ou esse comando falhar, ele ainda instala por copia manual e
+avisa no resumo.
 
 Quando o update terminar, feche e reabra o Gemini CLI. A partir da versao com
 auto-reload, a primeira ferramenta MCP que precisar do navegador confere se a

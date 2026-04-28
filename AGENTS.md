@@ -397,9 +397,12 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   o update nativo do Gemini CLI baixe também os arquivos da extensão Chrome,
   ajusta o bundle local para Claude/fallback, tenta registrar a extensão pelo
   comando oficial `gemini extensions install https://www.github.com/augustocaruso/gemini-md-export.git
-  --ref=gemini-cli-extension --auto-update --consent`, copia para
-  `~/.gemini/extensions/gemini-md-export` como fallback se o Gemini CLI não
-  estiver no PATH ou falhar, configura Claude Desktop quando detectado, gera
+  --ref=gemini-cli-extension --auto-update --consent`, sempre rodando antes
+  `gemini extensions uninstall gemini-md-export` e removendo
+  `~/.gemini/extensions/gemini-md-export` para não misturar instalação antiga
+  manual com a nova, copia para `~/.gemini/extensions/gemini-md-export` como
+  fallback se o Gemini CLI não estiver no PATH ou falhar, configura Claude
+  Desktop quando detectado, gera
   launchers `.command`, escreve `INSTALL-SUMMARY.txt` e abre a página de
   extensões do navegador. O carregamento/reload da extensão unpacked continua
   manual por restrição do Chrome/Edge/Brave.
@@ -427,8 +430,11 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   `gemini extensions uninstall gemini-md-export` (ignora falha) +
   `gemini extensions install https://www.github.com/augustocaruso/gemini-md-export.git
   --ref=gemini-cli-extension --auto-update --consent` para registrar a extensão como
-  gerenciável/atualizável pelo Gemini CLI. Se o binário `gemini`/`git` não
-  estiver no PATH ou o comando oficial falhar, cai para a
+  gerenciável/atualizável pelo Gemini CLI. Depois do uninstall e antes do novo
+  install, remove explicitamente
+  `%USERPROFILE%\.gemini\extensions\gemini-md-export`; isso limpa cópias
+  manuais/fallback que o comando oficial pode não conhecer. Se o binário
+  `gemini`/`git` não estiver no PATH ou o comando oficial falhar, cai para a
   cópia manual em `%USERPROFILE%\.gemini\extensions\gemini-md-export` e grava
   `method: manual-copy-fallback` no manifesto, deixando claro que a extensão
   pode aparecer como "not updatable". Se `settings.json` ainda contiver

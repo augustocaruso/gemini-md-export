@@ -659,6 +659,20 @@ const writeInstalledGeminiCliExtension = (targetDir) => {
   );
 };
 
+const removeInstalledGeminiCliExtension = (reason = 'reinstalacao') => {
+  const targetDir = geminiCliExtensionInstallPath();
+  if (options.dryRun) {
+    log(`    [dry-run] removeria extensao Gemini CLI existente (${reason}): ${targetDir}`);
+    return;
+  }
+  if (!existsSync(targetDir)) {
+    log(`    Gemini CLI: nenhuma pasta anterior para remover em ${targetDir}`);
+    return;
+  }
+  rmSync(targetDir, { recursive: true, force: true });
+  log(`    Gemini CLI: pasta anterior removida (${reason}): ${targetDir}`);
+};
+
 const patchGeminiCliExtensionBundle = (targetDir) => {
   if (options.dryRun) {
     log(`[dry-run] atualizaria manifest Gemini CLI em ${targetDir}`);
@@ -1053,6 +1067,8 @@ const configureGeminiCli = () => {
   log(`    gemini binario: ${geminiCommand || '(nao encontrado no PATH)'}`);
 
   if (options.dryRun) {
+    log(`    [dry-run] rodaria gemini extensions uninstall ${SERVER_NAME}`);
+    log(`    [dry-run] removeria ${geminiCliExtensionInstallPath()} antes de instalar novamente`);
     log(
       `    [dry-run] instalaria a extensao Gemini CLI de ${geminiCliExtensionInstallSource} e atualizaria settings.json`,
     );
@@ -1104,6 +1120,7 @@ const configureGeminiCli = () => {
   patchGeminiCliExtensionBundle(geminiCliExtensionBundlePath);
 
   if (geminiCommand) {
+    log('    Gemini CLI: desinstalando gemini-md-export antes de instalar novamente');
     const uninstallResult = runGeminiCommand(
       geminiCommand,
       ['extensions', 'uninstall', SERVER_NAME],
@@ -1113,6 +1130,7 @@ const configureGeminiCli = () => {
     if (!uninstallResult.ok) {
       log('    Gemini CLI: uninstall previo ignorado (extensao podia nao existir ou era manual)');
     }
+    removeInstalledGeminiCliExtension('pre-install');
 
     const installArgs = [
       'extensions',

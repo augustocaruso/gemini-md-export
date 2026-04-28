@@ -121,10 +121,13 @@ para a primeira migração, mudança de permissões/manifest ou perfil errado.
 Durante a instalação no Windows, o instalador tenta registrar a extensão pelo
 comando oficial `gemini extensions install https://www.github.com/augustocaruso/gemini-md-export.git
 --ref=gemini-cli-extension --auto-update`, em vez de apenas copiar arquivos para
-`~/.gemini/extensions`. Isso faz a extensão aparecer como atualizável no Gemini
-CLI. Se o binário `gemini` não estiver no PATH, `git` não estiver instalado ou
-esse comando falhar, o instalador ainda faz uma cópia manual como fallback e
-avisa no resumo.
+`~/.gemini/extensions`. Antes de reinstalar, ele roda
+`gemini extensions uninstall gemini-md-export` e remove a pasta antiga
+`~/.gemini/extensions/gemini-md-export`, para evitar mistura de instalação
+manual antiga com a nova. Isso faz a extensão aparecer como atualizável no
+Gemini CLI. Se o binário `gemini` não estiver no PATH, `git` não estiver
+instalado ou esse comando falhar, o instalador ainda faz uma cópia manual como
+fallback e avisa no resumo.
 
 ## Uso
 
