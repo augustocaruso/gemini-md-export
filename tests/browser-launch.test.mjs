@@ -144,7 +144,7 @@ test('launcher Windows usa PowerShell minimizado e restaura foco anterior', asyn
   }
 });
 
-test('launcher Windows cai para cmd start quando spawn direto falha', async () => {
+test('launcher Windows nao cai para cmd start quando spawn direto falha', async () => {
   const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-browser-launch-test-'));
   const calls = [];
   try {
@@ -156,7 +156,6 @@ test('launcher Windows cai para cmd start quando spawn direto falha', async () =
       spawnFn: (command, args, options) => {
         calls.push({ command, args, options });
         if (command === 'powershell.exe') return child({ error: 'powershell failed' });
-        if (command === 'wscript.exe') return child({ error: 'wscript failed' });
         if (command === 'chrome.exe') return child({ error: 'ENOENT' });
         return child({ exitCode: 0 });
       },
@@ -164,16 +163,13 @@ test('launcher Windows cai para cmd start quando spawn direto falha', async () =
     });
 
     assert.equal(result.attempted, true);
-    assert.equal(result.method, 'windows-cmd-start-fallback');
+    assert.equal(result.method, 'windows-direct-spawn-failed');
     assert.equal(calls[0].command, 'powershell.exe');
-    assert.equal(calls[1].command, 'wscript.exe');
-    assert.equal(calls[2].command, 'chrome.exe');
-    assert.equal(calls[3].command, 'cmd.exe');
-    assert.match(calls[3].args.join(' '), /start "" \/min/);
-    assert.match(calls[3].args.join(' '), /chrome\.exe/);
-    assert.match(calls[3].args.join(' '), /https:\/\/gemini\.google\.com\/app/);
+    assert.equal(calls[1].command, 'chrome.exe');
+    assert.equal(calls.length, 2);
     assert.equal(result.directLaunch.ok, false);
-    assert.equal(result.launch.ok, true);
+    assert.equal(result.launch.ok, false);
+    assert.equal(result.reason, 'browser-launch-failed');
   } finally {
     rmSync(tmpRoot, { recursive: true, force: true });
   }
@@ -212,9 +208,9 @@ test('script Windows captura janela ativa, abre minimizado e tenta devolver foco
   ]);
 
   assert.match(script, /GetForegroundWindow/);
-  assert.match(script, /ProcessWindowStyle\]::Minimized/);
+  assert.match(script, /-WindowStyle Minimized/);
   assert.match(script, /SetForegroundWindow/);
-  assert.match(script, /"--profile-directory=Profile 1"/);
+  assert.match(script, /--profile-directory=Profile 1/);
 });
 
 test('launcher macOS usa open -g -a Chrome para reduzir troca de foco', async () => {

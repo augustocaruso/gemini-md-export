@@ -39,10 +39,10 @@ Operational guidance:
   (`chrome`/`edge`/`brave`/`dia`) or `GEMINI_MCP_CHROME_PROFILE_DIRECTORY`
   over telling the user to repeat the same failed tool call.
 - On Windows, browser launch must not use synchronous `where`/`spawnSync` in
-  the runtime path. The MCP should spawn a known/configured browser executable
-  directly, observe immediate errors with `GEMINI_MCP_BROWSER_LAUNCH_OBSERVE_MS`,
-  and only then fall back to `cmd.exe /c start`. Tool results should preserve
-  `browserWake.launch` and `browserWake.directLaunch` for diagnostics.
+  the runtime path. In the Gemini CLI extension, the BeforeTool hook is
+  responsible for opening the configured browser; the MCP server runs with
+  `GEMINI_MCP_CHROME_LAUNCH_IF_CLOSED=false` so it does not compensate by
+  opening another tab if the hook fails.
 - `gemini_browser_status` is also allowed to wake the browser when no Gemini
   tab is connected. Do not treat status as a passive-only tool; Gemini CLI often
   asks for status first, and that first status call should be enough to open the
@@ -55,11 +55,14 @@ Operational guidance:
   opens `https://gemini.google.com/app` through a generated short PowerShell
   launcher that captures the current foreground window, starts the browser
   minimized, waits briefly, and tries to restore focus to the original terminal.
-  If that immediate launch fails, it falls back to WSH, direct browser spawn,
-  then `cmd.exe /c start "" /min`. The hook and MCP share
-  `hook-browser-launch.json`, so a tool call should not open a second tab while
-  a recent hook launch is still within cooldown. The hook itself must not use
-  synchronous stdin reads, wait for Chrome, or do long work. `SessionStart`
+  If that immediate launch fails, it falls back only to direct browser spawn
+  with argv items separated; do not reintroduce `cmd.exe /c start` or WSH here.
+  After launching, the hook waits for `/agent/clients` to report a connected
+  Gemini tab before it returns, up to `GEMINI_MCP_HOOK_CONNECT_TIMEOUT_MS`
+  (default 12000ms). The hook and MCP share `hook-browser-launch.json`, so a
+  tool call should not open a second tab while a recent hook launch is still
+  within cooldown. The hook itself must not use synchronous stdin reads.
+  `SessionStart`
   must not read stdin. BeforeTool/AfterTool read stdin asynchronously, parse as
   soon as a complete JSON payload arrives, and fail open after
   `GEMINI_MCP_HOOK_STDIN_TIMEOUT_MS` (default 120ms) if the client keeps stdin

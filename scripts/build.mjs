@@ -194,6 +194,9 @@ const geminiCliExtensionManifest = {
     'gemini-md-export': {
       command: 'node',
       args: ['${extensionPath}${/}src${/}mcp-server.js'],
+      env: {
+        GEMINI_MCP_CHROME_LAUNCH_IF_CLOSED: 'false',
+      },
     },
   },
 };

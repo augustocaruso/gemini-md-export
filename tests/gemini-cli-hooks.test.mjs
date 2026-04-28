@@ -299,9 +299,53 @@ test('BeforeTool abre Gemini direto pelo hook quando nao ha cliente conectado', 
     assert.equal(state.browserCommand, 'chrome.exe');
     assert.match(state.browserArgs.join(' '), /--new-tab/);
     assert.match(state.browserArgs.join(' '), /https:\/\/gemini\.google\.com\/app/);
-    assert.equal(state.fallbackCommand, 'cmd.exe');
-    assert.match(state.fallbackArgs.join(' '), /start "" \/min/);
+    assert.equal(state.fallbackCommand, undefined);
+    assert.equal(state.fallbackArgs, undefined);
     assert.equal(state.bridgeStatus.connectedCount, 0);
+  } finally {
+    await closeServer(server);
+    rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test('BeforeTool espera a aba Gemini conectar depois de abrir pelo hook', async () => {
+  const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-hook-test-'));
+  let requests = 0;
+  const server = createServer((_req, res) => {
+    requests += 1;
+    res.setHeader('content-type', 'application/json');
+    const connectedClients = requests >= 2 ? [{ clientId: 'tab-1' }] : [];
+    res.end(JSON.stringify({ connectedClients }));
+  });
+  const port = await listen(server);
+
+  try {
+    const output = await runHookAsync(
+      'before-tool',
+      {
+        hook_event_name: 'BeforeTool',
+        tool_name: 'mcp_gemini-md-export_gemini_browser_status',
+        tool_input: {},
+      },
+      {
+        GEMINI_MCP_HOOK_PLATFORM: 'win32',
+        GEMINI_MCP_CHROME_EXE: '/usr/bin/true',
+        GEMINI_MCP_HOOK_STATE_DIR: tmpRoot,
+        GEMINI_MCP_BRIDGE_PORT: String(port),
+        GEMINI_MCP_BROWSER_LAUNCH_COOLDOWN_MS: '0',
+        GEMINI_MCP_HOOK_CONNECT_TIMEOUT_MS: '1500',
+        GEMINI_MCP_HOOK_CONNECT_POLL_MS: '50',
+      },
+    );
+    const state = JSON.parse(readFileSync(resolve(tmpRoot, 'hook-browser-launch.json'), 'utf-8'));
+
+    assert.equal(output.suppressOutput, true);
+    assert.equal(output.decision, undefined);
+    assert.equal(state.method, 'windows-direct-spawn');
+    assert.equal(state.command, '/usr/bin/true');
+    assert.equal(state.connectWait.connected, true);
+    assert.equal(state.connectWait.status.connectedCount, 1);
+    assert.equal(requests >= 2, true);
   } finally {
     await closeServer(server);
     rmSync(tmpRoot, { recursive: true, force: true });
@@ -433,7 +477,9 @@ test('BeforeTool considera browser_status como tool que acorda o navegador', () 
   assert.match(hookSource, /gemini_browser_status/);
   assert.match(hookSource, /open-gemini-restore-focus\.ps1/);
   assert.match(hookSource, /SetForegroundWindow/);
-  assert.match(hookSource, /cmd\.exe/);
+  assert.match(hookSource, /waitForConnectedBrowserClient/);
   assert.match(hookSource, /agent\/clients/);
+  assert.doesNotMatch(hookSource, /cmd\.exe/);
+  assert.doesNotMatch(hookSource, /wscript\.exe/);
   assert.doesNotMatch(hookSource, /prelaunch-browser-windows\.ps1/);
 });
