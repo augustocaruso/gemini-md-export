@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 import test from 'node:test';
 import {
   launchGeminiBrowser,
@@ -7,43 +8,47 @@ import {
 
 const noExists = () => false;
 
-const whereOnly = (matches) => (command, args) => {
-  const wanted = args?.[0];
-  const stdout = matches[wanted] || '';
-  return {
-    status: stdout ? 0 : 1,
-    stdout,
-  };
+const neverProbe = () => {
+  throw new Error('spawnSync/where must not run in Windows launch path');
 };
 
-test('Windows prefere Chrome encontrado no PATH ao abrir Gemini pela tool MCP', () => {
+const child = ({ pid = 123, error = null, exitCode = null } = {}) => {
+  const emitter = new EventEmitter();
+  emitter.pid = pid;
+  emitter.unref = () => {};
+  process.nextTick(() => {
+    if (error) emitter.emit('error', new Error(error));
+    if (exitCode !== null) emitter.emit('exit', exitCode, null);
+  });
+  return emitter;
+};
+
+test('Windows prefere Chrome encontrado em caminho conhecido sem chamar where', () => {
   const plan = resolveGeminiBrowserLaunchPlan({
     platform: 'win32',
-    env: {},
-    exists: noExists,
-    spawnSyncFn: whereOnly({
-      'chrome.exe': 'C:\\Users\\me\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe\r\n',
-      'msedge.exe': 'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe\r\n',
-    }),
+    env: { LOCALAPPDATA: 'C:\\Users\\me\\AppData\\Local' },
+    exists: (candidate) =>
+      candidate === 'C:\\Users\\me\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe',
+    spawnSyncFn: neverProbe,
   });
 
   assert.equal(plan.browserName, 'Chrome');
   assert.equal(plan.binary, 'C:\\Users\\me\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe');
+  assert.equal(plan.binarySource, 'known-path');
   assert.equal(plan.fallbackFrom, null);
 });
 
-test('Windows cai para Edge quando Chrome não existe, inclusive via msedge.exe no PATH', () => {
+test('Windows cai para Edge quando Chrome não existe mas Edge está em caminho conhecido', () => {
   const plan = resolveGeminiBrowserLaunchPlan({
     platform: 'win32',
     env: {},
-    exists: noExists,
-    spawnSyncFn: whereOnly({
-      'msedge.exe': 'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe\r\n',
-    }),
+    exists: (candidate) => candidate === 'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+    spawnSyncFn: neverProbe,
   });
 
   assert.equal(plan.browserName, 'Edge');
   assert.equal(plan.binary, 'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe');
+  assert.equal(plan.binarySource, 'known-path');
   assert.equal(plan.fallbackFrom, 'Chrome');
 });
 
@@ -51,15 +56,28 @@ test('Windows respeita GEMINI_MCP_BROWSER=edge para perfil que usa Edge', () => 
   const plan = resolveGeminiBrowserLaunchPlan({
     platform: 'win32',
     env: { GEMINI_MCP_BROWSER: 'edge' },
-    exists: noExists,
-    spawnSyncFn: whereOnly({
-      'msedge.exe': 'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe\r\n',
-      'chrome.exe': 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\r\n',
-    }),
+    exists: (candidate) =>
+      candidate === 'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe' ||
+      candidate === 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    spawnSyncFn: neverProbe,
   });
 
   assert.equal(plan.browserName, 'Edge');
   assert.equal(plan.fallbackFrom, null);
+});
+
+test('Windows usa comando preferido como fallback sem chamar where', () => {
+  const plan = resolveGeminiBrowserLaunchPlan({
+    platform: 'win32',
+    env: {},
+    exists: noExists,
+    spawnSyncFn: neverProbe,
+  });
+
+  assert.equal(plan.browserName, 'Chrome');
+  assert.equal(plan.binary, 'chrome.exe');
+  assert.equal(plan.binarySource, 'command-fallback');
+  assert.equal(plan.method, 'windows-command-fallback');
 });
 
 test('macOS abre Google Chrome por padrão em vez do navegador padrão', () => {
@@ -86,30 +104,55 @@ test('macOS permite selecionar Edge por variável de ambiente', () => {
   assert.equal(plan.fallbackFrom, null);
 });
 
-test('launcher Windows usa cmd start com URL do Gemini e perfil configurado', async () => {
+test('launcher Windows usa spawn direto com URL do Gemini e perfil configurado', async () => {
   const calls = [];
   const result = await launchGeminiBrowser({
     platform: 'win32',
     profileDirectory: 'Profile 1',
     env: {},
-    exists: noExists,
-    spawnSyncFn: whereOnly({
-      'chrome.exe': 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe\r\n',
-    }),
+    exists: (candidate) => candidate === 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    spawnSyncFn: neverProbe,
     spawnFn: (command, args, options) => {
       calls.push({ command, args, options });
-      return { unref() {} };
+      return child();
     },
+    launchObserveMs: 0,
   });
 
   assert.equal(result.attempted, true);
   assert.equal(result.browserName, 'Chrome');
-  assert.equal(result.method, 'windows-cmd-start');
-  assert.equal(calls[0].command, 'cmd.exe');
-  assert.match(calls[0].args.join(' '), /start ""/);
+  assert.equal(result.method, 'windows-direct-spawn');
+  assert.equal(calls[0].command, 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe');
   assert.match(calls[0].args.join(' '), /--new-tab/);
   assert.match(calls[0].args.join(' '), /https:\/\/gemini\.google\.com\/app/);
   assert.match(calls[0].args.join(' '), /--profile-directory=Profile 1/);
+  assert.equal(result.launch.ok, true);
+});
+
+test('launcher Windows cai para cmd start quando spawn direto falha', async () => {
+  const calls = [];
+  const result = await launchGeminiBrowser({
+    platform: 'win32',
+    env: {},
+    exists: noExists,
+    spawnSyncFn: neverProbe,
+    spawnFn: (command, args, options) => {
+      calls.push({ command, args, options });
+      if (command === 'chrome.exe') return child({ error: 'ENOENT' });
+      return child({ exitCode: 0 });
+    },
+    launchObserveMs: 0,
+  });
+
+  assert.equal(result.attempted, true);
+  assert.equal(result.method, 'windows-cmd-start-fallback');
+  assert.equal(calls[0].command, 'chrome.exe');
+  assert.equal(calls[1].command, 'cmd.exe');
+  assert.match(calls[1].args.join(' '), /start ""/);
+  assert.match(calls[1].args.join(' '), /chrome\.exe/);
+  assert.match(calls[1].args.join(' '), /https:\/\/gemini\.google\.com\/app/);
+  assert.equal(result.directLaunch.ok, false);
+  assert.equal(result.launch.ok, true);
 });
 
 test('launcher macOS usa open -g -a Chrome para reduzir troca de foco', async () => {

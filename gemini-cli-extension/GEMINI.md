@@ -38,6 +38,11 @@ Operational guidance:
   configured Chromium browser. Prefer fixing `GEMINI_MCP_BROWSER`
   (`chrome`/`edge`/`brave`/`dia`) or `GEMINI_MCP_CHROME_PROFILE_DIRECTORY`
   over telling the user to repeat the same failed tool call.
+- On Windows, browser launch must not use synchronous `where`/`spawnSync` in
+  the runtime path. The MCP should spawn a known/configured browser executable
+  directly, observe immediate errors with `GEMINI_MCP_BROWSER_LAUNCH_OBSERVE_MS`,
+  and only then fall back to `cmd.exe /c start`. Tool results should preserve
+  `browserWake.launch` and `browserWake.directLaunch` for diagnostics.
 - `gemini_browser_status` is also allowed to wake the browser when no Gemini
   tab is connected. Do not treat status as a passive-only tool; Gemini CLI often
   asks for status first, and that first status call should be enough to open the
@@ -46,8 +51,8 @@ Operational guidance:
   browser before browser-dependent exporter tools. It first checks
   `http://127.0.0.1:47283/agent/clients` with a very short timeout. If a Gemini
   tab is already connected, it opens nothing. If no client is connected, it
-  opens `https://gemini.google.com/app` directly with `cmd.exe /c start` and
-  returns immediately, without a PowerShell helper. The hook itself must not
+  opens `https://gemini.google.com/app` by direct spawn and falls back to
+  `cmd.exe /c start` if direct spawn fails, without a PowerShell helper. The hook itself must not
   use synchronous stdin reads, wait for Chrome, or do long work. `SessionStart`
   must not read stdin. BeforeTool/AfterTool read stdin asynchronously, parse as
   soon as a complete JSON payload arrives, and fail open after

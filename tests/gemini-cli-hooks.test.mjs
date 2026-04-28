@@ -293,11 +293,12 @@ test('BeforeTool abre Gemini direto pelo hook quando nao ha cliente conectado', 
     assert.equal(output.suppressOutput, true);
     assert.equal(output.decision, undefined);
     assert.equal(state.dryRun, true);
-    assert.equal(state.method, 'windows-cmd-start');
-    assert.equal(state.command, 'cmd.exe');
-    assert.match(state.args.join(' '), /start ""/);
+    assert.equal(state.method, 'windows-direct-spawn');
+    assert.equal(state.command, 'chrome.exe');
     assert.match(state.args.join(' '), /--new-tab/);
     assert.match(state.args.join(' '), /https:\/\/gemini\.google\.com\/app/);
+    assert.equal(state.fallbackCommand, 'cmd.exe');
+    assert.match(state.fallbackArgs.join(' '), /start ""/);
     assert.equal(state.bridgeStatus.connectedCount, 0);
   } finally {
     await closeServer(server);

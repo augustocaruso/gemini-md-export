@@ -4,7 +4,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
-import { resolve } from 'node:path';
+import { resolve, win32 } from 'node:path';
 
 const mode = process.argv[2] || '';
 let wroteOutput = false;
@@ -35,6 +35,7 @@ const GEMINI_APP_URL = 'https://gemini.google.com/app';
 const DEFAULT_BROWSER_LAUNCH_COOLDOWN_MS = 60000;
 const DEFAULT_HOOK_BRIDGE_CHECK_TIMEOUT_MS = 180;
 const DEFAULT_HOOK_STDIN_TIMEOUT_MS = 120;
+const DEFAULT_HOOK_LAUNCH_OBSERVE_MS = 120;
 const MAX_STDIN_BYTES = 1024 * 1024;
 const HOOK_BROWSER_STATE_FILENAME = 'hook-browser-launch.json';
 const HOOK_LAST_RUN_FILENAME = 'hook-last-run.json';
@@ -109,9 +110,9 @@ const windowsBrowserConfigs = (env = process.env) => {
       fallbackCommand: 'chrome.exe',
       explicit: env.GEMINI_MCP_CHROME_EXE || env.GME_CHROME_EXE,
       paths: [
-        localAppData && resolve(localAppData, 'Google', 'Chrome', 'Application', 'chrome.exe'),
-        resolve(programFiles, 'Google', 'Chrome', 'Application', 'chrome.exe'),
-        resolve(programFilesX86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+        localAppData && win32.join(localAppData, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+        win32.join(programFiles, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+        win32.join(programFilesX86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
       ],
     },
     edge: {
@@ -119,9 +120,9 @@ const windowsBrowserConfigs = (env = process.env) => {
       fallbackCommand: 'msedge.exe',
       explicit: env.GEMINI_MCP_EDGE_EXE || env.GME_EDGE_EXE,
       paths: [
-        localAppData && resolve(localAppData, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
-        resolve(programFiles, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
-        resolve(programFilesX86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+        localAppData && win32.join(localAppData, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+        win32.join(programFiles, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+        win32.join(programFilesX86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
       ],
     },
     brave: {
@@ -130,9 +131,9 @@ const windowsBrowserConfigs = (env = process.env) => {
       explicit: env.GEMINI_MCP_BRAVE_EXE || env.GME_BRAVE_EXE,
       paths: [
         localAppData &&
-          resolve(localAppData, 'BraveSoftware', 'Brave-Browser', 'Application', 'brave.exe'),
-        resolve(programFiles, 'BraveSoftware', 'Brave-Browser', 'Application', 'brave.exe'),
-        resolve(programFilesX86, 'BraveSoftware', 'Brave-Browser', 'Application', 'brave.exe'),
+          win32.join(localAppData, 'BraveSoftware', 'Brave-Browser', 'Application', 'brave.exe'),
+        win32.join(programFiles, 'BraveSoftware', 'Brave-Browser', 'Application', 'brave.exe'),
+        win32.join(programFilesX86, 'BraveSoftware', 'Brave-Browser', 'Application', 'brave.exe'),
       ],
     },
     dia: {
@@ -140,8 +141,8 @@ const windowsBrowserConfigs = (env = process.env) => {
       fallbackCommand: 'dia.exe',
       explicit: env.GEMINI_MCP_DIA_EXE || env.GME_DIA_EXE,
       paths: [
-        localAppData && resolve(localAppData, 'Programs', 'Dia', 'Dia.exe'),
-        env.APPDATA && resolve(env.APPDATA, 'Dia', 'Application', 'Dia.exe'),
+        localAppData && win32.join(localAppData, 'Programs', 'Dia', 'Dia.exe'),
+        env.APPDATA && win32.join(env.APPDATA, 'Dia', 'Application', 'Dia.exe'),
       ],
     },
   };
@@ -306,15 +307,65 @@ const buildWindowsBrowserStartCommand = () => {
   const startCommand = `start "" ${quoteCmd(browser.command)} ${browserArgs.map(quoteCmd).join(' ')}`;
   return {
     ...browser,
-    method: 'windows-cmd-start',
-    command: 'cmd.exe',
-    args: ['/d', '/s', '/c', startCommand],
+    method: 'windows-direct-spawn',
+    command: browser.command,
+    args: browserArgs,
+    fallbackMethod: 'windows-cmd-start-fallback',
+    fallbackCommand: 'cmd.exe',
+    fallbackArgs: ['/d', '/s', '/c', startCommand],
     browserCommand: browser.command,
     browserArgs,
     profileDirectory: profileDirectory || null,
     url: GEMINI_APP_URL,
   };
 };
+
+const observeDetachedSpawn = (command, args, observeMs) =>
+  new Promise((resolveObserve) => {
+    let child = null;
+    let settled = false;
+    let timer = null;
+    const startedAt = Date.now();
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolveObserve({
+        command,
+        args,
+        pid: child?.pid || null,
+        elapsedMs: Date.now() - startedAt,
+        ...result,
+      });
+    };
+
+    try {
+      child = spawn(command, args, {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+    } catch (err) {
+      finish({ ok: false, error: err?.message || String(err), phase: 'spawn-throw' });
+      return;
+    }
+
+    child.on?.('error', (err) => {
+      finish({ ok: false, error: err?.message || String(err), phase: 'spawn-error' });
+    });
+    child.on?.('exit', (code, signal) => {
+      if (code === 0 || code === null) {
+        finish({ ok: true, exited: true, exitCode: code, signal: signal || null });
+      } else {
+        finish({ ok: false, exited: true, exitCode: code, signal: signal || null });
+      }
+    });
+    child.unref?.();
+
+    timer = setTimeout(() => {
+      finish({ ok: true, exited: false });
+    }, parseNonNegativeInt(process.env.GEMINI_MCP_HOOK_LAUNCH_OBSERVE_MS, observeMs));
+  });
 
 const prelaunchBrowserDetached = async (input) => {
   if (isDisabled(process.env.GEMINI_MCP_HOOK_LAUNCH_BROWSER)) return;
@@ -353,6 +404,8 @@ const prelaunchBrowserDetached = async (input) => {
       browserName: launch.browserName,
       browserCommand: launch.browserCommand,
       args: launch.args,
+      fallbackCommand: launch.fallbackCommand,
+      fallbackArgs: launch.fallbackArgs,
     },
   });
 
@@ -361,28 +414,45 @@ const prelaunchBrowserDetached = async (input) => {
     return;
   }
 
+  const direct = await observeDetachedSpawn(
+    launch.command,
+    launch.args,
+    DEFAULT_HOOK_LAUNCH_OBSERVE_MS,
+  );
+  if (direct.ok) {
+    writeHookState({
+      ...state,
+      launch: direct,
+    });
+    return;
+  }
+
+  const fallback = await observeDetachedSpawn(
+    launch.fallbackCommand,
+    launch.fallbackArgs,
+    DEFAULT_HOOK_LAUNCH_OBSERVE_MS,
+  );
+  const nextState = {
+    ...state,
+    method: launch.fallbackMethod,
+    command: launch.fallbackCommand,
+    args: launch.fallbackArgs,
+    directLaunch: direct,
+    launch: fallback,
+  };
+  if (!fallback.ok) {
+    nextState.lastFailureAt = Date.now();
+    nextState.error = fallback.error || direct.error || `exit ${fallback.exitCode ?? 'unknown'}`;
+    console.error(`[gemini-md-export-hook] browser prelaunch error: ${nextState.error}`);
+  }
   try {
-    const child = spawn(launch.command, launch.args, {
-      detached: true,
-      stdio: 'ignore',
-      windowsHide: true,
-    });
-    child.on?.('error', (err) => {
-      writeHookState({
-        ...state,
-        lastFailureAt: Date.now(),
-        error: err.message,
-      });
-      console.error(`[gemini-md-export-hook] browser prelaunch error: ${err.message}`);
-    });
-    child.unref();
+    writeHookState(nextState);
   } catch (err) {
     writeHookState({
       ...state,
       lastFailureAt: Date.now(),
       error: err.message,
     });
-    console.error(`[gemini-md-export-hook] failed to prelaunch browser: ${err.message}`);
   }
 };
 

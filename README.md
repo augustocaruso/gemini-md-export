@@ -136,13 +136,18 @@ MCP só envia `--profile-directory` quando
 `GEMINI_MCP_CHROME_PROFILE_DIRECTORY` é definido explicitamente; isso evita a
 caixa de seleção/perfil do Chrome em chamadas normais de tool. Para perfis
 específicos, use por exemplo `GEMINI_MCP_CHROME_PROFILE_DIRECTORY="Profile 1"`.
+No Windows, o launcher não usa mais `where` síncrono no caminho de runtime: ele
+tenta primeiro executar diretamente o browser encontrado em caminhos conhecidos
+ou configurado por variável de ambiente, observa erro imediato, e só depois cai
+para `cmd.exe /c start` como fallback. O resultado aparece em `browserWake`,
+incluindo `launch`/`directLaunch`, para diagnosticar falhas reais de abertura.
 Além do guard dentro do MCP, o hook `BeforeTool` da extensão do Gemini CLI faz
 um pré-aquecimento no Windows: antes de tools do exporter que dependem do
 navegador, ele checa rapidamente `http://127.0.0.1:47283/agent/clients`. Se já
 houver uma aba Gemini conectada, não abre nada. Se não houver cliente
-conectado, abre `https://gemini.google.com/app` diretamente por `cmd.exe /c
-start` e sai imediatamente. O hook não depende de PowerShell, respeita cooldown
-e não deve ficar preso em "executing hook". A leitura do payload do hook é
+conectado, tenta abrir `https://gemini.google.com/app` por spawn direto e cai
+para `cmd.exe /c start` se o spawn direto falhar. O hook não depende de
+PowerShell, respeita cooldown e não deve ficar preso em "executing hook". A leitura do payload do hook é
 assíncrona e tem timeout curto (`GEMINI_MCP_HOOK_STDIN_TIMEOUT_MS`, default
 120ms), porque uma leitura síncrona de stdin pode travar se o cliente mantiver
 o pipe aberto. Para diagnosticar sem acionar nenhuma tool, rode o script do

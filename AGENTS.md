@@ -286,8 +286,13 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   navegador correto: Chrome por padrão, ou o browser fixado por
   `GEMINI_MCP_BROWSER`/`GME_BROWSER` (`chrome`, `edge`, `brave`, `dia`), com
   fallback para outro Chromium conhecido se o preferido não existir. No
-  Windows usa `cmd.exe /c start` com o executável real do navegador; no macOS usa `open -g
-  -a` para preferir app Chromium em vez do navegador padrão. O argumento de
+  Windows não deve usar `where`/`spawnSync` no caminho de runtime para descobrir
+  browser: isso já é um ponto possível de travamento. O fluxo correto é tentar
+  spawn direto do executável conhecido/configurado, observar erro imediato por
+  timeout curto (`GEMINI_MCP_BROWSER_LAUNCH_OBSERVE_MS`) e cair para
+  `cmd.exe /c start` só como fallback diagnosticado; `browserWake` deve incluir
+  `launch` e, quando houver fallback, `directLaunch`. No macOS usa `open -g -a`
+  para preferir app Chromium em vez do navegador padrão. O argumento de
   perfil só é enviado quando `GEMINI_MCP_CHROME_PROFILE_DIRECTORY` ou
   `GME_CHROME_PROFILE_DIRECTORY` for configurado explicitamente; não passar
   `--profile-directory=Default` por padrão, porque isso pode abrir UI de
@@ -302,8 +307,9 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   pré-aquecimento para tools do exporter que dependem do navegador no Windows:
   o hook JavaScript consulta rapidamente `/agent/clients`; se já houver uma aba
   Gemini conectada, não abre nada. Se não houver cliente conectado, abre
-  `https://gemini.google.com/app` diretamente via `cmd.exe /c start` e sai
-  imediatamente, sem PowerShell intermediário. O hook em si não deve fazer
+  `https://gemini.google.com/app` por spawn direto e cai para `cmd.exe /c start`
+  se o spawn direto falhar; sai imediatamente, sem PowerShell intermediário.
+  O hook em si não deve fazer
   leitura síncrona de stdin, `import()` dinâmico, espera longa de navegador ou
   trabalho bloqueante. `SessionStart` não deve ler stdin. Before/AfterTool leem
   stdin de forma assíncrona, tentam parsear assim que o JSON chega e falham

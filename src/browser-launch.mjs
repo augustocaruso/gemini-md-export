@@ -1,9 +1,10 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { resolve } from 'node:path';
+import { resolve, win32 } from 'node:path';
 
 const GEMINI_URL = 'https://gemini.google.com/app';
+const DEFAULT_LAUNCH_OBSERVE_MS = 180;
 
 const quoteCmd = (value) => `"${String(value).replace(/"/g, '""')}"`;
 
@@ -44,9 +45,9 @@ const windowsBrowsers = (env = process.env) => {
       paths: [
         env.GEMINI_MCP_CHROME_EXE,
         env.GME_CHROME_EXE,
-        localAppData && resolve(localAppData, 'Google', 'Chrome', 'Application', 'chrome.exe'),
-        resolve(programFiles, 'Google', 'Chrome', 'Application', 'chrome.exe'),
-        resolve(programFilesX86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+        localAppData && win32.join(localAppData, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+        win32.join(programFiles, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+        win32.join(programFilesX86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
       ].filter(Boolean),
     },
     edge: {
@@ -55,9 +56,9 @@ const windowsBrowsers = (env = process.env) => {
       paths: [
         env.GEMINI_MCP_EDGE_EXE,
         env.GME_EDGE_EXE,
-        localAppData && resolve(localAppData, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
-        resolve(programFiles, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
-        resolve(programFilesX86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+        localAppData && win32.join(localAppData, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+        win32.join(programFiles, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+        win32.join(programFilesX86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
       ].filter(Boolean),
     },
     brave: {
@@ -67,9 +68,9 @@ const windowsBrowsers = (env = process.env) => {
         env.GEMINI_MCP_BRAVE_EXE,
         env.GME_BRAVE_EXE,
         localAppData &&
-          resolve(localAppData, 'BraveSoftware', 'Brave-Browser', 'Application', 'brave.exe'),
-        resolve(programFiles, 'BraveSoftware', 'Brave-Browser', 'Application', 'brave.exe'),
-        resolve(programFilesX86, 'BraveSoftware', 'Brave-Browser', 'Application', 'brave.exe'),
+          win32.join(localAppData, 'BraveSoftware', 'Brave-Browser', 'Application', 'brave.exe'),
+        win32.join(programFiles, 'BraveSoftware', 'Brave-Browser', 'Application', 'brave.exe'),
+        win32.join(programFilesX86, 'BraveSoftware', 'Brave-Browser', 'Application', 'brave.exe'),
       ].filter(Boolean),
     },
     dia: {
@@ -78,8 +79,8 @@ const windowsBrowsers = (env = process.env) => {
       paths: [
         env.GEMINI_MCP_DIA_EXE,
         env.GME_DIA_EXE,
-        localAppData && resolve(localAppData, 'Programs', 'Dia', 'Dia.exe'),
-        env.APPDATA && resolve(env.APPDATA, 'Dia', 'Application', 'Dia.exe'),
+        localAppData && win32.join(localAppData, 'Programs', 'Dia', 'Dia.exe'),
+        env.APPDATA && win32.join(env.APPDATA, 'Dia', 'Application', 'Dia.exe'),
       ].filter(Boolean),
     },
   };
@@ -173,31 +174,46 @@ export const resolveGeminiBrowserLaunchPlan = ({
 
   if (platform === 'win32') {
     const browsers = windowsBrowsers(env);
+    let commandFallback = null;
+
     for (const key of browserOrder(preferredKey)) {
       const browser = browsers[key];
       if (!browser) continue;
-      const binary =
-        firstExisting(browser.paths, exists) ||
-        browser.commands
-          .map((command) => commandOnPath(command, spawnSyncFn, platform))
-          .find(Boolean);
+      if (!commandFallback && key === preferredKey) {
+        commandFallback = browser.commands[0] || null;
+      }
+      const binary = firstExisting(browser.paths, exists);
       if (!binary) continue;
       return {
         platform,
         browserKey: key,
         browserName: browser.name,
         binary,
+        binarySource: 'known-path',
         fallbackFrom: key === preferredKey ? null : browsers[preferredKey]?.name || preferredKey,
-        method: 'windows-start-process-minimized',
+        method: 'windows-direct-spawn',
       };
     }
+
+    if (commandFallback) {
+      return {
+        platform,
+        browserKey: preferredKey,
+        browserName: browsers[preferredKey]?.name || preferredKey,
+        binary: commandFallback,
+        binarySource: 'command-fallback',
+        fallbackFrom: null,
+        method: 'windows-command-fallback',
+      };
+    }
+
     return {
       platform,
       browserKey: preferredKey,
       browserName: windowsBrowsers(env)[preferredKey]?.name || preferredKey,
       binary: null,
       fallbackFrom: null,
-      method: 'windows-start-process-minimized',
+      method: 'windows-direct-spawn',
     };
   }
 
@@ -248,6 +264,55 @@ export const resolveGeminiBrowserLaunchPlan = ({
   };
 };
 
+const normalizeObserveMs = (value, fallback = DEFAULT_LAUNCH_OBSERVE_MS) => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+  return Math.min(parsed, 2000);
+};
+
+const observeDetachedSpawn = (spawnFn, command, args, options, observeMs) =>
+  new Promise((resolveObserve) => {
+    let child = null;
+    let settled = false;
+    let timer = null;
+    const startedAt = Date.now();
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolveObserve({
+        command,
+        args,
+        pid: child?.pid || null,
+        elapsedMs: Date.now() - startedAt,
+        ...result,
+      });
+    };
+
+    try {
+      child = spawnFn(command, args, options);
+    } catch (err) {
+      finish({ ok: false, error: err?.message || String(err), phase: 'spawn-throw' });
+      return;
+    }
+
+    child?.on?.('error', (err) => {
+      finish({ ok: false, error: err?.message || String(err), phase: 'spawn-error' });
+    });
+    child?.on?.('exit', (code, signal) => {
+      if (code === 0 || code === null) {
+        finish({ ok: true, exited: true, exitCode: code, signal: signal || null });
+      } else {
+        finish({ ok: false, exited: true, exitCode: code, signal: signal || null });
+      }
+    });
+    child?.unref?.();
+
+    timer = setTimeout(() => {
+      finish({ ok: true, exited: false });
+    }, observeMs);
+  });
+
 export const launchGeminiBrowser = async ({
   profileDirectory,
   env = process.env,
@@ -255,9 +320,13 @@ export const launchGeminiBrowser = async ({
   exists = existsSync,
   spawnFn = spawn,
   spawnSyncFn = spawnSync,
+  launchObserveMs,
 } = {}) => {
   const plan = resolveGeminiBrowserLaunchPlan({ env, platform, exists, spawnSyncFn });
   const profileArg = profileDirectory ? `--profile-directory=${profileDirectory}` : null;
+  const observeMs = normalizeObserveMs(
+    launchObserveMs ?? env.GEMINI_MCP_BROWSER_LAUNCH_OBSERVE_MS,
+  );
 
   try {
     if (platform === 'darwin') {
@@ -291,19 +360,41 @@ export const launchGeminiBrowser = async ({
         };
       }
       const args = [profileArg, '--new-tab', GEMINI_URL].filter(Boolean);
-      const command = `start "" ${quoteCmd(plan.binary)} ${args.map(quoteCmd).join(' ')}`;
-      const child = spawnFn('cmd.exe', ['/d', '/s', '/c', command], {
+      const direct = await observeDetachedSpawn(spawnFn, plan.binary, args, {
         detached: true,
         stdio: 'ignore',
         windowsHide: true,
-      });
-      child.unref?.();
+      }, observeMs);
+      if (direct.ok) {
+        return {
+          attempted: true,
+          supported: true,
+          ...plan,
+          method: 'windows-direct-spawn',
+          profileDirectory: profileDirectory || null,
+          launch: direct,
+        };
+      }
+
+      const command = `start "" ${quoteCmd(plan.binary)} ${args.map(quoteCmd).join(' ')}`;
+      const cmdArgs = ['/d', '/s', '/c', command];
+      const shellFallback = await observeDetachedSpawn(spawnFn, 'cmd.exe', cmdArgs, {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+      }, observeMs);
       return {
-        attempted: true,
+        attempted: shellFallback.ok,
         supported: true,
         ...plan,
-        method: 'windows-cmd-start',
+        method: 'windows-cmd-start-fallback',
         profileDirectory: profileDirectory || null,
+        launch: shellFallback,
+        directLaunch: direct,
+        reason: shellFallback.ok ? null : 'browser-launch-failed',
+        error: shellFallback.ok
+          ? null
+          : shellFallback.error || direct.error || `exit ${shellFallback.exitCode ?? 'unknown'}`,
       };
     }
 
