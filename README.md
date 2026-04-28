@@ -195,6 +195,11 @@ não tenta disputar essa porta nem deve mostrar erro de bridge ocupado: ela
 permanece como servidor MCP por `stdio` e encaminha as tools para a instância
 primária que já está conectada à extensão do navegador.
 
+O manifesto da extensão Gemini CLI não define `cwd` dentro de
+`~/.gemini/extensions/gemini-md-export`. Isso é intencional: no Windows, um MCP
+rodando com diretório de trabalho dentro da pasta da extensão pode travar o
+auto-update com `EBUSY: resource busy or locked, rmdir ...`.
+
 Tools disponíveis:
 
 - `gemini_browser_status`

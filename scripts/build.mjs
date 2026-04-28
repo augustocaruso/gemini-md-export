@@ -194,7 +194,6 @@ const geminiCliExtensionManifest = {
     'gemini-md-export': {
       command: 'node',
       args: ['${extensionPath}${/}src${/}mcp-server.js'],
-      cwd: '${extensionPath}',
     },
   },
 };

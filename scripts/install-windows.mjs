@@ -657,7 +657,6 @@ const patchedGeminiCliExtensionManifest = () => {
       ...(manifest.mcpServers?.[SERVER_NAME] || {}),
       command: resolvedNodeCommand,
       args: ['${extensionPath}${/}src${/}mcp-server.js'],
-      cwd: '${extensionPath}',
       ...(normalizedExportDir
         ? {
             env: {

@@ -90,6 +90,30 @@ const detectExpectedBrowserBuildStamp = () => {
   return null;
 };
 
+const pathContains = (candidate, fragment) =>
+  String(candidate || '').replace(/\\/g, '/').toLowerCase().includes(fragment);
+
+const isInsidePath = (parent, child) => {
+  const rel = relative(parent, child);
+  return rel === '' || (!!rel && !rel.startsWith('..') && !isAbsolute(rel));
+};
+
+const releaseAutoUpdateDirectoryCwd = () => {
+  try {
+    const cwd = resolve(process.cwd());
+    if (
+      isInsidePath(ROOT, cwd) &&
+      pathContains(ROOT, '/.gemini/extensions/gemini-md-export')
+    ) {
+      process.chdir(homedir());
+    }
+  } catch {
+    // CWD release is best-effort; the MCP can still run if chdir is denied.
+  }
+};
+
+releaseAutoUpdateDirectoryCwd();
+
 const EXPECTED_CHROME_EXTENSION_INFO = {
   extensionVersion: bridgeVersion.extensionVersion || SERVER_VERSION,
   protocolVersion: EXTENSION_PROTOCOL_VERSION,

@@ -196,7 +196,6 @@ manifest.mcpServers['gemini-md-export'] = {
   ...(manifest.mcpServers['gemini-md-export'] || {}),
   command: nodeBin,
   args: ['${extensionPath}${/}src${/}mcp-server.js'],
-  cwd: '${extensionPath}',
 };
 if (exportDir) {
   manifest.mcpServers['gemini-md-export'].env = {

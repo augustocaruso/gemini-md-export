@@ -254,7 +254,14 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   para instalação em `~/.gemini/extensions/gemini-md-export`. O workflow de
   release também publica esse bundle no branch `gemini-cli-extension`, onde o
   `gemini-extension.json` fica na raiz; os instaladores usam esse branch como
-  fonte oficial do Gemini CLI para a extensão aparecer como atualizável.
+  fonte oficial do Gemini CLI para a extensão aparecer como atualizável. O
+  `mcpServers.gemini-md-export` publicado **não deve definir**
+  `cwd: "${extensionPath}"`: no Windows, processo MCP com cwd dentro de
+  `~/.gemini/extensions/gemini-md-export` impede o Gemini CLI de remover a
+  pasta durante auto-update e causa
+  `EBUSY: resource busy or locked, rmdir ...`. O MCP também faz
+  `process.chdir(homedir())` cedo quando detecta que nasceu dentro dessa pasta
+  auto-updatable.
 - `src/mcp-server.js` — servidor MCP local via `stdio`. No mesmo processo,
   ele também sobe um bridge HTTP local em `127.0.0.1:47283` para a extensão.
   A extensão/content script faz heartbeat do estado da aba do Gemini e aceita
