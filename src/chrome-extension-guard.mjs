@@ -1,7 +1,8 @@
 export const DEFAULT_CHROME_GUARD_CONFIG = Object.freeze({
   profileDirectory: 'Default',
   launchIfClosed: true,
-  reloadTimeoutMs: 15_000,
+  initialConnectTimeoutMs: 20_000,
+  reloadTimeoutMs: 75_000,
   maxReloadAttempts: 1,
   pollIntervalMs: 500,
   useExtensionsReloaderFallback: false,
@@ -23,8 +24,36 @@ const normalizeConfig = (config = {}) => ({
   ),
 });
 
-const selectClient = (clients, preferredClientId, previousClient = null) => {
+const clientBuildStamp = (client) => client?.buildStamp || client?.page?.buildStamp || null;
+
+const clientMatchesExpected = (client, expected) =>
+  !!client &&
+  (!expected ||
+    (isProtocolMatch(client.protocolVersion, expected.protocolVersion) &&
+      isVersionMatch(client.extensionVersion, expected.extensionVersion) &&
+      isBuildStampMatch(clientBuildStamp(client), expected.buildStamp)));
+
+const selectClient = (clients, preferredClientId, previousClient = null, expected = null) => {
   const liveClients = Array.isArray(clients) ? clients : [];
+  const matchingExpected = expected
+    ? liveClients.filter((client) => clientMatchesExpected(client, expected))
+    : [];
+  if (preferredClientId) {
+    const exact = liveClients.find((client) => client.clientId === preferredClientId);
+    if (exact && clientMatchesExpected(exact, expected)) return exact;
+  }
+  if (previousClient?.tabId !== undefined && previousClient?.tabId !== null) {
+    const sameTab = matchingExpected.find((client) => client.tabId === previousClient.tabId);
+    if (sameTab) return sameTab;
+  }
+  if (previousClient?.windowId !== undefined && previousClient?.windowId !== null) {
+    const sameWindowActive = matchingExpected.find(
+      (client) => client.windowId === previousClient.windowId && client.isActiveTab === true,
+    );
+    if (sameWindowActive) return sameWindowActive;
+  }
+  if (matchingExpected[0]) return matchingExpected[0];
+
   if (preferredClientId) {
     const exact = liveClients.find((client) => client.clientId === preferredClientId);
     if (exact) return exact;
@@ -46,6 +75,9 @@ const isVersionMatch = (actual, expected) => String(actual || '') === String(exp
 
 const isProtocolMatch = (actual, expected) => Number(actual) === Number(expected);
 
+const isBuildStampMatch = (actual, expected) =>
+  !expected || String(actual || '') === String(expected || '');
+
 const mismatchFor = (info, expected) => {
   if (!info) return { kind: 'unreachable' };
   if (!isProtocolMatch(info.protocolVersion, expected.protocolVersion)) {
@@ -60,6 +92,13 @@ const mismatchFor = (info, expected) => {
       kind: 'version',
       actual: info.extensionVersion ?? null,
       expected: expected.extensionVersion,
+    };
+  }
+  if (!isBuildStampMatch(info.buildStamp, expected.buildStamp)) {
+    return {
+      kind: 'build',
+      actual: info.buildStamp ?? null,
+      expected: expected.buildStamp,
     };
   }
   return null;
@@ -85,6 +124,17 @@ const formatMismatchError = (mismatch, { afterReload = false } = {}) => {
     );
   }
 
+  if (mismatch.kind === 'build') {
+    const prefix = afterReload
+      ? 'A extensão do Chrome/Dia ainda está com build antigo depois do reload.'
+      : 'A extensão do Chrome/Dia está com build antigo.';
+    return makeUserError(
+      `${prefix} Esperado ${mismatch.expected}, recebido ${mismatch.actual ?? 'desconhecido'}. Recarregue o card da extensão em chrome://extensions; se continuar, confirme se a extensão unpacked aponta para a pasta browser-extension atualizada.`,
+      'chrome_extension_build_mismatch',
+      mismatch,
+    );
+  }
+
   return makeUserError(
     'A extensão do Chrome não está acessível. Abra Chrome/Edge com o perfil correto, confirme que a extensão unpacked está ativa e abra https://gemini.google.com/app.',
     'chrome_extension_unreachable',
@@ -97,6 +147,7 @@ const probeExtensionInfo = async (deps, state) => {
     deps.getLiveClients(),
     state.preferredClientId,
     state.previousClient,
+    deps.expected,
   );
   if (!client) return null;
 
@@ -111,6 +162,7 @@ const probeExtensionInfo = async (deps, state) => {
             ok: true,
             extensionVersion: client.extensionVersion || null,
             protocolVersion: client.protocolVersion ?? null,
+            buildStamp: client.buildStamp || client.page?.buildStamp || null,
             source: 'heartbeat-fallback',
           },
         };
@@ -129,6 +181,7 @@ const probeExtensionInfo = async (deps, state) => {
           ok: true,
           extensionVersion: client.extensionVersion || null,
           protocolVersion: client.protocolVersion ?? null,
+          buildStamp: client.buildStamp || client.page?.buildStamp || null,
           source: 'heartbeat-fallback',
         },
       };
@@ -145,6 +198,20 @@ const waitForExtensionInfo = async (deps, state, timeoutMs, pollIntervalMs) => {
     await deps.sleep(pollIntervalMs);
   }
   return null;
+};
+
+const waitForMatchingExtensionInfo = async (deps, state, expected, timeoutMs, pollIntervalMs) => {
+  const startedAt = Date.now();
+  let lastProbe = null;
+  while (Date.now() - startedAt <= timeoutMs) {
+    const probe = await probeExtensionInfo(deps, state);
+    if (probe) {
+      lastProbe = probe;
+      if (!mismatchFor(probe.info, expected)) return probe;
+    }
+    await deps.sleep(pollIntervalMs);
+  }
+  return lastProbe;
 };
 
 export const ensureChromeExtensionReady = async (deps, options = {}) => {
@@ -164,12 +231,25 @@ export const ensureChromeExtensionReady = async (deps, options = {}) => {
   log('checking', {
     expectedExtensionVersion: expected.extensionVersion,
     expectedProtocolVersion: expected.protocolVersion,
+    expectedBuildStamp: expected.buildStamp || null,
     preferredClientId: state.preferredClientId,
   });
 
   let launchedChrome = false;
   let reloadAttempts = 0;
   let probe = await probeExtensionInfo(deps, state);
+
+  if (!probe && config.initialConnectTimeoutMs > 0) {
+    log('waiting-initial-client', {
+      timeoutMs: config.initialConnectTimeoutMs,
+    });
+    probe = await waitForExtensionInfo(
+      deps,
+      state,
+      config.initialConnectTimeoutMs,
+      config.pollIntervalMs,
+    );
+  }
 
   if (!probe && (options.allowLaunchChrome ?? config.launchIfClosed)) {
     const launchResult = await deps.launchChromeForGemini?.({
@@ -202,6 +282,8 @@ export const ensureChromeExtensionReady = async (deps, options = {}) => {
       expectedExtensionVersion: expected.extensionVersion,
       actualProtocolVersion: probe.info.protocolVersion ?? null,
       expectedProtocolVersion: expected.protocolVersion,
+      actualBuildStamp: probe.info.buildStamp ?? null,
+      expectedBuildStamp: expected.buildStamp || null,
       mismatch: mismatch?.kind || null,
       reloadAttempts,
     });
@@ -230,6 +312,7 @@ export const ensureChromeExtensionReady = async (deps, options = {}) => {
       reason: `${mismatch.kind}_mismatch`,
       expectedExtensionVersion: expected.extensionVersion,
       expectedProtocolVersion: expected.protocolVersion,
+      expectedBuildStamp: expected.buildStamp || null,
     });
 
     if (!reloadResult?.ok) {
@@ -244,7 +327,13 @@ export const ensureChromeExtensionReady = async (deps, options = {}) => {
     }
 
     await sleep(config.pollIntervalMs);
-    probe = await waitForExtensionInfo(deps, state, config.reloadTimeoutMs, config.pollIntervalMs);
+    probe = await waitForMatchingExtensionInfo(
+      deps,
+      state,
+      expected,
+      config.reloadTimeoutMs,
+      config.pollIntervalMs,
+    );
     if (!probe) {
       throw makeUserError(
         'Pedi reload da extensão do Chrome, mas ela não voltou a conectar. Recarregue manualmente o card da extensão em chrome://extensions e depois recarregue a aba do Gemini. Se houve mudança de permissões no manifest, o reload manual pode ser obrigatório.',

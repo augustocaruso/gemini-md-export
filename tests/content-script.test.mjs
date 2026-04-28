@@ -83,6 +83,59 @@ const createGeminiTopBarDom = () => {
   return { dom, runtimeErrors };
 };
 
+const createGeminiMediaDom = (bodyHtml) => {
+  const virtualConsole = new VirtualConsole();
+  const runtimeErrors = [];
+  virtualConsole.on('jsdomError', (error) => runtimeErrors.push(error));
+
+  const dom = new JSDOM(
+    `<!doctype html>
+    <html>
+      <head><title>Conversa de mídia - Gemini</title></head>
+      <body>
+        <main>${bodyHtml}</main>
+      </body>
+    </html>`,
+    {
+      url: 'https://gemini.google.com/app/b8e7c075effe9457',
+      runScripts: 'outside-only',
+      pretendToBeVisual: true,
+      virtualConsole,
+    },
+  );
+
+  installLayoutMocks(dom.window);
+  dom.window.console.log = () => {};
+  dom.window.console.warn = () => {};
+  dom.window.console.error = (...args) => runtimeErrors.push(args);
+  dom.window.HTMLCanvasElement.prototype.getContext = () => null;
+  dom.window.Element.prototype.scrollIntoView = () => {};
+  dom.window.scrollTo = () => {};
+
+  return { dom, runtimeErrors };
+};
+
+const installReadyImageMock = (window, selector = 'img') => {
+  window.document.querySelectorAll(selector).forEach((img) => {
+    Object.defineProperty(img, 'complete', { configurable: true, value: true });
+    Object.defineProperty(img, 'naturalWidth', { configurable: true, value: 320 });
+    Object.defineProperty(img, 'naturalHeight', { configurable: true, value: 180 });
+    img.decode = () => Promise.resolve();
+  });
+};
+
+const evaluateContentScript = async (window) => {
+  const script = await readFile(contentScriptUrl, 'utf8');
+  window.eval(script);
+  await new Promise((resolve) => window.setTimeout(resolve, 25));
+  return window.__geminiMdExportDebug;
+};
+
+const fakeBlobResponse = (window, bytes, type = 'image/png') => ({
+  ok: true,
+  blob: async () => new Blob([new Uint8Array(bytes)], { type }),
+});
+
 test('content script injeta botão moderno sem loop de MutationObserver', { timeout: 2000 }, async () => {
   const script = await readFile(contentScriptUrl, 'utf8');
   const pkg = JSON.parse(
@@ -129,6 +182,130 @@ test('content script injeta botão moderno sem loop de MutationObserver', { time
     `injeção não deve criar tempestade de mutações; observadas ${mutationCount}`,
   );
   assert.equal(button.querySelectorAll('svg').length, 1);
+  assert.deepEqual(runtimeErrors, []);
+
+  window.close();
+});
+
+test('content script não contém fallback de captura visual', async () => {
+  const [contentScript, backgroundScript] = await Promise.all([
+    readFile(contentScriptUrl, 'utf8'),
+    readFile(new URL('../dist/extension/background.js', import.meta.url), 'utf8'),
+  ]);
+
+  assert.doesNotMatch(contentScript, /capture-visible-tab|captureVisibleTab|ScreenshotToAsset/);
+  assert.doesNotMatch(backgroundScript, /capture-visible-tab|captureVisibleTab/);
+});
+
+test('exportPayload baixa blob sem preparar a imagem antes', { timeout: 5000 }, async () => {
+  const { dom, runtimeErrors } = createGeminiMediaDom(`
+    <model-response>
+      <button class="image-button">
+        <img src="blob:https://gemini.google.com/blob-1" alt="Blob image">
+      </button>
+    </model-response>
+  `);
+  const { window } = dom;
+  installReadyImageMock(window);
+
+  let fetchCalledWith = null;
+  window.fetch = async (source) => {
+    fetchCalledWith = String(source);
+    return fakeBlobResponse(window, [1, 2, 3, 4], 'image/png');
+  };
+  let scrolled = false;
+  window.Element.prototype.scrollIntoView = () => {
+    scrolled = true;
+  };
+
+  const debug = await evaluateContentScript(window);
+  const payload = await debug.exportPayload();
+
+  assert.equal(fetchCalledWith, 'blob:https://gemini.google.com/blob-1');
+  assert.equal(scrolled, false);
+  assert.equal(payload.mediaFiles.length, 1);
+  assert.equal(payload.mediaFailures.length, 0);
+  assert.match(payload.content, /!\[Blob image\]\(assets\/b8e7c075effe9457\/gemini-01-image-01\.png\)/);
+  assert.deepEqual(runtimeErrors, []);
+
+  window.close();
+});
+
+test('exportPayload usa fonte byte-legível revelada no lightbox', { timeout: 4000 }, async () => {
+  const lightboxDataUrl = 'data:image/png;base64,AQIDBA==';
+  const { dom, runtimeErrors } = createGeminiMediaDom(`
+    <model-response>
+      <button class="image-button" id="open-lightbox">
+        <img src="https://lh3.googleusercontent.com/gg/protected=s1024-rj" alt="Generated image">
+      </button>
+    </model-response>
+  `);
+  const { window } = dom;
+  installReadyImageMock(window);
+
+  window.fetch = async () => {
+    throw new Error('HTTP 403');
+  };
+  window.document.getElementById('open-lightbox').addEventListener('click', () => {
+    const dialog = window.document.createElement('div');
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('data-rect', '10,10,400,300');
+    dialog.innerHTML = `
+      <button aria-label="Close">Close</button>
+      <img src="${lightboxDataUrl}" alt="Generated image full">
+    `;
+    dialog.querySelector('button').addEventListener('click', () => dialog.remove());
+    window.document.body.appendChild(dialog);
+  });
+
+  const debug = await evaluateContentScript(window);
+  const payload = await debug.exportPayload();
+
+  assert.equal(payload.mediaFiles.length, 1);
+  assert.equal(payload.mediaFailures.length, 0);
+  assert.equal(payload.mediaFiles[0].contentBase64, 'AQIDBA==');
+  assert.match(payload.content, /!\[Generated image\]\(assets\/b8e7c075effe9457\/gemini-01-image-01\.png\)/);
+  assert.equal(window.document.querySelector('[role="dialog"]'), null);
+  assert.deepEqual(runtimeErrors, []);
+
+  window.close();
+});
+
+test('exportPayload mantém warning quando lightbox não revela fonte legível', { timeout: 4000 }, async () => {
+  const protectedUrl = 'https://lh3.googleusercontent.com/gg/protected=s1024-rj';
+  const { dom, runtimeErrors } = createGeminiMediaDom(`
+    <model-response>
+      <button class="image-button" id="open-lightbox">
+        <img src="${protectedUrl}" alt="Protected image">
+      </button>
+    </model-response>
+  `);
+  const { window } = dom;
+  installReadyImageMock(window);
+
+  window.fetch = async () => {
+    throw new Error('HTTP 403');
+  };
+  window.document.getElementById('open-lightbox').addEventListener('click', () => {
+    const dialog = window.document.createElement('div');
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('data-rect', '10,10,400,300');
+    dialog.innerHTML = `
+      <button aria-label="Close">Close</button>
+      <img src="${protectedUrl}" alt="Protected image full">
+    `;
+    dialog.querySelector('button').addEventListener('click', () => dialog.remove());
+    window.document.body.appendChild(dialog);
+  });
+
+  const debug = await evaluateContentScript(window);
+  const payload = await debug.exportPayload();
+
+  assert.equal(payload.mediaFiles.length, 0);
+  assert.equal(payload.mediaFailures.length, 1);
+  assert.match(payload.content, /\[!warning\] Mídia não importada/);
+  assert.match(payload.content, /> Descrição: Protected image/);
+  assert.equal(window.document.querySelector('[role="dialog"]'), null);
   assert.deepEqual(runtimeErrors, []);
 
   window.close();

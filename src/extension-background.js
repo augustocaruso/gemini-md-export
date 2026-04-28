@@ -134,13 +134,22 @@ const fetchAsset = async (source) => {
     throw new Error('URL de mídia inválida.');
   }
 
+  const isGoogleMediaHost =
+    /(?:^|\.)googleusercontent\.com$/i.test(url.hostname) ||
+    /(?:^|\.)google\.com$/i.test(url.hostname);
+
   const fetchWithCredentials = async (credentials) => {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 4000);
+    const timeoutId = setTimeout(() => controller.abort(), 7000);
     try {
       const response = await fetch(url.href, {
         credentials,
         cache: 'force-cache',
+        headers: {
+          Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+        },
+        referrer: isGoogleMediaHost ? 'https://gemini.google.com/' : undefined,
+        referrerPolicy: isGoogleMediaHost ? 'strict-origin-when-cross-origin' : undefined,
         signal: controller.signal,
       });
       if (!response.ok) {
@@ -153,19 +162,18 @@ const fetchAsset = async (source) => {
   };
 
   let response;
-  try {
-    response = await fetchWithCredentials('omit');
-  } catch (omitErr) {
+  const credentialModes = isGoogleMediaHost ? ['include', 'omit'] : ['omit', 'include'];
+  const errors = [];
+
+  for (const credentials of credentialModes) {
     try {
-      response = await fetchWithCredentials('include');
-    } catch (includeErr) {
-      throw new Error(
-        `omit: ${omitErr?.message || String(omitErr)}; include: ${
-          includeErr?.message || String(includeErr)
-        }`,
-      );
+      response = await fetchWithCredentials(credentials);
+      break;
+    } catch (err) {
+      errors.push(`${credentials}: ${err?.message || String(err)}`);
     }
   }
+  if (!response) throw new Error(errors.join('; '));
 
   const blob = await response.blob();
   return {
@@ -191,6 +199,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       reason: message.reason || 'self-reload',
       expectedExtensionVersion: message.expectedExtensionVersion || null,
       expectedProtocolVersion: message.expectedProtocolVersion || null,
+      expectedBuildStamp: message.expectedBuildStamp || null,
       requestedAt: new Date().toISOString(),
     }).then(() => {
       sendResponse({ ok: true, reloading: true });

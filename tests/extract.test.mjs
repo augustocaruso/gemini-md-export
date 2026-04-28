@@ -391,7 +391,7 @@ test('extractMarkdown: não cola heading com parágrafo seguinte (regressão rea
   assert.equal(lines[idx + 1], '', 'linha depois do heading deve ser vazia');
 });
 
-test('extractMarkdown: marca imagem como mídia não exportada', () => {
+test('extractMarkdown: marca imagem como mídia não importada com warning', () => {
   const el = makeEl(`
     <model-response>
       <p>Veja o achado:</p>
@@ -401,7 +401,7 @@ test('extractMarkdown: marca imagem como mídia não exportada', () => {
   `);
   const md = extractMarkdown(el);
   assert.match(md, /Veja o achado:/);
-  assert.match(md, /> \[!warning\] Mídia não exportada/);
+  assert.match(md, /> \[!warning\] Mídia não importada/);
   assert.match(md, /> Tipo: Imagem/);
   assert.match(md, /> Descrição: Radiografia de tórax/);
   assert.match(md, /> Origem detectada: https:\/\/example\.com\/rx\.png/);
@@ -431,7 +431,7 @@ test('extractMarkdown: não duplica placeholder em div simples do usuário', () 
     </user-query>
   `);
   const md = extractMarkdown(el);
-  assert.equal((md.match(/Mídia não exportada/g) || []).length, 1);
+  assert.equal((md.match(/Mídia não importada/g) || []).length, 1);
   assert.match(md, /^olhe isso/);
 });
 
@@ -473,7 +473,8 @@ test('extractMarkdown: marca links de anexos conhecidos', () => {
     </model-response>
   `);
   const md = extractMarkdown(el);
-  assert.match(md, /> Tipo: Anexo/);
+  assert.match(md, /> \[!info\] Anexo não importado/);
+  assert.match(md, /> PDF detectado neste ponto da conversa\./);
   assert.match(md, /> Descrição: laudo\.pdf/);
   assert.match(md, /> Origem detectada: https:\/\/example\.com\/laudo\.pdf/);
 });
@@ -490,7 +491,9 @@ test('extractMarkdown: trata ícone de PDF do Gemini como anexo, não imagem', (
   `);
   const md = extractMarkdown(el);
   assert.match(md, /^analise este arquivo/);
-  assert.match(md, /> Tipo: Anexo/);
+  assert.match(md, /> \[!info\] Anexo não importado/);
+  assert.match(md, /> PDF detectado neste ponto da conversa\./);
+  assert.doesNotMatch(md, /drive-thirdparty\.googleusercontent\.com/);
   assert.doesNotMatch(md, /> Tipo: Imagem/);
 });
 

@@ -386,6 +386,9 @@
     heartbeatTimer: 0,
     polling: false,
     lastHeartbeatAt: 0,
+    lastCommandPollStartedAt: 0,
+    lastCommandPollEndedAt: 0,
+    lastCommandReceivedAt: 0,
   };
 
   // --- metadata da página -----------------------------------------------
@@ -1712,6 +1715,18 @@
       extensionVersion: bridgeState.extensionVersion,
       protocolVersion: bridgeState.protocolVersion,
       buildStamp: bridgeState.buildStamp,
+      commandPoll: {
+        polling: bridgeState.polling,
+        lastStartedAt: bridgeState.lastCommandPollStartedAt
+          ? new Date(bridgeState.lastCommandPollStartedAt).toISOString()
+          : null,
+        lastEndedAt: bridgeState.lastCommandPollEndedAt
+          ? new Date(bridgeState.lastCommandPollEndedAt).toISOString()
+          : null,
+        lastCommandReceivedAt: bridgeState.lastCommandReceivedAt
+          ? new Date(bridgeState.lastCommandReceivedAt).toISOString()
+          : null,
+      },
       observedAt: new Date().toISOString(),
       staleAfterMs: BRIDGE_CLIENT_STALE_MS,
       page: {
@@ -1743,6 +1758,21 @@
   // --- ação de exportar -------------------------------------------------
 
   const MEDIA_ASSET_SELECTOR = MEDIA_SELECTOR;
+  const MEDIA_EXPORT_TOTAL_BUDGET_MS = 25000;
+  const MEDIA_IMAGE_READY_TIMEOUT_MS = 2200;
+  const MEDIA_IMAGE_SCROLL_SETTLE_MS = 180;
+  const MEDIA_LIGHTBOX_TIMEOUT_MS = 2400;
+  const LIGHTBOX_ROOT_SELECTOR = [
+    '[role="dialog"]',
+    '[aria-modal="true"]',
+    'image-lightbox',
+    'mat-dialog-container',
+    '.mat-mdc-dialog-container',
+    '.cdk-overlay-pane',
+    '.cdk-overlay-container',
+    '.lightbox',
+    '.image-lightbox',
+  ].join(',');
 
   const mediaAssetExtensionFor = (mimeType, source) => {
     const type = String(mimeType || '').toLowerCase().split(';')[0].trim();
@@ -1813,6 +1843,9 @@
     }
   };
 
+  const shouldPrepareImageBeforeFetch = (source) =>
+    !/^(?:blob|data):/i.test(String(source || ''));
+
   const canvasToAsset = (canvas) => {
     const dataUrl = canvas.toDataURL('image/png');
     return parseDataUrlAsset(dataUrl);
@@ -1838,13 +1871,238 @@
     return canvasToAsset(canvas);
   };
 
+  const waitForImageElementReady = async (img, timeoutMs = MEDIA_IMAGE_READY_TIMEOUT_MS) => {
+    if (!(img instanceof HTMLImageElement)) return false;
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      if (img.complete && img.naturalWidth > 0 && img.naturalHeight > 0) {
+        return true;
+      }
+      try {
+        await withTimeout(img.decode?.() || Promise.resolve(), 350, 'decode-timeout');
+      } catch {
+        await sleep(100);
+      }
+    }
+    return img.complete && img.naturalWidth > 0 && img.naturalHeight > 0;
+  };
+
+  const prepareImageElementForExport = async (img) => {
+    if (!(img instanceof HTMLImageElement)) return mediaSourceOf(img);
+
+    try {
+      img.loading = 'eager';
+    } catch {
+      // A imagem ainda pode ser preparada via scroll/decode.
+    }
+
+    try {
+      img.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
+    } catch {
+      try {
+        img.scrollIntoView();
+      } catch {
+        // Se o host bloquear scrollIntoView, seguimos com o src atual.
+      }
+    }
+
+    await sleep(MEDIA_IMAGE_SCROLL_SETTLE_MS);
+    await waitForImageElementReady(img);
+    return mediaSourceOf(img);
+  };
+
+  const visibleElement = (el) => {
+    if (!el || !el.isConnected) return false;
+    if (el.hidden || el.getAttribute?.('aria-hidden') === 'true') return false;
+    const style = getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') {
+      return false;
+    }
+    const rect = el.getBoundingClientRect?.();
+    return !rect || rect.width > 0 || rect.height > 0;
+  };
+
+  const waitForCondition = async (predicate, timeoutMs, intervalMs = 80) => {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      const value = predicate();
+      if (value) return value;
+      await sleep(intervalMs);
+    }
+    return predicate() || null;
+  };
+
+  const cssUrlValues = (value) => {
+    const urls = [];
+    const pattern = /url\((['"]?)(.*?)\1\)/gi;
+    let match;
+    while ((match = pattern.exec(String(value || '')))) {
+      if (match[2]) urls.push(match[2]);
+    }
+    return urls;
+  };
+
+  const srcsetUrls = (value) =>
+    String(value || '')
+      .split(',')
+      .map((part) => part.trim().split(/\s+/)[0])
+      .filter(Boolean);
+
+  const pushUnique = (list, value) => {
+    const normalized = normalizeWhitespace(value || '');
+    if (!normalized || list.includes(normalized)) return;
+    list.push(normalized);
+  };
+
+  const mediaSourcesFromRoot = (root) => {
+    const sources = [];
+    if (!root?.querySelectorAll) return sources;
+
+    root.querySelectorAll('img, video, audio, source, object, embed, a[href]').forEach((el) => {
+      pushUnique(sources, el.currentSrc);
+      pushUnique(sources, el.getAttribute?.('currentSrc'));
+      pushUnique(sources, el.src);
+      pushUnique(sources, el.getAttribute?.('src'));
+      pushUnique(sources, el.getAttribute?.('data-src'));
+      pushUnique(sources, el.href);
+      pushUnique(sources, el.getAttribute?.('href'));
+      pushUnique(sources, el.getAttribute?.('data-download-url'));
+      pushUnique(sources, el.data);
+      pushUnique(sources, el.getAttribute?.('data'));
+      srcsetUrls(el.getAttribute?.('srcset')).forEach((source) => pushUnique(sources, source));
+    });
+
+    root.querySelectorAll('[style]').forEach((el) => {
+      cssUrlValues(el.style?.backgroundImage || el.getAttribute?.('style')).forEach((source) =>
+        pushUnique(sources, source),
+      );
+    });
+
+    return sources;
+  };
+
+  const findLightboxTrigger = (img) => {
+    if (!(img instanceof HTMLElement)) return null;
+    return (
+      img.closest('.image-button, .preview-image-button, button, [role="button"]') ||
+      mediaReplacementTarget(img, document.body)
+    );
+  };
+
+  const lightboxRoots = () =>
+    Array.from(document.querySelectorAll(LIGHTBOX_ROOT_SELECTOR)).filter(
+      (el) => !el.closest?.(`#${MODAL_ID}`),
+    );
+
+  const findOpenedLightbox = (previousRoots) => {
+    const before = previousRoots || new Set();
+    const roots = lightboxRoots().filter(visibleElement);
+    return (
+      roots.find((root) => !before.has(root) && mediaSourcesFromRoot(root).length > 0) ||
+      roots.find((root) => mediaSourcesFromRoot(root).length > 0) ||
+      null
+    );
+  };
+
+  const closeLightbox = async (root, previousActiveElement) => {
+    const closeButton = root?.querySelector?.(
+      [
+        'button[aria-label*="Close" i]',
+        'button[aria-label*="Fechar" i]',
+        'button[aria-label*="Dismiss" i]',
+        'button[data-test-id*="close" i]',
+        '[role="button"][aria-label*="Close" i]',
+        '[role="button"][aria-label*="Fechar" i]',
+        '[mat-dialog-close]',
+      ].join(','),
+    );
+    if (closeButton) {
+      closeButton.click();
+    } else {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    }
+    await sleep(120);
+    try {
+      previousActiveElement?.focus?.({ preventScroll: true });
+    } catch {
+      // Foco é conforto visual; export continua sem isso.
+    }
+  };
+
+  const fetchMediaFromSources = async (sources) => {
+    const errors = [];
+    for (const source of sources) {
+      try {
+        const asset = await fetchImageAsset(source);
+        if (asset?.contentBase64) {
+          return { asset, source };
+        }
+      } catch (err) {
+        errors.push(`${source}: ${err?.message || String(err)}`);
+      }
+    }
+    if (errors.length) {
+      throw new Error(errors.join('; '));
+    }
+    return null;
+  };
+
+  const fetchImageAssetViaLightbox = async (img, originalSource) => {
+    const trigger = findLightboxTrigger(img);
+    if (!trigger || trigger === img) return null;
+
+    const previousRoots = new Set(lightboxRoots());
+    const previousActiveElement = document.activeElement;
+    try {
+      trigger.click();
+      const root = await waitForCondition(
+        () => findOpenedLightbox(previousRoots),
+        MEDIA_LIGHTBOX_TIMEOUT_MS,
+      );
+      if (!root) return null;
+
+      try {
+        const sources = mediaSourcesFromRoot(root).filter((source) => source !== originalSource);
+        return await fetchMediaFromSources(sources);
+      } finally {
+        await closeLightbox(root, previousActiveElement);
+      }
+    } catch (err) {
+      throw new Error(`lightbox: ${err?.message || String(err)}`);
+    }
+  };
+
+  const captureMediaScrollPosition = () => {
+    try {
+      const { el: scroller } = getGeminiScrollHost(document, window);
+      const target = getScrollTarget(scroller, document, window);
+      return {
+        target,
+        top: getScrollTop(target, window),
+      };
+    } catch {
+      return null;
+    }
+  };
+
+  const restoreMediaScrollPosition = async (position) => {
+    if (!position) return;
+    try {
+      setScrollTop(position.target, window, position.top);
+      await sleep(50);
+    } catch {
+      // Restauração de scroll é conforto visual, não deve quebrar export.
+    }
+  };
+
   const fetchImageAssetViaBackground = async (source) => {
     const response = await extensionSendMessage(
       {
         type: 'gemini-md-export/fetch-asset',
         source,
       },
-      { timeoutMs: 6500 },
+      { timeoutMs: 9000 },
     );
     if (!response?.ok || !response.contentBase64) {
       throw new Error(response?.error || 'background-fetch-failed');
@@ -1859,33 +2117,59 @@
     if (!source) return null;
     if (/^data:/i.test(source)) return parseDataUrlAsset(source);
 
+    const fetchFromPage = async () => {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 3500);
+      try {
+        const response = await fetch(source, {
+          credentials: shouldFetchWithCredentials(source) ? 'include' : 'omit',
+          cache: 'force-cache',
+          signal: controller.signal,
+        });
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        const blob = await response.blob();
+        return {
+          mimeType: blob.type || 'application/octet-stream',
+          contentBase64: arrayBufferToBase64(await blob.arrayBuffer()),
+        };
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    };
+
     if (shouldFetchViaBackgroundFirst(source)) {
-      return fetchImageAssetViaBackground(source);
+      try {
+        return await fetchImageAssetViaBackground(source);
+      } catch (backgroundErr) {
+        try {
+          return await fetchFromPage();
+        } catch (pageErr) {
+          throw new Error(
+            `background: ${backgroundErr?.message || String(backgroundErr)}; page: ${
+              pageErr?.message || String(pageErr)
+            }`,
+          );
+        }
+      }
     }
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 5000);
     try {
-      const response = await fetch(source, {
-        credentials: shouldFetchWithCredentials(source) ? 'include' : 'omit',
-        cache: 'force-cache',
-        signal: controller.signal,
-      });
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-      const blob = await response.blob();
-      return {
-        mimeType: blob.type || 'application/octet-stream',
-        contentBase64: arrayBufferToBase64(await blob.arrayBuffer()),
-      };
+      return await fetchFromPage();
     } catch (err) {
       if (isExtensionContext) {
-        return fetchImageAssetViaBackground(source);
+        try {
+          return await fetchImageAssetViaBackground(source);
+        } catch (backgroundErr) {
+          throw new Error(
+            `page: ${err?.message || String(err)}; background: ${
+              backgroundErr?.message || String(backgroundErr)
+            }`,
+          );
+        }
       }
       throw err;
-    } finally {
-      clearTimeout(timeoutId);
     }
   };
 
@@ -1924,68 +2208,116 @@
     const nodes = Array.from(doc.querySelectorAll('user-query, model-response'));
     const updatedTurns = turns.map((turn) => ({ ...turn }));
     const files = [];
+    const failures = [];
     let exportedTurnIndex = 0;
+    const deadlineAt = Date.now() + MEDIA_EXPORT_TOTAL_BUDGET_MS;
+    const scrollPosition = captureMediaScrollPosition();
 
-    for (const node of nodes) {
-      const role = roleOf(node);
-      if (!role) continue;
-
-      const extracted = extractMarkdown(node);
-      if (!extracted.trim()) continue;
-
-      const turn = updatedTurns[exportedTurnIndex];
-      if (!turn) break;
-
-      const candidates = collectMediaCandidatesForTurn(node);
-      let mediaIndex = 0;
-      for (const candidate of candidates) {
-        mediaIndex += 1;
-        try {
-          let asset = null;
-          if (candidate.kind === 'canvas') {
-            asset = canvasToAsset(candidate.el);
-          } else {
-            try {
-              asset = await fetchImageAsset(candidate.source);
-            } catch (fetchErr) {
-              try {
-                asset = await imageElementToAsset(candidate.el);
-              } catch {
-                asset = null;
-              }
-              if (!asset?.contentBase64) throw fetchErr;
-            }
-          }
-          if (!asset?.contentBase64) continue;
-
-          const ext = mediaAssetExtensionFor(asset.mimeType, candidate.source);
-          const rolePrefix = role === 'user' ? 'user' : 'gemini';
-          const filename = `assets/${chatId}/${rolePrefix}-${String(
-            exportedTurnIndex + 1,
-          ).padStart(2, '0')}-image-${String(mediaIndex).padStart(2, '0')}.${ext}`;
-          const markdownPath = filename;
-          const markdownImage = `![${escapeMarkdownAlt(candidate.description)}](${markdownPath})`;
-
-          files.push({
-            filename,
-            contentBase64: asset.contentBase64,
-            mimeType: asset.mimeType,
-          });
-          turn.text = replaceFirst(turn.text, candidate.placeholder, markdownImage);
-        } catch (err) {
-          warn('Não consegui baixar a mídia; mantendo warning no Markdown.', {
-            source: candidate.source,
-            error: err?.message || String(err),
-          });
+    try {
+      for (const node of nodes) {
+        if (Date.now() >= deadlineAt) {
+          warn('Tempo de importação de mídia esgotado; mantendo placeholders restantes.');
+          break;
         }
-      }
 
-      exportedTurnIndex += 1;
+        const role = roleOf(node);
+        if (!role) continue;
+
+        const extracted = extractMarkdown(node);
+        if (!extracted.trim()) continue;
+
+        const turn = updatedTurns[exportedTurnIndex];
+        if (!turn) break;
+
+        const candidates = collectMediaCandidatesForTurn(node);
+        let mediaIndex = 0;
+        for (const candidate of candidates) {
+          if (Date.now() >= deadlineAt) {
+            warn('Tempo de importação de mídia esgotado; mantendo placeholders restantes.');
+            break;
+          }
+
+          mediaIndex += 1;
+          let source = candidate.source;
+          try {
+            let asset = null;
+            if (candidate.kind === 'canvas') {
+              asset = canvasToAsset(candidate.el);
+            } else {
+              if (shouldPrepareImageBeforeFetch(source)) {
+                source = (await prepareImageElementForExport(candidate.el)) || source;
+              }
+              try {
+                asset = await fetchImageAsset(source);
+              } catch (fetchErr) {
+                let finalFetchErr = fetchErr;
+                try {
+                  asset = await imageElementToAsset(candidate.el);
+                } catch {
+                  asset = null;
+                }
+                if (!asset?.contentBase64) {
+                  try {
+                    const lightboxResult = await fetchImageAssetViaLightbox(candidate.el, source);
+                    if (lightboxResult?.asset?.contentBase64) {
+                      asset = lightboxResult.asset;
+                      source = lightboxResult.source || source;
+                    }
+                  } catch (lightboxErr) {
+                    finalFetchErr = new Error(
+                      `${fetchErr?.message || String(fetchErr)}; ${
+                        lightboxErr?.message || String(lightboxErr)
+                      }`,
+                    );
+                  }
+                }
+                if (!asset?.contentBase64) throw finalFetchErr;
+              }
+            }
+            if (!asset?.contentBase64) continue;
+
+            const ext = mediaAssetExtensionFor(asset.mimeType, source);
+            const rolePrefix = role === 'user' ? 'user' : 'gemini';
+            const filename = `assets/${chatId}/${rolePrefix}-${String(
+              exportedTurnIndex + 1,
+            ).padStart(2, '0')}-image-${String(mediaIndex).padStart(2, '0')}.${ext}`;
+            const markdownPath = filename;
+            const markdownImage = `![${escapeMarkdownAlt(candidate.description)}](${markdownPath})`;
+
+            files.push({
+              filename,
+              contentBase64: asset.contentBase64,
+              mimeType: asset.mimeType,
+            });
+            turn.text = replaceFirst(turn.text, candidate.placeholder, markdownImage);
+          } catch (err) {
+            failures.push({
+              turnIndex: exportedTurnIndex + 1,
+              role,
+              kind: candidate.kind,
+              description: candidate.description,
+              source,
+              originalSource: source === candidate.source ? undefined : candidate.source,
+              error: err?.message || String(err),
+            });
+            warn('Não consegui baixar a mídia; mantendo warning no Markdown.', {
+              source,
+              originalSource: source === candidate.source ? undefined : candidate.source,
+              error: err?.message || String(err),
+            });
+          }
+        }
+
+        exportedTurnIndex += 1;
+      }
+    } finally {
+      await restoreMediaScrollPosition(scrollPosition);
     }
 
     return {
       turns: updatedTurns,
       files,
+      failures,
     };
   };
 
@@ -2021,6 +2353,7 @@
       content: buildDocument({ meta, turns: media.turns }),
       fallbackContent,
       mediaFiles: media.files,
+      mediaFailures: media.failures,
       hydration: options.hydration || null,
     };
   };
@@ -2187,6 +2520,7 @@
         reason: command.args?.reason || 'bridge-command',
         expectedExtensionVersion: command.args?.expectedExtensionVersion || null,
         expectedProtocolVersion: command.args?.expectedProtocolVersion || null,
+        expectedBuildStamp: command.args?.expectedBuildStamp || null,
       });
       return response || { ok: false, reason: 'empty-reload-response' };
     }
@@ -2902,6 +3236,19 @@
     setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
+  const markdownWithInlineMediaFallback = (payload) => {
+    let content = payload?.content || payload?.fallbackContent || '';
+    const mediaFiles = Array.isArray(payload?.mediaFiles) ? payload.mediaFiles : [];
+    for (const file of mediaFiles) {
+      if (!file?.filename || !file?.contentBase64) continue;
+      const dataUrl = `data:${file.mimeType || 'application/octet-stream'};base64,${
+        file.contentBase64
+      }`;
+      content = content.split(`](${file.filename})`).join(`](${dataUrl})`);
+    }
+    return content || payload?.fallbackContent || '';
+  };
+
   const saveExportPayload = async (payload) => {
     if (state.bridgeOutputDir) {
       try {
@@ -2940,7 +3287,7 @@
       }
     }
 
-    await downloadBlob(payload.filename, payload.fallbackContent || payload.content);
+    await downloadBlob(payload.filename, markdownWithInlineMediaFallback(payload));
   };
 
   const exportNow = async () => {
@@ -4336,6 +4683,9 @@
     if (response?.clientId && !bridgeState.clientId) {
       bridgeState.clientId = response.clientId;
     }
+    if (response?.command) {
+      await handleBridgeCommand(response.command);
+    }
     // Se o bridge acabou de voltar, o heartbeat já serve como nudge para o
     // loop de comandos sair rápido de backoff/transiente e reabrir o long-poll.
     pollBridgeCommands();
@@ -4353,24 +4703,40 @@
     });
   };
 
+  const handleBridgeCommand = async (command) => {
+    bridgeState.lastCommandReceivedAt = Date.now();
+    let result;
+    try {
+      result = await executeBridgeCommand(command);
+    } catch (err) {
+      result = {
+        ok: false,
+        error: err?.message || String(err),
+      };
+    }
+    await postBridgeCommandResult(command, result);
+  };
+
   const pollBridgeCommands = async () => {
     if (!bridgeState.started || bridgeState.polling) return;
     bridgeState.polling = true;
 
     while (bridgeState.started) {
       try {
+        bridgeState.lastCommandPollStartedAt = Date.now();
         const response = await bridgeRequest(
           `/bridge/command?clientId=${encodeURIComponent(bridgeState.clientId)}`,
           { timeoutMs: BRIDGE_POLL_TIMEOUT_MS },
         );
+        bridgeState.lastCommandPollEndedAt = Date.now();
 
         if (!response?.command) {
           continue;
         }
 
-        const result = await executeBridgeCommand(response.command);
-        await postBridgeCommandResult(response.command, result);
+        await handleBridgeCommand(response.command);
       } catch (err) {
+        bridgeState.lastCommandPollEndedAt = Date.now();
         bridgeState.lastError = err?.message || String(err);
         await sleep(BRIDGE_POLL_ERROR_BACKOFF_MS);
       }
@@ -4778,6 +5144,7 @@
       clearNotebookChatUrlCache: (notebookId) => clearNotebookChatUrlCache(notebookId),
       snapshot: debugSnapshot,
       hydrateCurrentConversation: () => hydrateConversationToTop(document, window),
+      exportPayload: () => buildExportPayload(document, location.href),
       findTopBar: () => {
         const res = findTopBar();
         if (!res) return { matchedBy: null, target: null };

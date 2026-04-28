@@ -206,6 +206,18 @@ const humanMediaKind = (kind) => {
   return 'Mídia';
 };
 
+const attachmentLabelOf = (el) => {
+  const description = describeMedia(el);
+  const source = mediaSourceOf(el);
+  const sourceMatch = source.match(/\/type\/application\/([^/?#]+)/i);
+  if (sourceMatch?.[1]) return sourceMatch[1].toUpperCase();
+  if (/pdf/i.test(description)) return 'PDF';
+  if (/spreadsheet/i.test(description)) return 'Planilha';
+  if (/presentation/i.test(description)) return 'Apresentação';
+  if (/document/i.test(description)) return 'Documento';
+  return 'Arquivo';
+};
+
 const mediaKindOf = (el) => {
   const tag = el.tagName?.toLowerCase();
   if (tag === 'img') {
@@ -268,14 +280,33 @@ const mediaPlaceholderFor = (el) => {
   const kind = mediaKindOf(el);
   if (!kind) return '';
 
-  const label = humanMediaKind(kind);
-  const lines = [
-    '> [!warning] Mídia não exportada',
-    `> Tipo: ${label}`,
-    '> Arquivo detectado no Gemini neste ponto, mas não salvo automaticamente.',
-  ];
   const description = describeMedia(el);
   const source = mediaSourceOf(el);
+  if (kind === 'attachment') {
+    const attachmentLabel = attachmentLabelOf(el);
+    const lines = [
+      '> [!info] Anexo não importado',
+      `> ${attachmentLabel} detectado neste ponto da conversa.`,
+      '> O Gemini expõe apenas um preview/ícone no DOM exportável; o arquivo original precisa ser salvo manualmente.',
+    ];
+    if (description && !/\b(?:pdf|document|spreadsheet|presentation)\s+icon\b/i.test(description)) {
+      lines.push(`> Descrição: ${description}`);
+    }
+    if (
+      shouldPrintMediaSource(source) &&
+      !/drive-thirdparty\.googleusercontent\.com\/\d+\/type\/application\//i.test(source)
+    ) {
+      lines.push(`> Origem detectada: ${formatMediaSource(source)}`);
+    }
+    return lines.join('\n');
+  }
+
+  const label = humanMediaKind(kind);
+  const lines = [
+    '> [!warning] Mídia não importada',
+    `> Tipo: ${label}`,
+    '> Arquivo detectado neste ponto da conversa, mas não salvo automaticamente.',
+  ];
   if (description) lines.push(`> Descrição: ${description}`);
   if (shouldPrintMediaSource(source)) {
     lines.push(`> Origem detectada: ${formatMediaSource(source)}`);

@@ -34,6 +34,12 @@ const DEFAULT_EXPORT_DIR = process.env.GEMINI_MCP_EXPORT_DIR || resolve(homedir(
 const CLIENT_STALE_MS = 45_000;
 const LONG_POLL_TIMEOUT_MS = 25_000;
 const COMMAND_TIMEOUT_MS = Number(process.env.GEMINI_MCP_COMMAND_TIMEOUT_MS || 180_000);
+const EXTENSION_INFO_COMMAND_TIMEOUT_MS = Number(
+  process.env.GEMINI_MCP_EXTENSION_INFO_COMMAND_TIMEOUT_MS || 6000,
+);
+const RELOAD_EXTENSION_COMMAND_TIMEOUT_MS = Number(
+  process.env.GEMINI_MCP_RELOAD_EXTENSION_COMMAND_TIMEOUT_MS || 25_000,
+);
 const FOLDER_PICKER_TIMEOUT_MS = 5 * 60_000;
 const ALLOWED_BRIDGE_ORIGIN = 'https://gemini.google.com';
 const RECENT_CHATS_CACHE_MAX_AGE_MS = Number(
@@ -48,14 +54,42 @@ const CHROME_GUARD_CONFIG = {
     process.env.GME_CHROME_PROFILE_DIRECTORY ||
     'Default',
   launchIfClosed: process.env.GEMINI_MCP_CHROME_LAUNCH_IF_CLOSED !== 'false',
-  reloadTimeoutMs: Number(process.env.GEMINI_MCP_CHROME_RELOAD_TIMEOUT_MS || 15_000),
+  reloadTimeoutMs: Number(process.env.GEMINI_MCP_CHROME_RELOAD_TIMEOUT_MS || 75_000),
   maxReloadAttempts: Number(process.env.GEMINI_MCP_CHROME_MAX_RELOAD_ATTEMPTS || 1),
   useExtensionsReloaderFallback:
     process.env.GEMINI_MCP_USE_EXTENSIONS_RELOADER_FALLBACK === 'true',
 };
+const detectExpectedBrowserBuildStamp = () => {
+  if (process.env.GEMINI_MCP_EXPECTED_BUILD_STAMP) {
+    return process.env.GEMINI_MCP_EXPECTED_BUILD_STAMP;
+  }
+  if (bridgeVersion.buildStamp) return bridgeVersion.buildStamp;
+
+  const candidates = [
+    resolve(ROOT, 'browser-extension', 'background.js'),
+    resolve(ROOT, 'dist', 'extension', 'background.js'),
+    resolve(ROOT, 'dist', 'extension', 'content.js'),
+  ];
+  for (const candidate of candidates) {
+    try {
+      if (!existsSync(candidate)) continue;
+      const source = readFileSync(candidate, 'utf-8');
+      const match =
+        source.match(/\bbuildStamp:\s*['"](\d{8}-\d{4})['"]/) ||
+        source.match(/\bBUILD_STAMP\s*=\s*['"](\d{8}-\d{4})['"]/) ||
+        source.match(/\bbuild\s+(\d{8}-\d{4})\b/);
+      if (match?.[1]) return match[1];
+    } catch {
+      // Build stamp ausente não deve impedir o MCP de iniciar.
+    }
+  }
+  return null;
+};
+
 const EXPECTED_CHROME_EXTENSION_INFO = {
   extensionVersion: bridgeVersion.extensionVersion || SERVER_VERSION,
   protocolVersion: EXTENSION_PROTOCOL_VERSION,
+  buildStamp: detectExpectedBrowserBuildStamp(),
 };
 
 const clients = new Map();
@@ -209,23 +243,36 @@ const getLiveClients = () => {
     .sort(
       (a, b) =>
         Number(b.isActiveTab === true) - Number(a.isActiveTab === true) ||
+        Number(!!b.pendingPoll) - Number(!!a.pendingPoll) ||
         b.lastSeenAt - a.lastSeenAt,
     );
+};
+
+const removeClient = (clientId) => {
+  const client = clients.get(clientId);
+  if (!client) return;
+  if (client.pendingPoll) {
+    try {
+      clearTimeout(client.pendingPoll.timer);
+      sendNoContent(client.pendingPoll.res);
+    } catch {
+      // ignore stale socket
+    }
+  }
+  clients.delete(clientId);
 };
 
 const cleanupStaleClients = () => {
   const now = Date.now();
   for (const [clientId, client] of clients.entries()) {
     if (now - client.lastSeenAt <= CLIENT_STALE_MS) continue;
-    if (client.pendingPoll) {
-      try {
-        clearTimeout(client.pendingPoll.timer);
-        sendNoContent(client.pendingPoll.res);
-      } catch {
-        // ignore socket errors
-      }
-    }
-    clients.delete(clientId);
+    removeClient(clientId);
+  }
+};
+
+const dropClientsAfterExtensionReload = () => {
+  for (const clientId of Array.from(clients.keys())) {
+    removeClient(clientId);
   }
 };
 
@@ -246,6 +293,7 @@ const upsertClient = (payload) => {
     payload.protocolVersion !== undefined ? payload.protocolVersion : next.protocolVersion ?? null;
   next.buildStamp = payload.buildStamp || payload.page?.buildStamp || next.buildStamp || null;
   next.page = payload.page || next.page || null;
+  next.commandPoll = payload.commandPoll || next.commandPoll || null;
   next.conversations = Array.isArray(payload.conversations)
     ? payload.conversations
     : next.conversations || [];
@@ -255,9 +303,20 @@ const upsertClient = (payload) => {
   return next;
 };
 
+const takeQueuedCommand = (client) => {
+  if (!client?.queue?.length) return null;
+  const command = client.queue.shift();
+  const pending = pendingCommands.get(command.id);
+  if (pending) {
+    pending.dispatchedAt = Date.now();
+  }
+  return command;
+};
+
 const flushQueuedCommand = (client) => {
   if (!client?.pendingPoll || client.queue.length === 0) return false;
-  const command = client.queue.shift();
+  const command = takeQueuedCommand(client);
+  if (!command) return false;
   const { res, timer } = client.pendingPoll;
   clearTimeout(timer);
   client.pendingPoll = null;
@@ -265,7 +324,13 @@ const flushQueuedCommand = (client) => {
   return true;
 };
 
-const enqueueCommand = (clientId, type, args = {}) => {
+const removeQueuedCommand = (clientId, commandId) => {
+  const client = clients.get(clientId);
+  if (!client?.queue?.length) return;
+  client.queue = client.queue.filter((command) => command.id !== commandId);
+};
+
+const enqueueCommand = (clientId, type, args = {}, options = {}) => {
   const client = clients.get(clientId);
   if (!client) {
     throw new Error(`Cliente ${clientId} não encontrado.`);
@@ -278,22 +343,31 @@ const enqueueCommand = (clientId, type, args = {}) => {
     createdAt: new Date().toISOString(),
   };
 
-  client.queue.push(command);
-  flushQueuedCommand(client);
-
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      pendingCommands.delete(command.id);
-      reject(new Error(`Timeout aguardando resposta do comando ${type}.`));
-    }, COMMAND_TIMEOUT_MS);
-
-    pendingCommands.set(command.id, {
+    const timeoutMs = Number(options.timeoutMs || COMMAND_TIMEOUT_MS);
+    const pending = {
       clientId,
       resolve,
       reject,
-      timer,
+      timer: null,
       type,
-    });
+      dispatchedAt: null,
+    };
+    const timer = setTimeout(() => {
+      pendingCommands.delete(command.id);
+      removeQueuedCommand(clientId, command.id);
+      const error = new Error(`Timeout aguardando resposta do comando ${type}.`);
+      error.code = 'command_timeout';
+      error.commandType = type;
+      error.commandDispatched = !!pending.dispatchedAt;
+      reject(error);
+    }, timeoutMs);
+
+    pending.timer = timer;
+    pendingCommands.set(command.id, pending);
+
+    client.queue.push(command);
+    flushQueuedCommand(client);
   });
 };
 
@@ -356,6 +430,58 @@ const requireNotebookClient = (clientId) => {
 };
 
 const launchChromeForGemini = async ({ profileDirectory } = {}) => {
+  const geminiUrl = 'https://gemini.google.com/app';
+
+  if (process.platform === 'darwin') {
+    const explicitApp =
+      process.env.GEMINI_MCP_CHROME_APP ||
+      process.env.GME_CHROME_APP ||
+      process.env.GEMINI_MCP_CHROME_EXE ||
+      process.env.GME_CHROME_EXE ||
+      '';
+    const args = explicitApp ? ['-a', explicitApp, geminiUrl] : [geminiUrl];
+    try {
+      const child = spawn('open', args, {
+        detached: true,
+        stdio: 'ignore',
+      });
+      child.unref();
+      return {
+        attempted: true,
+        supported: true,
+        method: explicitApp ? 'macos-open-app' : 'macos-open-default-browser',
+        app: explicitApp || null,
+      };
+    } catch (err) {
+      return {
+        attempted: true,
+        supported: true,
+        error: err?.message || String(err),
+      };
+    }
+  }
+
+  if (process.platform === 'linux') {
+    try {
+      const child = spawn(process.env.BROWSER || 'xdg-open', [geminiUrl], {
+        detached: true,
+        stdio: 'ignore',
+      });
+      child.unref();
+      return {
+        attempted: true,
+        supported: true,
+        method: process.env.BROWSER ? 'linux-browser-env' : 'linux-xdg-open',
+      };
+    } catch (err) {
+      return {
+        attempted: true,
+        supported: true,
+        error: err?.message || String(err),
+      };
+    }
+  }
+
   if (process.platform !== 'win32') {
     return {
       attempted: false,
@@ -365,7 +491,7 @@ const launchChromeForGemini = async ({ profileDirectory } = {}) => {
   }
 
   const profileArg = profileDirectory ? `--profile-directory=${profileDirectory}` : null;
-  const args = [profileArg, 'https://gemini.google.com/app'].filter(Boolean);
+  const args = [profileArg, geminiUrl].filter(Boolean);
   const quotedArgs = args.map((arg) => `'${String(arg).replace(/'/g, "''")}'`).join(',');
   const explicitChrome = process.env.GEMINI_MCP_CHROME_EXE || process.env.GME_CHROME_EXE || '';
   const candidates = [
@@ -417,13 +543,68 @@ const launchChromeForGemini = async ({ profileDirectory } = {}) => {
 };
 
 const getChromeExtensionInfo = async (client) => {
-  const result = await enqueueCommand(client.clientId, 'get-extension-info');
+  const result = await enqueueCommand(client.clientId, 'get-extension-info', {}, {
+    timeoutMs: EXTENSION_INFO_COMMAND_TIMEOUT_MS,
+  });
   return result || null;
 };
 
+const reloadChromeExtensionForClient = async (client, args = {}) => {
+  try {
+    const result = await enqueueCommand(client.clientId, 'reload-extension-self', args, {
+      timeoutMs: RELOAD_EXTENSION_COMMAND_TIMEOUT_MS,
+    });
+    return result || null;
+  } catch (err) {
+    if (/Timeout aguardando resposta/.test(err?.message || '')) {
+      if (err.commandDispatched) {
+        return {
+          ok: true,
+          reloading: true,
+          assumed: true,
+          reason: 'reload-command-result-timeout',
+          detail: err.message,
+        };
+      }
+      return {
+        ok: false,
+        reloading: false,
+        reason: 'reload-command-dispatch-timeout',
+        detail: err.message,
+      };
+    }
+    throw err;
+  }
+};
+
 const reloadChromeExtension = async (client, args = {}) => {
-  const result = await enqueueCommand(client.clientId, 'reload-extension-self', args);
-  return result || null;
+  const candidates = [
+    client,
+    ...getLiveClients().filter((candidate) => candidate.clientId !== client?.clientId),
+  ].filter(Boolean);
+  const attempts = [];
+
+  for (const candidate of candidates) {
+    const result = await reloadChromeExtensionForClient(candidate, args);
+    attempts.push({
+      client: summarizeClient(candidate),
+      result,
+    });
+    if (result?.ok) {
+      dropClientsAfterExtensionReload();
+      return {
+        ...result,
+        attempts,
+      };
+    }
+  }
+
+  return {
+    ok: false,
+    reloading: false,
+    reason: attempts.at(-1)?.result?.reason || 'reload-command-failed',
+    attempts,
+  };
 };
 
 const ensureBrowserExtensionReady = (args = {}, options = {}) =>
@@ -452,6 +633,14 @@ const summarizeClient = (client) => ({
   protocolVersion: client.protocolVersion ?? null,
   buildStamp: client.buildStamp ?? client.page?.buildStamp ?? null,
   lastSeenAt: new Date(client.lastSeenAt).toISOString(),
+  commandChannel: {
+    pollConnected: !!client.pendingPoll,
+    queuedCommands: client.queue?.length || 0,
+    pagePolling: client.commandPoll?.polling ?? null,
+    lastPollStartedAt: client.commandPoll?.lastStartedAt || null,
+    lastPollEndedAt: client.commandPoll?.lastEndedAt || null,
+    lastCommandReceivedAt: client.commandPoll?.lastCommandReceivedAt || null,
+  },
   page: client.page || null,
   listedConversationCount: client.conversations?.length || 0,
   sidebarConversationCount: recentConversationsForClient(client).length,
@@ -547,6 +736,21 @@ const writeExportPayload = (payload, { outputDir } = {}) => {
       ? content.length
       : Buffer.byteLength(content, 'utf-8'),
     overwritten: existed,
+  };
+};
+
+const writeExportPayloadBundle = (payload, { outputDir } = {}) => {
+  const savedMarkdown = writeExportPayload(payload, { outputDir });
+  const mediaFiles = Array.isArray(payload?.mediaFiles) ? payload.mediaFiles : [];
+  const savedMediaFiles = mediaFiles.map((file) => writeExportPayload(file, { outputDir }));
+  const mediaFailures = Array.isArray(payload?.mediaFailures) ? payload.mediaFailures : [];
+
+  return {
+    ...savedMarkdown,
+    mediaFiles: savedMediaFiles,
+    mediaFileCount: savedMediaFiles.length,
+    mediaFailures,
+    mediaFailureCount: mediaFailures.length,
   };
 };
 
@@ -933,7 +1137,7 @@ const downloadConversationItemForClient = async (client, conversation, args = {}
     throw new Error(result?.error || 'Falha ao exportar conversa no browser.');
   }
 
-  const saved = writeExportPayload(result.payload, { outputDir: args.outputDir });
+  const saved = writeExportPayloadBundle(result.payload, { outputDir: args.outputDir });
   return {
     client: summarizeClient(client),
     conversation: result.conversation || conversation,
@@ -1369,6 +1573,8 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
           filename: result.filename,
           filePath: result.filePath,
           bytes: result.bytes,
+          mediaFileCount: result.mediaFileCount || 0,
+          mediaFailureCount: result.mediaFailureCount || 0,
           turns: result.turns,
           overwritten: result.overwritten,
         };
@@ -2115,8 +2321,41 @@ const bridgeServer = createServer(async (req, res) => {
 
   if (req.method === 'GET' && url.pathname === '/agent/clients') {
     sendAgentJson(res, 200, {
+      expectedChromeExtension: EXPECTED_CHROME_EXTENSION_INFO,
       connectedClients: getLiveClients().map(summarizeClient),
     });
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/agent/ensure-browser-extension-ready') {
+    try {
+      const ready = await ensureBrowserExtensionReady(
+        {
+          clientId: url.searchParams.get('clientId') || undefined,
+        },
+        {
+          allowLaunchChrome: parseOptionalBoolean(url.searchParams.get('allowLaunchChrome')),
+          allowReload: parseOptionalBoolean(url.searchParams.get('allowReload')),
+        },
+      );
+      sendAgentJson(res, 200, {
+        ok: true,
+        expectedChromeExtension: EXPECTED_CHROME_EXTENSION_INFO,
+        client: summarizeClient(ready.client),
+        info: ready.info,
+        launchedChrome: ready.launchedChrome,
+        reloadAttempts: ready.reloadAttempts,
+      });
+    } catch (err) {
+      sendAgentJson(res, 503, {
+        ok: false,
+        error: err.message,
+        code: err.code || null,
+        data: err.data || null,
+        expectedChromeExtension: EXPECTED_CHROME_EXTENSION_INFO,
+        connectedClients: getLiveClients().map(summarizeClient),
+      });
+    }
     return;
   }
 
@@ -2426,11 +2665,20 @@ const bridgeServer = createServer(async (req, res) => {
       }
 
       const client = upsertClient(payload);
-      flushQueuedCommand(client);
+      const deliveredToPoll = flushQueuedCommand(client);
+      const heartbeatCommand = deliveredToPoll ? null : takeQueuedCommand(client);
       sendJson(res, 200, {
         ok: true,
         clientId: client.clientId,
         serverTime: new Date().toISOString(),
+        command: heartbeatCommand,
+        commandDelivery: heartbeatCommand
+          ? 'heartbeat'
+          : deliveredToPoll
+            ? 'long-poll'
+            : null,
+        commandPollRequired: !client.pendingPoll,
+        queuedCommands: client.queue?.length || 0,
       });
     } catch (err) {
       sendJson(res, 400, { error: err.message });
