@@ -279,7 +279,7 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   navegador correto: Chrome por padrão, ou o browser fixado por
   `GEMINI_MCP_BROWSER`/`GME_BROWSER` (`chrome`, `edge`, `brave`, `dia`), com
   fallback para outro Chromium conhecido se o preferido não existir. No
-  Windows usa `Start-Process -WindowStyle Minimized`; no macOS usa `open -g
+  Windows usa `cmd.exe /c start` com o executável real do navegador; no macOS usa `open -g
   -a` para preferir app Chromium em vez do navegador padrão. O argumento de
   perfil só é enviado quando `GEMINI_MCP_CHROME_PROFILE_DIRECTORY` ou
   `GME_CHROME_PROFILE_DIRECTORY` for configurado explicitamente; não passar
@@ -290,7 +290,11 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   a extensão ainda não conectou. O launch é controlado por
   `GEMINI_MCP_CHROME_LAUNCH_IF_CLOSED` (default ligado); timeout e tentativas
   vêm de `GEMINI_MCP_CHROME_RELOAD_TIMEOUT_MS` e
-  `GEMINI_MCP_CHROME_MAX_RELOAD_ATTEMPTS`.
+  `GEMINI_MCP_CHROME_MAX_RELOAD_ATTEMPTS`. O hook `BeforeTool` também usa esse
+  launcher como pré-aquecimento para tools do exporter que dependem do
+  navegador: consulta `/agent/clients` com timeout curto e, se não houver
+  cliente conectado, abre o Gemini antes da tool. Esse prelaunch é controlado
+  por `GEMINI_MCP_HOOK_LAUNCH_BROWSER` (default ligado) e pelo mesmo cooldown.
   `gemini_list_recent_chats` e `/agent/recent-chats` agora priorizam a lista
   trazida pelo heartbeat recente da extensão para responder rápido. Só
   mandam `list-conversations` para abrir/atualizar o sidebar quando o cache

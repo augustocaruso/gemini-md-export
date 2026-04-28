@@ -1,8 +1,12 @@
 #!/usr/bin/env node
 
-import { readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const mode = process.argv[2] || '';
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const SESSION_CONTEXT = [
   'Gemini MD Export: use the gemini-md-export MCP tools for browser status, listing, downloads, and batch exports.',
@@ -15,6 +19,110 @@ const BLOCK_REASON =
 
 const MEDIA_WARNING_RE =
   /\[!warning\]\s*M[ií]dia n[aã]o importada|M[ií]dia n[aã]o exportada|media n(?:ao|ão) importad/i;
+
+const BROWSER_DEPENDENT_EXPORTER_TOOLS = new Set([
+  'gemini_list_recent_chats',
+  'gemini_list_notebook_chats',
+  'gemini_get_current_chat',
+  'gemini_download_chat',
+  'gemini_download_notebook_chat',
+  'gemini_export_recent_chats',
+  'gemini_export_notebook',
+  'gemini_cache_status',
+  'gemini_clear_cache',
+  'gemini_open_chat',
+  'gemini_reload_gemini_tabs',
+  'gemini_snapshot',
+]);
+
+const hookLaunchStatePath = () =>
+  resolve(tmpdir(), 'gemini-md-export', 'hook-browser-launch.json');
+
+const loadBrowserLauncher = async () => {
+  const candidates = [
+    resolve(__dirname, '..', '..', 'src', 'browser-launch.mjs'),
+    resolve(__dirname, '..', '..', '..', 'src', 'browser-launch.mjs'),
+  ];
+  const modulePath = candidates.find((candidate) => existsSync(candidate));
+  if (!modulePath) throw new Error('browser-launch.mjs not found');
+  return import(pathToFileURL(modulePath).href);
+};
+
+const normalizeExporterToolName = (toolName) =>
+  String(toolName || '')
+    .replace(/^mcp__gemini-md-export__/, '')
+    .replace(/^mcp[_-]gemini[_-]md[_-]export[_-]/, '')
+    .replace(/^gemini-md-export[_-]/, '');
+
+const isBrowserDependentExporterTool = (input) => {
+  const normalized = normalizeExporterToolName(getToolName(input));
+  if (BROWSER_DEPENDENT_EXPORTER_TOOLS.has(normalized)) return true;
+  return BROWSER_DEPENDENT_EXPORTER_TOOLS.has(normalized.replace(/-/g, '_'));
+};
+
+const readHookLaunchState = () => {
+  try {
+    return JSON.parse(readFileSync(hookLaunchStatePath(), 'utf-8'));
+  } catch {
+    return {};
+  }
+};
+
+const writeHookLaunchState = (state) => {
+  try {
+    const filePath = hookLaunchStatePath();
+    mkdirSync(dirname(filePath), { recursive: true });
+    writeFileSync(filePath, `${JSON.stringify(state, null, 2)}\n`, 'utf-8');
+  } catch (err) {
+    console.error(`[gemini-md-export-hook] failed to write launch state: ${err.message}`);
+  }
+};
+
+const hookLaunchInCooldown = () => {
+  const cooldownMs = Number(process.env.GEMINI_MCP_BROWSER_LAUNCH_COOLDOWN_MS || 60_000);
+  if (!Number.isFinite(cooldownMs) || cooldownMs <= 0) return false;
+  const lastAttemptAt = Number(readHookLaunchState().lastAttemptAt || 0);
+  return lastAttemptAt > 0 && Date.now() - lastAttemptAt < cooldownMs;
+};
+
+const hasConnectedBrowserClient = async () => {
+  if (typeof fetch !== 'function') return false;
+  const bridgeUrl =
+    process.env.GEMINI_MCP_BRIDGE_CLIENTS_URL || 'http://127.0.0.1:47283/agent/clients';
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 350);
+  try {
+    const response = await fetch(bridgeUrl, { signal: controller.signal });
+    if (!response.ok) return false;
+    const payload = await response.json();
+    return Array.isArray(payload.connectedClients) && payload.connectedClients.length > 0;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+const maybeLaunchBrowserBeforeTool = async (input) => {
+  if (process.env.GEMINI_MCP_HOOK_LAUNCH_BROWSER === 'false') return;
+  if (!isBrowserDependentExporterTool(input)) return;
+  if (await hasConnectedBrowserClient()) return;
+  if (hookLaunchInCooldown()) return;
+
+  const profileDirectory =
+    process.env.GEMINI_MCP_CHROME_PROFILE_DIRECTORY ||
+    process.env.GME_CHROME_PROFILE_DIRECTORY ||
+    null;
+  const { launchGeminiBrowser } = await loadBrowserLauncher();
+  const result = await launchGeminiBrowser({ profileDirectory });
+  writeHookLaunchState({
+    lastAttemptAt: Date.now(),
+    result,
+  });
+  console.error(
+    `[gemini-md-export-hook] browser prelaunch attempted=${!!result.attempted} method=${result.method || 'unknown'} browser=${result.browserName || 'unknown'} reason=${result.reason || ''}`,
+  );
+};
 
 const readInput = () => {
   let raw = '';
@@ -274,9 +382,12 @@ const forbiddenReason = (input) => {
   return null;
 };
 
-const beforeTool = (input) => {
+const beforeTool = async (input) => {
   const reason = forbiddenReason(input);
-  if (!reason) return silent();
+  if (!reason) {
+    await maybeLaunchBrowserBeforeTool(input);
+    return silent();
+  }
   return {
     suppressOutput: true,
     decision: 'deny',
@@ -284,7 +395,7 @@ const beforeTool = (input) => {
   };
 };
 
-const run = () => {
+const run = async () => {
   const input = readInput();
   if (mode === 'session-start') return contextOutput(SESSION_CONTEXT);
   if (mode === 'after-tool') return afterTool(input);
@@ -293,7 +404,7 @@ const run = () => {
 };
 
 try {
-  writeJson(run());
+  writeJson(await run());
 } catch (err) {
   console.error(`[gemini-md-export-hook] unexpected failure: ${err.message}`);
   writeJson(silent());

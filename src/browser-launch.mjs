@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 
 const GEMINI_URL = 'https://gemini.google.com/app';
 
-const quotePowerShell = (value) => `'${String(value).replace(/'/g, "''")}'`;
+const quoteCmd = (value) => `"${String(value).replace(/"/g, '""')}"`;
 
 const firstExisting = (paths, exists = existsSync) => paths.find((candidate) => exists(candidate));
 
@@ -291,19 +291,20 @@ export const launchGeminiBrowser = async ({
         };
       }
       const args = [profileArg, GEMINI_URL].filter(Boolean);
-      const psArgs = args.map(quotePowerShell).join(',');
-      const script = [
-        "$ErrorActionPreference = 'Stop'",
-        `$arguments = @(${psArgs})`,
-        `Start-Process -FilePath ${quotePowerShell(plan.binary)} -ArgumentList $arguments -WindowStyle Minimized`,
-      ].join('; ');
-      const child = spawnFn(
-        'powershell.exe',
-        ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
-        { detached: true, stdio: 'ignore', windowsHide: true },
-      );
+      const command = `start "" ${quoteCmd(plan.binary)} ${args.map(quoteCmd).join(' ')}`;
+      const child = spawnFn('cmd.exe', ['/d', '/s', '/c', command], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+      });
       child.unref?.();
-      return { attempted: true, supported: true, ...plan, profileDirectory: profileDirectory || null };
+      return {
+        attempted: true,
+        supported: true,
+        ...plan,
+        method: 'windows-cmd-start',
+        profileDirectory: profileDirectory || null,
+      };
     }
 
     return {

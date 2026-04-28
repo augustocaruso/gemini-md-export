@@ -14,10 +14,14 @@ const hookPath = resolve(
   'gemini-md-export-hook.mjs',
 );
 
-const runHook = (mode, payload = {}) => {
+const runHook = (mode, payload = {}, env = {}) => {
   const result = spawnSync(process.execPath, [hookPath, mode], {
     input: JSON.stringify(payload),
     encoding: 'utf-8',
+    env: {
+      ...process.env,
+      ...env,
+    },
   });
 
   assert.equal(result.status, 0, result.stderr);
@@ -113,6 +117,23 @@ test('BeforeTool falha aberto para chamada normal', () => {
     tool_name: 'mcp_gemini-md-export_gemini_browser_status',
     tool_input: {},
   });
+
+  assert.equal(output.suppressOutput, true);
+  assert.equal(output.decision, undefined);
+});
+
+test('BeforeTool permite desativar prelaunch do navegador para tools do exporter', () => {
+  const output = runHook(
+    'before-tool',
+    {
+      hook_event_name: 'BeforeTool',
+      tool_name: 'mcp_gemini-md-export_gemini_list_recent_chats',
+      tool_input: {},
+    },
+    {
+      GEMINI_MCP_HOOK_LAUNCH_BROWSER: 'false',
+    },
+  );
 
   assert.equal(output.suppressOutput, true);
   assert.equal(output.decision, undefined);

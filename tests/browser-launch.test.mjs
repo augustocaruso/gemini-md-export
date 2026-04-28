@@ -86,7 +86,7 @@ test('macOS permite selecionar Edge por variável de ambiente', () => {
   assert.equal(plan.fallbackFrom, null);
 });
 
-test('launcher Windows usa Start-Process com URL do Gemini e perfil configurado', async () => {
+test('launcher Windows usa cmd start com URL do Gemini e perfil configurado', async () => {
   const calls = [];
   const result = await launchGeminiBrowser({
     platform: 'win32',
@@ -104,8 +104,9 @@ test('launcher Windows usa Start-Process com URL do Gemini e perfil configurado'
 
   assert.equal(result.attempted, true);
   assert.equal(result.browserName, 'Chrome');
-  assert.equal(calls[0].command, 'powershell.exe');
-  assert.match(calls[0].args.join(' '), /Start-Process/);
+  assert.equal(result.method, 'windows-cmd-start');
+  assert.equal(calls[0].command, 'cmd.exe');
+  assert.match(calls[0].args.join(' '), /start ""/);
   assert.match(calls[0].args.join(' '), /https:\/\/gemini\.google\.com\/app/);
   assert.match(calls[0].args.join(' '), /--profile-directory=Profile 1/);
 });

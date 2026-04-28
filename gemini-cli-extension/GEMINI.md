@@ -38,6 +38,10 @@ Operational guidance:
   configured Chromium browser. Prefer fixing `GEMINI_MCP_BROWSER`
   (`chrome`/`edge`/`brave`/`dia`) or `GEMINI_MCP_CHROME_PROFILE_DIRECTORY`
   over telling the user to repeat the same failed tool call.
+- The extension BeforeTool hook also prelaunches the configured Chromium
+  browser before browser-dependent exporter tools when `/agent/clients` reports
+  no connected Gemini tab. If this is undesirable, set
+  `GEMINI_MCP_HOOK_LAUNCH_BROWSER=false`.
 - When the user reports the MCP as disconnected on Windows, suggest running:
   `powershell -ExecutionPolicy Bypass -File .\diagnose-windows-mcp.ps1`
 - If the MCP looks disconnected, suspect a stale `node.exe` or a bridge port
