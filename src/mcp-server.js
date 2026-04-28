@@ -785,6 +785,26 @@ const notebookConversationsForClient = (client) =>
 const recentConversationsForClient = (client) =>
   (client.conversations || []).filter((conversation) => conversation.source !== 'notebook');
 
+const recentConversationCountForClient = (client) => recentConversationsForClient(client).length;
+
+const requireRecentChatsClient = (clientId) => {
+  if (clientId) return requireClient(clientId);
+
+  cleanupStaleClients();
+  const liveClients = getLiveClients();
+  if (liveClients.length === 0) {
+    throw new Error('Nenhuma aba do Gemini conectada à extensão.');
+  }
+
+  return [...liveClients].sort(
+    (a, b) =>
+      recentConversationCountForClient(b) - recentConversationCountForClient(a) ||
+      Number(b.isActiveTab === true) - Number(a.isActiveTab === true) ||
+      Number(!!b.pendingPoll) - Number(!!a.pendingPoll) ||
+      b.lastSeenAt - a.lastSeenAt,
+  )[0];
+};
+
 const recentChatsReachedEndForClient = (client) =>
   client?.lastSnapshot?.reachedSidebarEnd === true || client?.page?.reachedSidebarEnd === true;
 
@@ -2051,7 +2071,7 @@ const rawTools = [
   {
     name: 'gemini_list_recent_chats',
     description:
-      'Retorna uma página das conversas visíveis/carregáveis no sidebar do Gemini da aba ativa, ou da aba conectada mais recente como fallback.',
+      'Retorna uma página das conversas visíveis/carregáveis no sidebar do Gemini. Sem clientId, usa a aba viva com mais histórico já carregado.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2079,7 +2099,7 @@ const rawTools = [
       additionalProperties: false,
     },
     call: async (args = {}) => {
-      const client = requireClient(args.clientId);
+      const client = requireRecentChatsClient(args.clientId);
       return toolTextResult(await listRecentChatsForClient(client, args));
     },
   },
@@ -2717,7 +2737,7 @@ const bridgeServer = createServer(async (req, res) => {
 
   if (req.method === 'GET' && url.pathname === '/agent/recent-chats') {
     try {
-      const client = requireClient(url.searchParams.get('clientId'));
+      const client = requireRecentChatsClient(url.searchParams.get('clientId'));
       sendAgentJson(
         res,
         200,
