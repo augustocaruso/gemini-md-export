@@ -15,6 +15,13 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   const guardPath = resolve(extensionDir, 'src', 'chrome-extension-guard.mjs');
   const bridgeVersionPath = resolve(extensionDir, 'bridge-version.json');
   const browserManifestPath = resolve(extensionDir, 'browser-extension', 'manifest.json');
+  const hooksConfigPath = resolve(extensionDir, 'hooks', 'hooks.json');
+  const hookScriptPath = resolve(
+    extensionDir,
+    'scripts',
+    'hooks',
+    'gemini-md-export-hook.mjs',
+  );
 
   assert.equal(existsSync(manifestPath), true);
   assert.equal(existsSync(contextPath), true);
@@ -22,13 +29,25 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.equal(existsSync(guardPath), true);
   assert.equal(existsSync(bridgeVersionPath), true);
   assert.equal(existsSync(browserManifestPath), true);
+  assert.equal(existsSync(hooksConfigPath), true);
+  assert.equal(existsSync(hookScriptPath), true);
 
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8'));
   assert.equal(manifest.contextFileName, 'GEMINI.md');
+  assert.equal(manifest.hooks, undefined);
   assert.equal(typeof manifest.mcpServers?.['gemini-md-export']?.command, 'string');
   assert.match(
     manifest.mcpServers?.['gemini-md-export']?.args?.[0] || '',
     /mcp-server\.js$/,
+  );
+
+  const hooksConfig = JSON.parse(readFileSync(hooksConfigPath, 'utf-8'));
+  assert.ok(Array.isArray(hooksConfig.hooks?.SessionStart));
+  assert.ok(Array.isArray(hooksConfig.hooks?.AfterTool));
+  assert.ok(Array.isArray(hooksConfig.hooks?.BeforeTool));
+  assert.match(
+    hooksConfig.hooks.SessionStart[0].hooks[0].command,
+    /\$\{extensionPath\}.*gemini-md-export-hook\.mjs/,
   );
 
   const browserManifest = JSON.parse(readFileSync(browserManifestPath, 'utf-8'));

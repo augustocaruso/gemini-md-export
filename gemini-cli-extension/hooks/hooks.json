@@ -1,0 +1,46 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "name": "gemini-md-export-session-context",
+            "description": "Add short operational context for the Gemini Markdown exporter.",
+            "type": "command",
+            "command": "node \"${extensionPath}${/}scripts${/}hooks${/}gemini-md-export-hook.mjs\" session-start",
+            "timeout": 2000
+          }
+        ]
+      }
+    ],
+    "AfterTool": [
+      {
+        "matcher": "mcp_gemini[-_]md[-_]export_.*|gemini_.*",
+        "hooks": [
+          {
+            "name": "gemini-md-export-media-audit",
+            "description": "Warn the agent when exported media needs follow-up.",
+            "type": "command",
+            "command": "node \"${extensionPath}${/}scripts${/}hooks${/}gemini-md-export-hook.mjs\" after-tool",
+            "timeout": 3000
+          }
+        ]
+      }
+    ],
+    "BeforeTool": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "name": "gemini-md-export-policy-guard",
+            "description": "Block explicitly forbidden implementation paths for this exporter.",
+            "type": "command",
+            "command": "node \"${extensionPath}${/}scripts${/}hooks${/}gemini-md-export-hook.mjs\" before-tool",
+            "timeout": 3000
+          }
+        ]
+      }
+    ]
+  }
+}
