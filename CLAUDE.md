@@ -402,10 +402,11 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
 - `scripts/build-release-windows-prebuilt.mjs` — gera um pacote Windows
   **precompilado e leve** em `release/*.zip`. Ele inclui `install-windows.cmd`,
   `dist/extension`, `dist/gemini-cli-extension`, `scripts/install-windows.mjs`,
-  `scripts/update-windows.ps1`, `LEIA-ME.txt` e o diagnóstico, sem empacotar
-  runtime do Node. Também grava assets estáveis
+  `scripts/update-windows.ps1`, `scripts/repair-windows-gemini-extension.ps1`,
+  `LEIA-ME.txt` e o diagnóstico, sem empacotar runtime do Node. Também grava assets estáveis
   `release/gemini-md-export-windows-prebuilt.zip` e
-  `release/update-windows.ps1` para GitHub Releases.
+  `release/update-windows.ps1`/`release/repair-windows-gemini-extension.ps1`
+  para GitHub Releases.
 - `scripts/publish-gemini-cli-extension-branch.mjs` — publica
   `dist/gemini-cli-extension` no branch `gemini-cli-extension` com
   `gemini-extension.json` na raiz. O bundle também contém
@@ -450,6 +451,15 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   sucesso e preserva temp/log em falha. Aceita override por `GME_RELEASE_REPO`,
   `GME_RELEASE_ZIP_URL`, `GME_BROWSER` e flags (`-Repo`, `-ZipUrl`,
   `-Browser`, `-KeepTemp`, `-DryRun`).
+- `scripts/repair-windows-gemini-extension.ps1` — reparo limpo para quando o
+  auto-update do Gemini CLI fica preso em versão antiga ou falha com
+  `EBUSY: resource busy or locked, rmdir ...`. Ele substitui comandos inline
+  frágeis: resolve `gemini`, encerra só processos `node.exe`/`gemini.exe` que
+  pertencem ao exporter, roda `gemini extensions uninstall`, remove/renomeia
+  a pasta `~\.gemini\extensions\gemini-md-export` com retries, remove override
+  legado de `mcpServers.gemini-md-export` no settings e reinstala a extensão
+  pelo GitHub com `--ref=gemini-cli-extension --auto-update --consent`,
+  validando que o manifesto instalado não tem `cwd`.
 - `scripts/install-windows.mjs` + `install-windows.cmd` — instalador assistido
   para Windows. Automatiza `npm install`, `npm run build`, localização de
   instalação anterior por configs legadas do Gemini CLI/Claude Desktop ou pela pasta

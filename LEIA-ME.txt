@@ -41,6 +41,10 @@ descobre a ultima release pela API antes de baixar o pacote precompilado.
 Se voce quer atualizar apenas a extensao do Gemini CLI, use o comando nativo:
    gemini extensions update gemini-md-export
 
+Se aparecer erro "EBUSY", "resource busy or locked" ou a extensao ficar presa
+numa versao antiga, use o reparo limpo:
+   powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; iex ((New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/augustocaruso/gemini-md-export/main/scripts/repair-windows-gemini-extension.ps1'))"
+
 Depois da instalacao atual, esse comando tambem baixa os arquivos novos da
 extensao unpacked do navegador, porque eles ficam dentro da extensao do Gemini
 CLI. O passo manual que continua necessario e clicar no reload do card da

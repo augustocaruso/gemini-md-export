@@ -29,12 +29,14 @@ const stageDir = resolve(RELEASE_ROOT, releaseName);
 const zipPath = resolve(RELEASE_ROOT, `${releaseName}.zip`);
 const stableZipPath = resolve(RELEASE_ROOT, 'gemini-md-export-windows-prebuilt.zip');
 const stableUpdaterPath = resolve(RELEASE_ROOT, 'update-windows.ps1');
+const stableRepairPath = resolve(RELEASE_ROOT, 'repair-windows-gemini-extension.ps1');
 
 const includePaths = [
   'dist/extension',
   'dist/gemini-cli-extension',
   'scripts/install-windows.mjs',
   'scripts/update-windows.ps1',
+  'scripts/repair-windows-gemini-extension.ps1',
   'install-windows.cmd',
   'diagnose-windows-mcp.ps1',
   'LEIA-ME.txt',
@@ -86,6 +88,7 @@ rmSync(stageDir, { recursive: true, force: true });
 rmSync(zipPath, { force: true });
 rmSync(stableZipPath, { force: true });
 rmSync(stableUpdaterPath, { force: true });
+rmSync(stableRepairPath, { force: true });
 mkdirSync(RELEASE_ROOT, { recursive: true });
 mkdirSync(stageDir, { recursive: true });
 
@@ -106,6 +109,7 @@ run(
 
 copyFileSync(zipPath, stableZipPath);
 copyFileSync(resolve(ROOT, 'scripts', 'update-windows.ps1'), stableUpdaterPath);
+copyFileSync(resolve(ROOT, 'scripts', 'repair-windows-gemini-extension.ps1'), stableRepairPath);
 
 log('\n============================================================');
 log('  Pacote Windows precompilado gerado com sucesso.');
@@ -114,3 +118,4 @@ log(`Pasta: ${stageDir}`);
 log(`ZIP:   ${zipPath}`);
 log(`ZIP estavel para GitHub Releases: ${stableZipPath}`);
 log(`Updater PowerShell: ${stableUpdaterPath}`);
+log(`Repair PowerShell: ${stableRepairPath}`);

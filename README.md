@@ -81,6 +81,13 @@ abrir Edge/Brave/Dia como fallback para não travar no passo da página de
 extensões. O bootstrap baixa só o script pequeno da release; o pacote
 precompilado grande é resolvido pelo updater via API do GitHub.
 
+Se o auto-update do Gemini CLI travar com `EBUSY`/`resource busy or locked`,
+use o reparo limpo em vez de colar comandos longos de PowerShell:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; iex ((New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/augustocaruso/gemini-md-export/main/scripts/repair-windows-gemini-extension.ps1'))"
+```
+
 O passo que continua manual por restrição do Chrome/Edge é carregar ou
 recarregar a extensão unpacked:
 
