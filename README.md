@@ -33,7 +33,7 @@ Esse comando baixa o projeto, roda `npm install`/`npm run build`, instala em
 `~/GeminiMdExport-extension` apontando para a cópia da extensão do navegador
 baixada junto com a extensão do Gemini CLI, tenta registrar a extensão do
 Gemini CLI pelo GitHub com
-`gemini extensions install https://github.com/augustocaruso/gemini-md-export.git --ref=gemini-cli-extension --auto-update`,
+`gemini extensions install https://www.github.com/augustocaruso/gemini-md-export.git --ref=gemini-cli-extension --auto-update`,
 configura Claude Desktop quando detectado e abre a página de extensões do
 navegador.
 
@@ -69,15 +69,15 @@ Pré-requisitos:
 No PowerShell, rode:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; iex ((New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/augustocaruso/gemini-md-export/main/scripts/update-windows.ps1'))"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; iex ((New-Object Net.WebClient).DownloadString('https://www.github.com/augustocaruso/gemini-md-export/releases/latest/download/update-windows.ps1'))"
 ```
 
-Esse comando baixa a última release, extrai em uma pasta temporária, valida o
-pacote, instala/atualiza o MCP e a extensão, sincroniza cópias unpacked já
-carregadas no navegador quando possível e apaga os temporários após sucesso.
-Ele baixa o script bruto do GitHub e o próprio script resolve a última release
-via API, evitando depender do redirect `/releases/latest/download` do GitHub no
-PowerShell.
+Esse comando baixa o updater publicado na última release oficial; o updater
+consulta a API do GitHub, baixa o pacote precompilado mais recente, extrai em
+uma pasta temporária, valida o pacote, instala/atualiza o MCP e a extensão,
+sincroniza cópias unpacked já carregadas no navegador quando possível e apaga
+os temporários após sucesso. O bootstrap baixa só o script pequeno da release;
+o pacote precompilado grande é resolvido pelo updater via API do GitHub.
 
 O passo que continua manual por restrição do Chrome/Edge é carregar ou
 recarregar a extensão unpacked:
@@ -119,7 +119,7 @@ card em `chrome://extensions`/`edge://extensions` continua sendo o fallback
 para a primeira migração, mudança de permissões/manifest ou perfil errado.
 
 Durante a instalação no Windows, o instalador tenta registrar a extensão pelo
-comando oficial `gemini extensions install https://github.com/augustocaruso/gemini-md-export.git
+comando oficial `gemini extensions install https://www.github.com/augustocaruso/gemini-md-export.git
 --ref=gemini-cli-extension --auto-update`, em vez de apenas copiar arquivos para
 `~/.gemini/extensions`. Isso faz a extensão aparecer como atualizável no Gemini
 CLI. Se o binário `gemini` não estiver no PATH, `git` não estiver instalado ou

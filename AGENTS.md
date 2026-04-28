@@ -380,7 +380,7 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   `browser-extension/` com a MV3 unpacked; assim `gemini extensions update
   gemini-md-export` baixa MCP e extensão de navegador juntos, restando ao
   usuário apenas recarregar manualmente o card do Chrome/Edge. Esse branch é o alvo de
-  `gemini extensions install https://github.com/augustocaruso/gemini-md-export.git
+  `gemini extensions install https://www.github.com/augustocaruso/gemini-md-export.git
   --ref=gemini-cli-extension --auto-update`; não instalar a extensão CLI a partir de
   `dist/gemini-cli-extension` local com `--auto-update`, porque o Gemini CLI
   atual responde `--ref and --auto-update are not applicable for local
@@ -396,7 +396,7 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   está instalado, driblando o `~/Library` escondido no Finder e permitindo que
   o update nativo do Gemini CLI baixe também os arquivos da extensão Chrome,
   ajusta o bundle local para Claude/fallback, tenta registrar a extensão pelo
-  comando oficial `gemini extensions install https://github.com/augustocaruso/gemini-md-export.git
+  comando oficial `gemini extensions install https://www.github.com/augustocaruso/gemini-md-export.git
   --ref=gemini-cli-extension --auto-update --consent`, copia para
   `~/.gemini/extensions/gemini-md-export` como fallback se o Gemini CLI não
   estiver no PATH ou falhar, configura Claude Desktop quando detectado, gera
@@ -425,7 +425,7 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   backup curto em `backups\<timestamp>` e mantém os 5 backups mais recentes.
   Para Gemini CLI, tenta usar o fluxo oficial
   `gemini extensions uninstall gemini-md-export` (ignora falha) +
-  `gemini extensions install https://github.com/augustocaruso/gemini-md-export.git
+  `gemini extensions install https://www.github.com/augustocaruso/gemini-md-export.git
   --ref=gemini-cli-extension --auto-update --consent` para registrar a extensão como
   gerenciável/atualizável pelo Gemini CLI. Se o binário `gemini`/`git` não
   estiver no PATH ou o comando oficial falhar, cai para a
@@ -654,7 +654,7 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   `update-windows.ps1` do `main` via `raw.githubusercontent.com`; o script então
   consulta a API de releases do GitHub e baixa o zip da última release. Esse
   caminho evita depender do redirect `/releases/latest/download` no PowerShell:
-  `powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; iex ((New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/augustocaruso/gemini-md-export/main/scripts/update-windows.ps1'))"`.
+  `powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; iex ((New-Object Net.WebClient).DownloadString('https://www.github.com/augustocaruso/gemini-md-export/releases/latest/download/update-windows.ps1'))"`.
 - Para distribuir/atualizar releases, use `npm run release:windows:prebuilt`;
   ele gera `release/gemini-md-export-windows-prebuilt.zip`,
   `release/update-windows.ps1` e um zip versionado. O workflow

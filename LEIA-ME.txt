@@ -32,11 +32,10 @@ extrai em uma pasta temporaria, instala a partir da pasta correta e apaga os
 temporarios depois que terminar.
 
 Comando padrao:
-   powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; iex ((New-Object Net.WebClient).DownloadString('https://raw.githubusercontent.com/augustocaruso/gemini-md-export/main/scripts/update-windows.ps1'))"
+   powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; iex ((New-Object Net.WebClient).DownloadString('https://www.github.com/augustocaruso/gemini-md-export/releases/latest/download/update-windows.ps1'))"
 
-Esse comando e mais robusto que baixar pelo link "latest" da pagina de
-releases: ele baixa o script direto do GitHub e o script descobre a ultima
-release pela API antes de baixar o pacote.
+Esse comando baixa o updater publicado na ultima release oficial. O updater
+descobre a ultima release pela API antes de baixar o pacote precompilado.
 
 Se voce quer atualizar apenas a extensao do Gemini CLI, use o comando nativo:
    gemini extensions update gemini-md-export

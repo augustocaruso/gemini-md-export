@@ -114,7 +114,7 @@ const sourceGeminiCliExtensionPath = resolve(ROOT, 'dist', 'gemini-cli-extension
 const sourceMcpRuntimeDir = resolve(sourceGeminiCliExtensionPath, 'src');
 const geminiCliExtensionSource =
   process.env.GME_GEMINI_EXTENSION_SOURCE ||
-  'https://github.com/augustocaruso/gemini-md-export.git';
+  'https://www.github.com/augustocaruso/gemini-md-export.git';
 const geminiCliExtensionRef = process.env.GME_GEMINI_EXTENSION_REF || 'gemini-cli-extension';
 const geminiCliExtensionInstallSource = `${geminiCliExtensionSource} --ref=${geminiCliExtensionRef} --auto-update`;
 
