@@ -128,18 +128,20 @@ card em `chrome://extensions`/`edge://extensions` continua sendo o fallback
 para a primeira migração, mudança de permissões/manifest ou perfil errado.
 Se nenhuma aba do Gemini estiver conectada quando uma tool MCP for chamada, o
 MCP tenta abrir `https://gemini.google.com/app` no navegador certo: Chrome por
-padrão, depois Edge/Brave/Dia como fallback. Use `GEMINI_MCP_BROWSER=edge`
-ou `chrome`/`brave`/`dia` para fixar o navegador. O MCP só envia
-`--profile-directory` quando `GEMINI_MCP_CHROME_PROFILE_DIRECTORY` é definido
-explicitamente; isso evita a caixa de seleção/perfil do Chrome em chamadas
-normais de tool. Para perfis específicos, use por exemplo
-`GEMINI_MCP_CHROME_PROFILE_DIRECTORY="Profile 1"`.
+padrão, depois Edge/Brave/Dia como fallback. `gemini_browser_status` também
+acorda o navegador quando está sem clientes conectados, porque o Gemini CLI
+costuma chamar status antes de escolher a tool de export. Use
+`GEMINI_MCP_BROWSER=edge` ou `chrome`/`brave`/`dia` para fixar o navegador. O
+MCP só envia `--profile-directory` quando
+`GEMINI_MCP_CHROME_PROFILE_DIRECTORY` é definido explicitamente; isso evita a
+caixa de seleção/perfil do Chrome em chamadas normais de tool. Para perfis
+específicos, use por exemplo `GEMINI_MCP_CHROME_PROFILE_DIRECTORY="Profile 1"`.
 Além do guard dentro do MCP, o hook `BeforeTool` da extensão do Gemini CLI faz
 um pré-aquecimento no Windows: antes de tools do exporter que dependem do
 navegador, o hook só dispara `prelaunch-browser-windows.ps1` em processo
 detached e sai imediatamente. O `.ps1`, fora do hook, faz uma checagem curta do
-bridge local e respeita cooldown antes de abrir o Gemini; assim o hook não fica
-preso em "executing hook". Isso pode ser desativado com
+bridge local e respeita cooldown antes de abrir o Gemini via `cmd start`; assim
+o hook não fica preso em "executing hook". Isso pode ser desativado com
 `GEMINI_MCP_HOOK_LAUNCH_BROWSER=false`.
 
 Durante a instalação no Windows, o instalador tenta registrar a extensão pelo

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -183,4 +183,16 @@ test('hook emite JSON valido mesmo com stdin invalido', () => {
 
   assert.equal(result.status, 0, result.stderr);
   assert.doesNotThrow(() => JSON.parse(result.stdout), result.stdout);
+});
+
+test('BeforeTool considera browser_status como tool que acorda o navegador', () => {
+  const hookSource = readFileSync(hookPath, 'utf-8');
+  const prelaunchSource = readFileSync(
+    resolve(ROOT, 'gemini-cli-extension', 'scripts', 'hooks', 'prelaunch-browser-windows.ps1'),
+    'utf-8',
+  );
+
+  assert.match(hookSource, /gemini_browser_status/);
+  assert.match(prelaunchSource, /method = 'cmd-start'/);
+  assert.match(prelaunchSource, /lastFailureAt/);
 });

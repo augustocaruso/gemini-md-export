@@ -28,6 +28,7 @@ const MEDIA_WARNING_RE =
   /\[!warning\]\s*M[ií]dia n[aã]o importada|M[ií]dia n[aã]o exportada|media n(?:ao|ão) importad/i;
 
 const BROWSER_DEPENDENT_EXPORTER_TOOLS = new Set([
+  'gemini_browser_status',
   'gemini_list_recent_chats',
   'gemini_list_notebook_chats',
   'gemini_get_current_chat',
@@ -70,6 +71,9 @@ const prelaunchBrowserDetached = (input) => {
         windowsHide: true,
       },
     );
+    child.on?.('error', (err) => {
+      console.error(`[gemini-md-export-hook] prelaunch helper error: ${err.message}`);
+    });
     child.unref();
   } catch (err) {
     console.error(`[gemini-md-export-hook] failed to spawn prelaunch helper: ${err.message}`);

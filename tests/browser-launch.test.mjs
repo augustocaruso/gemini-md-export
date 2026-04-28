@@ -107,6 +107,7 @@ test('launcher Windows usa cmd start com URL do Gemini e perfil configurado', as
   assert.equal(result.method, 'windows-cmd-start');
   assert.equal(calls[0].command, 'cmd.exe');
   assert.match(calls[0].args.join(' '), /start ""/);
+  assert.match(calls[0].args.join(' '), /--new-tab/);
   assert.match(calls[0].args.join(' '), /https:\/\/gemini\.google\.com\/app/);
   assert.match(calls[0].args.join(' '), /--profile-directory=Profile 1/);
 });

@@ -296,17 +296,21 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   60000ms) para não abrir uma janela/diálogo novo a cada chamada de tool quando
   a extensão ainda não conectou. O launch é controlado por
   `GEMINI_MCP_CHROME_LAUNCH_IF_CLOSED` (default ligado); timeout e tentativas
-  vêm de `GEMINI_MCP_CHROME_RELOAD_TIMEOUT_MS` e
+  vêm de `GEMINI_MCP_CHROME_INITIAL_CONNECT_TIMEOUT_MS` (default 1500ms),
+  `GEMINI_MCP_CHROME_RELOAD_TIMEOUT_MS` e
   `GEMINI_MCP_CHROME_MAX_RELOAD_ATTEMPTS`. O hook `BeforeTool` também usa esse
   launcher como pré-aquecimento para tools do exporter que dependem do
   navegador no Windows: o hook JavaScript só dispara
   `scripts/hooks/prelaunch-browser-windows.ps1` detached e sai imediatamente.
   O `.ps1`, fora do hook, faz uma checagem curta de `/agent/clients`, respeita
-  cooldown e abre o Gemini se necessário. O hook em si não deve fazer `fetch`,
+  cooldown e abre o Gemini se necessário via `cmd start` primeiro, com
+  `Start-Process` só como fallback. O hook em si não deve fazer `fetch`,
   `import()` dinâmico, espera de navegador ou trabalho bloqueante. Esse
   prelaunch é controlado por `GEMINI_MCP_HOOK_LAUNCH_BROWSER` (default ligado)
-  e pelo mesmo cooldown. Se precisar de confirmação real, isso pertence ao
-  guard do MCP.
+  e pelo mesmo cooldown. `gemini_browser_status` também deve acordar o
+  navegador quando não há clientes conectados e aguardar um curto período
+  (`GEMINI_MCP_BROWSER_STATUS_WAKE_WAIT_MS`, default 8000ms), porque o Gemini
+  CLI frequentemente consulta status antes de chamar uma tool de export.
   `gemini_list_recent_chats` e `/agent/recent-chats` agora priorizam a lista
   trazida pelo heartbeat recente da extensão para responder rápido. Só
   mandam `list-conversations` para abrir/atualizar o sidebar quando o cache

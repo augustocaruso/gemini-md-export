@@ -55,6 +55,7 @@ const CHROME_GUARD_CONFIG = {
     process.env.GME_CHROME_PROFILE_DIRECTORY ||
     null,
   launchIfClosed: process.env.GEMINI_MCP_CHROME_LAUNCH_IF_CLOSED !== 'false',
+  initialConnectTimeoutMs: Number(process.env.GEMINI_MCP_CHROME_INITIAL_CONNECT_TIMEOUT_MS || 1500),
   reloadTimeoutMs: Number(process.env.GEMINI_MCP_CHROME_RELOAD_TIMEOUT_MS || 75_000),
   maxReloadAttempts: Number(process.env.GEMINI_MCP_CHROME_MAX_RELOAD_ATTEMPTS || 1),
   useExtensionsReloaderFallback:
@@ -62,6 +63,9 @@ const CHROME_GUARD_CONFIG = {
 };
 const BROWSER_LAUNCH_COOLDOWN_MS = Number(
   process.env.GEMINI_MCP_BROWSER_LAUNCH_COOLDOWN_MS || 60_000,
+);
+const BROWSER_STATUS_WAKE_WAIT_MS = Number(
+  process.env.GEMINI_MCP_BROWSER_STATUS_WAKE_WAIT_MS || 8_000,
 );
 const detectExpectedBrowserBuildStamp = () => {
   if (process.env.GEMINI_MCP_EXPECTED_BUILD_STAMP) {
@@ -517,6 +521,26 @@ const launchChromeForGemini = async ({ profileDirectory } = {}) => {
   lastBrowserLaunchAt = now;
   lastBrowserLaunchResult = result;
   return result;
+};
+
+const sleep = (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
+
+const normalizeWaitMs = (value, fallback, max = 30_000) => {
+  const parsed = Number(value ?? fallback);
+  const safe = Number.isFinite(parsed) ? parsed : fallback;
+  return Math.max(0, Math.min(max, safe));
+};
+
+const waitForLiveClients = async (timeoutMs, pollIntervalMs = 500) => {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt <= timeoutMs) {
+    cleanupStaleClients();
+    const liveClients = getLiveClients();
+    if (liveClients.length > 0) return liveClients;
+    await sleep(pollIntervalMs);
+  }
+  cleanupStaleClients();
+  return getLiveClients();
 };
 
 const getChromeExtensionInfo = async (client) => {
@@ -1774,17 +1798,60 @@ const reloadGeminiTabs = async (args = {}) => {
 const rawTools = [
   {
     name: 'gemini_browser_status',
-    description: 'Lista as abas do Gemini atualmente conectadas à extensão.',
+    description:
+      'Lista as abas do Gemini conectadas à extensão e acorda o navegador se nenhuma aba estiver conectada.',
     inputSchema: {
       type: 'object',
-      properties: {},
+      properties: {
+        wakeBrowser: {
+          type: 'boolean',
+          description:
+            'Quando true ou omitido, tenta abrir Chrome/Edge/Brave/Dia se nenhuma aba Gemini estiver conectada.',
+        },
+        waitMs: {
+          type: 'number',
+          description: 'Tempo máximo para aguardar a extensão conectar após abrir o navegador.',
+        },
+      },
       additionalProperties: false,
     },
-    call: async () =>
-      toolTextResult({
+    call: async (args = {}) => {
+      cleanupStaleClients();
+      let liveClients = getLiveClients();
+      let launchResult = null;
+      let waitedMs = 0;
+      const wakeBrowser = args.wakeBrowser !== false;
+
+      if (wakeBrowser && liveClients.length === 0 && CHROME_GUARD_CONFIG.launchIfClosed) {
+        launchResult = await launchChromeForGemini({
+          profileDirectory: CHROME_GUARD_CONFIG.profileDirectory,
+        });
+        const waitMs = normalizeWaitMs(args.waitMs, BROWSER_STATUS_WAKE_WAIT_MS);
+        const startedAt = Date.now();
+        liveClients = await waitForLiveClients(waitMs, CHROME_GUARD_CONFIG.pollIntervalMs || 500);
+        waitedMs = Date.now() - startedAt;
+      }
+
+      return toolTextResult({
         expectedChromeExtension: EXPECTED_CHROME_EXTENSION_INFO,
-        connectedClients: getLiveClients().map(summarizeClient),
-      }),
+        connectedClients: liveClients.map(summarizeClient),
+        browserWake: launchResult
+          ? {
+              ...launchResult,
+              waitedMs,
+              connectedAfterWake: liveClients.length,
+            }
+          : {
+              attempted: false,
+              reason:
+                liveClients.length > 0
+                  ? 'already-connected'
+                  : wakeBrowser
+                    ? 'launch-disabled'
+                    : 'wake-disabled',
+            },
+      });
+    },
   },
   {
     name: 'gemini_get_export_dir',

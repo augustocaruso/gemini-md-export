@@ -38,12 +38,17 @@ Operational guidance:
   configured Chromium browser. Prefer fixing `GEMINI_MCP_BROWSER`
   (`chrome`/`edge`/`brave`/`dia`) or `GEMINI_MCP_CHROME_PROFILE_DIRECTORY`
   over telling the user to repeat the same failed tool call.
+- `gemini_browser_status` is also allowed to wake the browser when no Gemini
+  tab is connected. Do not treat status as a passive-only tool; Gemini CLI often
+  asks for status first, and that first status call should be enough to open the
+  configured browser.
 - On Windows, the extension BeforeTool hook prelaunches the configured Chromium
   browser before browser-dependent exporter tools by spawning
   `prelaunch-browser-windows.ps1` detached and returning immediately. The PS1
   helper, outside the hook, may do a short bridge check and cooldown before
-  opening Gemini. The hook itself must not wait for Chrome or do long work. If
-  this is undesirable, set `GEMINI_MCP_HOOK_LAUNCH_BROWSER=false`.
+  opening Gemini with `cmd start`. The hook itself must not wait for Chrome or
+  do long work. If this is undesirable, set
+  `GEMINI_MCP_HOOK_LAUNCH_BROWSER=false`.
 - When the user reports the MCP as disconnected on Windows, suggest running:
   `powershell -ExecutionPolicy Bypass -File .\diagnose-windows-mcp.ps1`
 - Multiple Gemini CLI terminals may start multiple MCP processes. Only the

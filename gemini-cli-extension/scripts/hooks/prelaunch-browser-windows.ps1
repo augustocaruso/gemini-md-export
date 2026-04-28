@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'SilentlyContinue'
+$ErrorActionPreference = 'Stop'
 
 $GeminiUrl = 'https://gemini.google.com/app'
 $BridgeClientsUrl = if ($env:GEMINI_MCP_BRIDGE_CLIENTS_URL) {
@@ -185,34 +185,37 @@ function Start-GeminiBrowser {
   $args.Add($GeminiUrl)
 
   try {
-    Start-Process -FilePath $browser.Command -ArgumentList $args.ToArray() -WindowStyle Minimized -ErrorAction Stop
+    $quotedArgs = ($args.ToArray() | ForEach-Object { '"' + ($_ -replace '"', '""') + '"' }) -join ' '
+    $cmdLine = 'start "" "{0}" {1}' -f ($browser.Command -replace '"', '""'), $quotedArgs
+    Start-Process -FilePath "$env:ComSpec" -ArgumentList @('/d', '/s', '/c', $cmdLine) -WindowStyle Hidden -ErrorAction Stop
     Write-LaunchState @{
       lastAttemptAt = Get-NowMs
       browserKey = $browser.BrowserKey
       command = $browser.Command
       source = $browser.Source
-      method = 'Start-Process'
+      method = 'cmd-start'
     }
   } catch {
+    $cmdStartError = $_.Exception.Message
     try {
-      $quotedArgs = ($args.ToArray() | ForEach-Object { '"' + ($_ -replace '"', '""') + '"' }) -join ' '
-      $cmdLine = 'start "" "{0}" {1}' -f ($browser.Command -replace '"', '""'), $quotedArgs
-      Start-Process -FilePath "$env:ComSpec" -ArgumentList @('/d', '/s', '/c', $cmdLine) -WindowStyle Hidden -ErrorAction Stop
+      Start-Process -FilePath $browser.Command -ArgumentList $args.ToArray() -WindowStyle Minimized -ErrorAction Stop
       Write-LaunchState @{
         lastAttemptAt = Get-NowMs
         browserKey = $browser.BrowserKey
         command = $browser.Command
         source = $browser.Source
-        method = 'cmd-start'
+        method = 'Start-Process'
+        cmdStartError = $cmdStartError
       }
     } catch {
       Write-LaunchState @{
-        lastAttemptAt = Get-NowMs
+        lastFailureAt = Get-NowMs
         browserKey = $browser.BrowserKey
         command = $browser.Command
         source = $browser.Source
         method = 'failed'
         error = $_.Exception.Message
+        cmdStartError = $cmdStartError
       }
     }
   }

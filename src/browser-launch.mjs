@@ -290,7 +290,7 @@ export const launchGeminiBrowser = async ({
           profileDirectory: profileDirectory || null,
         };
       }
-      const args = [profileArg, GEMINI_URL].filter(Boolean);
+      const args = [profileArg, '--new-tab', GEMINI_URL].filter(Boolean);
       const command = `start "" ${quoteCmd(plan.binary)} ${args.map(quoteCmd).join(' ')}`;
       const child = spawnFn('cmd.exe', ['/d', '/s', '/c', command], {
         detached: true,
