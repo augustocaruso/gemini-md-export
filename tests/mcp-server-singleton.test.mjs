@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
+import { createServer as createHttpServer } from 'node:http';
 import { mkdtempSync, rmSync } from 'node:fs';
-import { createServer } from 'node:net';
+import { createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -11,7 +12,7 @@ const ROOT = resolve(import.meta.dirname, '..');
 const SERVER_PATH = resolve(ROOT, 'src', 'mcp-server.js');
 
 const getFreePort = async () => {
-  const server = createServer();
+  const server = createNetServer();
   await new Promise((resolveListen, rejectListen) => {
     server.once('error', rejectListen);
     server.listen(0, '127.0.0.1', resolveListen);
@@ -20,6 +21,15 @@ const getFreePort = async () => {
   await new Promise((resolveClose) => server.close(resolveClose));
   return port;
 };
+
+const listenHttp = async (server, port) =>
+  new Promise((resolveListen, rejectListen) => {
+    server.once('error', rejectListen);
+    server.listen(port, '127.0.0.1', resolveListen);
+  });
+
+const closeHttp = async (server) =>
+  new Promise((resolveClose) => server.close(resolveClose));
 
 const waitForHealth = async (port) => {
   const startedAt = Date.now();
@@ -141,4 +151,64 @@ test('segunda instância MCP não emite erro quando o bridge já está em uso e 
   const exportDirResponse = await fetch(`http://127.0.0.1:${port}/agent/export-dir`);
   const exportDir = await exportDirResponse.json();
   assert.equal(exportDir.outputDir, outputDir);
+});
+
+test('segunda instância MCP diagnostica bridge primário com versão antiga', async (t) => {
+  const port = await getFreePort();
+  const primary = createHttpServer((req, res) => {
+    res.setHeader('content-type', 'application/json; charset=utf-8');
+    if (req.url === '/healthz') {
+      res.end(JSON.stringify({ ok: true, name: 'gemini-md-export', version: '0.0.1', clients: 0 }));
+      return;
+    }
+    if (req.url === '/agent/clients') {
+      res.end(JSON.stringify({ expectedChromeExtension: {}, connectedClients: [] }));
+      return;
+    }
+    if (req.url === '/agent/mcp-tool-call') {
+      res.end(JSON.stringify({ ok: true, result: { shouldNotProxy: true } }));
+      return;
+    }
+    res.statusCode = 404;
+    res.end(JSON.stringify({ error: 'not found' }));
+  });
+  await listenHttp(primary, port);
+  const secondary = spawnMcp(port);
+  const outputDir = mkdtempSync(resolve(tmpdir(), 'gemini-md-export-old-primary-'));
+
+  t.after(async () => {
+    await secondary.stop();
+    await closeHttp(primary);
+    rmSync(outputDir, { recursive: true, force: true });
+  });
+
+  const status = await secondary.callRpc({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'tools/call',
+    params: {
+      name: 'gemini_browser_status',
+      arguments: {},
+    },
+  });
+
+  assert.equal(status.result.isError, true);
+  assert.equal(status.result.structuredContent.problem.code, 'primary_bridge_version_mismatch');
+  assert.equal(status.result.structuredContent.problem.mismatch.actualVersion, '0.0.1');
+
+  const setDir = await secondary.callRpc({
+    jsonrpc: '2.0',
+    id: 2,
+    method: 'tools/call',
+    params: {
+      name: 'gemini_set_export_dir',
+      arguments: {
+        outputDir,
+      },
+    },
+  });
+
+  assert.equal(setDir.result.isError, true);
+  assert.equal(setDir.result.structuredContent.code, 'primary_bridge_version_mismatch');
+  assert.match(setDir.result.structuredContent.error, /MCP 0\.0\.1/);
 });

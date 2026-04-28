@@ -117,6 +117,8 @@ const geminiCliExtensionSource =
   'https://www.github.com/augustocaruso/gemini-md-export.git';
 const geminiCliExtensionRef = process.env.GME_GEMINI_EXTENSION_REF || 'gemini-cli-extension';
 const geminiCliExtensionInstallSource = `${geminiCliExtensionSource} --ref=${geminiCliExtensionRef} --auto-update`;
+const projectPackage = JSON.parse(readFileSync(resolve(ROOT, 'package.json'), 'utf-8'));
+const expectedGeminiCliExtensionVersion = projectPackage.version;
 
 const timestamp = () =>
   new Date()
@@ -635,6 +637,59 @@ const runGeminiCommand = (geminiCommand, commandArgs, label, { ignoreFailure = f
   return { ok: true, status: result.status, stdout, stderr };
 };
 
+const stopRunningExporterMcpProcesses = () => {
+  if (options.dryRun) {
+    log('    [dry-run] encerraria processos MCP antigos do gemini-md-export');
+    return { attempted: false, dryRun: true };
+  }
+  if (process.platform !== 'win32') {
+    return { attempted: false, reason: 'not-windows' };
+  }
+
+  const script = String.raw`
+$ErrorActionPreference = 'Continue'
+$matches = Get-CimInstance Win32_Process |
+  Where-Object {
+    $_.Name -match '^node(.exe)?$' -and
+    $_.CommandLine -match 'mcp-server\.js' -and
+    $_.CommandLine -match 'gemini-md-export'
+  }
+foreach ($proc in $matches) {
+  try {
+    Stop-Process -Id $proc.ProcessId -Force -ErrorAction Stop
+    Write-Host ("encerrado PID " + $proc.ProcessId)
+  } catch {
+    Write-Host ("falha PID " + $proc.ProcessId + ": " + $_.Exception.Message)
+  }
+}
+if (-not $matches) {
+  Write-Host "nenhum MCP antigo encontrado"
+}
+`;
+  const result = spawnSync(
+    'powershell.exe',
+    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
+    {
+      cwd: ROOT,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      encoding: 'utf-8',
+      shell: false,
+    },
+  );
+  const stdout = String(result.stdout || '').trim();
+  const stderr = String(result.stderr || '').trim();
+  if (stdout) log(stdout.split(/\r?\n/).map((line) => `      ${line}`).join('\n'));
+  if (stderr) log(stderr.split(/\r?\n/).map((line) => `      ${line}`).join('\n'));
+  return {
+    attempted: true,
+    ok: result.status === 0 && !result.error,
+    status: result.status,
+    error: result.error?.message || null,
+    stdout,
+    stderr,
+  };
+};
+
 const mcpServerConfig = () => {
   const config = {
     command: resolvedNodeCommand,
@@ -650,7 +705,7 @@ const mcpServerConfig = () => {
 
 const patchedGeminiCliExtensionManifest = () => {
   const manifest = readJsonIfExists(resolve(sourceGeminiCliExtensionPath, 'gemini-extension.json'));
-  manifest.version = manifest.version || JSON.parse(readFileSync(resolve(ROOT, 'package.json'), 'utf-8')).version;
+  manifest.version = manifest.version || expectedGeminiCliExtensionVersion;
   manifest.mcpServers = {
     ...(manifest.mcpServers || {}),
     [SERVER_NAME]: {
@@ -667,6 +722,96 @@ const patchedGeminiCliExtensionManifest = () => {
     },
   };
   return manifest;
+};
+
+const verifyGeminiCliExtensionInstall = () => {
+  const targetDir = geminiCliExtensionInstallPath();
+  const manifestPath = resolve(targetDir, 'gemini-extension.json');
+  const browserManifestPath = resolve(targetDir, 'browser-extension', 'manifest.json');
+  const mcpPath = resolve(targetDir, 'src', 'mcp-server.js');
+  const hooksPath = resolve(targetDir, 'hooks', 'hooks.json');
+
+  if (!existsSync(manifestPath)) {
+    return {
+      ok: false,
+      reason: 'manifest-missing',
+      targetDir,
+      manifestPath,
+      expectedVersion: expectedGeminiCliExtensionVersion,
+    };
+  }
+
+  const manifest = readJsonForDiscovery(manifestPath);
+  if (!manifest) {
+    return {
+      ok: false,
+      reason: 'manifest-invalid',
+      targetDir,
+      manifestPath,
+      expectedVersion: expectedGeminiCliExtensionVersion,
+    };
+  }
+
+  const missingFiles = [
+    browserManifestPath,
+    mcpPath,
+    hooksPath,
+  ].filter((filePath) => !existsSync(filePath));
+  const wrongName = manifest.name !== SERVER_NAME;
+  const wrongVersion = String(manifest.version || '') !== String(expectedGeminiCliExtensionVersion);
+  const missingMcpServer = !manifest.mcpServers?.[SERVER_NAME];
+
+  if (wrongName || wrongVersion || missingMcpServer || missingFiles.length > 0) {
+    return {
+      ok: false,
+      reason: wrongName
+        ? 'name-mismatch'
+        : wrongVersion
+          ? 'version-mismatch'
+          : missingMcpServer
+            ? 'mcp-server-missing'
+            : 'files-missing',
+      targetDir,
+      manifestPath,
+      actualName: manifest.name || null,
+      actualVersion: manifest.version || null,
+      expectedVersion: expectedGeminiCliExtensionVersion,
+      missingFiles,
+    };
+  }
+
+  return {
+    ok: true,
+    targetDir,
+    manifestPath,
+    version: manifest.version,
+    browserManifestPath,
+    mcpPath,
+    hooksPath,
+  };
+};
+
+const installGeminiCliExtensionOfficial = (geminiCommand) => {
+  const installArgs = [
+    'extensions',
+    'install',
+    geminiCliExtensionSource,
+    `--ref=${geminiCliExtensionRef}`,
+    '--auto-update',
+    '--consent',
+  ];
+  const installResult = runGeminiCommand(
+    geminiCommand,
+    installArgs,
+    'gemini extensions install',
+    { ignoreFailure: true },
+  );
+  const verification = installResult.ok ? verifyGeminiCliExtensionInstall() : null;
+  return {
+    ok: installResult.ok && verification?.ok === true,
+    installResult,
+    verification,
+  };
 };
 
 const writeInstalledGeminiCliExtension = (targetDir) => {
@@ -1144,51 +1289,57 @@ const configureGeminiCli = () => {
   patchGeminiCliExtensionBundle(geminiCliExtensionBundlePath);
 
   if (geminiCommand) {
+    log('    Gemini CLI: encerrando MCPs antigos antes de reinstalar');
+    const stopResult = stopRunningExporterMcpProcesses();
     log('    Gemini CLI: desinstalando gemini-md-export antes de instalar novamente');
-    const uninstallResult = runGeminiCommand(
-      geminiCommand,
-      ['extensions', 'uninstall', SERVER_NAME],
-      'gemini extensions uninstall',
-      { ignoreFailure: true },
-    );
-    if (!uninstallResult.ok) {
-      log('    Gemini CLI: uninstall previo ignorado (extensao podia nao existir ou era manual)');
-    }
-    removeInstalledGeminiCliExtension('pre-install');
 
-    const installArgs = [
-      'extensions',
-      'install',
-      geminiCliExtensionSource,
-      `--ref=${geminiCliExtensionRef}`,
-      '--auto-update',
-      '--consent',
-    ];
-    const installResult = runGeminiCommand(
-      geminiCommand,
-      installArgs,
-      'gemini extensions install',
-      { ignoreFailure: true },
-    );
-    if (installResult.ok) {
-      log(
-        `    Gemini CLI configurado via GitHub (${geminiCliExtensionInstallSource}); deve aparecer como atualizavel.`,
-      );
-      log('    Reinicie a sessao do gemini para ativar.');
-      return {
-        status: 'configured',
-        method: 'gemini-extensions-install',
-        configPath,
-        extensionInstallPath: geminiCliExtensionInstallPath(),
-        sourcePath: geminiCliExtensionInstallSource,
+    let lastOfficialResult = null;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const uninstallResult = runGeminiCommand(
         geminiCommand,
-      };
+        ['extensions', 'uninstall', SERVER_NAME],
+        'gemini extensions uninstall',
+        { ignoreFailure: true },
+      );
+      if (!uninstallResult.ok) {
+        log('    Gemini CLI: uninstall previo ignorado (extensao podia nao existir ou era manual)');
+      }
+      removeInstalledGeminiCliExtension(`pre-install tentativa ${attempt}`);
+
+      lastOfficialResult = installGeminiCliExtensionOfficial(geminiCommand);
+      if (lastOfficialResult.ok) {
+        log(
+          `    Gemini CLI configurado via GitHub (${geminiCliExtensionInstallSource}); deve aparecer como atualizavel.`,
+        );
+        log('    Gemini CLI: instalacao verificada em ' + lastOfficialResult.verification.targetDir);
+        log('    Reinicie a sessao do gemini para ativar.');
+        return {
+          status: 'configured',
+          method: attempt === 1 ? 'gemini-extensions-install' : 'gemini-extensions-install-retried',
+          configPath,
+          extensionInstallPath: geminiCliExtensionInstallPath(),
+          sourcePath: geminiCliExtensionInstallSource,
+          geminiCommand,
+          stopResult,
+          verification: lastOfficialResult.verification,
+        };
+      }
+
+      const reason =
+        lastOfficialResult.verification?.reason ||
+        lastOfficialResult.installResult?.error ||
+        'install-not-verified';
+      log(`    [AVISO] Gemini CLI: instalacao oficial nao foi verificada (${reason}).`);
+      if (attempt < 2) {
+        log('    Gemini CLI: tentando reinstalar oficialmente mais uma vez.');
+      }
     }
 
-    log('    Gemini CLI: install oficial falhou; usando copia manual como fallback.');
+    log('    Gemini CLI: install oficial falhou/nao verificou; usando copia manual como fallback.');
   }
 
   writeInstalledGeminiCliExtension(geminiCliExtensionInstallPath());
+  const fallbackVerification = verifyGeminiCliExtensionInstall();
   log('    Gemini CLI configurado via copia manual fallback. Reinicie a sessao do gemini para ativar.');
   return {
     status: 'configured',
@@ -1197,6 +1348,7 @@ const configureGeminiCli = () => {
     extensionInstallPath: geminiCliExtensionInstallPath(),
     sourcePath: geminiCliExtensionBundlePath,
     geminiCommand,
+    verification: fallbackVerification,
     warning: 'Extensao pode aparecer como nao atualizavel porque o comando oficial do Gemini CLI nao foi usado.',
   };
 };

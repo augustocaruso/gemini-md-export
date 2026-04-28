@@ -136,6 +136,85 @@ remove_installed_gemini_cli_extension() {
   fi
 }
 
+expected_gemini_cli_extension_version() {
+  node -p "require(process.argv[1]).version" "$INSTALL_DIR/gemini-cli-extension/package.json"
+}
+
+verify_gemini_cli_extension_install() {
+  local manifest="$GEMINI_CLI_EXTENSION_DIR/gemini-extension.json"
+  local expected_version
+  expected_version="$(expected_gemini_cli_extension_version)"
+
+  if [ ! -f "$manifest" ]; then
+    warn "Gemini CLI: manifest instalado nao encontrado em $manifest"
+    return 1
+  fi
+
+  node - "$manifest" "$expected_version" <<'NODE'
+const fs = require('fs');
+const path = require('path');
+const [manifestPath, expectedVersion] = process.argv.slice(2);
+const root = path.dirname(manifestPath);
+const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+const required = [
+  path.join(root, 'src', 'mcp-server.js'),
+  path.join(root, 'browser-extension', 'manifest.json'),
+  path.join(root, 'hooks', 'hooks.json'),
+];
+const missing = required.filter((file) => !fs.existsSync(file));
+if (manifest.name !== 'gemini-md-export') {
+  console.error(`nome inesperado: ${manifest.name || '(vazio)'}`);
+  process.exit(1);
+}
+if (String(manifest.version || '') !== String(expectedVersion || '')) {
+  console.error(`versao inesperada: ${manifest.version || '(vazia)'}; esperada ${expectedVersion}`);
+  process.exit(1);
+}
+if (!manifest.mcpServers || !manifest.mcpServers['gemini-md-export']) {
+  console.error('mcpServers.gemini-md-export ausente');
+  process.exit(1);
+}
+if (missing.length > 0) {
+  console.error(`arquivos ausentes: ${missing.join(', ')}`);
+  process.exit(1);
+}
+NODE
+}
+
+stop_running_mcp_processes() {
+  log "Gemini CLI: encerrando MCPs antigos do exporter, se existirem"
+  local pids
+  pids="$(pgrep -f 'gemini-md-export.*mcp-server\.js|mcp-server\.js.*gemini-md-export' 2>/dev/null || true)"
+  if [ -z "$pids" ]; then
+    log "Gemini CLI: nenhum MCP antigo encontrado"
+    return
+  fi
+
+  local pid
+  for pid in $pids; do
+    if [ "$pid" = "$$" ]; then
+      continue
+    fi
+    if kill "$pid" >/dev/null 2>&1; then
+      printf '  encerrado PID %s\n' "$pid" >&2
+    else
+      warn "nao consegui encerrar PID $pid"
+    fi
+  done
+}
+
+copy_gemini_cli_fallback() {
+  warn "$1"
+  mkdir -p "$HOME/.gemini/extensions"
+  remove_installed_gemini_cli_extension "fallback manual"
+  copy_dir "$INSTALL_DIR/gemini-cli-extension" "$HOME/.gemini/extensions/gemini-md-export"
+  if verify_gemini_cli_extension_install; then
+    warn "Gemini CLI configurado por copia manual fallback. Pode aparecer como not updatable."
+  else
+    fail "Fallback manual da extensao Gemini CLI tambem falhou."
+  fi
+}
+
 write_launchers() {
   local mcp_server="$INSTALL_DIR/gemini-cli-extension/src/mcp-server.js"
   local node_bin
@@ -216,25 +295,35 @@ configure_gemini_cli() {
     if [ "$CONFIGURE_GEMINI" = "1" ] || [ "$CONFIGURE_GEMINI" = "true" ]; then
       fail "gemini nao encontrado no PATH."
     fi
-    warn "Gemini CLI nao encontrado; copiando extensao como fallback manual. Ela nao aparecera como atualizavel ate o Gemini CLI ser instalado."
-    mkdir -p "$HOME/.gemini/extensions"
-    remove_installed_gemini_cli_extension "fallback manual"
-    copy_dir "$INSTALL_DIR/gemini-cli-extension" "$HOME/.gemini/extensions/gemini-md-export"
+    copy_gemini_cli_fallback "Gemini CLI nao encontrado; copiando extensao como fallback manual. Ela nao aparecera como atualizavel ate o Gemini CLI ser instalado."
     return
   fi
 
   log "Configurando Gemini CLI"
-  log "Gemini CLI: desinstalando gemini-md-export antes de instalar novamente"
-  gemini extensions uninstall gemini-md-export >/dev/null 2>&1 || true
-  remove_installed_gemini_cli_extension "pre-install"
-  if gemini extensions install "$GEMINI_EXTENSION_SOURCE" "--ref=$GEMINI_EXTENSION_REF" --auto-update --consent; then
-    printf 'Gemini CLI configurado via GitHub (%s --ref=%s --auto-update).\n' "$GEMINI_EXTENSION_SOURCE" "$GEMINI_EXTENSION_REF"
-  else
-    warn "gemini extensions install via GitHub falhou; copiando extensao como fallback manual. Ela pode aparecer como not updatable."
-    mkdir -p "$HOME/.gemini/extensions"
-    remove_installed_gemini_cli_extension "fallback manual"
-    copy_dir "$INSTALL_DIR/gemini-cli-extension" "$HOME/.gemini/extensions/gemini-md-export"
-  fi
+  stop_running_mcp_processes
+
+  local attempt
+  for attempt in 1 2; do
+    log "Gemini CLI: desinstalando gemini-md-export antes de instalar novamente (tentativa $attempt)"
+    gemini extensions uninstall gemini-md-export >/dev/null 2>&1 || true
+    remove_installed_gemini_cli_extension "pre-install tentativa $attempt"
+
+    if gemini extensions install "$GEMINI_EXTENSION_SOURCE" "--ref=$GEMINI_EXTENSION_REF" --auto-update --consent; then
+      if verify_gemini_cli_extension_install; then
+        printf 'Gemini CLI configurado via GitHub (%s --ref=%s --auto-update).\n' "$GEMINI_EXTENSION_SOURCE" "$GEMINI_EXTENSION_REF"
+        return
+      fi
+      warn "gemini extensions install terminou, mas a extensao instalada nao foi verificada."
+    else
+      warn "gemini extensions install via GitHub falhou."
+    fi
+
+    if [ "$attempt" = "1" ]; then
+      warn "Gemini CLI: tentando reinstalacao oficial mais uma vez."
+    fi
+  done
+
+  copy_gemini_cli_fallback "Gemini CLI: instalacao oficial nao verificou; copiando extensao como fallback manual."
 }
 
 configure_claude() {

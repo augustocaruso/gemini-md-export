@@ -71,6 +71,7 @@ test('aguarda heartbeat atrasado antes de considerar a extensão inalcançável'
   let probes = 0;
   const ready = await ensureChromeExtensionReady(
     baseDeps({
+      sleep: async () => {},
       getLiveClients: () => {
         probes += 1;
         return probes >= 3 ? [client('late-client')] : [];

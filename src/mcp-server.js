@@ -72,6 +72,9 @@ const BROWSER_LAUNCH_COOLDOWN_MS = Number(
 const BROWSER_STATUS_WAKE_WAIT_MS = Number(
   process.env.GEMINI_MCP_BROWSER_STATUS_WAKE_WAIT_MS || 8_000,
 );
+const PRIMARY_BRIDGE_HEALTH_TIMEOUT_MS = Number(
+  process.env.GEMINI_MCP_PRIMARY_BRIDGE_HEALTH_TIMEOUT_MS || 1200,
+);
 const detectExpectedBrowserBuildStamp = () => {
   if (process.env.GEMINI_MCP_EXPECTED_BUILD_STAMP) {
     return process.env.GEMINI_MCP_EXPECTED_BUILD_STAMP;
@@ -174,6 +177,90 @@ const bridgeUrlHost = (host) => {
 };
 
 const primaryBridgeBaseUrl = () => `http://${bridgeUrlHost(cli.host)}:${cli.port}`;
+
+const fetchJsonWithTimeout = async (url, timeoutMs = PRIMARY_BRIDGE_HEALTH_TIMEOUT_MS) => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    const text = await response.text();
+    let payload = null;
+    try {
+      payload = text ? JSON.parse(text) : null;
+    } catch {
+      payload = { raw: text };
+    }
+    return { ok: response.ok, status: response.status, payload, text };
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+const primaryBridgeHealth = async () => {
+  try {
+    return await fetchJsonWithTimeout(`${primaryBridgeBaseUrl()}/healthz`);
+  } catch (err) {
+    return {
+      ok: false,
+      status: null,
+      payload: null,
+      error: err?.name === 'AbortError' ? 'timeout' : err?.message || String(err),
+    };
+  }
+};
+
+const primaryBridgeClients = async () => {
+  try {
+    return await fetchJsonWithTimeout(`${primaryBridgeBaseUrl()}/agent/clients`);
+  } catch (err) {
+    return {
+      ok: false,
+      status: null,
+      payload: null,
+      error: err?.name === 'AbortError' ? 'timeout' : err?.message || String(err),
+    };
+  }
+};
+
+const primaryBridgeMismatch = (health) => {
+  const payload = health?.payload || {};
+  if (!health?.ok) {
+    return {
+      kind: 'unreachable',
+      expectedVersion: SERVER_VERSION,
+      actualVersion: null,
+      detail: health?.error || health?.text || `HTTP ${health?.status ?? 'unknown'}`,
+    };
+  }
+  if (payload.name && payload.name !== SERVER_NAME) {
+    return {
+      kind: 'name',
+      expectedName: SERVER_NAME,
+      actualName: payload.name,
+      expectedVersion: SERVER_VERSION,
+      actualVersion: payload.version || null,
+    };
+  }
+  if (payload.version && payload.version !== SERVER_VERSION) {
+    return {
+      kind: 'version',
+      expectedVersion: SERVER_VERSION,
+      actualVersion: payload.version,
+    };
+  }
+  return null;
+};
+
+const primaryBridgeMismatchMessage = (mismatch) => {
+  if (!mismatch) return null;
+  if (mismatch.kind === 'version') {
+    return `Outra instância do gemini-md-export está segurando a porta ${cli.host}:${cli.port} com MCP ${mismatch.actualVersion}, mas esta sessão carregou MCP ${mismatch.expectedVersion}. Feche/reinicie as sessões antigas do Gemini CLI ou encerre o processo node antigo do exporter antes de repetir a tool.`;
+  }
+  if (mismatch.kind === 'name') {
+    return `A porta ${cli.host}:${cli.port} está ocupada por ${mismatch.actualName || 'outro serviço'}, não pelo ${SERVER_NAME}. Feche esse processo ou altere GEMINI_MCP_BRIDGE_PORT.`;
+  }
+  return `A porta ${cli.host}:${cli.port} parece ocupada, mas esta instância não conseguiu consultar o bridge primário (${mismatch.detail || 'sem detalhe'}). Reinicie o Gemini CLI e confira se a extensão gemini-md-export está instalada.`;
+};
 
 const parseArgs = (argv) => {
   const out = {
@@ -2381,6 +2468,23 @@ const executeToolCall = async (name, args = {}) => {
 };
 
 const proxyToolCallToPrimary = async (name, args = {}) => {
+  const health = await primaryBridgeHealth();
+  const mismatch = primaryBridgeMismatch(health);
+  if (mismatch) {
+    const error = new Error(primaryBridgeMismatchMessage(mismatch));
+    error.code = 'primary_bridge_version_mismatch';
+    error.data = {
+      bridgeRole,
+      currentMcp: {
+        name: SERVER_NAME,
+        version: SERVER_VERSION,
+      },
+      primaryBridge: health.payload || null,
+      mismatch,
+    };
+    throw error;
+  }
+
   const response = await fetch(`${primaryBridgeBaseUrl()}/agent/mcp-tool-call`, {
     method: 'POST',
     headers: {
@@ -2404,6 +2508,49 @@ const proxyToolCallToPrimary = async (name, args = {}) => {
   }
 
   return payload.result;
+};
+
+const proxyBrowserStatus = async () => {
+  const health = await primaryBridgeHealth();
+  const clients = await primaryBridgeClients();
+  const mismatch = primaryBridgeMismatch(health);
+
+  return toolTextResult(
+    {
+      mcp: {
+        name: SERVER_NAME,
+        version: SERVER_VERSION,
+        bridgeRole,
+        proxyingToPrimary: !mismatch,
+      },
+      primaryBridge: {
+        ok: health.ok,
+        status: health.status,
+        health: health.payload || null,
+        error: health.error || null,
+      },
+      expectedChromeExtension: EXPECTED_CHROME_EXTENSION_INFO,
+      connectedClients: Array.isArray(clients.payload?.connectedClients)
+        ? clients.payload.connectedClients
+        : [],
+      browserWake: {
+        attempted: false,
+        reason: mismatch ? 'primary-mcp-version-mismatch' : 'proxy-mode',
+      },
+      problem: mismatch
+        ? {
+            code: 'primary_bridge_version_mismatch',
+            message: primaryBridgeMismatchMessage(mismatch),
+            mismatch,
+          }
+        : null,
+      installCheck:
+        mismatch?.kind === 'unreachable'
+          ? 'Se o healthz tambem falhar, confirme que a extensao gemini-md-export aparece em `gemini extensions list` e reinicie o Gemini CLI.'
+          : null,
+    },
+    { isError: !!mismatch },
+  );
 };
 
 const bridgeServer = createServer(async (req, res) => {
@@ -3038,10 +3185,15 @@ const handleRequest = async (message) => {
 
     try {
       await waitForBridgeStartup();
-      const result =
-        bridgeRole === 'proxy' && process.env.GEMINI_MCP_PROXY_TO_PRIMARY !== 'false'
-          ? await proxyToolCallToPrimary(name, args)
-          : await executeToolCall(name, args);
+      let result;
+      if (bridgeRole === 'proxy' && process.env.GEMINI_MCP_PROXY_TO_PRIMARY !== 'false') {
+        result =
+          name === 'gemini_browser_status'
+            ? await proxyBrowserStatus(args)
+            : await proxyToolCallToPrimary(name, args);
+      } else {
+        result = await executeToolCall(name, args);
+      }
       respond(id, result);
     } catch (err) {
       respond(
