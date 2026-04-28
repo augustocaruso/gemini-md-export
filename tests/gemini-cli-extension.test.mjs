@@ -23,6 +23,12 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
     'hooks',
     'gemini-md-export-hook.mjs',
   );
+  const hookPrelaunchPath = resolve(
+    extensionDir,
+    'scripts',
+    'hooks',
+    'prelaunch-browser-windows.ps1',
+  );
 
   assert.equal(existsSync(manifestPath), true);
   assert.equal(existsSync(contextPath), true);
@@ -33,6 +39,7 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.equal(existsSync(browserManifestPath), true);
   assert.equal(existsSync(hooksConfigPath), true);
   assert.equal(existsSync(hookScriptPath), true);
+  assert.equal(existsSync(hookPrelaunchPath), true);
 
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8'));
   assert.equal(manifest.contextFileName, 'GEMINI.md');

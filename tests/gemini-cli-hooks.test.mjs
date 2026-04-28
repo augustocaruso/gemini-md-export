@@ -141,7 +141,7 @@ test('BeforeTool permite desativar prelaunch do navegador para tools do exporter
   assert.equal(output.decision, undefined);
 });
 
-test('BeforeTool prelaunch respeita cooldown e sai imediatamente', () => {
+test('BeforeTool prelaunch retorna imediatamente sem esperar o navegador', () => {
   const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-hook-test-'));
   mkdirSync(resolve(tmpRoot, 'gemini-md-export'), { recursive: true });
   writeFileSync(

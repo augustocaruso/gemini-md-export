@@ -38,9 +38,11 @@ Operational guidance:
   configured Chromium browser. Prefer fixing `GEMINI_MCP_BROWSER`
   (`chrome`/`edge`/`brave`/`dia`) or `GEMINI_MCP_CHROME_PROFILE_DIRECTORY`
   over telling the user to repeat the same failed tool call.
-- The extension BeforeTool hook also prelaunches the configured Chromium
-  browser before browser-dependent exporter tools using a detached fire-and-forget
-  launcher. It must not wait for Chrome, query the bridge, or do long work. If
+- On Windows, the extension BeforeTool hook prelaunches the configured Chromium
+  browser before browser-dependent exporter tools by spawning
+  `prelaunch-browser-windows.ps1` detached and returning immediately. The PS1
+  helper, outside the hook, may do a short bridge check and cooldown before
+  opening Gemini. The hook itself must not wait for Chrome or do long work. If
   this is undesirable, set `GEMINI_MCP_HOOK_LAUNCH_BROWSER=false`.
 - When the user reports the MCP as disconnected on Windows, suggest running:
   `powershell -ExecutionPolicy Bypass -File .\diagnose-windows-mcp.ps1`
