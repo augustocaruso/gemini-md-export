@@ -76,8 +76,10 @@ Esse comando baixa o updater publicado na última release oficial; o updater
 consulta a API do GitHub, baixa o pacote precompilado mais recente, extrai em
 uma pasta temporária, valida o pacote, instala/atualiza o MCP e a extensão,
 sincroniza cópias unpacked já carregadas no navegador quando possível e apaga
-os temporários após sucesso. O bootstrap baixa só o script pequeno da release;
-o pacote precompilado grande é resolvido pelo updater via API do GitHub.
+os temporários após sucesso. Se o Chrome não for encontrado, o instalador tenta
+abrir Edge/Brave/Dia como fallback para não travar no passo da página de
+extensões. O bootstrap baixa só o script pequeno da release; o pacote
+precompilado grande é resolvido pelo updater via API do GitHub.
 
 O passo que continua manual por restrição do Chrome/Edge é carregar ou
 recarregar a extensão unpacked:
@@ -117,6 +119,12 @@ precisar do navegador confere versão/protocolo da extensão do Chrome e pede
 própria extensão recarrega as abas do Gemini em seguida. O reload manual do
 card em `chrome://extensions`/`edge://extensions` continua sendo o fallback
 para a primeira migração, mudança de permissões/manifest ou perfil errado.
+Se nenhuma aba do Gemini estiver conectada quando uma tool MCP for chamada, o
+MCP tenta abrir `https://gemini.google.com/app` no navegador certo: Chrome por
+padrão, depois Edge/Brave/Dia como fallback. Use `GEMINI_MCP_BROWSER=edge`
+ou `chrome`/`brave`/`dia` para fixar o navegador, e
+`GEMINI_MCP_CHROME_PROFILE_DIRECTORY="Profile 1"` quando o perfil do Chrome
+não for `Default`.
 
 Durante a instalação no Windows, o instalador tenta registrar a extensão pelo
 comando oficial `gemini extensions install https://www.github.com/augustocaruso/gemini-md-export.git

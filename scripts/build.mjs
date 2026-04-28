@@ -244,6 +244,10 @@ cpSync(
   resolve(geminiCliExtensionDir, 'src', 'chrome-extension-guard.mjs'),
 );
 cpSync(
+  resolve(ROOT, 'src', 'browser-launch.mjs'),
+  resolve(geminiCliExtensionDir, 'src', 'browser-launch.mjs'),
+);
+cpSync(
   resolve(ROOT, 'src', 'recent-chats-policy.mjs'),
   resolve(geminiCliExtensionDir, 'src', 'recent-chats-policy.mjs'),
 );

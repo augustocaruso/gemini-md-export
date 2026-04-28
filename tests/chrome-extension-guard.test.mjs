@@ -105,6 +105,28 @@ test('tenta abrir Chrome quando extensão está inalcançável e launch está ha
   assert.equal(ready.client.clientId, 'client-1');
 });
 
+test('erro claro quando nenhum navegador suportado é encontrado para launch automático', async () => {
+  await assert.rejects(
+    () =>
+      ensureChromeExtensionReady(
+        baseDeps({
+          config: {
+            launchIfClosed: true,
+            reloadTimeoutMs: 2,
+            pollIntervalMs: 1,
+          },
+          getLiveClients: () => [],
+          launchChromeForGemini: async () => ({
+            attempted: false,
+            supported: true,
+            reason: 'browser-not-found',
+          }),
+        }),
+      ),
+    /não encontrei Chrome\/Edge\/Brave\/Dia/i,
+  );
+});
+
 test('recarrega extensão antiga e continua quando volta atualizada', async () => {
   let reloads = 0;
   let currentInfo = info({ extensionVersion: '0.4.11' });

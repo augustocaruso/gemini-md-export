@@ -2,7 +2,7 @@
 
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { execFile, spawn } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
@@ -18,6 +18,7 @@ import {
 } from './recent-chats-load-more.mjs';
 import { formatBridgeListenError } from './mcp-server-errors.mjs';
 import { ensureChromeExtensionReady } from './chrome-extension-guard.mjs';
+import { launchGeminiBrowser } from './browser-launch.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
@@ -429,118 +430,8 @@ const requireNotebookClient = (clientId) => {
   return client;
 };
 
-const launchChromeForGemini = async ({ profileDirectory } = {}) => {
-  const geminiUrl = 'https://gemini.google.com/app';
-
-  if (process.platform === 'darwin') {
-    const explicitApp =
-      process.env.GEMINI_MCP_CHROME_APP ||
-      process.env.GME_CHROME_APP ||
-      process.env.GEMINI_MCP_CHROME_EXE ||
-      process.env.GME_CHROME_EXE ||
-      '';
-    const args = explicitApp ? ['-a', explicitApp, geminiUrl] : [geminiUrl];
-    try {
-      const child = spawn('open', args, {
-        detached: true,
-        stdio: 'ignore',
-      });
-      child.unref();
-      return {
-        attempted: true,
-        supported: true,
-        method: explicitApp ? 'macos-open-app' : 'macos-open-default-browser',
-        app: explicitApp || null,
-      };
-    } catch (err) {
-      return {
-        attempted: true,
-        supported: true,
-        error: err?.message || String(err),
-      };
-    }
-  }
-
-  if (process.platform === 'linux') {
-    try {
-      const child = spawn(process.env.BROWSER || 'xdg-open', [geminiUrl], {
-        detached: true,
-        stdio: 'ignore',
-      });
-      child.unref();
-      return {
-        attempted: true,
-        supported: true,
-        method: process.env.BROWSER ? 'linux-browser-env' : 'linux-xdg-open',
-      };
-    } catch (err) {
-      return {
-        attempted: true,
-        supported: true,
-        error: err?.message || String(err),
-      };
-    }
-  }
-
-  if (process.platform !== 'win32') {
-    return {
-      attempted: false,
-      supported: false,
-      reason: 'unsupported-platform',
-    };
-  }
-
-  const profileArg = profileDirectory ? `--profile-directory=${profileDirectory}` : null;
-  const args = [profileArg, geminiUrl].filter(Boolean);
-  const quotedArgs = args.map((arg) => `'${String(arg).replace(/'/g, "''")}'`).join(',');
-  const explicitChrome = process.env.GEMINI_MCP_CHROME_EXE || process.env.GME_CHROME_EXE || '';
-  const candidates = [
-    explicitChrome,
-    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-    'chrome.exe',
-  ].filter(Boolean);
-  const quotedCandidates = candidates
-    .map((candidate) => `'${String(candidate).replace(/'/g, "''")}'`)
-    .join(',');
-  const script = [
-    "$ErrorActionPreference = 'Stop'",
-    `$candidates = @(${quotedCandidates})`,
-    `$arguments = @(${quotedArgs})`,
-    'foreach ($candidate in $candidates) {',
-    "  if ($candidate -eq 'chrome.exe' -or (Test-Path -LiteralPath $candidate)) {",
-    '    Start-Process -FilePath $candidate -ArgumentList $arguments -WindowStyle Minimized',
-    '    exit 0',
-    '  }',
-    '}',
-    'exit 1',
-  ].join('; ');
-
-  try {
-    const child = spawn(
-      'powershell.exe',
-      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
-      {
-        detached: true,
-        stdio: 'ignore',
-        windowsHide: true,
-      },
-    );
-    child.unref();
-    return {
-      attempted: true,
-      supported: true,
-      method: 'powershell-start-process-minimized',
-      profileDirectory: profileDirectory || null,
-    };
-  } catch (err) {
-    return {
-      attempted: true,
-      supported: true,
-      error: err?.message || String(err),
-    };
-  }
-};
+const launchChromeForGemini = async ({ profileDirectory } = {}) =>
+  launchGeminiBrowser({ profileDirectory });
 
 const getChromeExtensionInfo = async (client) => {
   const result = await enqueueCommand(client.clientId, 'get-extension-info', {}, {

@@ -29,7 +29,8 @@ INSTALACAO (modo simples)
 Se voce recebeu um comando PowerShell de update, esse e o caminho mais simples.
 Abra o PowerShell, cole o comando e aperte Enter. Ele baixa a ultima versao,
 extrai em uma pasta temporaria, instala a partir da pasta correta e apaga os
-temporarios depois que terminar.
+temporarios depois que terminar. Se o Chrome nao for encontrado, o instalador
+tenta abrir Edge/Brave/Dia como fallback para mostrar a pagina de extensoes.
 
 Comando padrao:
    powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; iex ((New-Object Net.WebClient).DownloadString('https://www.github.com/augustocaruso/gemini-md-export/releases/latest/download/update-windows.ps1'))"

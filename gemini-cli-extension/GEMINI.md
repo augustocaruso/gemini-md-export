@@ -33,6 +33,11 @@ Operational guidance:
   browser extension version/protocol and ask it to reload itself when it is
   stale; manual reload in `chrome://extensions` is only the fallback for first
   migration, manifest/permission changes, or the wrong browser profile.
+- If no Gemini tab is connected when a browser-dependent MCP tool runs, the MCP
+  should try to open `https://gemini.google.com/app` automatically in the
+  configured Chromium browser. Prefer fixing `GEMINI_MCP_BROWSER`
+  (`chrome`/`edge`/`brave`/`dia`) or `GEMINI_MCP_CHROME_PROFILE_DIRECTORY`
+  over telling the user to repeat the same failed tool call.
 - When the user reports the MCP as disconnected on Windows, suggest running:
   `powershell -ExecutionPolicy Bypass -File .\diagnose-windows-mcp.ps1`
 - If the MCP looks disconnected, suspect a stale `node.exe` or a bridge port

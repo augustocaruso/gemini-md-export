@@ -274,12 +274,17 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   versão/protocolo, pede `reload-extension-self` quando os arquivos da
   extensão Chrome foram atualizados pelo Gemini CLI mas o runtime do Chrome
   ainda está velho, espera a reconexão e evita loop infinito (default: 1
-  tentativa). Se não houver heartbeat, em Windows ele tenta abrir Chrome no
-  perfil configurado (`GEMINI_MCP_CHROME_PROFILE_DIRECTORY`, default
-  `Default`) diretamente em `https://gemini.google.com/app`, em janela
-  minimizada best-effort, e só então espera a extensão conectar. O launch é
-  controlado por `GEMINI_MCP_CHROME_LAUNCH_IF_CLOSED` (default ligado);
-  timeout e tentativas vêm de `GEMINI_MCP_CHROME_RELOAD_TIMEOUT_MS` e
+  tentativa). Se não houver heartbeat, o launcher de
+  `src/browser-launch.mjs` tenta abrir `https://gemini.google.com/app` no
+  navegador correto: Chrome por padrão, ou o browser fixado por
+  `GEMINI_MCP_BROWSER`/`GME_BROWSER` (`chrome`, `edge`, `brave`, `dia`), com
+  fallback para outro Chromium conhecido se o preferido não existir. No
+  Windows usa `Start-Process -WindowStyle Minimized`; no macOS usa `open -g
+  -a` para preferir app Chromium em vez do navegador padrão; ambos respeitam
+  `GEMINI_MCP_CHROME_PROFILE_DIRECTORY`/`GME_CHROME_PROFILE_DIRECTORY`
+  (default `Default`). O launch é controlado por
+  `GEMINI_MCP_CHROME_LAUNCH_IF_CLOSED` (default ligado); timeout e tentativas
+  vêm de `GEMINI_MCP_CHROME_RELOAD_TIMEOUT_MS` e
   `GEMINI_MCP_CHROME_MAX_RELOAD_ATTEMPTS`.
   `gemini_list_recent_chats` e `/agent/recent-chats` agora priorizam a lista
   trazida pelo heartbeat recente da extensão para responder rápido. Só
@@ -352,8 +357,9 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   para instalação como extensão desempacotada e `dist/gemini-cli-extension/*`
   como bundle da extensão do Gemini CLI. O build valida que
   `bridge-version.json.extensionVersion` bate com `package.json`, injeta
-  `protocolVersion` no content/background e copia `bridge-version.json` +
-  `src/chrome-extension-guard.mjs` para o bundle Gemini CLI.
+  `protocolVersion` no content/background e copia `bridge-version.json`,
+  `src/chrome-extension-guard.mjs` e `src/browser-launch.mjs` para o bundle
+  Gemini CLI.
 - `scripts/install-windows-launcher.cjs` — launcher empacotável para Windows.
   Em modo normal, delega para `scripts/install-windows.mjs` na pasta real do
   projeto. Em modo `pkg`, lê `release-manifest.json` embutido, extrai o payload
@@ -464,9 +470,11 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   ponteiro temporário `%TEMP%\gemini-md-export-last-install.env` para o
   `.cmd` exibir a pasta real da extensão mesmo em upgrades fora do default. O
   instalador também gera launchers `refresh-browser-extension.cmd` (abre a
-  página de extensões no executável real do browser escolhido usando
-  `--new-tab`, para preferir uma aba na janela existente, e relembra qual
-  card/pasta recarregar) e `restart-gemini-cli.cmd` (encerra MCPs antigos do
+  página de extensões via `cmd /c start` no executável real do browser
+  escolhido usando `--new-tab`, para preferir uma aba na janela existente; se
+  o browser escolhido não for encontrado, cai para outro instalado entre
+  Chrome/Edge/Brave/Dia, e relembra qual card/pasta recarregar) e
+  `restart-gemini-cli.cmd` (encerra MCPs antigos do
   exporter e abre uma nova janela `gemini` se o binário estiver no PATH),
   para tornar updates menos manuais. O
   `.cmd` imprime banner, detecta Node.js, mostra causas comuns de falha e

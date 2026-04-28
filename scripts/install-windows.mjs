@@ -292,14 +292,10 @@ const browserLaunchTargets = () => ({
   },
 });
 
-const resolveBrowserLaunchTarget = (browserOption) => {
-  const targets = browserLaunchTargets();
-  const target = targets[String(browserOption || 'chrome').trim().toLowerCase()] || targets.chrome;
-
+const resolveBrowserBinary = (target) => {
   const fromFileSystem = target.binaryCandidates.find((candidate) => existsSync(candidate));
   if (fromFileSystem) {
     return {
-      ...target,
       binary: fromFileSystem,
       resolvedBy: 'filesystem',
     };
@@ -307,7 +303,6 @@ const resolveBrowserLaunchTarget = (browserOption) => {
 
   if (process.platform !== 'win32') {
     return {
-      ...target,
       binary: null,
       resolvedBy: null,
     };
@@ -326,7 +321,6 @@ const resolveBrowserLaunchTarget = (browserOption) => {
         .find(Boolean);
       if (first) {
         return {
-          ...target,
           binary: first,
           resolvedBy: 'where',
         };
@@ -335,9 +329,40 @@ const resolveBrowserLaunchTarget = (browserOption) => {
   }
 
   return {
-    ...target,
     binary: null,
     resolvedBy: null,
+  };
+};
+
+const resolveBrowserLaunchTarget = (browserOption) => {
+  const targets = browserLaunchTargets();
+  const requestedKey = String(browserOption || 'chrome').trim().toLowerCase();
+  const requestedTarget = targets[requestedKey] || targets.chrome;
+  const requestedResolution = resolveBrowserBinary(requestedTarget);
+  if (requestedResolution.binary) {
+    return {
+      ...requestedTarget,
+      ...requestedResolution,
+      requested: requestedKey,
+    };
+  }
+
+  for (const [key, target] of Object.entries(targets)) {
+    if (target === requestedTarget) continue;
+    const resolution = resolveBrowserBinary(target);
+    if (!resolution.binary) continue;
+    return {
+      ...target,
+      ...resolution,
+      requested: requestedKey,
+      fallbackFrom: requestedTarget.name,
+    };
+  }
+
+  return {
+    ...requestedTarget,
+    ...requestedResolution,
+    requested: requestedKey,
   };
 };
 
@@ -1180,10 +1205,14 @@ const configureGeminiCli = () => {
 const openBrowserExtensions = () => {
   if (!options.openBrowser || options.dryRun) return;
   if (!browserLaunchTarget.binary) {
-    log(`Aviso: nao encontrei o executavel do ${browserLaunchTarget.name}. Abra manualmente ${browserLaunchTarget.url}`);
+    log(`Aviso: nao encontrei Chrome/Edge/Brave/Dia automaticamente. Abra manualmente ${browserLaunchTarget.url}`);
     return;
   }
-  const child = spawn(browserLaunchTarget.binary, browserLaunchArgs(browserLaunchTarget.url), {
+  if (browserLaunchTarget.fallbackFrom) {
+    log(`Aviso: ${browserLaunchTarget.fallbackFrom} nao encontrado; abrindo ${browserLaunchTarget.name}.`);
+  }
+  const command = `start "" ${quoteCmd(browserLaunchTarget.binary)} --new-tab ${quoteCmd(browserLaunchTarget.url)}`;
+  const child = spawn(cmdCommand, ['/d', '/s', '/c', command], {
     cwd: ROOT,
     stdio: 'ignore',
     detached: true,

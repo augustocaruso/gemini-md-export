@@ -236,6 +236,7 @@ export const ensureChromeExtensionReady = async (deps, options = {}) => {
   });
 
   let launchedChrome = false;
+  let launchResult = null;
   let reloadAttempts = 0;
   let probe = await probeExtensionInfo(deps, state);
 
@@ -252,7 +253,7 @@ export const ensureChromeExtensionReady = async (deps, options = {}) => {
   }
 
   if (!probe && (options.allowLaunchChrome ?? config.launchIfClosed)) {
-    const launchResult = await deps.launchChromeForGemini?.({
+    launchResult = await deps.launchChromeForGemini?.({
       profileDirectory: config.profileDirectory,
     });
     launchedChrome = !!launchResult?.attempted;
@@ -260,16 +261,32 @@ export const ensureChromeExtensionReady = async (deps, options = {}) => {
       attempted: launchedChrome,
       supported: launchResult?.supported ?? null,
       method: launchResult?.method ?? null,
+      browserName: launchResult?.browserName ?? null,
+      fallbackFrom: launchResult?.fallbackFrom ?? null,
+      reason: launchResult?.reason ?? null,
+      error: launchResult?.error ?? null,
     });
     probe = await waitForExtensionInfo(deps, state, config.reloadTimeoutMs, config.pollIntervalMs);
   }
 
   if (!probe) {
+    if (launchResult?.reason === 'browser-not-found') {
+      throw makeUserError(
+        'A extensão do Chrome não está acessível e não encontrei Chrome/Edge/Brave/Dia para abrir automaticamente. Abra o navegador onde a extensão unpacked está instalada, confirme o perfil correto e acesse https://gemini.google.com/app.',
+        'chrome_extension_browser_not_found',
+        {
+          launchedChrome,
+          launchResult,
+          lastProbeError: state.lastProbeError,
+        },
+      );
+    }
     throw makeUserError(
       'A extensão do Chrome não está acessível. Tentei localizar uma aba do Gemini conectada, mas a extensão não respondeu. Abra Chrome/Edge com o perfil correto, confirme que a extensão unpacked está ativa e abra https://gemini.google.com/app.',
       'chrome_extension_unreachable',
       {
         launchedChrome,
+        launchResult,
         lastProbeError: state.lastProbeError,
       },
     );
