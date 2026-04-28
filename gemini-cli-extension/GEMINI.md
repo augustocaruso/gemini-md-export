@@ -46,8 +46,11 @@ Operational guidance:
   this is undesirable, set `GEMINI_MCP_HOOK_LAUNCH_BROWSER=false`.
 - When the user reports the MCP as disconnected on Windows, suggest running:
   `powershell -ExecutionPolicy Bypass -File .\diagnose-windows-mcp.ps1`
-- If the MCP looks disconnected, suspect a stale `node.exe` or a bridge port
-  conflict on `127.0.0.1:47283`.
+- Multiple Gemini CLI terminals may start multiple MCP processes. Only the
+  first process owns `127.0.0.1:47283`; later processes should stay quiet and
+  proxy MCP tool calls to the primary bridge. If a second terminal still shows
+  bridge/extension startup errors, suspect an old extension version or stale
+  `node.exe`.
 - The local bridge health check is `http://127.0.0.1:47283/healthz`.
 
 Available capabilities include:

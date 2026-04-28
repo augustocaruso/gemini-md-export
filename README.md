@@ -190,6 +190,11 @@ O servidor MCP fica em [`src/mcp-server.js`](src/mcp-server.js). Ele roda via
 `stdio` para o cliente AI e, no mesmo processo, abre um bridge HTTP local em
 `127.0.0.1:47283` para a extensão do navegador.
 
+Se você abrir uma segunda aba do terminal com `gemini`, a nova instância MCP
+não tenta disputar essa porta nem deve mostrar erro de bridge ocupado: ela
+permanece como servidor MCP por `stdio` e encaminha as tools para a instância
+primária que já está conectada à extensão do navegador.
+
 Tools disponíveis:
 
 - `gemini_browser_status`

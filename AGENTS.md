@@ -311,9 +311,14 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   extensão, o long-poll de comandos do bridge usa retry curto após erro e é
   rearmado depois de heartbeat bem-sucedido, reduzindo latência depois de
   restart do MCP ou falha transitória no localhost. O processo MCP agora
-  encerra explicitamente quando o `stdin` do cliente fecha e também trata
-  `EADDRINUSE` do bridge com mensagem clara, evitando zumbis que deixavam a
-  porta 47283 ocupada e apareciam como "disconnected" no Gemini CLI.
+  encerra explicitamente quando o `stdin` do cliente fecha. Quando uma segunda
+  aba/janela do Gemini CLI inicia outro MCP e encontra `EADDRINUSE` na porta
+  `127.0.0.1:47283`, essa instância não deve logar erro nem morrer: ela entra
+  em modo proxy por `stdio` e encaminha `tools/call` para a instância primária
+  via `/agent/mcp-tool-call`. O objetivo é permitir múltiplos terminais Gemini
+  sem mensagens de bridge/extensão desconectada. Se esse proxy falhar, a
+  mensagem acionável deve pedir para fechar sessões antigas/reiniciar após
+  update, não tratar automaticamente como zumbi.
   O MCP também expõe tools para status, diretório de export, listagem de
   sidebar, listagem/export de cadernos, download individual, cache e navegação:
   `gemini_browser_status`, `gemini_get_export_dir`, `gemini_set_export_dir`,

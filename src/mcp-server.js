@@ -101,10 +101,46 @@ const pendingCommands = new Map();
 const exportJobs = new Map();
 let configuredExportDir = DEFAULT_EXPORT_DIR;
 let shuttingDown = false;
+let bridgeRole = 'starting';
+let bridgeListening = false;
+let bridgeStartupSettled = false;
+let bridgeStartupResolve;
+const bridgeStartup = new Promise((resolveStartup) => {
+  bridgeStartupResolve = resolveStartup;
+});
 
 const log = (...args) => {
   process.stderr.write(`[${SERVER_NAME}] ${args.join(' ')}\n`);
 };
+
+const debugLog = (...args) => {
+  if (process.env.GEMINI_MCP_DEBUG === 'true') log(...args);
+};
+
+const settleBridgeStartup = (role, error = null) => {
+  bridgeRole = role;
+  if (bridgeStartupSettled) return;
+  bridgeStartupSettled = true;
+  bridgeStartupResolve?.({ role, error });
+};
+
+const waitForBridgeStartup = async (timeoutMs = 1000) => {
+  if (bridgeStartupSettled) return { role: bridgeRole };
+  return Promise.race([
+    bridgeStartup,
+    new Promise((resolveTimeout) =>
+      setTimeout(() => resolveTimeout({ role: bridgeRole, timeout: true }), timeoutMs),
+    ),
+  ]);
+};
+
+const bridgeUrlHost = (host) => {
+  if (!host || host === '0.0.0.0') return '127.0.0.1';
+  if (host.includes(':') && !host.startsWith('[')) return `[${host}]`;
+  return host;
+};
+
+const primaryBridgeBaseUrl = () => `http://${bridgeUrlHost(cli.host)}:${cli.port}`;
 
 const parseArgs = (argv) => {
   const out = {
@@ -2203,6 +2239,53 @@ const tools = rawTools.map((tool) =>
 
 const toolByName = new Map(tools.map((tool) => [tool.name, tool]));
 
+const executeToolCall = async (name, args = {}) => {
+  const tool = toolByName.get(name);
+
+  if (!tool) {
+    return toolTextResult({ error: `Tool desconhecida: ${name}` }, { isError: true });
+  }
+
+  try {
+    return await tool.call(args);
+  } catch (err) {
+    return toolTextResult(
+      {
+        error: err.message,
+        code: err.code || null,
+        data: err.data || null,
+      },
+      { isError: true },
+    );
+  }
+};
+
+const proxyToolCallToPrimary = async (name, args = {}) => {
+  const response = await fetch(`${primaryBridgeBaseUrl()}/agent/mcp-tool-call`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ name, arguments: args }),
+  });
+  const text = await response.text();
+  let payload = null;
+  try {
+    payload = text ? JSON.parse(text) : null;
+  } catch {
+    // HTTP/proxy errors can be plain text when the primary is old or unhealthy.
+  }
+
+  if (!response.ok || !payload?.result) {
+    const detail = payload?.error || text || `HTTP ${response.status}`;
+    throw new Error(
+      `Outra instância do gemini-md-export já está rodando, mas não consegui encaminhar esta tool para ela (${detail}). Feche as abas antigas do Gemini CLI e abra de novo depois de atualizar a extensão.`,
+    );
+  }
+
+  return payload.result;
+};
+
 const bridgeServer = createServer(async (req, res) => {
   cleanupStaleClients();
 
@@ -2241,6 +2324,32 @@ const bridgeServer = createServer(async (req, res) => {
       expectedChromeExtension: EXPECTED_CHROME_EXTENSION_INFO,
       connectedClients: getLiveClients().map(summarizeClient),
     });
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/agent/mcp-tool-call') {
+    try {
+      const payload = await readJsonBody(req);
+      const name = payload?.name;
+      if (!name || typeof name !== 'string') {
+        sendAgentJson(res, 400, {
+          ok: false,
+          error: 'name is required',
+        });
+        return;
+      }
+
+      const result = await executeToolCall(name, payload.arguments || payload.args || {});
+      sendAgentJson(res, 200, {
+        ok: true,
+        result,
+      });
+    } catch (err) {
+      sendAgentJson(res, 500, {
+        ok: false,
+        error: err.message,
+      });
+    }
     return;
   }
 
@@ -2667,6 +2776,8 @@ const bridgeServer = createServer(async (req, res) => {
 });
 
 bridgeServer.listen(cli.port, cli.host, () => {
+  bridgeListening = true;
+  settleBridgeStartup('primary');
   log(`bridge HTTP escutando em http://${cli.host}:${cli.port}`);
 });
 
@@ -2684,6 +2795,11 @@ const shutdown = (reason, exitCode = 0) => {
       // ignore stale socket
     }
     client.pendingPoll = null;
+  }
+
+  if (!bridgeListening) {
+    process.exit(exitCode);
+    return;
   }
 
   const forceExitTimer = setTimeout(() => {
@@ -2705,6 +2821,14 @@ const shutdown = (reason, exitCode = 0) => {
 };
 
 bridgeServer.on('error', (error) => {
+  if (error?.code === 'EADDRINUSE') {
+    settleBridgeStartup('proxy', error);
+    debugLog(
+      `bridge HTTP já está em uso em ${cli.host}:${cli.port}; esta instância MCP vai encaminhar tools para a instância primária.`,
+    );
+    return;
+  }
+  settleBridgeStartup('failed', error);
   log(formatBridgeListenError(error, { host: cli.host, port: cli.port }));
   shutdown('Encerrando MCP por falha no bridge HTTP.', 1);
 });
@@ -2791,18 +2915,26 @@ const handleRequest = async (message) => {
   if (method === 'tools/call') {
     const name = params?.name;
     const args = params?.arguments || {};
-    const tool = toolByName.get(name);
-
-    if (!tool) {
-      respond(id, toolTextResult({ error: `Tool desconhecida: ${name}` }, { isError: true }));
-      return;
-    }
 
     try {
-      const result = await tool.call(args);
+      await waitForBridgeStartup();
+      const result =
+        bridgeRole === 'proxy' && process.env.GEMINI_MCP_PROXY_TO_PRIMARY !== 'false'
+          ? await proxyToolCallToPrimary(name, args)
+          : await executeToolCall(name, args);
       respond(id, result);
     } catch (err) {
-      respond(id, toolTextResult({ error: err.message }, { isError: true }));
+      respond(
+        id,
+        toolTextResult(
+          {
+            error: err.message,
+            code: err.code || null,
+            data: err.data || null,
+          },
+          { isError: true },
+        ),
+      );
     }
     return;
   }
