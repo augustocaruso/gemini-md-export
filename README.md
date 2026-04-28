@@ -138,10 +138,11 @@ caixa de seleção/perfil do Chrome em chamadas normais de tool. Para perfis
 específicos, use por exemplo `GEMINI_MCP_CHROME_PROFILE_DIRECTORY="Profile 1"`.
 Além do guard dentro do MCP, o hook `BeforeTool` da extensão do Gemini CLI faz
 um pré-aquecimento no Windows: antes de tools do exporter que dependem do
-navegador, o hook só dispara `prelaunch-browser-windows.ps1` em processo
-detached e sai imediatamente. O `.ps1`, fora do hook, faz uma checagem curta do
-bridge local e respeita cooldown antes de abrir o Gemini via `cmd start`; assim
-o hook não fica preso em "executing hook". Isso pode ser desativado com
+navegador, ele checa rapidamente `http://127.0.0.1:47283/agent/clients`. Se já
+houver uma aba Gemini conectada, não abre nada. Se não houver cliente
+conectado, abre `https://gemini.google.com/app` diretamente por `cmd.exe /c
+start` e sai imediatamente. O hook não depende de PowerShell, respeita cooldown
+e não deve ficar preso em "executing hook". Isso pode ser desativado com
 `GEMINI_MCP_HOOK_LAUNCH_BROWSER=false`.
 
 Durante a instalação no Windows, o instalador tenta registrar a extensão pelo

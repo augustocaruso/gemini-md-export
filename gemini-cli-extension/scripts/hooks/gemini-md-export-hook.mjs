@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 
 import { spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { request } from 'node:http';
+import { tmpdir } from 'node:os';
+import { resolve } from 'node:path';
 
 const mode = process.argv[2] || '';
-const __dirname = dirname(fileURLToPath(import.meta.url));
 let wroteOutput = false;
 const hardExit = setTimeout(() => {
   if (!wroteOutput) {
@@ -26,6 +26,11 @@ const BLOCK_REASON =
 
 const MEDIA_WARNING_RE =
   /\[!warning\]\s*M[ií]dia n[aã]o importada|M[ií]dia n[aã]o exportada|media n(?:ao|ão) importad/i;
+
+const GEMINI_APP_URL = 'https://gemini.google.com/app';
+const DEFAULT_BROWSER_LAUNCH_COOLDOWN_MS = 60000;
+const DEFAULT_HOOK_BRIDGE_CHECK_TIMEOUT_MS = 180;
+const HOOK_BROWSER_STATE_FILENAME = 'hook-browser-launch.json';
 
 const BROWSER_DEPENDENT_EXPORTER_TOOLS = new Set([
   'gemini_browser_status',
@@ -55,28 +60,276 @@ const isBrowserDependentExporterTool = (input) => {
   return BROWSER_DEPENDENT_EXPORTER_TOOLS.has(normalized.replace(/-/g, '_'));
 };
 
-const prelaunchBrowserDetached = (input) => {
-  if (process.env.GEMINI_MCP_HOOK_LAUNCH_BROWSER === 'false') return;
-  if (!isBrowserDependentExporterTool(input)) return;
-  if (process.platform !== 'win32') return;
+const parseNonNegativeInt = (value, fallback) => {
+  const parsed = Number.parseInt(String(value ?? ''), 10);
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+  return parsed;
+};
 
+const isDisabled = (value) => String(value || '').trim().toLowerCase() === 'false';
+
+const isEnabled = (value) => /^(1|true|yes|sim)$/i.test(String(value || '').trim());
+
+const currentPlatform = () => process.env.GEMINI_MCP_HOOK_PLATFORM || process.platform;
+
+const quoteCmd = (value) => `"${String(value).replace(/"/g, '""')}"`;
+
+const normalizeBrowserKey = (value) => {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text) return 'chrome';
+  if (/^(google[-_\s]*)?chrome$|chrome\.exe$/.test(text)) return 'chrome';
+  if (/^edge$|microsoft[-_\s]*edge|msedge(\.exe)?$/.test(text)) return 'edge';
+  if (/^brave$|brave[-_\s]*browser|brave(\.exe)?$/.test(text)) return 'brave';
+  if (/^dia$|dia(\.exe)?$/.test(text)) return 'dia';
+  return text;
+};
+
+const firstExisting = (paths) => paths.filter(Boolean).find((candidate) => existsSync(candidate));
+
+const windowsBrowserConfigs = (env = process.env) => {
+  const localAppData = env.LOCALAPPDATA || '';
+  const programFiles = env.ProgramFiles || 'C:\\Program Files';
+  const programFilesX86 = env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+  return {
+    chrome: {
+      name: 'Chrome',
+      fallbackCommand: 'chrome.exe',
+      explicit: env.GEMINI_MCP_CHROME_EXE || env.GME_CHROME_EXE,
+      paths: [
+        localAppData && resolve(localAppData, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+        resolve(programFiles, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+        resolve(programFilesX86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      ],
+    },
+    edge: {
+      name: 'Edge',
+      fallbackCommand: 'msedge.exe',
+      explicit: env.GEMINI_MCP_EDGE_EXE || env.GME_EDGE_EXE,
+      paths: [
+        localAppData && resolve(localAppData, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+        resolve(programFiles, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+        resolve(programFilesX86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+      ],
+    },
+    brave: {
+      name: 'Brave',
+      fallbackCommand: 'brave.exe',
+      explicit: env.GEMINI_MCP_BRAVE_EXE || env.GME_BRAVE_EXE,
+      paths: [
+        localAppData &&
+          resolve(localAppData, 'BraveSoftware', 'Brave-Browser', 'Application', 'brave.exe'),
+        resolve(programFiles, 'BraveSoftware', 'Brave-Browser', 'Application', 'brave.exe'),
+        resolve(programFilesX86, 'BraveSoftware', 'Brave-Browser', 'Application', 'brave.exe'),
+      ],
+    },
+    dia: {
+      name: 'Dia',
+      fallbackCommand: 'dia.exe',
+      explicit: env.GEMINI_MCP_DIA_EXE || env.GME_DIA_EXE,
+      paths: [
+        localAppData && resolve(localAppData, 'Programs', 'Dia', 'Dia.exe'),
+        env.APPDATA && resolve(env.APPDATA, 'Dia', 'Application', 'Dia.exe'),
+      ],
+    },
+  };
+};
+
+const browserOrder = (preferredKey) => [
+  preferredKey,
+  ...['chrome', 'edge', 'brave', 'dia'].filter((key) => key !== preferredKey),
+];
+
+const resolveWindowsBrowserForHook = (env = process.env) => {
+  const preferredKey = normalizeBrowserKey(env.GEMINI_MCP_BROWSER || env.GME_BROWSER || 'chrome');
+  const configs = windowsBrowserConfigs(env);
+
+  for (const key of browserOrder(preferredKey)) {
+    const config = configs[key];
+    if (!config) continue;
+    const command = config.explicit || firstExisting(config.paths) || config.fallbackCommand;
+    if (!command) continue;
+    return {
+      browserKey: key,
+      browserName: config.name,
+      command,
+      fallbackFrom: key === preferredKey ? null : configs[preferredKey]?.name || preferredKey,
+    };
+  }
+
+  return {
+    browserKey: preferredKey,
+    browserName: configs[preferredKey]?.name || preferredKey,
+    command: 'chrome.exe',
+    fallbackFrom: null,
+  };
+};
+
+const hookStateDir = () =>
+  process.env.GEMINI_MCP_HOOK_STATE_DIR ||
+  resolve(process.env.TEMP || process.env.TMP || tmpdir(), 'gemini-md-export');
+
+const hookStatePath = () => resolve(hookStateDir(), HOOK_BROWSER_STATE_FILENAME);
+
+const readHookState = () => {
   try {
-    const scriptPath = resolve(__dirname, 'prelaunch-browser-windows.ps1');
-    const child = spawn(
-      'powershell.exe',
-      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath],
+    return JSON.parse(readFileSync(hookStatePath(), 'utf-8'));
+  } catch {
+    return {};
+  }
+};
+
+const writeHookState = (state) => {
+  try {
+    mkdirSync(hookStateDir(), { recursive: true });
+    writeFileSync(hookStatePath(), `${JSON.stringify(state, null, 2)}\n`, 'utf-8');
+  } catch (err) {
+    console.error(`[gemini-md-export-hook] failed to write launch state: ${err.message}`);
+  }
+};
+
+const shouldSkipBrowserLaunchForCooldown = (now) => {
+  if (isEnabled(process.env.GEMINI_MCP_HOOK_ALWAYS_LAUNCH_BROWSER)) return false;
+  const cooldownMs = parseNonNegativeInt(
+    process.env.GEMINI_MCP_BROWSER_LAUNCH_COOLDOWN_MS,
+    DEFAULT_BROWSER_LAUNCH_COOLDOWN_MS,
+  );
+  if (cooldownMs === 0) return false;
+  const lastAttemptAt = Number(readHookState().lastAttemptAt || 0);
+  return lastAttemptAt > 0 && now - lastAttemptAt < cooldownMs;
+};
+
+const queryConnectedBrowserClients = () =>
+  new Promise((resolveResult) => {
+    if (isDisabled(process.env.GEMINI_MCP_HOOK_BRIDGE_CHECK)) {
+      resolveResult({ checked: false, connectedCount: null, reason: 'disabled' });
+      return;
+    }
+
+    const timeoutMs = parseNonNegativeInt(
+      process.env.GEMINI_MCP_HOOK_BRIDGE_TIMEOUT_MS,
+      DEFAULT_HOOK_BRIDGE_CHECK_TIMEOUT_MS,
+    );
+    const port = parseNonNegativeInt(process.env.GEMINI_MCP_BRIDGE_PORT, 47283);
+    let done = false;
+    const finish = (result) => {
+      if (done) return;
+      done = true;
+      resolveResult({ checked: true, ...result });
+    };
+
+    const req = request(
       {
-        detached: true,
-        stdio: 'ignore',
-        windowsHide: true,
+        host: '127.0.0.1',
+        port,
+        path: '/agent/clients',
+        method: 'GET',
+        timeout: timeoutMs,
+      },
+      (res) => {
+        let body = '';
+        res.setEncoding('utf-8');
+        res.on('data', (chunk) => {
+          body += chunk;
+          if (body.length > 65536) {
+            req.destroy(new Error('response too large'));
+          }
+        });
+        res.on('end', () => {
+          try {
+            const parsed = JSON.parse(body);
+            const connectedClients = Array.isArray(parsed.connectedClients)
+              ? parsed.connectedClients
+              : [];
+            finish({
+              reachable: res.statusCode >= 200 && res.statusCode < 300,
+              connectedCount: connectedClients.length,
+            });
+          } catch (err) {
+            finish({ reachable: false, connectedCount: null, reason: `invalid-json: ${err.message}` });
+          }
+        });
       },
     );
+
+    req.on('timeout', () => {
+      req.destroy();
+      finish({ reachable: false, connectedCount: null, reason: 'timeout' });
+    });
+    req.on('error', (err) => {
+      finish({ reachable: false, connectedCount: null, reason: err.message });
+    });
+    req.end();
+  });
+
+const buildWindowsBrowserStartCommand = () => {
+  const browser = resolveWindowsBrowserForHook(process.env);
+  const profileDirectory =
+    process.env.GEMINI_MCP_CHROME_PROFILE_DIRECTORY || process.env.GME_CHROME_PROFILE_DIRECTORY || '';
+  const browserArgs = [
+    profileDirectory ? `--profile-directory=${profileDirectory}` : null,
+    '--new-tab',
+    GEMINI_APP_URL,
+  ].filter(Boolean);
+  const startCommand = `start "" ${quoteCmd(browser.command)} ${browserArgs.map(quoteCmd).join(' ')}`;
+  return {
+    ...browser,
+    method: 'windows-cmd-start',
+    command: 'cmd.exe',
+    args: ['/d', '/s', '/c', startCommand],
+    browserCommand: browser.command,
+    browserArgs,
+    profileDirectory: profileDirectory || null,
+    url: GEMINI_APP_URL,
+  };
+};
+
+const prelaunchBrowserDetached = async (input) => {
+  if (isDisabled(process.env.GEMINI_MCP_HOOK_LAUNCH_BROWSER)) return;
+  if (isDisabled(process.env.GEMINI_MCP_CHROME_LAUNCH_IF_CLOSED)) return;
+  if (!isBrowserDependentExporterTool(input)) return;
+  if (currentPlatform() !== 'win32') return;
+
+  const now = Date.now();
+  if (shouldSkipBrowserLaunchForCooldown(now)) return;
+
+  const bridgeStatus = await queryConnectedBrowserClients();
+  if (bridgeStatus.connectedCount > 0) return;
+
+  const launch = buildWindowsBrowserStartCommand();
+  const state = {
+    lastAttemptAt: now,
+    bridgeStatus,
+    ...launch,
+  };
+  writeHookState(state);
+
+  if (isEnabled(process.env.GEMINI_MCP_HOOK_DRY_RUN)) {
+    writeHookState({ ...state, dryRun: true });
+    return;
+  }
+
+  try {
+    const child = spawn(launch.command, launch.args, {
+      detached: true,
+      stdio: 'ignore',
+      windowsHide: true,
+    });
     child.on?.('error', (err) => {
-      console.error(`[gemini-md-export-hook] prelaunch helper error: ${err.message}`);
+      writeHookState({
+        ...state,
+        lastFailureAt: Date.now(),
+        error: err.message,
+      });
+      console.error(`[gemini-md-export-hook] browser prelaunch error: ${err.message}`);
     });
     child.unref();
   } catch (err) {
-    console.error(`[gemini-md-export-hook] failed to spawn prelaunch helper: ${err.message}`);
+    writeHookState({
+      ...state,
+      lastFailureAt: Date.now(),
+      error: err.message,
+    });
+    console.error(`[gemini-md-export-hook] failed to prelaunch browser: ${err.message}`);
   }
 };
 
@@ -339,10 +592,10 @@ const forbiddenReason = (input) => {
   return null;
 };
 
-const beforeTool = (input) => {
+const beforeTool = async (input) => {
   const reason = forbiddenReason(input);
   if (!reason) {
-    prelaunchBrowserDetached(input);
+    await prelaunchBrowserDetached(input);
     return silent();
   }
   return {
@@ -352,7 +605,7 @@ const beforeTool = (input) => {
   };
 };
 
-const run = () => {
+const run = async () => {
   const input = readInput();
   if (mode === 'session-start') return contextOutput(SESSION_CONTEXT);
   if (mode === 'after-tool') return afterTool(input);
@@ -361,7 +614,7 @@ const run = () => {
 };
 
 try {
-  writeJson(run());
+  writeJson(await run());
   clearTimeout(hardExit);
   process.exit(0);
 } catch (err) {

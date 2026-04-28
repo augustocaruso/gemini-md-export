@@ -43,11 +43,12 @@ Operational guidance:
   asks for status first, and that first status call should be enough to open the
   configured browser.
 - On Windows, the extension BeforeTool hook prelaunches the configured Chromium
-  browser before browser-dependent exporter tools by spawning
-  `prelaunch-browser-windows.ps1` detached and returning immediately. The PS1
-  helper, outside the hook, may do a short bridge check and cooldown before
-  opening Gemini with `cmd start`. The hook itself must not wait for Chrome or
-  do long work. If this is undesirable, set
+  browser before browser-dependent exporter tools. It first checks
+  `http://127.0.0.1:47283/agent/clients` with a very short timeout. If a Gemini
+  tab is already connected, it opens nothing. If no client is connected, it
+  opens `https://gemini.google.com/app` directly with `cmd.exe /c start` and
+  returns immediately, without a PowerShell helper. The hook itself must not
+  wait for Chrome or do long work. If this is undesirable, set
   `GEMINI_MCP_HOOK_LAUNCH_BROWSER=false`.
 - When the user reports the MCP as disconnected on Windows, suggest running:
   `powershell -ExecutionPolicy Bypass -File .\diagnose-windows-mcp.ps1`
