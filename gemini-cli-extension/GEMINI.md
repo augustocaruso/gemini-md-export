@@ -48,7 +48,14 @@ Operational guidance:
   tab is already connected, it opens nothing. If no client is connected, it
   opens `https://gemini.google.com/app` directly with `cmd.exe /c start` and
   returns immediately, without a PowerShell helper. The hook itself must not
-  wait for Chrome or do long work. If this is undesirable, set
+  use synchronous stdin reads, wait for Chrome, or do long work. `SessionStart`
+  must not read stdin. BeforeTool/AfterTool read stdin asynchronously, parse as
+  soon as a complete JSON payload arrives, and fail open after
+  `GEMINI_MCP_HOOK_STDIN_TIMEOUT_MS` (default 120ms) if the client keeps stdin
+  open. For debugging, run
+  `node scripts/hooks/gemini-md-export-hook.mjs diagnose`; it prints bridge
+  status, launch plan, and the paths to `hook-last-run.json` and
+  `hook-browser-launch.json`. If this is undesirable, set
   `GEMINI_MCP_HOOK_LAUNCH_BROWSER=false`.
 - When the user reports the MCP as disconnected on Windows, suggest running:
   `powershell -ExecutionPolicy Bypass -File .\diagnose-windows-mcp.ps1`

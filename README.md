@@ -142,8 +142,13 @@ navegador, ele checa rapidamente `http://127.0.0.1:47283/agent/clients`. Se já
 houver uma aba Gemini conectada, não abre nada. Se não houver cliente
 conectado, abre `https://gemini.google.com/app` diretamente por `cmd.exe /c
 start` e sai imediatamente. O hook não depende de PowerShell, respeita cooldown
-e não deve ficar preso em "executing hook". Isso pode ser desativado com
-`GEMINI_MCP_HOOK_LAUNCH_BROWSER=false`.
+e não deve ficar preso em "executing hook". A leitura do payload do hook é
+assíncrona e tem timeout curto (`GEMINI_MCP_HOOK_STDIN_TIMEOUT_MS`, default
+120ms), porque uma leitura síncrona de stdin pode travar se o cliente mantiver
+o pipe aberto. Para diagnosticar sem acionar nenhuma tool, rode o script do
+hook com `diagnose`; ele imprime o bridge, o plano de launch e os arquivos
+temporários `hook-last-run.json`/`hook-browser-launch.json`. Isso pode ser
+desativado com `GEMINI_MCP_HOOK_LAUNCH_BROWSER=false`.
 
 Durante a instalação no Windows, o instalador tenta registrar a extensão pelo
 comando oficial `gemini extensions install https://www.github.com/augustocaruso/gemini-md-export.git

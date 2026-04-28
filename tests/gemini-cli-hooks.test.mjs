@@ -65,6 +65,48 @@ const runHookAsync = (mode, payload = {}, env = {}) =>
     child.stdin.end(JSON.stringify(payload));
   });
 
+const runHookWithOpenStdin = (mode, payload, env = {}) =>
+  new Promise((resolveRun, rejectRun) => {
+    const child = spawn(process.execPath, [hookPath, mode], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        ...env,
+      },
+    });
+    let stdout = '';
+    let stderr = '';
+    const timer = setTimeout(() => {
+      child.kill('SIGKILL');
+      rejectRun(new Error(`hook did not exit with open stdin; stderr=${stderr}`));
+    }, 1500);
+    child.stdout.setEncoding('utf-8');
+    child.stderr.setEncoding('utf-8');
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      rejectRun(err);
+    });
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      try {
+        assert.equal(code, 0, stderr);
+        assert.doesNotThrow(() => JSON.parse(stdout), stdout);
+        resolveRun(JSON.parse(stdout));
+      } catch (err) {
+        rejectRun(err);
+      }
+    });
+    if (payload !== undefined) {
+      child.stdin.write(typeof payload === 'string' ? payload : JSON.stringify(payload));
+    }
+  });
+
 const additionalContextOf = (output) => output?.hookSpecificOutput?.additionalContext || '';
 
 const listen = (server) =>
@@ -293,6 +335,81 @@ test('BeforeTool nao abre nova aba quando Gemini ja esta conectado', async () =>
     assert.equal(existsSync(resolve(tmpRoot, 'hook-browser-launch.json')), false);
   } finally {
     await closeServer(server);
+    rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test('BeforeTool nao trava se o Gemini CLI deixar stdin aberto', async () => {
+  const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-hook-test-'));
+
+  try {
+    const startedAt = Date.now();
+    const output = await runHookWithOpenStdin(
+      'before-tool',
+      {
+        hook_event_name: 'BeforeTool',
+        tool_name: 'mcp_gemini-md-export_gemini_browser_status',
+        tool_input: {},
+      },
+      {
+        GEMINI_MCP_HOOK_LAUNCH_BROWSER: 'false',
+        GEMINI_MCP_HOOK_STATE_DIR: tmpRoot,
+      },
+    );
+    const lastRun = JSON.parse(readFileSync(resolve(tmpRoot, 'hook-last-run.json'), 'utf-8'));
+
+    assert.equal(output.suppressOutput, true);
+    assert.equal(output.decision, undefined);
+    assert.equal(Date.now() - startedAt < 1000, true);
+    assert.equal(lastRun.stdinStatus, 'ok');
+    assert.equal(lastRun.toolName, 'mcp_gemini-md-export_gemini_browser_status');
+  } finally {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test('BeforeTool falha aberto quando stdin fica aberto sem payload', async () => {
+  const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-hook-test-'));
+
+  try {
+    const output = await runHookWithOpenStdin(
+      'before-tool',
+      undefined,
+      {
+        GEMINI_MCP_HOOK_LAUNCH_BROWSER: 'false',
+        GEMINI_MCP_HOOK_STATE_DIR: tmpRoot,
+        GEMINI_MCP_HOOK_STDIN_TIMEOUT_MS: '30',
+      },
+    );
+    const lastRun = JSON.parse(readFileSync(resolve(tmpRoot, 'hook-last-run.json'), 'utf-8'));
+
+    assert.equal(output.suppressOutput, true);
+    assert.equal(output.decision, undefined);
+    assert.equal(lastRun.stdinStatus, 'timeout');
+  } finally {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test('hook diagnose retorna estado e caminhos de depuracao', async () => {
+  const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-hook-test-'));
+
+  try {
+    const output = await runHookAsync(
+      'diagnose',
+      {},
+      {
+        GEMINI_MCP_HOOK_STATE_DIR: tmpRoot,
+        GEMINI_MCP_HOOK_BRIDGE_TIMEOUT_MS: '30',
+      },
+    );
+
+    assert.equal(output.ok, true);
+    assert.equal(output.mode, 'diagnose');
+    assert.match(output.files.lastRun, /hook-last-run\.json$/);
+    assert.match(output.files.browserLaunch, /hook-browser-launch\.json$/);
+    assert.equal(typeof output.bridgeStatus.checked, 'boolean');
+  } finally {
     rmSync(tmpRoot, { recursive: true, force: true });
   }
 });

@@ -9,6 +9,10 @@ import { resolve } from 'node:path';
 const mode = process.argv[2] || '';
 let wroteOutput = false;
 const hardExit = setTimeout(() => {
+  writeHookDiagnostic({
+    stage: 'hard-exit',
+    elapsedMs: Date.now() - RUN_STARTED_AT,
+  });
   if (!wroteOutput) {
     process.stdout.write(`${JSON.stringify({ suppressOutput: true })}\n`);
   }
@@ -30,7 +34,16 @@ const MEDIA_WARNING_RE =
 const GEMINI_APP_URL = 'https://gemini.google.com/app';
 const DEFAULT_BROWSER_LAUNCH_COOLDOWN_MS = 60000;
 const DEFAULT_HOOK_BRIDGE_CHECK_TIMEOUT_MS = 180;
+const DEFAULT_HOOK_STDIN_TIMEOUT_MS = 120;
+const MAX_STDIN_BYTES = 1024 * 1024;
 const HOOK_BROWSER_STATE_FILENAME = 'hook-browser-launch.json';
+const HOOK_LAST_RUN_FILENAME = 'hook-last-run.json';
+const RUN_STARTED_AT = Date.now();
+let diagnosticState = {
+  pid: process.pid,
+  mode,
+  startedAt: new Date(RUN_STARTED_AT).toISOString(),
+};
 
 const BROWSER_DEPENDENT_EXPORTER_TOOLS = new Set([
   'gemini_browser_status',
@@ -170,12 +183,18 @@ const hookStateDir = () =>
 
 const hookStatePath = () => resolve(hookStateDir(), HOOK_BROWSER_STATE_FILENAME);
 
-const readHookState = () => {
+const hookLastRunPath = () => resolve(hookStateDir(), HOOK_LAST_RUN_FILENAME);
+
+const readJsonFile = (path) => {
   try {
-    return JSON.parse(readFileSync(hookStatePath(), 'utf-8'));
+    return JSON.parse(readFileSync(path, 'utf-8'));
   } catch {
     return {};
   }
+};
+
+const readHookState = () => {
+  return readJsonFile(hookStatePath());
 };
 
 const writeHookState = (state) => {
@@ -184,6 +203,20 @@ const writeHookState = (state) => {
     writeFileSync(hookStatePath(), `${JSON.stringify(state, null, 2)}\n`, 'utf-8');
   } catch (err) {
     console.error(`[gemini-md-export-hook] failed to write launch state: ${err.message}`);
+  }
+};
+
+const writeHookDiagnostic = (patch) => {
+  diagnosticState = {
+    ...diagnosticState,
+    ...patch,
+    updatedAt: new Date().toISOString(),
+  };
+  try {
+    mkdirSync(hookStateDir(), { recursive: true });
+    writeFileSync(hookLastRunPath(), `${JSON.stringify(diagnosticState, null, 2)}\n`, 'utf-8');
+  } catch {
+    // Diagnostics must never make the advisory hook noisy or blocking.
   }
 };
 
@@ -290,10 +323,20 @@ const prelaunchBrowserDetached = async (input) => {
   if (currentPlatform() !== 'win32') return;
 
   const now = Date.now();
-  if (shouldSkipBrowserLaunchForCooldown(now)) return;
+  if (shouldSkipBrowserLaunchForCooldown(now)) {
+    writeHookDiagnostic({ stage: 'browser-prelaunch-skipped', reason: 'cooldown' });
+    return;
+  }
 
   const bridgeStatus = await queryConnectedBrowserClients();
-  if (bridgeStatus.connectedCount > 0) return;
+  if (bridgeStatus.connectedCount > 0) {
+    writeHookDiagnostic({
+      stage: 'browser-prelaunch-skipped',
+      reason: 'already-connected',
+      bridgeStatus,
+    });
+    return;
+  }
 
   const launch = buildWindowsBrowserStartCommand();
   const state = {
@@ -302,6 +345,16 @@ const prelaunchBrowserDetached = async (input) => {
     ...launch,
   };
   writeHookState(state);
+  writeHookDiagnostic({
+    stage: 'browser-prelaunch',
+    bridgeStatus,
+    launch: {
+      method: launch.method,
+      browserName: launch.browserName,
+      browserCommand: launch.browserCommand,
+      args: launch.args,
+    },
+  });
 
   if (isEnabled(process.env.GEMINI_MCP_HOOK_DRY_RUN)) {
     writeHookState({ ...state, dryRun: true });
@@ -333,27 +386,111 @@ const prelaunchBrowserDetached = async (input) => {
   }
 };
 
-const readInput = () => {
-  let raw = '';
+const parseHookInput = (raw) => {
+  if (!raw.trim()) return { input: {}, status: 'empty', bytes: raw.length };
   try {
-    raw = readFileSync(0, 'utf-8');
+    return {
+      input: JSON.parse(raw),
+      status: 'ok',
+      bytes: raw.length,
+    };
   } catch (err) {
-    console.error(`[gemini-md-export-hook] failed to read stdin: ${err.message}`);
-    return {};
-  }
-
-  if (!raw.trim()) return {};
-
-  try {
-    return JSON.parse(raw);
-  } catch (err) {
-    console.error(`[gemini-md-export-hook] invalid JSON stdin: ${err.message}`);
-    return {};
+    return {
+      input: {},
+      status: 'invalid-json',
+      bytes: raw.length,
+      error: err.message,
+    };
   }
 };
 
+const readInput = async () =>
+  new Promise((resolveInput) => {
+    const timeoutMs = parseNonNegativeInt(
+      process.env.GEMINI_MCP_HOOK_STDIN_TIMEOUT_MS,
+      DEFAULT_HOOK_STDIN_TIMEOUT_MS,
+    );
+    let raw = '';
+    let done = false;
+
+    const finish = (result) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      try {
+        process.stdin.pause();
+      } catch {
+        // Best effort only. The process exits right after writing hook JSON.
+      }
+      if (result.status === 'invalid-json') {
+        console.error(`[gemini-md-export-hook] invalid JSON stdin: ${result.error}`);
+      }
+      writeHookDiagnostic({
+        stage: 'stdin-read',
+        stdinStatus: result.status,
+        stdinBytes: result.bytes,
+        stdinError: result.error || null,
+      });
+      resolveInput(result.input);
+    };
+
+    const timer = setTimeout(() => {
+      finish({
+        input: {},
+        status: raw ? 'timeout-after-data' : 'timeout',
+        bytes: raw.length,
+      });
+    }, timeoutMs);
+
+    try {
+      process.stdin.setEncoding('utf-8');
+      process.stdin.on('data', (chunk) => {
+        raw += chunk;
+        if (raw.length > MAX_STDIN_BYTES) {
+          finish({
+            input: {},
+            status: 'too-large',
+            bytes: raw.length,
+            error: `stdin exceeded ${MAX_STDIN_BYTES} bytes`,
+          });
+          return;
+        }
+
+        const parsed = parseHookInput(raw);
+        if (parsed.status === 'ok') {
+          finish(parsed);
+        }
+      });
+      process.stdin.on('end', () => {
+        finish(parseHookInput(raw));
+      });
+      process.stdin.on('error', (err) => {
+        console.error(`[gemini-md-export-hook] failed to read stdin: ${err.message}`);
+        finish({
+          input: {},
+          status: 'error',
+          bytes: raw.length,
+          error: err.message,
+        });
+      });
+      process.stdin.resume();
+    } catch (err) {
+      console.error(`[gemini-md-export-hook] failed to initialize stdin read: ${err.message}`);
+      finish({
+        input: {},
+        status: 'error',
+        bytes: raw.length,
+        error: err.message,
+      });
+    }
+  });
+
 const writeJson = (payload) => {
   wroteOutput = true;
+  writeHookDiagnostic({
+    stage: 'write-output',
+    elapsedMs: Date.now() - RUN_STARTED_AT,
+  });
   process.stdout.write(`${JSON.stringify(payload)}\n`);
 };
 
@@ -371,6 +508,7 @@ const hookEventNameForMode = () => {
   if (mode === 'session-start') return 'SessionStart';
   if (mode === 'after-tool') return 'AfterTool';
   if (mode === 'before-tool') return 'BeforeTool';
+  if (mode === 'diagnose') return 'Unknown';
   return 'Unknown';
 };
 
@@ -593,6 +731,10 @@ const forbiddenReason = (input) => {
 };
 
 const beforeTool = async (input) => {
+  writeHookDiagnostic({
+    stage: 'before-tool',
+    toolName: getToolName(input) || null,
+  });
   const reason = forbiddenReason(input);
   if (!reason) {
     await prelaunchBrowserDetached(input);
@@ -605,9 +747,43 @@ const beforeTool = async (input) => {
   };
 };
 
+const diagnose = async () => {
+  const bridgeStatus = await queryConnectedBrowserClients();
+  const launch = currentPlatform() === 'win32' ? buildWindowsBrowserStartCommand() : null;
+  return {
+    ok: true,
+    mode: 'diagnose',
+    platform: currentPlatform(),
+    pid: process.pid,
+    stateDir: hookStateDir(),
+    files: {
+      lastRun: hookLastRunPath(),
+      browserLaunch: hookStatePath(),
+    },
+    bridgeStatus,
+    lastRun: readJsonFile(hookLastRunPath()),
+    lastBrowserLaunch: readJsonFile(hookStatePath()),
+    launchPlan: launch
+      ? {
+          method: launch.method,
+          browserName: launch.browserName,
+          browserCommand: launch.browserCommand,
+          args: launch.args,
+          profileDirectory: launch.profileDirectory,
+        }
+      : null,
+  };
+};
+
 const run = async () => {
-  const input = readInput();
+  writeHookDiagnostic({
+    stage: 'start',
+    platform: currentPlatform(),
+    argv: process.argv.slice(2),
+  });
   if (mode === 'session-start') return contextOutput(SESSION_CONTEXT);
+  if (mode === 'diagnose') return diagnose();
+  const input = await readInput();
   if (mode === 'after-tool') return afterTool(input);
   if (mode === 'before-tool') return beforeTool(input);
   return silent();

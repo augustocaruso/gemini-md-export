@@ -304,8 +304,15 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   Gemini conectada, não abre nada. Se não houver cliente conectado, abre
   `https://gemini.google.com/app` diretamente via `cmd.exe /c start` e sai
   imediatamente, sem PowerShell intermediário. O hook em si não deve fazer
-  `import()` dinâmico, espera longa de navegador ou trabalho bloqueante. Esse
-  prelaunch é controlado por `GEMINI_MCP_HOOK_LAUNCH_BROWSER` (default ligado),
+  leitura síncrona de stdin, `import()` dinâmico, espera longa de navegador ou
+  trabalho bloqueante. `SessionStart` não deve ler stdin. Before/AfterTool leem
+  stdin de forma assíncrona, tentam parsear assim que o JSON chega e falham
+  aberto por timeout curto (`GEMINI_MCP_HOOK_STDIN_TIMEOUT_MS`, default 120ms)
+  se o cliente mantiver o pipe aberto. O modo
+  `node scripts/hooks/gemini-md-export-hook.mjs diagnose` deve continuar
+  disponível para imprimir estado, `/agent/clients`, plano de launch e caminhos
+  de `hook-last-run.json`/`hook-browser-launch.json`. Esse prelaunch é
+  controlado por `GEMINI_MCP_HOOK_LAUNCH_BROWSER` (default ligado),
   `GEMINI_MCP_HOOK_BRIDGE_TIMEOUT_MS` (default 180ms) e pelo mesmo cooldown.
   `gemini_browser_status` também deve acordar o
   navegador quando não há clientes conectados e aguardar um curto período
