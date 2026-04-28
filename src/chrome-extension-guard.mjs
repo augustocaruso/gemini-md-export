@@ -1,5 +1,5 @@
 export const DEFAULT_CHROME_GUARD_CONFIG = Object.freeze({
-  profileDirectory: 'Default',
+  profileDirectory: null,
   launchIfClosed: true,
   initialConnectTimeoutMs: 20_000,
   reloadTimeoutMs: 75_000,

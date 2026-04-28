@@ -280,9 +280,14 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   `GEMINI_MCP_BROWSER`/`GME_BROWSER` (`chrome`, `edge`, `brave`, `dia`), com
   fallback para outro Chromium conhecido se o preferido não existir. No
   Windows usa `Start-Process -WindowStyle Minimized`; no macOS usa `open -g
-  -a` para preferir app Chromium em vez do navegador padrão; ambos respeitam
-  `GEMINI_MCP_CHROME_PROFILE_DIRECTORY`/`GME_CHROME_PROFILE_DIRECTORY`
-  (default `Default`). O launch é controlado por
+  -a` para preferir app Chromium em vez do navegador padrão. O argumento de
+  perfil só é enviado quando `GEMINI_MCP_CHROME_PROFILE_DIRECTORY` ou
+  `GME_CHROME_PROFILE_DIRECTORY` for configurado explicitamente; não passar
+  `--profile-directory=Default` por padrão, porque isso pode abrir UI de
+  seleção/perfil do Chrome quando a tool tenta acordar o navegador. O launch é
+  protegido por cooldown (`GEMINI_MCP_BROWSER_LAUNCH_COOLDOWN_MS`, default
+  60000ms) para não abrir uma janela/diálogo novo a cada chamada de tool quando
+  a extensão ainda não conectou. O launch é controlado por
   `GEMINI_MCP_CHROME_LAUNCH_IF_CLOSED` (default ligado); timeout e tentativas
   vêm de `GEMINI_MCP_CHROME_RELOAD_TIMEOUT_MS` e
   `GEMINI_MCP_CHROME_MAX_RELOAD_ATTEMPTS`.

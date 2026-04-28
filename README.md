@@ -122,9 +122,11 @@ para a primeira migração, mudança de permissões/manifest ou perfil errado.
 Se nenhuma aba do Gemini estiver conectada quando uma tool MCP for chamada, o
 MCP tenta abrir `https://gemini.google.com/app` no navegador certo: Chrome por
 padrão, depois Edge/Brave/Dia como fallback. Use `GEMINI_MCP_BROWSER=edge`
-ou `chrome`/`brave`/`dia` para fixar o navegador, e
-`GEMINI_MCP_CHROME_PROFILE_DIRECTORY="Profile 1"` quando o perfil do Chrome
-não for `Default`.
+ou `chrome`/`brave`/`dia` para fixar o navegador. O MCP só envia
+`--profile-directory` quando `GEMINI_MCP_CHROME_PROFILE_DIRECTORY` é definido
+explicitamente; isso evita a caixa de seleção/perfil do Chrome em chamadas
+normais de tool. Para perfis específicos, use por exemplo
+`GEMINI_MCP_CHROME_PROFILE_DIRECTORY="Profile 1"`.
 
 Durante a instalação no Windows, o instalador tenta registrar a extensão pelo
 comando oficial `gemini extensions install https://www.github.com/augustocaruso/gemini-md-export.git

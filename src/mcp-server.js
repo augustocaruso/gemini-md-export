@@ -53,13 +53,16 @@ const CHROME_GUARD_CONFIG = {
   profileDirectory:
     process.env.GEMINI_MCP_CHROME_PROFILE_DIRECTORY ||
     process.env.GME_CHROME_PROFILE_DIRECTORY ||
-    'Default',
+    null,
   launchIfClosed: process.env.GEMINI_MCP_CHROME_LAUNCH_IF_CLOSED !== 'false',
   reloadTimeoutMs: Number(process.env.GEMINI_MCP_CHROME_RELOAD_TIMEOUT_MS || 75_000),
   maxReloadAttempts: Number(process.env.GEMINI_MCP_CHROME_MAX_RELOAD_ATTEMPTS || 1),
   useExtensionsReloaderFallback:
     process.env.GEMINI_MCP_USE_EXTENSIONS_RELOADER_FALLBACK === 'true',
 };
+const BROWSER_LAUNCH_COOLDOWN_MS = Number(
+  process.env.GEMINI_MCP_BROWSER_LAUNCH_COOLDOWN_MS || 60_000,
+);
 const detectExpectedBrowserBuildStamp = () => {
   if (process.env.GEMINI_MCP_EXPECTED_BUILD_STAMP) {
     return process.env.GEMINI_MCP_EXPECTED_BUILD_STAMP;
@@ -430,8 +433,31 @@ const requireNotebookClient = (clientId) => {
   return client;
 };
 
-const launchChromeForGemini = async ({ profileDirectory } = {}) =>
-  launchGeminiBrowser({ profileDirectory });
+let lastBrowserLaunchAt = 0;
+let lastBrowserLaunchResult = null;
+
+const launchChromeForGemini = async ({ profileDirectory } = {}) => {
+  const now = Date.now();
+  if (
+    lastBrowserLaunchResult &&
+    BROWSER_LAUNCH_COOLDOWN_MS > 0 &&
+    now - lastBrowserLaunchAt < BROWSER_LAUNCH_COOLDOWN_MS
+  ) {
+    return {
+      ...lastBrowserLaunchResult,
+      attempted: false,
+      skipped: true,
+      reason: 'launch-cooldown',
+      cooldownMs: BROWSER_LAUNCH_COOLDOWN_MS,
+      previousAttemptedAt: new Date(lastBrowserLaunchAt).toISOString(),
+    };
+  }
+
+  const result = await launchGeminiBrowser({ profileDirectory });
+  lastBrowserLaunchAt = now;
+  lastBrowserLaunchResult = result;
+  return result;
+};
 
 const getChromeExtensionInfo = async (client) => {
   const result = await enqueueCommand(client.clientId, 'get-extension-info', {}, {

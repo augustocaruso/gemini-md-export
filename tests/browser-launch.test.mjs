@@ -134,3 +134,19 @@ test('launcher macOS usa open -g -a Chrome para reduzir troca de foco', async ()
     '--profile-directory=Default',
   ]);
 });
+
+test('launcher macOS não envia profile arg quando perfil não foi configurado', async () => {
+  const calls = [];
+  const result = await launchGeminiBrowser({
+    platform: 'darwin',
+    env: {},
+    exists: (candidate) => candidate === '/Applications/Google Chrome.app',
+    spawnFn: (command, args, options) => {
+      calls.push({ command, args, options });
+      return { unref() {} };
+    },
+  });
+
+  assert.equal(result.browserName, 'Chrome');
+  assert.deepEqual(calls[0].args, ['-g', '-a', 'Google Chrome', 'https://gemini.google.com/app']);
+});
