@@ -48,12 +48,18 @@ Operational guidance:
   asks for status first, and that first status call should be enough to open the
   configured browser.
 - On Windows, the extension BeforeTool hook prelaunches the configured Chromium
-  browser before browser-dependent exporter tools. It first checks
+  browser before browser-dependent exporter tools, including
+  `gemini_browser_status`. It first checks
   `http://127.0.0.1:47283/agent/clients` with a very short timeout. If a Gemini
   tab is already connected, it opens nothing. If no client is connected, it
-  opens `https://gemini.google.com/app` by direct spawn and falls back to
-  `cmd.exe /c start` if direct spawn fails, without a PowerShell helper. The hook itself must not
-  use synchronous stdin reads, wait for Chrome, or do long work. `SessionStart`
+  opens `https://gemini.google.com/app` through a generated short PowerShell
+  launcher that captures the current foreground window, starts the browser
+  minimized, waits briefly, and tries to restore focus to the original terminal.
+  If that immediate launch fails, it falls back to WSH, direct browser spawn,
+  then `cmd.exe /c start "" /min`. The hook and MCP share
+  `hook-browser-launch.json`, so a tool call should not open a second tab while
+  a recent hook launch is still within cooldown. The hook itself must not use
+  synchronous stdin reads, wait for Chrome, or do long work. `SessionStart`
   must not read stdin. BeforeTool/AfterTool read stdin asynchronously, parse as
   soon as a complete JSON payload arrives, and fail open after
   `GEMINI_MCP_HOOK_STDIN_TIMEOUT_MS` (default 120ms) if the client keeps stdin

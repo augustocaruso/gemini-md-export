@@ -18,7 +18,12 @@ import {
 } from './recent-chats-load-more.mjs';
 import { formatBridgeListenError } from './mcp-server-errors.mjs';
 import { ensureChromeExtensionReady } from './chrome-extension-guard.mjs';
-import { launchGeminiBrowser } from './browser-launch.mjs';
+import {
+  describeRecentBrowserLaunch,
+  launchGeminiBrowser,
+  readBrowserLaunchState,
+  writeBrowserLaunchState,
+} from './browser-launch.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
@@ -502,6 +507,20 @@ let lastBrowserLaunchResult = null;
 
 const launchChromeForGemini = async ({ profileDirectory } = {}) => {
   const now = Date.now();
+  const sharedRecentLaunch = describeRecentBrowserLaunch(readBrowserLaunchState(), {
+    now,
+    cooldownMs: BROWSER_LAUNCH_COOLDOWN_MS,
+  });
+  if (sharedRecentLaunch) {
+    return {
+      attempted: false,
+      supported: true,
+      skipped: true,
+      reason: 'shared-launch-cooldown',
+      ...sharedRecentLaunch,
+    };
+  }
+
   if (
     lastBrowserLaunchResult &&
     BROWSER_LAUNCH_COOLDOWN_MS > 0 &&
@@ -520,6 +539,16 @@ const launchChromeForGemini = async ({ profileDirectory } = {}) => {
   const result = await launchGeminiBrowser({ profileDirectory });
   lastBrowserLaunchAt = now;
   lastBrowserLaunchResult = result;
+  try {
+    writeBrowserLaunchState({
+      source: 'mcp',
+      lastAttemptAt: now,
+      profileDirectory: profileDirectory || null,
+      ...result,
+    });
+  } catch (err) {
+    log('[browser-launch]', 'failed to write shared launch state', err?.message || String(err));
+  }
   return result;
 };
 

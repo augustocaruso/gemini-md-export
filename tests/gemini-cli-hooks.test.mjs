@@ -293,12 +293,14 @@ test('BeforeTool abre Gemini direto pelo hook quando nao ha cliente conectado', 
     assert.equal(output.suppressOutput, true);
     assert.equal(output.decision, undefined);
     assert.equal(state.dryRun, true);
-    assert.equal(state.method, 'windows-direct-spawn');
-    assert.equal(state.command, 'chrome.exe');
-    assert.match(state.args.join(' '), /--new-tab/);
-    assert.match(state.args.join(' '), /https:\/\/gemini\.google\.com\/app/);
+    assert.equal(state.method, 'windows-powershell-minimized-restore-focus');
+    assert.equal(state.command, 'powershell.exe');
+    assert.match(state.args.join(' '), /open-gemini-restore-focus\.ps1/);
+    assert.equal(state.browserCommand, 'chrome.exe');
+    assert.match(state.browserArgs.join(' '), /--new-tab/);
+    assert.match(state.browserArgs.join(' '), /https:\/\/gemini\.google\.com\/app/);
     assert.equal(state.fallbackCommand, 'cmd.exe');
-    assert.match(state.fallbackArgs.join(' '), /start ""/);
+    assert.match(state.fallbackArgs.join(' '), /start "" \/min/);
     assert.equal(state.bridgeStatus.connectedCount, 0);
   } finally {
     await closeServer(server);
@@ -429,8 +431,9 @@ test('BeforeTool considera browser_status como tool que acorda o navegador', () 
   const hookSource = readFileSync(hookPath, 'utf-8');
 
   assert.match(hookSource, /gemini_browser_status/);
+  assert.match(hookSource, /open-gemini-restore-focus\.ps1/);
+  assert.match(hookSource, /SetForegroundWindow/);
   assert.match(hookSource, /cmd\.exe/);
   assert.match(hookSource, /agent\/clients/);
-  assert.doesNotMatch(hookSource, /powershell\.exe/);
   assert.doesNotMatch(hookSource, /prelaunch-browser-windows\.ps1/);
 });
