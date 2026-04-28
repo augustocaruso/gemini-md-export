@@ -56,13 +56,12 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.equal(manifest.mcpServers?.['gemini-md-export']?.cwd, undefined);
 
   const hooksConfig = JSON.parse(readFileSync(hooksConfigPath, 'utf-8'));
-  assert.ok(Array.isArray(hooksConfig.hooks?.SessionStart));
   assert.ok(Array.isArray(hooksConfig.hooks?.AfterTool));
   assert.ok(Array.isArray(hooksConfig.hooks?.BeforeTool));
-  assert.match(
-    hooksConfig.hooks.SessionStart[0].hooks[0].command,
-    /\$\{extensionPath\}.*gemini-md-export-hook\.mjs/,
-  );
+  assert.equal(hooksConfig.hooks?.SessionStart, undefined);
+  assert.notEqual(hooksConfig.hooks.BeforeTool[0].matcher, '*');
+  assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /browser_status/);
+  assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /mcp_\+gemini/);
   assert.equal(hooksConfig.hooks.BeforeTool[0].hooks[0].timeout, 20000);
 
   const browserManifest = JSON.parse(readFileSync(browserManifestPath, 'utf-8'));

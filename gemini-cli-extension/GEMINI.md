@@ -47,9 +47,13 @@ Operational guidance:
   tab is connected. Do not treat status as a passive-only tool; Gemini CLI often
   asks for status first, and that first status call should be enough to open the
   configured browser.
-- On Windows, the extension BeforeTool hook prelaunches the configured Chromium
+- The extension does not use a `SessionStart` hook for static context; the
+  extension `GEMINI.md` file is the context source. This avoids hook execution
+  just because the Gemini CLI started.
+- On Windows, the extension BeforeTool hook is narrowly matched to
+  gemini-md-export MCP tools only. It prelaunches the configured Chromium
   browser before browser-dependent exporter tools, including
-  `gemini_browser_status`. It first checks
+  `gemini_browser_status`, but it must not run for unrelated tools. It first checks
   `http://127.0.0.1:47283/agent/clients` with a very short timeout. If a Gemini
   tab is already connected, it opens nothing. If no client is connected, it
   opens `https://gemini.google.com/app` through a generated short PowerShell
