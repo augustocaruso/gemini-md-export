@@ -37,7 +37,7 @@
             "description": "Block explicitly forbidden implementation paths for this exporter.",
             "type": "command",
             "command": "node \"${extensionPath}${/}scripts${/}hooks${/}gemini-md-export-hook.mjs\" before-tool",
-            "timeout": 3000
+            "timeout": 1000
           }
         ]
       }

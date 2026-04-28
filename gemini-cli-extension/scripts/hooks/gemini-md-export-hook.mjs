@@ -1,12 +1,18 @@
 #!/usr/bin/env node
 
+import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const mode = process.argv[2] || '';
-const __dirname = dirname(fileURLToPath(import.meta.url));
+let wroteOutput = false;
+const hardExit = setTimeout(() => {
+  if (!wroteOutput) {
+    process.stdout.write(`${JSON.stringify({ suppressOutput: true })}\n`);
+  }
+  process.exit(0);
+}, 1500);
 
 const SESSION_CONTEXT = [
   'Gemini MD Export: use the gemini-md-export MCP tools for browser status, listing, downloads, and batch exports.',
@@ -19,6 +25,8 @@ const BLOCK_REASON =
 
 const MEDIA_WARNING_RE =
   /\[!warning\]\s*M[ií]dia n[aã]o importada|M[ií]dia n[aã]o exportada|media n(?:ao|ão) importad/i;
+
+const GEMINI_URL = 'https://gemini.google.com/app';
 
 const BROWSER_DEPENDENT_EXPORTER_TOOLS = new Set([
   'gemini_list_recent_chats',
@@ -35,30 +43,25 @@ const BROWSER_DEPENDENT_EXPORTER_TOOLS = new Set([
   'gemini_snapshot',
 ]);
 
+const normalizeBrowserKey = (value) => {
+  const text = String(value || '').trim().toLowerCase();
+  if (!text) return 'chrome';
+  if (/^(google[-_\s]*)?chrome$|chrome\.exe$/.test(text)) return 'chrome';
+  if (/^edge$|microsoft[-_\s]*edge|msedge(\.exe)?$/.test(text)) return 'edge';
+  if (/^brave$|brave[-_\s]*browser|brave(\.exe)?$/.test(text)) return 'brave';
+  if (/^dia$|dia(\.exe)?$/.test(text)) return 'dia';
+  return text;
+};
+
+const browserOrder = (preferredKey) => [
+  preferredKey,
+  ...['chrome', 'edge', 'brave', 'dia'].filter((key) => key !== preferredKey),
+];
+
+const quoteCmd = (value) => `"${String(value).replace(/"/g, '""')}"`;
+
 const hookLaunchStatePath = () =>
   resolve(tmpdir(), 'gemini-md-export', 'hook-browser-launch.json');
-
-const loadBrowserLauncher = async () => {
-  const candidates = [
-    resolve(__dirname, '..', '..', 'src', 'browser-launch.mjs'),
-    resolve(__dirname, '..', '..', '..', 'src', 'browser-launch.mjs'),
-  ];
-  const modulePath = candidates.find((candidate) => existsSync(candidate));
-  if (!modulePath) throw new Error('browser-launch.mjs not found');
-  return import(pathToFileURL(modulePath).href);
-};
-
-const normalizeExporterToolName = (toolName) =>
-  String(toolName || '')
-    .replace(/^mcp__gemini-md-export__/, '')
-    .replace(/^mcp[_-]gemini[_-]md[_-]export[_-]/, '')
-    .replace(/^gemini-md-export[_-]/, '');
-
-const isBrowserDependentExporterTool = (input) => {
-  const normalized = normalizeExporterToolName(getToolName(input));
-  if (BROWSER_DEPENDENT_EXPORTER_TOOLS.has(normalized)) return true;
-  return BROWSER_DEPENDENT_EXPORTER_TOOLS.has(normalized.replace(/-/g, '_'));
-};
 
 const readHookLaunchState = () => {
   try {
@@ -85,43 +88,141 @@ const hookLaunchInCooldown = () => {
   return lastAttemptAt > 0 && Date.now() - lastAttemptAt < cooldownMs;
 };
 
-const hasConnectedBrowserClient = async () => {
-  if (typeof fetch !== 'function') return false;
-  const bridgeUrl =
-    process.env.GEMINI_MCP_BRIDGE_CLIENTS_URL || 'http://127.0.0.1:47283/agent/clients';
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 350);
-  try {
-    const response = await fetch(bridgeUrl, { signal: controller.signal });
-    if (!response.ok) return false;
-    const payload = await response.json();
-    return Array.isArray(payload.connectedClients) && payload.connectedClients.length > 0;
-  } catch {
-    return false;
-  } finally {
-    clearTimeout(timer);
-  }
+const normalizeExporterToolName = (toolName) =>
+  String(toolName || '')
+    .replace(/^mcp__gemini-md-export__/, '')
+    .replace(/^mcp[_-]gemini[_-]md[_-]export[_-]/, '')
+    .replace(/^gemini-md-export[_-]/, '');
+
+const isBrowserDependentExporterTool = (input) => {
+  const normalized = normalizeExporterToolName(getToolName(input));
+  if (BROWSER_DEPENDENT_EXPORTER_TOOLS.has(normalized)) return true;
+  return BROWSER_DEPENDENT_EXPORTER_TOOLS.has(normalized.replace(/-/g, '_'));
 };
 
-const maybeLaunchBrowserBeforeTool = async (input) => {
+const windowsBrowserCandidates = () => {
+  const localAppData = process.env.LOCALAPPDATA || '';
+  const programFiles = process.env.ProgramFiles || 'C:\\Program Files';
+  const programFilesX86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+  return {
+    chrome: [
+      process.env.GEMINI_MCP_CHROME_EXE,
+      process.env.GME_CHROME_EXE,
+      localAppData && resolve(localAppData, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      resolve(programFiles, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+      resolve(programFilesX86, 'Google', 'Chrome', 'Application', 'chrome.exe'),
+    ].filter(Boolean),
+    edge: [
+      process.env.GEMINI_MCP_EDGE_EXE,
+      process.env.GME_EDGE_EXE,
+      localAppData && resolve(localAppData, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+      resolve(programFiles, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+      resolve(programFilesX86, 'Microsoft', 'Edge', 'Application', 'msedge.exe'),
+    ].filter(Boolean),
+    brave: [
+      process.env.GEMINI_MCP_BRAVE_EXE,
+      process.env.GME_BRAVE_EXE,
+      localAppData &&
+        resolve(localAppData, 'BraveSoftware', 'Brave-Browser', 'Application', 'brave.exe'),
+      resolve(programFiles, 'BraveSoftware', 'Brave-Browser', 'Application', 'brave.exe'),
+      resolve(programFilesX86, 'BraveSoftware', 'Brave-Browser', 'Application', 'brave.exe'),
+    ].filter(Boolean),
+    dia: [
+      process.env.GEMINI_MCP_DIA_EXE,
+      process.env.GME_DIA_EXE,
+      localAppData && resolve(localAppData, 'Programs', 'Dia', 'Dia.exe'),
+      process.env.APPDATA && resolve(process.env.APPDATA, 'Dia', 'Application', 'Dia.exe'),
+    ].filter(Boolean),
+  };
+};
+
+const resolveWindowsBrowser = () => {
+  const preferredKey = normalizeBrowserKey(process.env.GEMINI_MCP_BROWSER || process.env.GME_BROWSER);
+  const candidates = windowsBrowserCandidates();
+  for (const key of browserOrder(preferredKey)) {
+    const existing = (candidates[key] || []).find((candidate) => existsSync(candidate));
+    if (existing) return { browserKey: key, command: existing };
+  }
+  const aliases = {
+    chrome: 'chrome.exe',
+    edge: 'msedge.exe',
+    brave: 'brave.exe',
+    dia: 'dia.exe',
+  };
+  return { browserKey: preferredKey, command: aliases[preferredKey] || aliases.chrome };
+};
+
+const prelaunchBrowserDetached = (input) => {
   if (process.env.GEMINI_MCP_HOOK_LAUNCH_BROWSER === 'false') return;
   if (!isBrowserDependentExporterTool(input)) return;
-  if (await hasConnectedBrowserClient()) return;
   if (hookLaunchInCooldown()) return;
 
-  const profileDirectory =
-    process.env.GEMINI_MCP_CHROME_PROFILE_DIRECTORY ||
-    process.env.GME_CHROME_PROFILE_DIRECTORY ||
-    null;
-  const { launchGeminiBrowser } = await loadBrowserLauncher();
-  const result = await launchGeminiBrowser({ profileDirectory });
-  writeHookLaunchState({
-    lastAttemptAt: Date.now(),
-    result,
-  });
-  console.error(
-    `[gemini-md-export-hook] browser prelaunch attempted=${!!result.attempted} method=${result.method || 'unknown'} browser=${result.browserName || 'unknown'} reason=${result.reason || ''}`,
-  );
+  const profileArg =
+    process.env.GEMINI_MCP_CHROME_PROFILE_DIRECTORY || process.env.GME_CHROME_PROFILE_DIRECTORY
+      ? `--profile-directory=${
+          process.env.GEMINI_MCP_CHROME_PROFILE_DIRECTORY || process.env.GME_CHROME_PROFILE_DIRECTORY
+        }`
+      : null;
+
+  try {
+    if (process.platform === 'win32') {
+      const browser = resolveWindowsBrowser();
+      const browserArgs = ['--new-tab', GEMINI_URL];
+      if (profileArg) browserArgs.unshift(profileArg);
+      const command = `start "" ${quoteCmd(browser.command)} ${browserArgs.map(quoteCmd).join(' ')}`;
+      const child = spawn('cmd.exe', ['/d', '/s', '/c', command], {
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+      child.unref();
+      writeHookLaunchState({
+        lastAttemptAt: Date.now(),
+        platform: process.platform,
+        browserKey: browser.browserKey,
+        method: 'cmd-start',
+      });
+      return;
+    }
+
+    if (process.platform === 'darwin') {
+      const preferredKey = normalizeBrowserKey(
+        process.env.GEMINI_MCP_BROWSER || process.env.GME_BROWSER,
+      );
+      const appByKey = {
+        chrome: process.env.GEMINI_MCP_CHROME_APP || process.env.GME_CHROME_APP || 'Google Chrome',
+        edge: process.env.GEMINI_MCP_EDGE_APP || process.env.GME_EDGE_APP || 'Microsoft Edge',
+        brave: process.env.GEMINI_MCP_BRAVE_APP || process.env.GME_BRAVE_APP || 'Brave Browser',
+        dia: process.env.GEMINI_MCP_DIA_APP || process.env.GME_DIA_APP || 'Dia',
+      };
+      const app = appByKey[preferredKey] || appByKey.chrome;
+      const args = ['-g', '-a', app, GEMINI_URL];
+      if (profileArg) args.push('--args', profileArg);
+      const child = spawn('open', args, { detached: true, stdio: 'ignore' });
+      child.unref();
+      writeHookLaunchState({
+        lastAttemptAt: Date.now(),
+        platform: process.platform,
+        browserKey: preferredKey,
+        method: 'open-g-app',
+      });
+      return;
+    }
+
+    if (process.platform === 'linux') {
+      const command = process.env.BROWSER || 'xdg-open';
+      const child = spawn(command, [GEMINI_URL], { detached: true, stdio: 'ignore' });
+      child.unref();
+      writeHookLaunchState({
+        lastAttemptAt: Date.now(),
+        platform: process.platform,
+        browserKey: command,
+        method: process.env.BROWSER ? 'browser-env' : 'xdg-open',
+      });
+    }
+  } catch (err) {
+    console.error(`[gemini-md-export-hook] browser prelaunch failed: ${err.message}`);
+  }
 };
 
 const readInput = () => {
@@ -144,6 +245,7 @@ const readInput = () => {
 };
 
 const writeJson = (payload) => {
+  wroteOutput = true;
   process.stdout.write(`${JSON.stringify(payload)}\n`);
 };
 
@@ -382,10 +484,10 @@ const forbiddenReason = (input) => {
   return null;
 };
 
-const beforeTool = async (input) => {
+const beforeTool = (input) => {
   const reason = forbiddenReason(input);
   if (!reason) {
-    await maybeLaunchBrowserBeforeTool(input);
+    prelaunchBrowserDetached(input);
     return silent();
   }
   return {
@@ -395,7 +497,7 @@ const beforeTool = async (input) => {
   };
 };
 
-const run = async () => {
+const run = () => {
   const input = readInput();
   if (mode === 'session-start') return contextOutput(SESSION_CONTEXT);
   if (mode === 'after-tool') return afterTool(input);
@@ -404,8 +506,12 @@ const run = async () => {
 };
 
 try {
-  writeJson(await run());
+  writeJson(run());
+  clearTimeout(hardExit);
+  process.exit(0);
 } catch (err) {
   console.error(`[gemini-md-export-hook] unexpected failure: ${err.message}`);
   writeJson(silent());
+  clearTimeout(hardExit);
+  process.exit(0);
 }

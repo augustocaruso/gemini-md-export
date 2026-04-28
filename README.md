@@ -129,8 +129,8 @@ normais de tool. Para perfis específicos, use por exemplo
 `GEMINI_MCP_CHROME_PROFILE_DIRECTORY="Profile 1"`.
 Além do guard dentro do MCP, o hook `BeforeTool` da extensão do Gemini CLI faz
 um pré-aquecimento: antes de tools do exporter que dependem do navegador, ele
-checa rapidamente o bridge local e, se não houver aba conectada, abre o Gemini
-com o mesmo launcher. Isso pode ser desativado com
+dispara um launcher detached e sai imediatamente, sem consultar o bridge nem
+aguardar resposta do Chrome. Isso pode ser desativado com
 `GEMINI_MCP_HOOK_LAUNCH_BROWSER=false`.
 
 Durante a instalação no Windows, o instalador tenta registrar a extensão pelo

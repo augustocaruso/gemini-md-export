@@ -292,9 +292,12 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   vêm de `GEMINI_MCP_CHROME_RELOAD_TIMEOUT_MS` e
   `GEMINI_MCP_CHROME_MAX_RELOAD_ATTEMPTS`. O hook `BeforeTool` também usa esse
   launcher como pré-aquecimento para tools do exporter que dependem do
-  navegador: consulta `/agent/clients` com timeout curto e, se não houver
-  cliente conectado, abre o Gemini antes da tool. Esse prelaunch é controlado
-  por `GEMINI_MCP_HOOK_LAUNCH_BROWSER` (default ligado) e pelo mesmo cooldown.
+  navegador: dispara um processo detached e sai imediatamente, sem consultar
+  `/agent/clients`, sem `fetch`, sem `import()` dinâmico e sem aguardar o
+  Chrome responder. Esse prelaunch é controlado por
+  `GEMINI_MCP_HOOK_LAUNCH_BROWSER` (default ligado) e pelo mesmo cooldown.
+  Hook nunca deve fazer trabalho bloqueante; se precisar de confirmação real,
+  isso pertence ao guard do MCP.
   `gemini_list_recent_chats` e `/agent/recent-chats` agora priorizam a lista
   trazida pelo heartbeat recente da extensão para responder rápido. Só
   mandam `list-conversations` para abrir/atualizar o sidebar quando o cache

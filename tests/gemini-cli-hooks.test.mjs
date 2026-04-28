@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -137,6 +139,40 @@ test('BeforeTool permite desativar prelaunch do navegador para tools do exporter
 
   assert.equal(output.suppressOutput, true);
   assert.equal(output.decision, undefined);
+});
+
+test('BeforeTool prelaunch respeita cooldown e sai imediatamente', () => {
+  const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-hook-test-'));
+  mkdirSync(resolve(tmpRoot, 'gemini-md-export'), { recursive: true });
+  writeFileSync(
+    resolve(tmpRoot, 'gemini-md-export', 'hook-browser-launch.json'),
+    JSON.stringify({ lastAttemptAt: Date.now() }),
+    'utf-8',
+  );
+
+  try {
+    const startedAt = Date.now();
+    const output = runHook(
+      'before-tool',
+      {
+        hook_event_name: 'BeforeTool',
+        tool_name: 'mcp_gemini-md-export_gemini_list_recent_chats',
+        tool_input: {},
+      },
+      {
+        TMPDIR: tmpRoot,
+        TEMP: tmpRoot,
+        TMP: tmpRoot,
+        GEMINI_MCP_BROWSER_LAUNCH_COOLDOWN_MS: '60000',
+      },
+    );
+
+    assert.equal(output.suppressOutput, true);
+    assert.equal(output.decision, undefined);
+    assert.equal(Date.now() - startedAt < 1000, true);
+  } finally {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  }
 });
 
 test('hook emite JSON valido mesmo com stdin invalido', () => {
