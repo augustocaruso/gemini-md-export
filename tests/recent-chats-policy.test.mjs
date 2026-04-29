@@ -43,6 +43,23 @@ test('recent chats força refresh quando o heartbeat ficou velho', () => {
   );
 });
 
+test('recent chats evita refresh quando o cache ja cobre a pagina pedida', () => {
+  const now = 100_000;
+  const client = {
+    lastSeenAt: now - 20_000,
+    conversations: Array.from({ length: 30 }, (_, index) => ({ chatId: `chat${index}` })),
+  };
+
+  assert.equal(
+    shouldRefreshRecentChats(client, {}, {
+      now,
+      maxAgeMs: DEFAULT_RECENT_CHATS_CACHE_MAX_AGE_MS,
+      requestedCount: 20,
+    }),
+    false,
+  );
+});
+
 test('recent chats respeita refresh=true para forçar atualização', () => {
   const client = {
     lastSeenAt: Date.now(),

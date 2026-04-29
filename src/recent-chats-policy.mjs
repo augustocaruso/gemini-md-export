@@ -15,6 +15,10 @@ export const shouldRefreshRecentChats = (client, args = {}, options = {}) => {
 
   const conversations = Array.isArray(client?.conversations) ? client.conversations : [];
   if (conversations.length === 0) return true;
+  const requestedCount = Number(options.requestedCount);
+  if (Number.isFinite(requestedCount) && requestedCount > 0 && conversations.length >= requestedCount) {
+    return false;
+  }
 
   const now = Number.isFinite(options.now) ? options.now : Date.now();
   const maxAgeMs =

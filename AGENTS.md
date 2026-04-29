@@ -301,7 +301,7 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   60000ms) para não abrir uma janela/diálogo novo a cada chamada de tool quando
   a extensão ainda não conectou. O launch é controlado por
   `GEMINI_MCP_CHROME_LAUNCH_IF_CLOSED` (default ligado); timeout e tentativas
-  vêm de `GEMINI_MCP_CHROME_INITIAL_CONNECT_TIMEOUT_MS` (default 1500ms),
+  vêm de `GEMINI_MCP_CHROME_INITIAL_CONNECT_TIMEOUT_MS` (default 8000ms),
   `GEMINI_MCP_CHROME_RELOAD_TIMEOUT_MS` e
   `GEMINI_MCP_CHROME_MAX_RELOAD_ATTEMPTS`. O hook `BeforeTool` também faz
   pré-aquecimento para tools do exporter que dependem do navegador no Windows:

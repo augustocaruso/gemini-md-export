@@ -66,12 +66,16 @@ const CHROME_GUARD_CONFIG = {
     process.env.GME_CHROME_PROFILE_DIRECTORY ||
     null,
   launchIfClosed: process.env.GEMINI_MCP_CHROME_LAUNCH_IF_CLOSED !== 'false',
-  initialConnectTimeoutMs: Number(process.env.GEMINI_MCP_CHROME_INITIAL_CONNECT_TIMEOUT_MS || 1500),
+  initialConnectTimeoutMs: Number(process.env.GEMINI_MCP_CHROME_INITIAL_CONNECT_TIMEOUT_MS || 8000),
   reloadTimeoutMs: Number(process.env.GEMINI_MCP_CHROME_RELOAD_TIMEOUT_MS || 75_000),
   maxReloadAttempts: Number(process.env.GEMINI_MCP_CHROME_MAX_RELOAD_ATTEMPTS || 1),
   useExtensionsReloaderFallback:
     process.env.GEMINI_MCP_USE_EXTENSIONS_RELOADER_FALLBACK === 'true',
 };
+const BROWSER_STATUS_INITIAL_WAIT_MS = Number(
+  process.env.GEMINI_MCP_BROWSER_STATUS_INITIAL_WAIT_MS ||
+    CHROME_GUARD_CONFIG.initialConnectTimeoutMs,
+);
 const BROWSER_LAUNCH_COOLDOWN_MS = Number(
   process.env.GEMINI_MCP_BROWSER_LAUNCH_COOLDOWN_MS || 60_000,
 );
@@ -790,6 +794,14 @@ const recentConversationsForClient = (client) =>
 
 const recentConversationCountForClient = (client) => recentConversationsForClient(client).length;
 
+const clientBuildStamp = (client) => client?.buildStamp || client?.page?.buildStamp || null;
+
+const clientMatchesExpectedBrowserExtension = (client) =>
+  String(client?.extensionVersion || '') === EXPECTED_CHROME_EXTENSION_INFO.extensionVersion &&
+  Number(client?.protocolVersion) === Number(EXPECTED_CHROME_EXTENSION_INFO.protocolVersion) &&
+  (!EXPECTED_CHROME_EXTENSION_INFO.buildStamp ||
+    String(clientBuildStamp(client) || '') === EXPECTED_CHROME_EXTENSION_INFO.buildStamp);
+
 const requireRecentChatsClient = (clientId) => {
   if (clientId) return requireClient(clientId);
 
@@ -801,6 +813,8 @@ const requireRecentChatsClient = (clientId) => {
 
   return [...liveClients].sort(
     (a, b) =>
+      Number(clientMatchesExpectedBrowserExtension(b)) -
+        Number(clientMatchesExpectedBrowserExtension(a)) ||
       recentConversationCountForClient(b) - recentConversationCountForClient(a) ||
       Number(b.isActiveTab === true) - Number(a.isActiveTab === true) ||
       Number(!!b.pendingPoll) - Number(!!a.pendingPoll) ||
@@ -1501,6 +1515,7 @@ const listRecentChatsForClient = async (client, args = {}) => {
   let loadMore = null;
   const refreshPlan = buildRecentChatsRefreshPlan(client, args, {
     maxAgeMs: RECENT_CHATS_CACHE_MAX_AGE_MS,
+    requestedCount: targetCount,
   });
   if (refreshPlan.shouldRefresh) {
     try {
@@ -1999,6 +2014,11 @@ const rawTools = [
           type: 'number',
           description: 'Tempo máximo para aguardar a extensão conectar após abrir o navegador.',
         },
+        initialWaitMs: {
+          type: 'number',
+          description:
+            'Tempo para aguardar uma aba Gemini já aberta reconectar antes de tentar abrir o navegador.',
+        },
       },
       additionalProperties: false,
     },
@@ -2008,6 +2028,13 @@ const rawTools = [
       let launchResult = null;
       let waitedMs = 0;
       const wakeBrowser = args.wakeBrowser !== false;
+
+      if (wakeBrowser && liveClients.length === 0 && CHROME_GUARD_CONFIG.launchIfClosed) {
+        liveClients = await waitForLiveClients(
+          normalizeWaitMs(args.initialWaitMs, BROWSER_STATUS_INITIAL_WAIT_MS),
+          CHROME_GUARD_CONFIG.pollIntervalMs || 500,
+        );
+      }
 
       if (wakeBrowser && liveClients.length === 0 && CHROME_GUARD_CONFIG.launchIfClosed) {
         launchResult = await launchChromeForGemini({
@@ -2502,12 +2529,8 @@ const BROWSER_DEPENDENT_TOOL_NAMES = new Set([
 const withChromeExtensionGuard = (tool) => ({
   ...tool,
   call: async (args = {}) => {
-    const ready = await ensureBrowserExtensionReady(args);
-    const guardedArgs = {
-      ...args,
-      clientId: ready.client?.clientId || args.clientId,
-    };
-    return tool.call(guardedArgs);
+    await ensureBrowserExtensionReady(args);
+    return tool.call(args);
   },
 });
 
