@@ -1234,7 +1234,14 @@ const resolveConversationRequest = (client, args = {}) => {
     });
     if (item) return item;
 
-    throw new Error(`A conversa ${requestedChatId} não está carregada no sidebar.`);
+    return {
+      id: requestedChatId,
+      chatId: requestedChatId,
+      title: requestedChatId,
+      url: `https://gemini.google.com/app/${requestedChatId}`,
+      current: false,
+      source: 'direct-url',
+    };
   }
 
   const current = conversations.find((conversation) => conversation.current);

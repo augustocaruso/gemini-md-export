@@ -278,6 +278,17 @@ mas o DOM ainda parece ser o chat anterior, o item falha no relatório e nenhum
 arquivo é salvo. O MCP também valida `chatId` retornado pela extensão antes de
 gravar em disco.
 
+Se você já tem um vault com notas possivelmente afetadas pelo bug antigo de
+conteúdo trocado, a extensão Gemini CLI inclui o subagent
+`gemini-vault-repair` e o comando `/exporter:repair-vault <caminho-do-vault>`.
+Ele roda um scanner local (`scripts/vault-repair-audit.mjs`), acha duplicatas
+suspeitas/mismatches, reexporta por `chatId` para staging, cria backup antes de
+sobrescrever e bloqueia qualquer nota que pareça ter virado wiki/nota editada.
+Essas notas wiki também entram no escopo de reparo: o agente preserva a nota,
+faz backup, reexporta o raw correto e cria um caso em `wiki-review/` para
+regenerar ou mesclar a wiki a partir da fonte corrigida. Elas não são
+sobrescritas automaticamente.
+
 Endpoints locais úteis para diagnóstico quando as tools ainda não carregaram:
 
 - `http://127.0.0.1:47283/healthz`

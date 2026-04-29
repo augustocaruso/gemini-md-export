@@ -24,6 +24,17 @@ Operational guidance:
   extension could not prove it reached the beginning of the conversation, report
   those failures from the job status instead of treating them as completed
   exports.
+- When the user asks to repair an Obsidian vault after wrong Gemini chat
+  content was saved under the wrong `chat_id`, use the bundled subagent
+  `gemini-vault-repair` or the command `/exporter:repair-vault <vault path>`.
+  It audits Markdown exports with `scripts/vault-repair-audit.mjs`, then follows
+  each raw export's `chat_id`/Gemini link by reexporting that exact chat to a
+  staging directory. The local audit only builds the queue and highlights
+  suspects; direct reexport is the authoritative check. It creates backups
+  before overwrite. If a bad chat has already become a wiki/Obsidian note, the
+  wiki note is also repair scope: preserve it, back it up, create a
+  `wiki-review` case file, and require a deliberate regenerate/merge strategy
+  from the corrected raw export instead of overwriting it automatically.
 - When the user asks to update this exporter inside Gemini CLI, use Gemini CLI's
   built-in extension update flow instead of an MCP tool: tell the user to run
   `gemini extensions update gemini-md-export` or `gemini extensions update --all`

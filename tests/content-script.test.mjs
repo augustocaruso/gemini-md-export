@@ -197,6 +197,23 @@ test('content script não contém fallback de captura visual', async () => {
   assert.doesNotMatch(backgroundScript, /capture-visible-tab|captureVisibleTab/);
 });
 
+test('content script mantém caminhos frequentes leves', async () => {
+  const source = await readFile(new URL('../src/userscript-shell.js', import.meta.url), 'utf8');
+  const bridgeSummary = source.match(
+    /const buildBridgeSummary = \(\) => \{[\s\S]*?\n  \};\n\n  \/\/ --- ação de exportar/,
+  )?.[0];
+
+  assert.ok(bridgeSummary, 'buildBridgeSummary deve existir no shell');
+  assert.doesNotMatch(
+    bridgeSummary,
+    /scrapeTurns\(document\)/,
+    'heartbeat não deve serializar Markdown da conversa inteira',
+  );
+  assert.match(bridgeSummary, /conversationDomTurnCount\(document\)/);
+  assert.match(source, /const MIN_FAST_POLL_BACKOFF_MS = 250/);
+  assert.match(source, /const INJECT_THROTTLE_MS = 250/);
+});
+
 test('exportPayload baixa blob sem preparar a imagem antes', { timeout: 5000 }, async () => {
   const { dom, runtimeErrors } = createGeminiMediaDom(`
     <model-response>

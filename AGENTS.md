@@ -394,6 +394,17 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   só aparecem com `GEMINI_MCP_DEBUG=true` ou `GEMINI_MCP_LOG_LEVEL=info`; erros
   acionáveis vão na resposta da tool/status e relatórios de job, não em spam de
   terminal.
+  A extensão Gemini CLI também publica o subagent
+  `agents/gemini-vault-repair.md` e o comando
+  `commands/exporter/repair-vault.toml`. Use esse subagent quando o usuário
+  quiser reparar notas já salvas com conteúdo possivelmente trocado: ele roda
+  `scripts/vault-repair-audit.mjs`, reexporta suspeitas por `chatId` para
+  staging, cria backup antes de sobrescrever e nunca sobrescreve nota com sinais
+  de wiki/edição humana automaticamente. Se um raw contaminado virou wiki, a
+  wiki também precisa reparo: preservar, backupear, reexportar raw correto e
+  criar caso `wiki-review/<chatId>.json` para regenerar/mesclar de forma
+  deliberada. O build deve copiar `agents/`, `commands/` e `scripts/` para
+  `dist/gemini-cli-extension/`; subagents não entram em `gemini-extension.json`.
   Downloads resolvem uma conversa por `index` 1-based,
   `chatId` ou, em cadernos, `title`; pedem o Markdown à extensão e gravam
   localmente no diretório padrão configurado, sobrescrevendo arquivos

@@ -390,6 +390,7 @@
     lastCommandPollEndedAt: 0,
     lastCommandReceivedAt: 0,
   };
+  const MIN_FAST_POLL_BACKOFF_MS = 250;
 
   // --- metadata da página -----------------------------------------------
 
@@ -1102,6 +1103,26 @@
       ? mergeConversationLists(collectSidebarConversationLinks(), collectNotebookConversationLinks())
       : collectSidebarConversationLinks();
 
+  const collectConversationLinkSnapshot = () => {
+    const notebookPage = isNotebookPage();
+    const sidebarConversations = collectSidebarConversationLinks();
+    const notebookConversations = notebookPage ? collectNotebookConversationLinks() : [];
+    const modalConversations =
+      notebookPage && notebookConversations.length > 0
+        ? notebookConversations
+        : sidebarConversations;
+    const bridgeConversations = notebookPage
+      ? mergeConversationLists(sidebarConversations, notebookConversations)
+      : sidebarConversations;
+
+    return {
+      modalConversations,
+      bridgeConversations,
+      sidebarConversations,
+      notebookConversations,
+    };
+  };
+
   const refreshConversationState = () => {
     const previousSelection = new Set(state.selectedChatIds);
     state.conversations = collectConversationLinks();
@@ -1405,36 +1426,43 @@
       })),
     );
 
-  const debugSnapshot = () => ({
-    version: '__VERSION__',
-    protocolVersion: EXTENSION_PROTOCOL_VERSION,
-    buildStamp: '__BUILD_STAMP__',
-    url: location.href,
-    pathname: location.pathname,
-    chatId: extractChatId(location.pathname),
-    notebookId: currentNotebookId(),
-    pageKind: isNotebookPage() ? 'notebook' : 'chat',
-    title: scrapeTitle(),
-    model: scrapeModel(),
-    turnCount: scrapeTurns(document).length,
-    selectorCounts: {
-      'user-query': countNodes('user-query'),
-      'model-response': countNodes('model-response'),
-      'project-chat-row': countNodes('project-chat-row'),
-    },
-    customTags: listCustomTags(),
-    buttonPresent: !!document.getElementById(BUTTON_ID),
-    modalPresent: !!document.getElementById(MODAL_ID),
-    legacyUiNodes: listLegacyUiNodes(),
-    sidebarOpen: isSidebarOpen(),
-    directoryPickerSupported: supportsDirectoryPicker(),
-    listedConversationCount: collectConversationLinks().length,
-    bridgeConversationCount: collectBridgeConversationLinks().length,
-    reachedSidebarEnd: state.reachedSidebarEnd,
-    isLoadingMore: state.isLoadingMore,
-    loadMoreFailures: state.loadMoreFailures,
-    batchExportSession: loadBatchExportSession(),
-  });
+  const debugSnapshot = ({ includeDomDiagnostics = true } = {}) => {
+    const {
+      modalConversations,
+      bridgeConversations,
+    } = collectConversationLinkSnapshot();
+
+    return {
+      version: '__VERSION__',
+      protocolVersion: EXTENSION_PROTOCOL_VERSION,
+      buildStamp: '__BUILD_STAMP__',
+      url: location.href,
+      pathname: location.pathname,
+      chatId: extractChatId(location.pathname),
+      notebookId: currentNotebookId(),
+      pageKind: isNotebookPage() ? 'notebook' : 'chat',
+      title: scrapeTitle(),
+      model: scrapeModel(),
+      turnCount: conversationDomTurnCount(document),
+      selectorCounts: {
+        'user-query': countNodes('user-query'),
+        'model-response': countNodes('model-response'),
+        'project-chat-row': countNodes('project-chat-row'),
+      },
+      customTags: includeDomDiagnostics ? listCustomTags() : [],
+      buttonPresent: !!document.getElementById(BUTTON_ID),
+      modalPresent: !!document.getElementById(MODAL_ID),
+      legacyUiNodes: includeDomDiagnostics ? listLegacyUiNodes() : [],
+      sidebarOpen: isSidebarOpen(),
+      directoryPickerSupported: supportsDirectoryPicker(),
+      listedConversationCount: modalConversations.length,
+      bridgeConversationCount: bridgeConversations.length,
+      reachedSidebarEnd: state.reachedSidebarEnd,
+      isLoadingMore: state.isLoadingMore,
+      loadMoreFailures: state.loadMoreFailures,
+      batchExportSession: loadBatchExportSession(),
+    };
+  };
 
   const compactOuterHtml = (el, maxLength = 1200) => {
     const html = String(el?.outerHTML || '');
@@ -1746,8 +1774,12 @@
   };
 
   const buildBridgeSummary = () => {
-    const modalConversations = collectConversationLinks();
-    const bridgeConversations = collectBridgeConversationLinks();
+    const {
+      modalConversations,
+      bridgeConversations,
+      sidebarConversations,
+      notebookConversations,
+    } = collectConversationLinkSnapshot();
     return {
       clientId: bridgeState.clientId,
       tabId: bridgeState.tabId,
@@ -1778,13 +1810,11 @@
         notebookId: currentNotebookId(),
         kind: isNotebookPage() ? 'notebook' : 'chat',
         model: scrapeModel(),
-        turnCount: scrapeTurns(document).length,
+        turnCount: conversationDomTurnCount(document),
         listedConversationCount: modalConversations.length,
         bridgeConversationCount: bridgeConversations.length,
-        sidebarConversationCount: bridgeConversations.filter((item) => item.source !== 'notebook')
-          .length,
-        notebookConversationCount: bridgeConversations.filter((item) => item.source === 'notebook')
-          .length,
+        sidebarConversationCount: sidebarConversations.length,
+        notebookConversationCount: notebookConversations.length,
         notebookCacheCount: notebookChatUrlCacheSummary().size,
         reachedSidebarEnd: state.reachedSidebarEnd,
         isActiveTab: bridgeState.isActiveTab,
@@ -2584,7 +2614,9 @@
         ok: true,
         conversations: collectBridgeConversationLinks(),
         modalConversations: collectConversationLinks(),
-        snapshot: debugSnapshot(),
+        snapshot: debugSnapshot({
+          includeDomDiagnostics: command.args?.includeDomDiagnostics === true,
+        }),
       };
     }
 
@@ -2650,7 +2682,12 @@
           command.args?.includeConversations === false ? undefined : collectBridgeConversationLinks(),
         modalConversations:
           command.args?.includeConversations === false ? undefined : collectConversationLinks(),
-        snapshot: command.args?.includeSnapshot === false ? undefined : debugSnapshot(),
+        snapshot:
+          command.args?.includeSnapshot === false
+            ? undefined
+            : debugSnapshot({
+                includeDomDiagnostics: command.args?.includeDomDiagnostics === true,
+              }),
       };
     }
 
@@ -4929,6 +4966,9 @@
         bridgeState.lastCommandPollEndedAt = Date.now();
 
         if (!response?.command) {
+          if (Date.now() - bridgeState.lastCommandPollStartedAt < MIN_FAST_POLL_BACKOFF_MS) {
+            await sleep(MIN_FAST_POLL_BACKOFF_MS);
+          }
           continue;
         }
 
@@ -5203,20 +5243,34 @@
     notFoundSince: 0,
     notFoundWarned: false,
     scheduled: false,
+    pendingTimer: 0,
+    lastRunAt: 0,
   };
   const NOT_FOUND_GRACE_MS = 4000;
+  const INJECT_THROTTLE_MS = 250;
 
   const scheduleInjectButton = () => {
     if (injectState.scheduled) return;
     injectState.scheduled = true;
-    const schedule =
-      typeof requestAnimationFrame === 'function'
-        ? requestAnimationFrame
-        : (callback) => setTimeout(callback, 16);
-    schedule(() => {
+    const run = () => {
+      injectState.pendingTimer = 0;
       injectState.scheduled = false;
+      injectState.lastRunAt = Date.now();
       injectButton();
-    });
+    };
+    const scheduleFrame = () => {
+      const schedule =
+        typeof requestAnimationFrame === 'function'
+          ? requestAnimationFrame
+          : (callback) => setTimeout(callback, 16);
+      schedule(run);
+    };
+    const waitMs = Math.max(0, INJECT_THROTTLE_MS - (Date.now() - injectState.lastRunAt));
+    if (waitMs > 0) {
+      injectState.pendingTimer = setTimeout(scheduleFrame, waitMs);
+      return;
+    }
+    scheduleFrame();
   };
 
   const injectButton = () => {

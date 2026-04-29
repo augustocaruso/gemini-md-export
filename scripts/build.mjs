@@ -224,16 +224,22 @@ if (existsSync(resolve(ROOT, 'gemini-cli-extension', 'commands'))) {
     { recursive: true },
   );
 }
+if (existsSync(resolve(ROOT, 'gemini-cli-extension', 'agents'))) {
+  cpSync(
+    resolve(ROOT, 'gemini-cli-extension', 'agents'),
+    resolve(geminiCliExtensionDir, 'agents'),
+    { recursive: true },
+  );
+}
 if (existsSync(resolve(ROOT, 'gemini-cli-extension', 'hooks'))) {
   cpSync(resolve(ROOT, 'gemini-cli-extension', 'hooks'), resolve(geminiCliExtensionDir, 'hooks'), {
     recursive: true,
   });
 }
-if (existsSync(resolve(ROOT, 'gemini-cli-extension', 'scripts', 'hooks'))) {
-  mkdirSync(resolve(geminiCliExtensionDir, 'scripts'), { recursive: true });
+if (existsSync(resolve(ROOT, 'gemini-cli-extension', 'scripts'))) {
   cpSync(
-    resolve(ROOT, 'gemini-cli-extension', 'scripts', 'hooks'),
-    resolve(geminiCliExtensionDir, 'scripts', 'hooks'),
+    resolve(ROOT, 'gemini-cli-extension', 'scripts'),
+    resolve(geminiCliExtensionDir, 'scripts'),
     { recursive: true },
   );
 }
@@ -269,8 +275,11 @@ console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'bridge-version.json
 if (existsSync(resolve(geminiCliExtensionDir, 'hooks'))) {
   console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'hooks')}`);
 }
-if (existsSync(resolve(geminiCliExtensionDir, 'scripts', 'hooks'))) {
-  console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'scripts', 'hooks')}`);
+if (existsSync(resolve(geminiCliExtensionDir, 'agents'))) {
+  console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'agents')}`);
+}
+if (existsSync(resolve(geminiCliExtensionDir, 'scripts'))) {
+  console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'scripts')}`);
 }
 console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'browser-extension')}`);
 console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'src', 'mcp-server.js')}`);

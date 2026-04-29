@@ -17,6 +17,9 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   const bridgeVersionPath = resolve(extensionDir, 'bridge-version.json');
   const browserManifestPath = resolve(extensionDir, 'browser-extension', 'manifest.json');
   const hooksConfigPath = resolve(extensionDir, 'hooks', 'hooks.json');
+  const repairAgentPath = resolve(extensionDir, 'agents', 'gemini-vault-repair.md');
+  const repairCommandPath = resolve(extensionDir, 'commands', 'exporter', 'repair-vault.toml');
+  const repairAuditScriptPath = resolve(extensionDir, 'scripts', 'vault-repair-audit.mjs');
   const hookScriptPath = resolve(
     extensionDir,
     'scripts',
@@ -32,11 +35,15 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.equal(existsSync(bridgeVersionPath), true);
   assert.equal(existsSync(browserManifestPath), true);
   assert.equal(existsSync(hooksConfigPath), true);
+  assert.equal(existsSync(repairAgentPath), true);
+  assert.equal(existsSync(repairCommandPath), true);
+  assert.equal(existsSync(repairAuditScriptPath), true);
   assert.equal(existsSync(hookScriptPath), true);
 
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8'));
   assert.equal(manifest.contextFileName, 'GEMINI.md');
   assert.equal(manifest.hooks, undefined);
+  assert.equal(manifest.agents, undefined);
   assert.equal(typeof manifest.mcpServers?.['gemini-md-export']?.command, 'string');
   assert.match(
     manifest.mcpServers?.['gemini-md-export']?.args?.[0] || '',
@@ -60,6 +67,16 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.doesNotMatch(hooksConfig.hooks.BeforeTool[0].matcher, /export_job_status/);
   assert.doesNotMatch(hooksConfig.hooks.BeforeTool[0].matcher, /export_job_cancel/);
   assert.equal(hooksConfig.hooks.BeforeTool[0].hooks[0].timeout, 20000);
+
+  const repairAgent = readFileSync(repairAgentPath, 'utf-8');
+  assert.match(repairAgent, /^---\nname: gemini-vault-repair/m);
+  assert.match(repairAgent, /mcp_gemini-md-export_gemini_download_chat/);
+  assert.match(repairAgent, /vault-repair-audit\.mjs/);
+  assert.match(repairAgent, /wikiCandidate/);
+
+  const repairCommand = readFileSync(repairCommandPath, 'utf-8');
+  assert.match(repairCommand, /gemini-vault-repair/);
+  assert.match(repairCommand, /vault-repair-audit\.mjs/);
 
   const browserManifest = JSON.parse(readFileSync(browserManifestPath, 'utf-8'));
   const bridgeVersion = JSON.parse(readFileSync(bridgeVersionPath, 'utf-8'));
