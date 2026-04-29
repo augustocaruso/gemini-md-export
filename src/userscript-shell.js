@@ -552,6 +552,19 @@
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+  const withTimeoutValue = (promise, timeoutMs, fallbackValue) =>
+    new Promise((resolve) => {
+      let settled = false;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      };
+      const timer = setTimeout(() => finish(fallbackValue), Math.max(1, timeoutMs));
+      Promise.resolve(promise).then(finish, () => finish(fallbackValue));
+    });
+
   const nextPaint = () =>
     new Promise((resolve) => {
       if (typeof pageWindow.requestAnimationFrame !== 'function') {
@@ -1248,10 +1261,14 @@
     if (isNotebookPage()) {
       scrollContainer = findNotebookHistoryScroller().scroller;
     }
+    const sidebarList = document.querySelector('conversations-list');
     scrollContainer =
       scrollContainer ||
-      document.querySelector('conversations-list') ||
-      document.querySelector('[role="navigation"]') ||
+      (hasOverflow(sidebarList) ? sidebarList : findScrollableParent(sidebarList)) ||
+      (hasOverflow(document.querySelector('[role="navigation"]'))
+        ? document.querySelector('[role="navigation"]')
+        : null) ||
+      findScrollableParent(document.querySelector('[role="navigation"]')) ||
       findScrollableParent(document.querySelector('[data-test-id="conversation"]'));
     if (!scrollContainer) return { loaded: false, scroller: null };
 
@@ -1392,6 +1409,8 @@
     listedConversationCount: collectConversationLinks().length,
     bridgeConversationCount: collectBridgeConversationLinks().length,
     reachedSidebarEnd: state.reachedSidebarEnd,
+    isLoadingMore: state.isLoadingMore,
+    loadMoreFailures: state.loadMoreFailures,
     batchExportSession: loadBatchExportSession(),
   });
 
@@ -2552,17 +2571,40 @@
         ? Number.POSITIVE_INFINITY
         : Math.max(1, Math.min(20000, Number(command.args?.targetCount || 10)));
       const attempts = Math.max(1, Math.min(5, Number(command.args?.attempts || 2)));
+      const maxRounds = Math.max(1, Math.min(20, Number(command.args?.maxRounds || 6)));
+      const timeoutMs = Math.max(
+        500,
+        Math.min(30_000, Number(command.args?.timeoutMs || (command.args?.fastMode ? 3500 : 8000))),
+      );
+      const startedAt = Date.now();
       const before = collectBridgeConversationLinks().length;
       let loadedAny = false;
+      let timedOut = false;
+      let roundsCompleted = 0;
+      let previousCount = before;
 
-      while (
-        collectBridgeConversationLinks().length < targetCount &&
-        !state.reachedSidebarEnd
-      ) {
-        const loaded = await loadMoreConversations(attempts, loadOptions);
-        loadedAny = loadedAny || loaded;
+      for (let round = 0; round < maxRounds; round += 1) {
+        const currentCount = collectBridgeConversationLinks().length;
+        if (currentCount >= targetCount || state.reachedSidebarEnd) break;
+
+        const remainingMs = timeoutMs - (Date.now() - startedAt);
+        if (remainingMs <= 0) {
+          timedOut = true;
+          break;
+        }
+
+        const loaded = await withTimeoutValue(
+          loadMoreConversations(attempts, loadOptions),
+          remainingMs,
+          false,
+        );
+        roundsCompleted += 1;
+        const afterCount = collectBridgeConversationLinks().length;
+        loadedAny = loadedAny || afterCount > previousCount;
+        if (afterCount <= previousCount) break;
         if (!loaded) break;
         await sleep(loadOptions.retryPauseMs);
+        previousCount = afterCount;
       }
 
       return {
@@ -2571,6 +2613,8 @@
         beforeCount: before,
         afterCount: collectBridgeConversationLinks().length,
         reachedEnd: state.reachedSidebarEnd,
+        timedOut,
+        roundsCompleted,
         conversations:
           command.args?.includeConversations === false ? undefined : collectBridgeConversationLinks(),
         modalConversations:

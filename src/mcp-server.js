@@ -57,6 +57,9 @@ const RECENT_CHATS_REFRESH_BUDGET_MS = Number(
 const RECENT_CHATS_LOAD_MORE_BUDGET_MS = Number(
   process.env.GEMINI_MCP_RECENT_CHATS_LOAD_MORE_BUDGET_MS || 6000,
 );
+const RECENT_CHATS_LOAD_MORE_BROWSER_TIMEOUT_MS = Number(
+  process.env.GEMINI_MCP_RECENT_CHATS_LOAD_MORE_BROWSER_TIMEOUT_MS || 3500,
+);
 const CHROME_GUARD_CONFIG = {
   profileDirectory:
     process.env.GEMINI_MCP_CHROME_PROFILE_DIRECTORY ||
@@ -1334,12 +1337,17 @@ const loadMoreRecentChatsForClient = async (client, requestedLimit, args = {}) =
   }
 
   let loadedAny = false;
+  let timedOut = false;
   let roundsCompleted = 0;
   let previousCount = initialCount;
 
   for (let round = 0; round < plan.rounds; round += 1) {
+    const browserTimeoutMs = Math.max(
+      500,
+      Number(args.loadMoreBrowserTimeoutMs || RECENT_CHATS_LOAD_MORE_BROWSER_TIMEOUT_MS),
+    );
     const commandTimeoutMs = Math.max(
-      1000,
+      browserTimeoutMs + 1500,
       Number(
         args.loadMoreCommandTimeoutMs ||
           args.loadMoreTimeoutMs ||
@@ -1354,6 +1362,8 @@ const loadMoreRecentChatsForClient = async (client, requestedLimit, args = {}) =
         attempts: plan.attemptsPerRound,
         targetCount: plan.targetCount,
         fastMode: true,
+        maxRounds: 4,
+        timeoutMs: browserTimeoutMs,
       },
       { timeoutMs: commandTimeoutMs },
     );
@@ -1374,9 +1384,11 @@ const loadMoreRecentChatsForClient = async (client, requestedLimit, args = {}) =
     const currentCount = recentConversationsForClient(client).length;
     roundsCompleted += 1;
     loadedAny = loadedAny || result.loadedAny === true || currentCount > previousCount;
+    timedOut = timedOut || result.timedOut === true;
 
     if (currentCount >= plan.targetCount) break;
     if (reachedEnd) break;
+    if (timedOut) break;
     if (currentCount <= previousCount && result.loadedAny !== true) break;
 
     previousCount = currentCount;
@@ -1385,6 +1397,7 @@ const loadMoreRecentChatsForClient = async (client, requestedLimit, args = {}) =
   return {
     attempted: true,
     loadedAny,
+    timedOut,
     roundsCompleted,
     reachedEnd,
     snapshot: latestSnapshot,
