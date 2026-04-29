@@ -179,13 +179,19 @@ fallback e avisa no resumo.
 ## Uso
 
 1. Abra uma conversa em `https://gemini.google.com/app/<id>`.
-2. Clique no botão circular de download no topo da conversa.
+2. Clique no botão circular de download no topo da conversa. Um menu abre com
+   duas opções: **Exportar como Markdown** (abre o modal) e **Ignorar esta
+   aba** (desliga a bridge MCP só nessa aba — útil quando você quer usar o
+   Gemini sem que o exporter envie heartbeat ou apareça em `/agent/clients`).
+   A flag de ignorar vale enquanto a aba existir e sobrevive a reload; some ao
+   fechar a aba.
 3. No modal, selecione conversas do sidebar ou, em páginas `/notebook/...`, as
    conversas do caderno.
 4. Use **Puxar mais histórico** se precisar carregar mais itens.
 5. Use **Alterar** em **Destino** para escolher uma pasta pelo seletor nativo
    do MCP local. Sem pasta escolhida, o fallback é Downloads.
-6. Clique em **Exportar selecionadas**.
+6. Clique em **Exportar selecionadas**. Atalho: `Ctrl+Shift+E` exporta a
+   conversa atual sem passar pelo menu (funciona inclusive em abas ignoradas).
 
 O export gera um arquivo `<chatId>.md` por conversa. Arquivos existentes são
 sobrescritos quando a gravação acontece via MCP local.

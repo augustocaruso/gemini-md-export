@@ -64,6 +64,7 @@
   const MODAL_COUNT_ID = `${UI_ID_PREFIX}-count`;
   const MODAL_SEARCH_ID = `${UI_ID_PREFIX}-search`;
   const PROGRESS_DOCK_ID = `${UI_ID_PREFIX}-progress-dock`;
+  const MENU_ID = `${UI_ID_PREFIX}-menu`;
   const DEBUG_GLOBAL = '__geminiMdExportDebug';
   const LOG_PREFIX = '[gemini-md-export]';
   const SCRIPT_VERSION = '__VERSION__';
@@ -312,6 +313,11 @@
   const BRIDGE_OUTPUT_DIR_STORAGE_KEY = 'gemini-md-export.bridgeOutputDir';
   const NOTEBOOK_CHAT_URL_CACHE_STORAGE_KEY = 'gemini-md-export.notebookChatUrls.v1';
   const BATCH_EXPORT_SESSION_STORAGE_KEY = 'gemini-md-export.batchExportSession.v1';
+  // Por aba (sessionStorage): quando '1', a aba não envia heartbeat nem
+  // long-poll de comandos para a bridge MCP. Usuário liga/desliga pelo menu
+  // do botão. Sobrevive reload da própria aba; some quando a aba é fechada.
+  const TAB_IGNORE_SESSION_STORAGE_KEY = 'gemini-md-export.ignoreThisTab.v1';
+  const TAB_IGNORE_CHANGED_EVENT = 'gm-md-export:tab-ignored-changed';
   const isExtensionContext =
     typeof chrome !== 'undefined' &&
     !!chrome.runtime?.id &&
@@ -332,6 +338,36 @@
       return pageWindow.localStorage?.getItem(BRIDGE_OUTPUT_DIR_STORAGE_KEY) || '';
     } catch {
       return '';
+    }
+  };
+  const isTabIgnored = () => {
+    try {
+      return pageWindow.sessionStorage?.getItem(TAB_IGNORE_SESSION_STORAGE_KEY) === '1';
+    } catch {
+      return false;
+    }
+  };
+  const setTabIgnored = (value) => {
+    const next = !!value;
+    try {
+      if (next) {
+        pageWindow.sessionStorage?.setItem(TAB_IGNORE_SESSION_STORAGE_KEY, '1');
+      } else {
+        pageWindow.sessionStorage?.removeItem(TAB_IGNORE_SESSION_STORAGE_KEY);
+      }
+    } catch {
+      // sessionStorage pode estar bloqueado em modos restritos; o fluxo
+      // continua e a bridge respeita o estado em memória até o próximo reload.
+    }
+    try {
+      const detail = { ignored: next };
+      const event =
+        typeof CustomEvent === 'function'
+          ? new CustomEvent(TAB_IGNORE_CHANGED_EVENT, { detail })
+          : null;
+      if (event) pageWindow.dispatchEvent(event);
+    } catch {
+      // dispatchEvent pode não estar disponível em runtimes degradados
     }
   };
   const state = {
@@ -1452,6 +1488,8 @@
       customTags: includeDomDiagnostics ? listCustomTags() : [],
       buttonPresent: !!document.getElementById(BUTTON_ID),
       modalPresent: !!document.getElementById(MODAL_ID),
+      menuPresent: !!document.getElementById(MENU_ID),
+      tabIgnored: isTabIgnored(),
       legacyUiNodes: includeDomDiagnostics ? listLegacyUiNodes() : [],
       sidebarOpen: isSidebarOpen(),
       directoryPickerSupported: supportsDirectoryPicker(),
@@ -4985,6 +5023,10 @@
 
   const installExtensionBridge = async () => {
     if (!isExtensionContext || bridgeState.started) return;
+    if (isTabIgnored()) {
+      log('aba marcada como ignorada; bridge MCP não vai iniciar nesta aba.');
+      return;
+    }
 
     bridgeState.clientId = randomId();
 
@@ -5019,6 +5061,33 @@
       tabId: bridgeState.tabId,
     });
   };
+
+  // Para a bridge nesta aba sem mexer no MCP nem na extensão. O long-poll
+  // sai sozinho na próxima iteração do `while (bridgeState.started)`; o MCP
+  // limpa o cliente sozinho via timeout de stale.
+  const stopExtensionBridge = () => {
+    if (bridgeState.heartbeatTimer) {
+      clearInterval(bridgeState.heartbeatTimer);
+      bridgeState.heartbeatTimer = 0;
+    }
+    bridgeState.started = false;
+  };
+
+  const applyTabIgnoredState = () => {
+    if (isTabIgnored()) {
+      stopExtensionBridge();
+      return;
+    }
+    if (!bridgeState.started) {
+      installExtensionBridge().catch((err) => {
+        warn('Falha ao reiniciar bridge após desfazer ignorar aba.', err);
+      });
+    }
+  };
+
+  if (typeof pageWindow.addEventListener === 'function') {
+    pageWindow.addEventListener(TAB_IGNORE_CHANGED_EVENT, applyTabIgnoredState);
+  }
 
   // --- UI: botão -------------------------------------------------------
 
@@ -5086,12 +5155,242 @@
     });
   };
 
+  // Menu popover ancorado ao botão. Sem `chrome.action` popup; o menu é DOM
+  // próprio e usa as variáveis `--gm-*` para herdar o tema do dock/modal.
+  const MENU_ZINDEX = 10004;
+  let menuOutsideClickHandler = null;
+  let menuKeydownHandler = null;
+  let menuRepositionHandler = null;
+  let menuScrollHandler = null;
+
+  const closeTopBarMenu = () => {
+    const existing = document.getElementById(MENU_ID);
+    if (existing) existing.remove();
+    const btn = document.getElementById(BUTTON_ID);
+    if (btn) btn.setAttribute('aria-expanded', 'false');
+    if (menuOutsideClickHandler) {
+      document.removeEventListener('mousedown', menuOutsideClickHandler, true);
+      menuOutsideClickHandler = null;
+    }
+    if (menuKeydownHandler) {
+      document.removeEventListener('keydown', menuKeydownHandler, true);
+      menuKeydownHandler = null;
+    }
+    if (menuRepositionHandler && typeof pageWindow.removeEventListener === 'function') {
+      pageWindow.removeEventListener('resize', menuRepositionHandler, true);
+      menuRepositionHandler = null;
+    }
+    if (menuScrollHandler && typeof pageWindow.removeEventListener === 'function') {
+      pageWindow.removeEventListener('scroll', menuScrollHandler, true);
+      menuScrollHandler = null;
+    }
+  };
+
+  const positionTopBarMenu = (menu, btn) => {
+    const rect = btn.getBoundingClientRect();
+    const viewportWidth =
+      pageWindow.innerWidth || document.documentElement?.clientWidth || 0;
+    menu.style.position = 'fixed';
+    menu.style.top = `${Math.round(rect.bottom + 6)}px`;
+    menu.style.right = `${Math.max(8, Math.round(viewportWidth - rect.right))}px`;
+    menu.style.left = 'auto';
+  };
+
+  const styleMenuItem = (el) => {
+    Object.assign(el.style, {
+      display: 'block',
+      width: '100%',
+      textAlign: 'left',
+      padding: '10px 12px',
+      background: 'transparent',
+      color: 'inherit',
+      border: '0',
+      borderRadius: '8px',
+      cursor: 'pointer',
+      fontSize: 'inherit',
+      fontFamily: 'inherit',
+      lineHeight: '1.3',
+    });
+    el.addEventListener('mouseenter', () => {
+      el.style.background = 'rgba(138,180,248,0.14)';
+    });
+    el.addEventListener('mouseleave', () => {
+      el.style.background = 'transparent';
+    });
+    el.addEventListener('focus', () => {
+      el.style.background = 'rgba(138,180,248,0.18)';
+      el.style.outline = 'none';
+    });
+    el.addEventListener('blur', () => {
+      el.style.background = 'transparent';
+    });
+  };
+
+  const renderIgnoreMenuItem = (item) => {
+    const ignored = isTabIgnored();
+    item.setAttribute('aria-checked', ignored ? 'true' : 'false');
+    item.dataset.checked = ignored ? '1' : '0';
+    while (item.firstChild) item.removeChild(item.firstChild);
+
+    const row = document.createElement('span');
+    Object.assign(row.style, {
+      display: 'flex',
+      alignItems: 'center',
+      gap: '8px',
+    });
+
+    const check = document.createElement('span');
+    check.textContent = ignored ? '✓' : '';
+    Object.assign(check.style, {
+      display: 'inline-block',
+      width: '16px',
+      textAlign: 'center',
+      fontWeight: '600',
+      color: ignored ? 'var(--gm-accent, #8ab4f8)' : 'transparent',
+    });
+    const label = document.createElement('span');
+    label.textContent = 'Ignorar esta aba';
+    row.appendChild(check);
+    row.appendChild(label);
+
+    const sub = document.createElement('span');
+    sub.textContent = ignored
+      ? 'A bridge MCP está desligada nesta aba.'
+      : 'Desliga a conexão com o MCP só nesta aba.';
+    Object.assign(sub.style, {
+      display: 'block',
+      marginTop: '2px',
+      paddingLeft: '24px',
+      fontSize: '11px',
+      color: 'var(--gm-dock-muted, #aab4be)',
+    });
+
+    item.appendChild(row);
+    item.appendChild(sub);
+  };
+
+  const openTopBarMenu = (btn) => {
+    closeTopBarMenu();
+
+    const menu = document.createElement('div');
+    menu.id = MENU_ID;
+    menu.setAttribute('role', 'menu');
+    menu.dataset.role = 'gm-md-export-menu';
+    Object.assign(menu.style, {
+      position: 'fixed',
+      minWidth: '260px',
+      padding: '6px',
+      background: 'var(--gm-dock-bg, rgba(31,35,41,0.96))',
+      color: 'var(--gm-dock-text, #e8eaed)',
+      border: '1px solid var(--gm-dock-border, rgba(255,255,255,0.08))',
+      borderRadius: '12px',
+      boxShadow: '0 12px 32px rgba(0,0,0,0.32)',
+      fontFamily:
+        'var(--gm-font, "Google Sans Text","Google Sans",Roboto,"Segoe UI",system-ui,sans-serif)',
+      fontSize: '13px',
+      zIndex: String(MENU_ZINDEX),
+      backdropFilter: 'blur(8px)',
+      WebkitBackdropFilter: 'blur(8px)',
+    });
+
+    const exportItem = document.createElement('button');
+    exportItem.type = 'button';
+    exportItem.setAttribute('role', 'menuitem');
+    exportItem.dataset.role = 'gm-menu-export';
+    exportItem.textContent = 'Exportar como Markdown';
+    styleMenuItem(exportItem);
+    exportItem.addEventListener('click', () => {
+      closeTopBarMenu();
+      safeOpenExportModal();
+    });
+
+    const divider = document.createElement('div');
+    Object.assign(divider.style, {
+      height: '1px',
+      margin: '6px 4px',
+      background: 'var(--gm-dock-border, rgba(255,255,255,0.08))',
+    });
+
+    const ignoreItem = document.createElement('button');
+    ignoreItem.type = 'button';
+    ignoreItem.setAttribute('role', 'menuitemcheckbox');
+    ignoreItem.dataset.role = 'gm-menu-ignore-tab';
+    styleMenuItem(ignoreItem);
+    renderIgnoreMenuItem(ignoreItem);
+    ignoreItem.addEventListener('click', () => {
+      const next = !isTabIgnored();
+      setTabIgnored(next);
+      renderIgnoreMenuItem(ignoreItem);
+      try {
+        showToast(
+          next
+            ? 'Aba ignorada. A bridge MCP não vai usar essa aba até você reativar aqui.'
+            : 'Aba reativada. A bridge MCP voltou a se conectar.',
+          'info',
+        );
+      } catch {
+        // toast pode não estar disponível em testes; estado já foi aplicado
+      }
+    });
+
+    menu.appendChild(exportItem);
+    menu.appendChild(divider);
+    menu.appendChild(ignoreItem);
+    document.body.appendChild(menu);
+    positionTopBarMenu(menu, btn);
+    btn.setAttribute('aria-expanded', 'true');
+
+    menuOutsideClickHandler = (ev) => {
+      if (menu.contains(ev.target) || btn.contains(ev.target)) return;
+      closeTopBarMenu();
+    };
+    menuKeydownHandler = (ev) => {
+      if (ev.key === 'Escape') {
+        ev.preventDefault();
+        closeTopBarMenu();
+        try {
+          btn.focus();
+        } catch {
+          // foco pode falhar em alguns runtimes; ok
+        }
+      }
+    };
+    menuRepositionHandler = () => {
+      const live = document.getElementById(MENU_ID);
+      const btnLive = document.getElementById(BUTTON_ID);
+      if (live && btnLive) positionTopBarMenu(live, btnLive);
+    };
+    menuScrollHandler = () => closeTopBarMenu();
+
+    document.addEventListener('mousedown', menuOutsideClickHandler, true);
+    document.addEventListener('keydown', menuKeydownHandler, true);
+    if (typeof pageWindow.addEventListener === 'function') {
+      pageWindow.addEventListener('resize', menuRepositionHandler, true);
+      pageWindow.addEventListener('scroll', menuScrollHandler, true);
+    }
+  };
+
+  const toggleTopBarMenu = (event) => {
+    if (event && typeof event.stopPropagation === 'function') {
+      event.stopPropagation();
+    }
+    if (document.getElementById(MENU_ID)) {
+      closeTopBarMenu();
+      return;
+    }
+    const btn = document.getElementById(BUTTON_ID);
+    if (btn) openTopBarMenu(btn);
+  };
+
   const createExportButton = () => {
     const btn = document.createElement('button');
     btn.id = BUTTON_ID;
     btn.type = 'button';
-    btn.title = 'Exportar como Markdown (Ctrl+Shift+E: conversa atual)';
+    btn.title =
+      'Exportar como Markdown — clique para abrir o menu (Ctrl+Shift+E exporta a conversa atual)';
     btn.setAttribute('aria-label', BUTTON_LABEL);
+    btn.setAttribute('aria-haspopup', 'menu');
+    btn.setAttribute('aria-expanded', 'false');
     markButtonAsCurrentBuild(btn);
     setHtml(btn, BUTTON_ICON_SVG);
     styleAsTopBarIconButton(btn);
@@ -5110,7 +5409,7 @@
     btn.addEventListener('blur', () => {
       btn.style.backgroundColor = 'transparent';
     });
-    btn.addEventListener('click', safeOpenExportModal);
+    btn.addEventListener('click', toggleTopBarMenu);
 
     return btn;
   };
@@ -5386,7 +5685,15 @@
         lastError: bridgeState.lastError,
         bridgeBaseUrl: BRIDGE_BASE_URL,
         lastHeartbeatAt: bridgeState.lastHeartbeatAt || null,
+        tabIgnored: isTabIgnored(),
       }),
+      isTabIgnored: () => isTabIgnored(),
+      setTabIgnored: (value) => setTabIgnored(value),
+      openTopBarMenu: () => {
+        const btn = document.getElementById(BUTTON_ID);
+        if (btn) openTopBarMenu(btn);
+      },
+      closeTopBarMenu: () => closeTopBarMenu(),
       destination: () => ({
         bridgeOutputDir: state.bridgeOutputDir || null,
         browserDirectoryHandle: state.directoryHandle?.name || null,
