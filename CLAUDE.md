@@ -217,6 +217,27 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   usuário já estava colado no fundo ou `reachedSidebarEnd` bateu. **Não
   reintroduzir `scroll-behavior: smooth`** no container — fazia o restore
   programático do scrollTop animar visivelmente a cada heartbeat.
+  (10b) **Menu do botão (top-bar) com toggle "Ignorar esta aba"**: clicar no
+  botão do exporter no top-bar abre um popover DOM próprio, não um popup
+  nativo de extensão Chrome. Id `${UI_ID_PREFIX}-menu`, `position: fixed`
+  ancorado abaixo/à direita do botão, `z-index: 10004` (acima do dock 10002,
+  abaixo do toast 10050; o modal 10001 e o menu são mutuamente exclusivos
+  por fluxo). Tema via `--gm-dock-bg/--gm-dock-text/--gm-dock-border/--gm-accent`
+  (mesma família que o dock). O menu tem dois `menuitem`s: "Exportar como
+  Markdown" (chama `safeOpenExportModal`) e "Ignorar esta aba"
+  (`menuitemcheckbox` com `aria-checked`). Fechamento por clique fora,
+  `Escape`, scroll ou resize. A flag de ignorar é armazenada em
+  `sessionStorage['gemini-md-export.ignoreThisTab.v1']` (sobrevive reload
+  da própria aba; some quando a aba é fechada, que é o comportamento certo
+  para um override pontual). Mudanças disparam o evento
+  `gm-md-export:tab-ignored-changed` no `pageWindow`; o listener
+  `applyTabIgnoredState` chama `stopExtensionBridge` (limpa o
+  `heartbeatTimer` e zera `bridgeState.started`, fazendo o `while` do
+  long-poll sair sozinho) ou `installExtensionBridge` na volta. **Não
+  precisa endpoint de "disconnect" no MCP**: o cliente desaparece sozinho
+  via `BRIDGE_CLIENT_STALE_MS`. A hotkey `Ctrl+Shift+E` continua exportando
+  direto e bypassa o menu — em aba ignorada o export ainda funciona, só não
+  envia heartbeat/comando.
   (10) **Fluidez da barra de progresso (progress dock)**: o dock fixo no
   rodapé central usa três mecanismos para evitar a sensação de "barra
   travada" durante etapas longas de uma única conversa (hidratação, scroll,

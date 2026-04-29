@@ -187,6 +187,109 @@ test('content script injeta botão moderno sem loop de MutationObserver', { time
   window.close();
 });
 
+test('botão do top-bar abre menu com toggle de ignorar aba', { timeout: 2000 }, async () => {
+  const script = await readFile(contentScriptUrl, 'utf8');
+  const { dom, runtimeErrors } = createGeminiTopBarDom();
+  const { window } = dom;
+
+  window.eval(script);
+  await new Promise((resolve) => window.setTimeout(resolve, 25));
+
+  const button = window.document.getElementById('gm-md-export-modern-btn');
+  assert.ok(button, 'botão moderno deve existir');
+  assert.equal(button.getAttribute('aria-haspopup'), 'menu');
+  assert.equal(button.getAttribute('aria-expanded'), 'false');
+
+  // Sem menu antes do clique.
+  assert.equal(window.document.getElementById('gm-md-export-modern-menu'), null);
+
+  button.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  const menu = window.document.getElementById('gm-md-export-modern-menu');
+  assert.ok(menu, 'clique no botão deve abrir o menu');
+  assert.equal(button.getAttribute('aria-expanded'), 'true');
+  assert.equal(menu.getAttribute('role'), 'menu');
+
+  const exportItem = menu.querySelector('[data-role="gm-menu-export"]');
+  const ignoreItem = menu.querySelector('[data-role="gm-menu-ignore-tab"]');
+  assert.ok(exportItem, 'menu deve ter item de exportar');
+  assert.ok(ignoreItem, 'menu deve ter item de ignorar aba');
+  assert.equal(ignoreItem.getAttribute('role'), 'menuitemcheckbox');
+  assert.equal(ignoreItem.getAttribute('aria-checked'), 'false');
+  assert.equal(
+    window.sessionStorage.getItem('gemini-md-export.ignoreThisTab.v1'),
+    null,
+    'sessionStorage deve começar limpo',
+  );
+
+  // Toggle ON
+  let eventDetail = null;
+  window.addEventListener('gm-md-export:tab-ignored-changed', (ev) => {
+    eventDetail = ev.detail;
+  });
+  ignoreItem.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+
+  assert.equal(ignoreItem.getAttribute('aria-checked'), 'true');
+  assert.equal(
+    window.sessionStorage.getItem('gemini-md-export.ignoreThisTab.v1'),
+    '1',
+    'toggle deve persistir flag em sessionStorage',
+  );
+  assert.equal(eventDetail.ignored, true);
+  assert.ok(
+    window.__geminiMdExportDebug.isTabIgnored(),
+    'debug API deve refletir aba ignorada',
+  );
+
+  // Toggle OFF
+  ignoreItem.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  assert.equal(ignoreItem.getAttribute('aria-checked'), 'false');
+  assert.equal(
+    window.sessionStorage.getItem('gemini-md-export.ignoreThisTab.v1'),
+    null,
+    'toggle off deve remover a flag',
+  );
+  assert.equal(eventDetail.ignored, false);
+
+  // Click fora fecha o menu
+  window.document.body.dispatchEvent(
+    new window.MouseEvent('mousedown', { bubbles: true }),
+  );
+  assert.equal(window.document.getElementById('gm-md-export-modern-menu'), null);
+  assert.equal(button.getAttribute('aria-expanded'), 'false');
+
+  assert.deepEqual(runtimeErrors, []);
+  window.close();
+});
+
+test('isTabIgnored persiste entre aberturas do menu e zera bridge', { timeout: 2000 }, async () => {
+  const script = await readFile(contentScriptUrl, 'utf8');
+  const { dom } = createGeminiTopBarDom();
+  const { window } = dom;
+  // Pré-popula a flag antes de carregar o content script para simular reload
+  // de aba já marcada como ignorada.
+  window.sessionStorage.setItem('gemini-md-export.ignoreThisTab.v1', '1');
+
+  window.eval(script);
+  await new Promise((resolve) => window.setTimeout(resolve, 25));
+
+  const button = window.document.getElementById('gm-md-export-modern-btn');
+  button.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  const ignoreItem = window.document.querySelector(
+    '[data-role="gm-menu-ignore-tab"]',
+  );
+  assert.equal(
+    ignoreItem.getAttribute('aria-checked'),
+    'true',
+    'toggle deve refletir flag pré-existente',
+  );
+
+  const snapshot = window.__geminiMdExportDebug.snapshot({});
+  assert.equal(snapshot.tabIgnored, true);
+  assert.equal(snapshot.menuPresent, true);
+
+  window.close();
+});
+
 test('content script não contém fallback de captura visual', async () => {
   const [contentScript, backgroundScript] = await Promise.all([
     readFile(contentScriptUrl, 'utf8'),
