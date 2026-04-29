@@ -145,7 +145,10 @@ menor que o timeout do Gemini CLI. O arquivo
 `hook-browser-launch.json` funciona como trava: duas chamadas rápidas não
 devem abrir duas abas. Não há fallback por `cmd.exe /c start`; spawn direto que
 pode focar janela só é permitido com
-`GEMINI_MCP_HOOK_ALLOW_FOCUSING_FALLBACK=true`.
+`GEMINI_MCP_HOOK_ALLOW_FOCUSING_FALLBACK=true`. Quando o hook realmente abre,
+espera, pula por bridge morto ou encontra timeout, ele emite uma mensagem curta
+no JSON (`systemMessage`) para aparecer no terminal; quando já existe aba
+conectada, ele fica silencioso para não poluir chamadas normais.
 
 Use `GEMINI_MCP_BROWSER=edge` ou `chrome`/`brave`/`dia` para fixar o navegador.
 O argumento `--profile-directory` só é enviado quando

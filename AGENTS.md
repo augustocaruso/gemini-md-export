@@ -313,7 +313,10 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   expirado, ela não abre segunda aba e só aguarda a conexão. Não reintroduzir
   `cmd.exe /c start`, WSH, `where` síncrono ou fallback que foque janela. Spawn
   direto do browser só é permitido quando
-  `GEMINI_MCP_HOOK_ALLOW_FOCUSING_FALLBACK=true`.
+  `GEMINI_MCP_HOOK_ALLOW_FOCUSING_FALLBACK=true`. O hook deve emitir
+  `systemMessage` em JSON quando houver ação ou problema útil ao usuário
+  (launch, espera reaproveitada, bridge morto, timeout ou falha), e ficar
+  silencioso quando já houver aba conectada.
   O hook em si não deve fazer leitura síncrona de stdin nem `import()` dinâmico.
   `SessionStart` não deve ler stdin. Before/AfterTool leem stdin de forma
   assíncrona, tentam parsear assim que o JSON chega e falham aberto por timeout

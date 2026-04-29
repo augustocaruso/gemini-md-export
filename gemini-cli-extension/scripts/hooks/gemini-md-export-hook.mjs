@@ -271,6 +271,41 @@ const currentConnectPollMs = () =>
 const buildLaunchId = () =>
   `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
+const secondsText = (ms) => {
+  const seconds = Math.max(0, Math.round(Number(ms || 0) / 100) / 10);
+  if (seconds === 1) return '1s';
+  return `${seconds}s`;
+};
+
+const bridgeReasonText = (status) => {
+  if (!status) return 'sem detalhe';
+  if (status.reason) return status.reason;
+  if (status.statusCode) return `HTTP ${status.statusCode}`;
+  return 'sem detalhe';
+};
+
+const browserNameFromLaunch = (launch) =>
+  launch?.browserName || launch?.plan?.browserName || launch?.browserKey || 'navegador';
+
+const manualBrowserRecoveryMessage =
+  'Abra o Gemini no navegador/perfil correto e confirme que a extensao unpacked esta ativa em chrome://extensions ou edge://extensions.';
+
+const systemMessageForConnectWait = (connectWait, launch, { reusedLaunch = false } = {}) => {
+  const browserName = browserNameFromLaunch(launch);
+  if (connectWait?.connected) {
+    if (reusedLaunch) {
+      return `Gemini Exporter: outra chamada ja estava acordando o navegador; a aba Gemini conectou em ${secondsText(connectWait.waitedMs)}.`;
+    }
+    return `Gemini Exporter: abri ${browserName} e a aba Gemini conectou em ${secondsText(connectWait.waitedMs)}.`;
+  }
+
+  const waitedMs = connectWait?.timeoutMs ?? connectWait?.waitedMs ?? currentConnectTimeoutMs();
+  if (reusedLaunch) {
+    return `Gemini Exporter: outra chamada ja tentou abrir o navegador, mas a extensao nao conectou em ${secondsText(waitedMs)}. ${manualBrowserRecoveryMessage}`;
+  }
+  return `Gemini Exporter: abri ${browserName}, mas a extensao nao conectou em ${secondsText(waitedMs)}. ${manualBrowserRecoveryMessage}`;
+};
+
 const buildWindowsRestoreFocusLaunchScript = (
   command,
   args = [],
@@ -595,7 +630,7 @@ const prelaunchBrowserDetached = async (input) => {
       sessionId,
       connectWait,
     });
-    return;
+    return systemMessageForConnectWait(connectWait, previousState.launch, { reusedLaunch: true });
   }
 
   if (shouldSkipBrowserLaunchForCooldown(previousState, now)) {
@@ -608,6 +643,9 @@ const prelaunchBrowserDetached = async (input) => {
       lastAttemptAt: previousState?.lastAttemptAt || null,
       cooldownMs: currentLaunchCooldownMs(),
     });
+    if (['failed', 'timeout', 'skipped'].includes(String(previousState?.status || ''))) {
+      return `Gemini Exporter: uma tentativa recente ainda esta em cooldown (${secondsText(currentLaunchCooldownMs())}); nao abri outra aba para evitar duplicatas. Ultimo estado: ${previousState.status}. ${manualBrowserRecoveryMessage}`;
+    }
     return;
   }
   recordStageDuration('cooldownLock', lockStartedAt);
@@ -641,7 +679,7 @@ const prelaunchBrowserDetached = async (input) => {
       sessionId,
       bridgeStatus,
     });
-    return;
+    return `Gemini Exporter: o bridge MCP local nao respondeu (${bridgeReasonText(bridgeStatus)}); nao abri o navegador as cegas. Reinicie o Gemini CLI ou rode gemini_browser_status de novo depois que o MCP subir.`;
   }
 
   const launch = buildWindowsBrowserStartCommand();
@@ -710,7 +748,7 @@ const prelaunchBrowserDetached = async (input) => {
 
   if (isEnabled(process.env.GEMINI_MCP_HOOK_DRY_RUN)) {
     writeHookState({ ...state, status: 'dry-run', dryRun: true, updatedAt: new Date().toISOString() });
-    return;
+    return `Gemini Exporter: dry-run do hook montou o launch de ${launch.browserName} sem abrir o navegador.`;
   }
 
   if (!launch.args) {
@@ -723,7 +761,7 @@ const prelaunchBrowserDetached = async (input) => {
         'PowerShell launcher unavailable and focusing fallback is disabled.',
       updatedAt: new Date().toISOString(),
     });
-    return;
+    return `Gemini Exporter: nao consegui montar o launcher do navegador pelo hook (${launch.restoreFocusScriptError || 'PowerShell indisponivel'}). ${manualBrowserRecoveryMessage}`;
   }
 
   const direct = await withStageTiming('launch', () =>
@@ -741,7 +779,7 @@ const prelaunchBrowserDetached = async (input) => {
       connectWait,
       updatedAt: new Date().toISOString(),
     });
-    return;
+    return systemMessageForConnectWait(connectWait, launch);
   }
 
   let directBrowser = null;
@@ -767,7 +805,10 @@ const prelaunchBrowserDetached = async (input) => {
         connectWait,
         updatedAt: new Date().toISOString(),
       });
-      return;
+      return systemMessageForConnectWait(connectWait, {
+        ...launch,
+        browserName: `${launch.browserName} via fallback opt-in`,
+      });
     }
   }
 
@@ -795,6 +836,7 @@ const prelaunchBrowserDetached = async (input) => {
       error: err.message,
     });
   }
+  return `Gemini Exporter: nao consegui abrir o navegador pelo hook (${nextState.error}). ${manualBrowserRecoveryMessage}`;
 };
 
 const parseHookInput = (raw) => {
@@ -909,7 +951,11 @@ const writeJson = (payload) => {
   process.stdout.write(`${JSON.stringify(payload)}\n`);
 };
 
-const silent = () => ({ suppressOutput: true });
+const silent = (systemMessage = '') => {
+  const output = { suppressOutput: true };
+  if (systemMessage) output.systemMessage = systemMessage;
+  return output;
+};
 
 const contextOutput = (additionalContext) => ({
   suppressOutput: true,
@@ -1152,8 +1198,8 @@ const beforeTool = async (input) => {
   });
   const reason = forbiddenReason(input);
   if (!reason) {
-    await prelaunchBrowserDetached(input);
-    return silent();
+    const systemMessage = await prelaunchBrowserDetached(input);
+    return silent(systemMessage);
   }
   return {
     suppressOutput: true,

@@ -62,7 +62,10 @@ Operational guidance:
   If that immediate launch fails, direct browser spawn is allowed only when
   `GEMINI_MCP_HOOK_ALLOW_FOCUSING_FALLBACK=true`; do not reintroduce
   `cmd.exe /c start`, WSH, synchronous `where`, or a fallback that focuses the
-  browser by default.
+  browser by default. Emit concise user-facing status through the hook JSON
+  `systemMessage` when the hook launches, waits on an existing launch, skips
+  because the bridge is unreachable, times out, or fails. Stay silent when a
+  Gemini tab is already connected.
   After launching, the hook waits for `/agent/clients` to report a connected
   Gemini tab before it returns, up to `GEMINI_MCP_HOOK_CONNECT_TIMEOUT_MS`
   (default 12000ms). The hook and MCP share `hook-browser-launch.json`, so a

@@ -292,6 +292,8 @@ test('BeforeTool abre Gemini pelo launcher PowerShell quando nao ha cliente cone
 
     assert.equal(output.suppressOutput, true);
     assert.equal(output.decision, undefined);
+    assert.match(output.systemMessage, /dry-run do hook/);
+    assert.match(output.systemMessage, /Chrome/);
     assert.equal(state.status, 'dry-run');
     assert.equal(state.dryRun, true);
     assert.equal(state.launch.plan.method, 'windows-powershell-minimized-restore-focus');
@@ -344,6 +346,8 @@ test('BeforeTool espera a aba Gemini conectar depois de abrir pelo hook', async 
 
     assert.equal(output.suppressOutput, true);
     assert.equal(output.decision, undefined);
+    assert.match(output.systemMessage, /aba Gemini conectou/);
+    assert.match(output.systemMessage, /fallback opt-in/);
     assert.equal(state.status, 'connected');
     assert.equal(state.launch.fallbackPlan.method, 'windows-direct-spawn');
     assert.equal(state.launch.fallbackPlan.command, '/usr/bin/true');
@@ -399,6 +403,8 @@ test('BeforeTool nao abre segunda aba durante launch em progresso', async () => 
     const state = JSON.parse(readFileSync(resolve(tmpRoot, 'hook-browser-launch.json'), 'utf-8'));
 
     assert.equal(output.suppressOutput, true);
+    assert.match(output.systemMessage, /outra chamada ja estava acordando/);
+    assert.match(output.systemMessage, /conectou/);
     assert.equal(state.launchId, 'existing-launch');
     assert.equal(state.status, 'connected');
     assert.equal(state.connectWait.connected, true);
@@ -432,6 +438,8 @@ test('BeforeTool nao abre browser as cegas quando bridge esta inalcançavel', as
     const state = JSON.parse(readFileSync(resolve(tmpRoot, 'hook-browser-launch.json'), 'utf-8'));
 
     assert.equal(output.suppressOutput, true);
+    assert.match(output.systemMessage, /bridge MCP local nao respondeu/);
+    assert.match(output.systemMessage, /nao abri o navegador as cegas/);
     assert.equal(state.status, 'skipped');
     assert.equal(state.reason, 'bridge-unreachable');
     assert.equal(state.launch, undefined);
@@ -472,6 +480,8 @@ test('BeforeTool timeout de conexao sai antes do hard exit da CLI', async () => 
     const state = JSON.parse(readFileSync(resolve(tmpRoot, 'hook-browser-launch.json'), 'utf-8'));
 
     assert.equal(output.suppressOutput, true);
+    assert.match(output.systemMessage, /extensao nao conectou/);
+    assert.match(output.systemMessage, /chrome:\/\/extensions/);
     assert.equal(elapsedMs < 1500, true);
     assert.equal(state.status, 'timeout');
     assert.equal(state.connectWait.connected, false);
@@ -509,6 +519,7 @@ test('BeforeTool nao abre nova aba quando Gemini ja esta conectado', async () =>
 
     assert.equal(output.suppressOutput, true);
     assert.equal(output.decision, undefined);
+    assert.equal(output.systemMessage, undefined);
     assert.equal(existsSync(resolve(tmpRoot, 'hook-browser-launch.json')), false);
   } finally {
     await closeServer(server);
