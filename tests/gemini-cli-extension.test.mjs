@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -14,6 +16,7 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   const serverPath = resolve(extensionDir, 'src', 'mcp-server.js');
   const guardPath = resolve(extensionDir, 'src', 'chrome-extension-guard.mjs');
   const browserLaunchPath = resolve(extensionDir, 'src', 'browser-launch.mjs');
+  const jobProgressBroadcastPath = resolve(extensionDir, 'src', 'job-progress-broadcast.mjs');
   const bridgeVersionPath = resolve(extensionDir, 'bridge-version.json');
   const browserManifestPath = resolve(extensionDir, 'browser-extension', 'manifest.json');
   const hooksConfigPath = resolve(extensionDir, 'hooks', 'hooks.json');
@@ -32,6 +35,7 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.equal(existsSync(serverPath), true);
   assert.equal(existsSync(guardPath), true);
   assert.equal(existsSync(browserLaunchPath), true);
+  assert.equal(existsSync(jobProgressBroadcastPath), true);
   assert.equal(existsSync(bridgeVersionPath), true);
   assert.equal(existsSync(browserManifestPath), true);
   assert.equal(existsSync(hooksConfigPath), true);
@@ -77,12 +81,16 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.match(repairAgent, /You cannot call another Gemini CLI subagent yourself/);
   assert.match(repairAgent, /ask the parent agent to call the appropriate/);
   assert.match(repairAgent, /wikiCandidate/);
+  assert.match(repairAgent, /deduplicated union of every/);
+  assert.match(repairAgent, /wikiFooterMissingSourceLinks/);
+  assert.match(repairAgent, /requiredFinalGeminiSourceLinks/);
 
   const repairCommand = readFileSync(repairCommandPath, 'utf-8');
   assert.match(repairCommand, /gemini-vault-repair/);
   assert.match(repairCommand, /vault-repair-audit\.mjs/);
   assert.match(repairCommand, /relatorio preliminar/);
   assert.match(repairCommand, /nao deve chamar outro subagent/);
+  assert.match(repairCommand, /uniao\s+deduplicada/);
 
   const browserManifest = JSON.parse(readFileSync(browserManifestPath, 'utf-8'));
   const bridgeVersion = JSON.parse(readFileSync(bridgeVersionPath, 'utf-8'));
@@ -91,4 +99,56 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.ok(browserManifest.permissions.includes('storage'));
   assert.equal(browserManifest.version, bridgeVersion.extensionVersion);
   assert.equal(typeof bridgeVersion.protocolVersion, 'number');
+});
+
+test('auditor coleta todos os links Gemini de origem em nota wiki consolidada', () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'gemini-md-export-wiki-'));
+  try {
+    const wikiDir = resolve(root, 'Wiki_Medicina');
+    mkdirSync(wikiDir, { recursive: true });
+    const wikiPath = resolve(wikiDir, 'ISRS.md');
+    writeFileSync(
+      wikiPath,
+      [
+        '---',
+        'title: "ISRS"',
+        'aliases: ["ISRS"]',
+        'tags: [psiquiatria]',
+        '---',
+        '',
+        '# ISRS',
+        '',
+        'Nota consolidada a partir de [[Farmacologia]] e conversas de estudo.',
+        '',
+        '## Fontes Gemini',
+        '',
+        '- https://gemini.google.com/app/b8e7c075effe9457',
+        '- [Efeitos adversos](https://gemini.google.com/app/c8e7c075effe9458)',
+        '',
+      ].join('\n'),
+      'utf-8',
+    );
+
+    const scriptPath = resolve(ROOT, 'gemini-cli-extension', 'scripts', 'vault-repair-audit.mjs');
+    const output = execFileSync(process.execPath, [scriptPath, '--include-notes', root], {
+      encoding: 'utf-8',
+    });
+    const report = JSON.parse(output);
+    const note = report.notes.find((item) => item.relativePath === 'Wiki_Medicina/ISRS.md');
+
+    assert.ok(note, 'nota wiki com links Gemini no corpo deve entrar no relatorio');
+    assert.equal(note.wikiCandidate, true);
+    assert.deepEqual(note.sourceChatIds, [
+      'b8e7c075effe9457',
+      'c8e7c075effe9458',
+    ]);
+    assert.deepEqual(note.geminiSourceLinks, [
+      'https://gemini.google.com/app/b8e7c075effe9457',
+      'https://gemini.google.com/app/c8e7c075effe9458',
+    ]);
+    assert.deepEqual(note.wikiFooterGeminiSourceLinks, note.geminiSourceLinks);
+    assert.deepEqual(note.wikiFooterMissingSourceLinks, []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

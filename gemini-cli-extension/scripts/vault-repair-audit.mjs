@@ -90,6 +90,50 @@ const chatIdFromValue = (value) => {
   return bare?.[1] || '';
 };
 
+const GEMINI_APP_LINK_RE = /https:\/\/gemini\.google\.com\/app\/([a-f0-9]{12,})/gi;
+const GEMINI_PREFIXED_CHAT_RE = /\bc_([a-f0-9]{12,})\b/gi;
+
+const canonicalGeminiLink = (chatId) =>
+  `https://gemini.google.com/app/${String(chatId || '').toLowerCase()}`;
+
+const collectGeminiSourceLinks = (...values) => {
+  const byChatId = new Map();
+  const add = (chatId, source) => {
+    const normalized = String(chatId || '').toLowerCase();
+    if (!/^[a-f0-9]{12,}$/.test(normalized) || byChatId.has(normalized)) return;
+    byChatId.set(normalized, {
+      chatId: normalized,
+      url: canonicalGeminiLink(normalized),
+      source,
+    });
+  };
+
+  for (const { value, source = 'unknown', allowBare = false } of values.filter(Boolean)) {
+    const text = String(value || '');
+    for (const match of text.matchAll(GEMINI_APP_LINK_RE)) add(match[1], source);
+    for (const match of text.matchAll(GEMINI_PREFIXED_CHAT_RE)) add(match[1], source);
+    if (allowBare) add(chatIdFromValue(text), source);
+  }
+
+  return Array.from(byChatId.values());
+};
+
+const finalSourceSection = (body) => {
+  const text = String(body || '');
+  const sourceHeadingRe =
+    /^#{1,6}\s+.*(?:Gemini|Fonte|Fontes|Refer[eê]ncias|Origem|Origens|Inspira|Chats?).*$/gim;
+  let lastSourceHeading = -1;
+  for (const match of text.matchAll(sourceHeadingRe)) {
+    lastSourceHeading = match.index;
+  }
+
+  if (lastSourceHeading >= 0 && lastSourceHeading >= text.length * 0.45) {
+    return text.slice(lastSourceHeading);
+  }
+
+  return text.slice(Math.max(0, text.length - 4000));
+};
+
 const tagsBeyondGeminiExport = (frontmatter) => {
   const match = frontmatter.match(/^tags:\s*(.+)$/im);
   if (!match) return [];
@@ -148,11 +192,27 @@ const analyzeFile = (filePath) => {
   const frontmatterChatId = chatIdFromValue(fields.chat_id);
   const urlChatId = chatIdFromValue(fields.url);
   const chatId = frontmatterChatId || urlChatId || filenameChatId;
+  const sourceLinks = collectGeminiSourceLinks(
+    { value: fields.chat_id, source: 'frontmatter.chat_id', allowBare: true },
+    { value: fields.url, source: 'frontmatter.url' },
+    { value: basename(filePath, '.md'), source: 'filename', allowBare: true },
+    { value: frontmatter, source: 'frontmatter' },
+    { value: body, source: 'body' },
+  );
+  const footerSourceLinks = collectGeminiSourceLinks({
+    value: finalSourceSection(body),
+    source: 'footer',
+  });
+  const footerSourceUrlSet = new Set(footerSourceLinks.map((link) => link.url));
+  const wikiFooterMissingSourceLinks = sourceLinks
+    .map((link) => link.url)
+    .filter((url) => !footerSourceUrlSet.has(url));
   const source = fields.source || '';
   const looksLikeGeminiExport =
     source === 'gemini-web' ||
     !!frontmatterChatId ||
     /gemini\.google\.com\/app\//i.test(frontmatter) ||
+    /gemini\.google\.com\/app\//i.test(body) ||
     /(^|\n)##\s+(?:🧑\s*)?(?:Usuário|Usuario)\b/i.test(body);
 
   if (!looksLikeGeminiExport) return null;
@@ -169,6 +229,9 @@ const analyzeFile = (filePath) => {
   if (frontmatterChatId && urlChatId && frontmatterChatId !== urlChatId) {
     reasons.push('url_chat_id_mismatch');
   }
+  if (wikiSignals.length > 0 && wikiFooterMissingSourceLinks.length > 0) {
+    reasons.push('wiki_footer_missing_gemini_source_links');
+  }
   if (turnCount === 0) reasons.push('no_gemini_turns');
   if (normalizedBody.length === 0) reasons.push('empty_body');
 
@@ -181,6 +244,11 @@ const analyzeFile = (filePath) => {
     frontmatterChatId,
     urlChatId,
     source,
+    sourceChatIds: sourceLinks.map((link) => link.chatId),
+    geminiSourceLinks: sourceLinks.map((link) => link.url),
+    geminiSourceLinkDetails: sourceLinks,
+    wikiFooterGeminiSourceLinks: footerSourceLinks.map((link) => link.url),
+    wikiFooterMissingSourceLinks,
     turnCount,
     bytes: Buffer.byteLength(raw, 'utf-8'),
     bodyBytes: Buffer.byteLength(body, 'utf-8'),

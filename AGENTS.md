@@ -256,6 +256,19 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   de meio-caminho. **Não remova o creep** sem repensar o feedback de
   hidratação: o usuário fica olhando 30s+ pra uma barra que aparenta
   congelada, e isso já gerou ticket.
+  (11) **Progress dock também aparece para exports do MCP**: quando a
+  exportação é disparada pelo `gemini_export_recent_chats` ou
+  `gemini_export_notebook` (em vez do botão local), o MCP serializa o estado
+  do job no campo `jobProgress` do response do `/bridge/heartbeat`. O content
+  script consome esse snapshot em cada heartbeat (8s) e reaproveita o mesmo
+  dock visual, marcando `state.exportSource = 'mcp'`. Status terminais
+  (`completed`, `completed_with_errors`, `failed`, `cancelled`) ficam
+  disponíveis por até `TERMINAL_JOB_PROGRESS_TTL_MS` (30s) para garantir que
+  a aba veja o "done" mesmo se um heartbeat falhar. Se o usuário acionar o
+  export local enquanto o MCP estiver rodando, a GUI vence (`state.exportSource = 'gui'`)
+  e o broadcast do MCP fica suprimido até a GUI terminar. A lógica pura do
+  snapshot vive em `src/job-progress-broadcast.mjs` com testes em
+  `tests/job-progress-broadcast.test.mjs`.
 - `src/extension-background.js` — service worker MV3. Além de responder ao
   ping do content script, usa a API `chrome.tabs` para recarregar abas
   `https://gemini.google.com/*` quando a extensão é instalada/recarregada e
@@ -427,9 +440,12 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   deliberada. Esse subagent deve usar modelo Flash e emitir relatório
   preliminar e final; se precisar reescrever uma wiki, ele pede ao agente
   principal para chamar o subagent escritor/arquitetura de notas com o case file
-  e o raw corrigido. O build deve copiar `agents/`, `commands/` e `scripts/`
-  para `dist/gemini-cli-extension/`; subagents não entram em
-  `gemini-extension.json`.
+  e o raw corrigido. Toda wiki regenerada, reescrita ou consolidada deve
+  terminar com uma seção de fontes Gemini contendo a união deduplicada de todos
+  os links `https://gemini.google.com/app/<chatId>` que inspiraram a nota; nunca
+  substituir uma lista multi-chat por só o último chat. O build deve copiar
+  `agents/`, `commands/` e `scripts/` para `dist/gemini-cli-extension/`;
+  subagents não entram em `gemini-extension.json`.
   Downloads resolvem uma conversa por `index` 1-based,
   `chatId` ou, em cadernos, `title`; pedem o Markdown à extensão e gravam
   localmente no diretório padrão configurado, sobrescrevendo arquivos

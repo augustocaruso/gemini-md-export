@@ -267,6 +267,10 @@ cpSync(
   resolve(ROOT, 'src', 'mcp-server-errors.mjs'),
   resolve(geminiCliExtensionDir, 'src', 'mcp-server-errors.mjs'),
 );
+cpSync(
+  resolve(ROOT, 'src', 'job-progress-broadcast.mjs'),
+  resolve(geminiCliExtensionDir, 'src', 'job-progress-broadcast.mjs'),
+);
 
 console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'gemini-extension.json')}`);
 console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'GEMINI.md')}`);

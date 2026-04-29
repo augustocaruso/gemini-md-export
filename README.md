@@ -297,6 +297,10 @@ sobrescritas automaticamente. O subagent de reparo usa modelo Flash e atua como
 verificador operacional: emite relatório preliminar e final; se uma wiki precisa
 ser reescrita, ele pede ao agente principal para chamar o subagent escritor de
 notas com o case file e o raw corrigido.
+Ao regenerar ou consolidar notas wiki, a nota final deve preservar a
+proveniência no rodapé: uma seção de fontes Gemini com a união deduplicada de
+todos os links `https://gemini.google.com/app/<chatId>` que inspiraram aquela
+nota, sem trocar uma lista de múltiplos chats por apenas o último link.
 
 Endpoints locais úteis para diagnóstico quando as tools ainda não carregaram:
 

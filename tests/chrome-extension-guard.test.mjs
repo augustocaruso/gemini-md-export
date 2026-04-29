@@ -201,6 +201,7 @@ test('depois do reload prefere cliente atualizado a heartbeat antigo da mesma ab
         reloaded = true;
         return { ok: true, reloading: true };
       },
+      sleep: async () => {},
     }),
   );
 
@@ -243,6 +244,7 @@ test('depois do reload continua aguardando quando só heartbeat antigo voltou', 
         reloaded = true;
         return { ok: true, reloading: true };
       },
+      sleep: async () => {},
     }),
   );
 

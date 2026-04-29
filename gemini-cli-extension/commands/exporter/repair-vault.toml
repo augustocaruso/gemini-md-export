@@ -19,6 +19,10 @@ Contrato:
   o subagent deve reexportar o raw correto, preservar/backupear a wiki atual e
   criar um caso em `wiki-review/<chatId>.json` marcando
   `wiki_repair_required`, em vez de fingir que o raw corrigido resolve a wiki.
+- Quando uma wiki for regenerada, reescrita ou consolidada com outras notas, a
+  nota final deve terminar com uma secao de fontes Gemini contendo a uniao
+  deduplicada de todos os links `https://gemini.google.com/app/<chatId>` que
+  inspiraram a nota. Nunca trocar uma lista multi-chat por apenas o ultimo link.
 - O subagent deve emitir um relatorio preliminar depois da auditoria e antes de
   qualquer overwrite, e um relatorio final depois da verificacao/reparo.
 - O subagent nao deve chamar outro subagent. Se uma wiki precisar ser reescrita,

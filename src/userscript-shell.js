@@ -378,8 +378,11 @@
     bridgeSaveFallbackNotified: false,
     browserDownloadFallbackNotified: false,
     isExporting: false,
+    exportSource: null, // 'gui' | 'mcp' | null
     progress: null,
     progressCreepTimer: null,
+    mcpProgressActive: false,
+    mcpProgressJobId: null,
     isLoadingMore: false,
     loadMoreFailures: 0,
     filterQuery: '',
@@ -3953,6 +3956,7 @@
 
   const beginExportProgress = async ({ total, label }) => {
     state.isExporting = true;
+    state.exportSource = 'gui';
     state.browserDownloadFallbackNotified = false;
     state.progress = {
       total,
@@ -3991,8 +3995,99 @@
     if (barEl) barEl.style.width = '100%';
     if (remaining > 0) await sleep(remaining);
     state.isExporting = false;
+    state.exportSource = null;
     state.progress = null;
     updateProgressDock();
+  };
+
+  // --- MCP-driven progress -----------------------------------------------
+  // Quando o MCP está exportando conversas pelo bridge, ele envia o
+  // jobProgress no payload do /bridge/heartbeat. A aba do Gemini reaproveita
+  // o mesmo dock visual usado pelo botão "Exportar selecionadas". Se o
+  // usuário disparou export pela GUI, o GUI tem prioridade e o MCP é ignorado
+  // até a GUI terminar.
+  const TERMINAL_MCP_STATUSES = new Set([
+    'completed',
+    'completed_with_errors',
+    'failed',
+    'cancelled',
+  ]);
+
+  const beginMcpProgress = (jobProgress) => {
+    state.mcpProgressActive = true;
+    state.mcpProgressJobId = jobProgress.jobId || null;
+    state.isExporting = true;
+    state.exportSource = 'mcp';
+    state.progress = {
+      total: Math.max(jobProgress.total || 1, 1),
+      current: jobProgress.current || 0,
+      label: jobProgress.label || 'MCP exportando conversas...',
+      errorCount: jobProgress.errorCount || 0,
+      startedAt: Date.now(),
+      displayPercent: 0,
+    };
+    updateProgressDock();
+    startProgressCreep();
+  };
+
+  const handleMcpJobProgressBroadcast = (jobProgress) => {
+    if (state.exportSource === 'gui') {
+      // Export iniciado pelo botão local tem prioridade visual.
+      return;
+    }
+
+    if (!jobProgress) {
+      // Sem broadcast no heartbeat: se a sessão MCP ainda estava ativa,
+      // limpamos o dock — ou foi finalizada com terminal, ou o MCP
+      // simplesmente não está mais reportando.
+      if (state.mcpProgressActive) {
+        state.mcpProgressActive = false;
+        state.mcpProgressJobId = null;
+        if (state.exportSource === 'mcp') {
+          stopProgressCreep();
+          state.isExporting = false;
+          state.exportSource = null;
+          state.progress = null;
+          updateProgressDock();
+        }
+      }
+      return;
+    }
+
+    if (jobProgress.source && jobProgress.source !== 'mcp') return;
+
+    if (!state.mcpProgressActive) {
+      beginMcpProgress(jobProgress);
+    } else {
+      if (jobProgress.jobId && jobProgress.jobId !== state.mcpProgressJobId) {
+        // Novo job começou — reinicia o dock para refletir totais novos.
+        state.mcpProgressJobId = jobProgress.jobId;
+        state.progress = {
+          total: Math.max(jobProgress.total || 1, 1),
+          current: jobProgress.current || 0,
+          label: jobProgress.label || 'MCP exportando conversas...',
+          errorCount: jobProgress.errorCount || 0,
+          startedAt: Date.now(),
+          displayPercent: 0,
+        };
+      } else {
+        updateExportProgress({
+          total: Math.max(jobProgress.total || state.progress?.total || 1, 1),
+          current: jobProgress.current ?? state.progress?.current ?? 0,
+          label: jobProgress.label || state.progress?.label || 'MCP exportando...',
+          errorCount: jobProgress.errorCount ?? state.progress?.errorCount ?? 0,
+        });
+      }
+      updateProgressDock();
+    }
+
+    if (jobProgress.status && TERMINAL_MCP_STATUSES.has(jobProgress.status)) {
+      // Terminal: anima 100% + shimmer off + fade-out, mantendo a sensação
+      // de "concluído" antes de esconder.
+      state.mcpProgressActive = false;
+      state.mcpProgressJobId = null;
+      void finishExportProgress();
+    }
   };
 
   const runBatchExport = async (
@@ -4955,6 +5050,11 @@
     bridgeState.lastHeartbeatAt = Date.now();
     if (response?.clientId && !bridgeState.clientId) {
       bridgeState.clientId = response.clientId;
+    }
+    try {
+      handleMcpJobProgressBroadcast(response?.jobProgress || null);
+    } catch (err) {
+      warn('Falha ao processar jobProgress do bridge.', err);
     }
     if (response?.command) {
       await handleBridgeCommand(response.command);

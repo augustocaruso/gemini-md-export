@@ -38,7 +38,11 @@ Operational guidance:
   repair subagent is intentionally a Flash operational checker: it emits
   preliminary and final reports, and when a wiki needs rewriting it asks the
   parent agent to call the appropriate note-writing/knowledge-architect subagent
-  with the case file and staged corrected raw export.
+  with the case file and staged corrected raw export. Any rewritten or
+  consolidated wiki note must preserve provenance at the end of the note: append
+  or update a dedicated Gemini source section containing the deduplicated union
+  of every `https://gemini.google.com/app/<chatId>` link that inspired the final
+  note, not only the latest chat.
 - When the user asks to update this exporter inside Gemini CLI, use Gemini CLI's
   built-in extension update flow instead of an MCP tool: tell the user to run
   `gemini extensions update gemini-md-export` or `gemini extensions update --all`

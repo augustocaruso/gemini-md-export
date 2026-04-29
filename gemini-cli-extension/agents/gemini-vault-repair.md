@@ -37,6 +37,11 @@ Data integrity outranks speed:
   But do not ignore it: if a contaminated chat fed a wiki note, that wiki note
   is also part of the repair scope and must be queued for a deliberate
   reprocess/merge decision.
+- When any wiki note is regenerated, rewritten, or consolidated from one or
+  more Gemini chats, preserve provenance: the final wiki note must end with a
+  dedicated Gemini source section listing the deduplicated union of every
+  `https://gemini.google.com/app/<chatId>` link that inspired it. Never replace
+  a multi-chat source list with only the most recent chat.
 - Never paste full note contents into chat; report paths, chatIds, counts,
   statuses, and concise reasons.
 - Prefer a staging directory and backups over direct writes.
@@ -89,6 +94,8 @@ The scanner returns JSON with:
 - filename/frontmatter/URL mismatches;
 - notes without Gemini turn structure;
 - `wikiCandidate` and `wikiSignals`.
+- Gemini source provenance fields: `sourceChatIds`, `geminiSourceLinks`,
+  `wikiFooterGeminiSourceLinks`, and `wikiFooterMissingSourceLinks`.
 
 Use the scanner output as the first-pass source of truth, then verify by direct
 Gemini link/re-export. Do not manually scan hundreds of full files in chat.
@@ -198,6 +205,9 @@ The case file must include:
 
 - wiki note path;
 - source `chatId`;
+- all Gemini source chat IDs and links already present in the wiki note;
+- the required final wiki footer links, including the union of existing wiki
+  links plus any staged corrected raw-export link;
 - staged raw re-export path;
 - wiki signals;
 - mismatch/suspicion reasons;
@@ -209,7 +219,9 @@ Recommended next action:
 - If the project has a Medical Notes Workbench/knowledge-note pipeline
   available, ask the parent agent to call the appropriate writer/architect
   subagent to reprocess the corrected raw export, then compare/merge with the
-  existing wiki note.
+  existing wiki note. The parent/writer must preserve or recreate the final
+  Gemini source footer with the union of all source links, especially when
+  multiple wiki notes or raw exports are consolidated into one note.
 - If no such pipeline is available, ask the user whether to manually rewrite,
   merge, or quarantine the wiki note.
 
@@ -240,6 +252,10 @@ regenerated from the corrected source.
      staging for later manual comparison, back up the wiki note, create a
      `wiki-review/<chatId>.json` case file, and mark status
      `wiki_repair_required`.
+     The case file must carry `geminiSourceLinks`,
+     `wikiFooterGeminiSourceLinks`, `wikiFooterMissingSourceLinks`, and
+     `requiredFinalGeminiSourceLinks` so later rewrite/consolidation steps can
+     append every source chat link at the end of the final wiki note.
    - If it is a raw export, call
      `mcp_gemini-md-export_gemini_download_chat` with:
      - `chatId`;
@@ -282,7 +298,10 @@ regenerated from the corrected source.
    - final report path;
    - next action for wiki candidates, including "parent should call
      <writer-subagent> with <case-file> and <staged-raw-export>" when a rewrite
-     is needed.
+     is needed;
+   - confirmation that regenerated or consolidated wiki notes must finish with
+     the complete Gemini source-link footer, not a single overwritten source
+     link.
 
 ## Hard Stops
 

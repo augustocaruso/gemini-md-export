@@ -24,6 +24,11 @@ import {
   readBrowserLaunchState,
   writeBrowserLaunchState,
 } from './browser-launch.mjs';
+import {
+  buildJobProgressBroadcast,
+  setClientJobProgress,
+  TERMINAL_JOB_STATUSES,
+} from './job-progress-broadcast.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
@@ -1715,6 +1720,51 @@ const persistRecentChatsExportReport = (job, client, successes, failures) => {
   overwriteExportReport(job.reportFile, buildRecentChatsExportReport(job, client, successes, failures));
 };
 
+const broadcastRecentChatsJobProgress = (job, client, patch = {}) => {
+  if (!client) return;
+  const total = patch.total ?? Math.max(job.requested || 0, job.completed || 0, 1);
+  const current = patch.current ?? job.completed ?? 0;
+  const errorCount = patch.errorCount ?? job.failureCount ?? 0;
+  const status = patch.status ?? job.status ?? 'running';
+  const phase = patch.phase ?? job.phase ?? null;
+  let label = patch.label;
+  if (!label) {
+    if (status === 'cancelled') {
+      label = 'Exportação cancelada.';
+    } else if (status === 'completed') {
+      label = 'Exportação concluída.';
+    } else if (status === 'completed_with_errors') {
+      label = `Exportação concluída com ${errorCount} erro${errorCount === 1 ? '' : 's'}.`;
+    } else if (status === 'failed') {
+      label = 'Exportação falhou.';
+    } else if (phase === 'loading-history') {
+      label = 'MCP carregando histórico do sidebar...';
+    } else if (phase === 'exporting' && job.current?.title) {
+      const indexLabel = job.current.index ? ` (${job.current.index})` : '';
+      label = `MCP exportando${indexLabel}: ${job.current.title}`;
+    } else if (phase === 'exporting') {
+      label = 'MCP exportando conversas...';
+    } else if (phase === 'writing-report') {
+      label = 'MCP gravando relatório...';
+    } else {
+      label = 'MCP preparando exportação...';
+    }
+  }
+  setClientJobProgress(client, {
+    source: 'mcp',
+    kind: 'recent-chats-export',
+    jobId: job.jobId,
+    status,
+    phase,
+    total,
+    current,
+    errorCount,
+    label,
+    title: job.current?.title || null,
+    chatId: job.current?.chatId || null,
+  });
+};
+
 const runRecentChatsExportJob = async (job, client, args = {}) => {
   const successes = [];
   const failures = [];
@@ -1722,6 +1772,7 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
     job.phase = 'loading-history';
     touchExportJob(job);
     persistRecentChatsExportReport(job, client, successes, failures);
+    broadcastRecentChatsJobProgress(job, client);
 
     if (job.exportAll) {
       const refreshPlan = buildRecentChatsRefreshPlan(client, args, {
@@ -1785,6 +1836,7 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
     job.phase = 'exporting';
     touchExportJob(job);
     persistRecentChatsExportReport(job, client, successes, failures);
+    broadcastRecentChatsJobProgress(job, client);
 
     for (let i = 0; i < selected.length; i += 1) {
       if (job.cancelRequested) {
@@ -1801,6 +1853,7 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
         chatId: conversation.chatId || conversation.id || null,
       };
       touchExportJob(job);
+      broadcastRecentChatsJobProgress(job, client);
 
       try {
         const result = await downloadConversationItemForClient(client, conversation, {
@@ -1839,12 +1892,14 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
         job.completed = i + 1;
         touchExportJob(job);
         persistRecentChatsExportReport(job, client, successes, failures);
+        broadcastRecentChatsJobProgress(job, client);
       }
     }
 
     if (!job.cancelRequested) {
       job.phase = 'writing-report';
       touchExportJob(job);
+      broadcastRecentChatsJobProgress(job, client);
       job.status = failures.length > 0 ? 'completed_with_errors' : 'completed';
       job.phase = 'done';
     }
@@ -1866,6 +1921,7 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
     } catch {
       // Status em memória permanece disponível mesmo se o relatório final falhar.
     }
+    broadcastRecentChatsJobProgress(job, client);
   }
 };
 
@@ -1931,27 +1987,73 @@ const exportNotebookForClient = async (client, args = {}) => {
     throw new Error('Nenhuma conversa de caderno carregada para exportar.');
   }
 
+  const total = selected.length;
+  const broadcast = (current, errorCount, label, status = 'running') => {
+    setClientJobProgress(client, {
+      source: 'mcp',
+      kind: 'notebook-export',
+      status,
+      total,
+      current,
+      errorCount,
+      label,
+    });
+  };
+
+  broadcast(0, 0, 'MCP exportando caderno...');
+
   const successes = [];
   const failures = [];
-  for (let i = 0; i < selected.length; i += 1) {
-    const conversation = selected[i];
-    try {
-      const result = await downloadConversationItemForClient(client, conversation, {
-        ...args,
-        returnToOriginal: true,
-        notebookReturnMode: 'direct',
-      });
-      successes.push({
-        index: startIndex + i,
-        ...result,
-      });
-    } catch (err) {
-      failures.push({
-        index: startIndex + i,
-        conversation,
-        error: err.message,
-      });
+  try {
+    for (let i = 0; i < selected.length; i += 1) {
+      const conversation = selected[i];
+      const indexLabel = startIndex + i;
+      const titleLabel = conversation?.title ? `: ${conversation.title}` : '';
+      broadcast(
+        i,
+        failures.length,
+        `MCP exportando caderno (${indexLabel}/${total + startIndex - 1})${titleLabel}`,
+      );
+      try {
+        const result = await downloadConversationItemForClient(client, conversation, {
+          ...args,
+          returnToOriginal: true,
+          notebookReturnMode: 'direct',
+        });
+        successes.push({
+          index: indexLabel,
+          ...result,
+        });
+      } catch (err) {
+        failures.push({
+          index: indexLabel,
+          conversation,
+          error: err.message,
+        });
+      } finally {
+        broadcast(
+          i + 1,
+          failures.length,
+          `MCP caderno: ${i + 1}/${total} concluído(s)`,
+        );
+      }
     }
+    broadcast(
+      total,
+      failures.length,
+      failures.length > 0
+        ? `Caderno exportado com ${failures.length} erro${failures.length === 1 ? '' : 's'}.`
+        : 'Caderno exportado.',
+      failures.length > 0 ? 'completed_with_errors' : 'completed',
+    );
+  } catch (err) {
+    broadcast(
+      Math.min(successes.length + failures.length, total),
+      failures.length,
+      `Falha ao exportar caderno: ${err.message}`,
+      'failed',
+    );
+    throw err;
   }
 
   return {
@@ -3093,6 +3195,7 @@ const bridgeServer = createServer(async (req, res) => {
       const client = upsertClient(payload);
       const deliveredToPoll = flushQueuedCommand(client);
       const heartbeatCommand = deliveredToPoll ? null : takeQueuedCommand(client);
+      const jobProgress = buildJobProgressBroadcast(client);
       sendJson(res, 200, {
         ok: true,
         clientId: client.clientId,
@@ -3105,6 +3208,7 @@ const bridgeServer = createServer(async (req, res) => {
             : null,
         commandPollRequired: !client.pendingPoll,
         queuedCommands: client.queue?.length || 0,
+        jobProgress,
       });
     } catch (err) {
       sendJson(res, 400, { error: err.message });
