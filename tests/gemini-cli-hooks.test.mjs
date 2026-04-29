@@ -230,7 +230,7 @@ test('BeforeTool permite desativar prelaunch do navegador para tools do exporter
   assert.equal(output.decision, undefined);
 });
 
-test('BeforeTool prelaunch retorna imediatamente sem esperar o navegador', () => {
+test('BeforeTool respeita cooldown sem abrir nem esperar navegador', () => {
   const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-hook-test-'));
   mkdirSync(resolve(tmpRoot, 'gemini-md-export'), { recursive: true });
   writeFileSync(
@@ -264,7 +264,7 @@ test('BeforeTool prelaunch retorna imediatamente sem esperar o navegador', () =>
   }
 });
 
-test('BeforeTool abre Gemini direto pelo hook quando nao ha cliente conectado', async () => {
+test('BeforeTool abre Gemini pelo launcher PowerShell quando nao ha cliente conectado', async () => {
   const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-hook-test-'));
   const server = createServer((_req, res) => {
     res.setHeader('content-type', 'application/json');
@@ -292,13 +292,15 @@ test('BeforeTool abre Gemini direto pelo hook quando nao ha cliente conectado', 
 
     assert.equal(output.suppressOutput, true);
     assert.equal(output.decision, undefined);
+    assert.equal(state.status, 'dry-run');
     assert.equal(state.dryRun, true);
-    assert.equal(state.method, 'windows-powershell-minimized-restore-focus');
-    assert.equal(state.command, 'powershell.exe');
-    assert.match(state.args.join(' '), /open-gemini-restore-focus\.ps1/);
-    assert.equal(state.browserCommand, 'chrome.exe');
-    assert.match(state.browserArgs.join(' '), /--new-tab/);
-    assert.match(state.browserArgs.join(' '), /https:\/\/gemini\.google\.com\/app/);
+    assert.equal(state.launch.plan.method, 'windows-powershell-minimized-restore-focus');
+    assert.equal(state.launch.plan.command, 'powershell.exe');
+    assert.match(state.launch.plan.args.join(' '), /open-gemini-restore-focus\.ps1/);
+    assert.equal(state.launch.plan.browserCommand, 'chrome.exe');
+    assert.match(state.launch.plan.browserArgs.join(' '), /--new-tab/);
+    assert.match(state.launch.plan.browserArgs.join(' '), /https:\/\/gemini\.google\.com\/app/);
+    assert.equal(state.launch.plan.focusingFallbackAllowed, false);
     assert.equal(state.fallbackCommand, undefined);
     assert.equal(state.fallbackArgs, undefined);
     assert.equal(state.bridgeStatus.connectedCount, 0);
@@ -335,17 +337,145 @@ test('BeforeTool espera a aba Gemini conectar depois de abrir pelo hook', async 
         GEMINI_MCP_BROWSER_LAUNCH_COOLDOWN_MS: '0',
         GEMINI_MCP_HOOK_CONNECT_TIMEOUT_MS: '1500',
         GEMINI_MCP_HOOK_CONNECT_POLL_MS: '50',
+        GEMINI_MCP_HOOK_ALLOW_FOCUSING_FALLBACK: 'true',
       },
     );
     const state = JSON.parse(readFileSync(resolve(tmpRoot, 'hook-browser-launch.json'), 'utf-8'));
 
     assert.equal(output.suppressOutput, true);
     assert.equal(output.decision, undefined);
-    assert.equal(state.method, 'windows-direct-spawn');
-    assert.equal(state.command, '/usr/bin/true');
+    assert.equal(state.status, 'connected');
+    assert.equal(state.launch.fallbackPlan.method, 'windows-direct-spawn');
+    assert.equal(state.launch.fallbackPlan.command, '/usr/bin/true');
     assert.equal(state.connectWait.connected, true);
     assert.equal(state.connectWait.status.connectedCount, 1);
     assert.equal(requests >= 2, true);
+  } finally {
+    await closeServer(server);
+    rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test('BeforeTool nao abre segunda aba durante launch em progresso', async () => {
+  const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-hook-test-'));
+  writeFileSync(
+    resolve(tmpRoot, 'hook-browser-launch.json'),
+    JSON.stringify({
+      source: 'hook',
+      launchId: 'existing-launch',
+      status: 'launching',
+      expiresAt: Date.now() + 5000,
+      lastAttemptAt: Date.now(),
+      launch: { plan: { method: 'windows-powershell-minimized-restore-focus' } },
+    }),
+    'utf-8',
+  );
+  let requests = 0;
+  const server = createServer((_req, res) => {
+    requests += 1;
+    res.setHeader('content-type', 'application/json');
+    const connectedClients = requests >= 2 ? [{ clientId: 'tab-1' }] : [];
+    res.end(JSON.stringify({ connectedClients }));
+  });
+  const port = await listen(server);
+
+  try {
+    const output = await runHookAsync(
+      'before-tool',
+      {
+        hook_event_name: 'BeforeTool',
+        session_id: 'session-a',
+        tool_name: 'mcp_gemini-md-export_gemini_list_recent_chats',
+        tool_input: {},
+      },
+      {
+        GEMINI_MCP_HOOK_PLATFORM: 'win32',
+        GEMINI_MCP_HOOK_STATE_DIR: tmpRoot,
+        GEMINI_MCP_BRIDGE_PORT: String(port),
+        GEMINI_MCP_HOOK_CONNECT_TIMEOUT_MS: '1000',
+        GEMINI_MCP_HOOK_CONNECT_POLL_MS: '50',
+      },
+    );
+    const state = JSON.parse(readFileSync(resolve(tmpRoot, 'hook-browser-launch.json'), 'utf-8'));
+
+    assert.equal(output.suppressOutput, true);
+    assert.equal(state.launchId, 'existing-launch');
+    assert.equal(state.status, 'connected');
+    assert.equal(state.connectWait.connected, true);
+    assert.equal(state.launch.plan.method, 'windows-powershell-minimized-restore-focus');
+  } finally {
+    await closeServer(server);
+    rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test('BeforeTool nao abre browser as cegas quando bridge esta inalcançavel', async () => {
+  const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-hook-test-'));
+
+  try {
+    const output = await runHookAsync(
+      'before-tool',
+      {
+        hook_event_name: 'BeforeTool',
+        session_id: 'session-a',
+        tool_name: 'mcp_gemini-md-export_gemini_browser_status',
+        tool_input: {},
+      },
+      {
+        GEMINI_MCP_HOOK_PLATFORM: 'win32',
+        GEMINI_MCP_HOOK_STATE_DIR: tmpRoot,
+        GEMINI_MCP_BRIDGE_PORT: '9',
+        GEMINI_MCP_HOOK_BRIDGE_TIMEOUT_MS: '30',
+        GEMINI_MCP_BROWSER_LAUNCH_COOLDOWN_MS: '0',
+      },
+    );
+    const state = JSON.parse(readFileSync(resolve(tmpRoot, 'hook-browser-launch.json'), 'utf-8'));
+
+    assert.equal(output.suppressOutput, true);
+    assert.equal(state.status, 'skipped');
+    assert.equal(state.reason, 'bridge-unreachable');
+    assert.equal(state.launch, undefined);
+  } finally {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test('BeforeTool timeout de conexao sai antes do hard exit da CLI', async () => {
+  const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-hook-test-'));
+  const server = createServer((_req, res) => {
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ connectedClients: [] }));
+  });
+  const port = await listen(server);
+
+  try {
+    const startedAt = Date.now();
+    const output = await runHookAsync(
+      'before-tool',
+      {
+        hook_event_name: 'BeforeTool',
+        tool_name: 'mcp_gemini-md-export_gemini_browser_status',
+        tool_input: {},
+      },
+      {
+        GEMINI_MCP_HOOK_PLATFORM: 'win32',
+        GEMINI_MCP_CHROME_EXE: '/usr/bin/true',
+        GEMINI_MCP_HOOK_STATE_DIR: tmpRoot,
+        GEMINI_MCP_BRIDGE_PORT: String(port),
+        GEMINI_MCP_BROWSER_LAUNCH_COOLDOWN_MS: '0',
+        GEMINI_MCP_HOOK_CONNECT_TIMEOUT_MS: '120',
+        GEMINI_MCP_HOOK_CONNECT_POLL_MS: '40',
+        GEMINI_MCP_HOOK_ALLOW_FOCUSING_FALLBACK: 'true',
+      },
+    );
+    const elapsedMs = Date.now() - startedAt;
+    const state = JSON.parse(readFileSync(resolve(tmpRoot, 'hook-browser-launch.json'), 'utf-8'));
+
+    assert.equal(output.suppressOutput, true);
+    assert.equal(elapsedMs < 1500, true);
+    assert.equal(state.status, 'timeout');
+    assert.equal(state.connectWait.connected, false);
+    assert.equal(state.connectWait.timeoutMs, 120);
   } finally {
     await closeServer(server);
     rmSync(tmpRoot, { recursive: true, force: true });
@@ -455,6 +585,8 @@ test('hook diagnose retorna estado e caminhos de depuracao', async () => {
     assert.equal(output.mode, 'diagnose');
     assert.match(output.files.lastRun, /hook-last-run\.json$/);
     assert.match(output.files.browserLaunch, /hook-browser-launch\.json$/);
+    assert.equal(typeof output.timeouts.connectMs, 'number');
+    assert.equal(typeof output.bridgeHealth.checked, 'boolean');
     assert.equal(typeof output.bridgeStatus.checked, 'boolean');
   } finally {
     rmSync(tmpRoot, { recursive: true, force: true });
@@ -481,5 +613,7 @@ test('BeforeTool considera browser_status como tool que acorda o navegador', () 
   assert.match(hookSource, /agent\/clients/);
   assert.doesNotMatch(hookSource, /cmd\.exe/);
   assert.doesNotMatch(hookSource, /wscript\.exe/);
+  assert.doesNotMatch(hookSource, /\bwhere\b/);
+  assert.doesNotMatch(hookSource, /start chrome/i);
   assert.doesNotMatch(hookSource, /prelaunch-browser-windows\.ps1/);
 });

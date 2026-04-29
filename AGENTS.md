@@ -287,11 +287,10 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   `GEMINI_MCP_BROWSER`/`GME_BROWSER` (`chrome`, `edge`, `brave`, `dia`), com
   fallback para outro Chromium conhecido se o preferido não existir. No
   Windows não deve usar `where`/`spawnSync` no caminho de runtime para descobrir
-  browser: isso já é um ponto possível de travamento. O fluxo correto é tentar
-  spawn direto do executável conhecido/configurado, observar erro imediato por
-  timeout curto (`GEMINI_MCP_BROWSER_LAUNCH_OBSERVE_MS`) e cair para
-  `cmd.exe /c start` só como fallback diagnosticado; `browserWake` deve incluir
-  `launch` e, quando houver fallback, `directLaunch`. No macOS usa `open -g -a`
+  browser: isso já é um ponto possível de travamento. No bundle do Gemini CLI,
+  o MCP roda com `GEMINI_MCP_CHROME_LAUNCH_IF_CLOSED=false`; ele valida
+  versão/protocolo/build e recarrega a extensão, mas não compete com o hook
+  abrindo outra aba. No macOS usa `open -g -a`
   para preferir app Chromium em vez do navegador padrão. O argumento de
   perfil só é enviado quando `GEMINI_MCP_CHROME_PROFILE_DIRECTORY` ou
   `GME_CHROME_PROFILE_DIRECTORY` for configurado explicitamente; não passar
@@ -299,31 +298,40 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   seleção/perfil do Chrome quando a tool tenta acordar o navegador. O launch é
   protegido por cooldown (`GEMINI_MCP_BROWSER_LAUNCH_COOLDOWN_MS`, default
   60000ms) para não abrir uma janela/diálogo novo a cada chamada de tool quando
-  a extensão ainda não conectou. O launch é controlado por
-  `GEMINI_MCP_CHROME_LAUNCH_IF_CLOSED` (default ligado); timeout e tentativas
-  vêm de `GEMINI_MCP_CHROME_INITIAL_CONNECT_TIMEOUT_MS` (default 8000ms),
-  `GEMINI_MCP_CHROME_RELOAD_TIMEOUT_MS` e
-  `GEMINI_MCP_CHROME_MAX_RELOAD_ATTEMPTS`. O hook `BeforeTool` também faz
-  pré-aquecimento para tools do exporter que dependem do navegador no Windows:
-  o hook JavaScript consulta rapidamente `/agent/clients`; se já houver uma aba
-  Gemini conectada, não abre nada. Se não houver cliente conectado, abre
-  `https://gemini.google.com/app` por spawn direto e cai para `cmd.exe /c start`
-  se o spawn direto falhar; sai imediatamente, sem PowerShell intermediário.
-  O hook em si não deve fazer
-  leitura síncrona de stdin, `import()` dinâmico, espera longa de navegador ou
-  trabalho bloqueante. `SessionStart` não deve ler stdin. Before/AfterTool leem
-  stdin de forma assíncrona, tentam parsear assim que o JSON chega e falham
-  aberto por timeout curto (`GEMINI_MCP_HOOK_STDIN_TIMEOUT_MS`, default 120ms)
-  se o cliente mantiver o pipe aberto. O modo
+  a extensão ainda não conectou. O hook `BeforeTool` faz o pré-aquecimento para
+  tools do exporter que dependem do navegador no Windows: consulta rapidamente
+  `/agent/clients`; se já houver uma aba Gemini conectada, não abre nada. Se o
+  bridge estiver inalcançável, também não abre browser às cegas; registra
+  diagnóstico e deixa o MCP retornar erro acionável. Se o bridge está de pé e
+  sem clientes, abre `https://gemini.google.com/app` por um PowerShell
+  temporário oculto com `Start-Process -WindowStyle Minimized`, tenta restaurar
+  o foco da janela anterior e aguarda conexão até
+  `GEMINI_MCP_HOOK_CONNECT_TIMEOUT_MS` (default 12000ms), com hard exit menor
+  que o timeout de `hooks.json`. `hook-browser-launch.json` registra
+  `launchId`, `status`, `expiresAt`, `toolName`, `sessionId`, `bridgeStatus`,
+  `launch` e `connectWait`; se outra chamada encontra `status: "launching"` não
+  expirado, ela não abre segunda aba e só aguarda a conexão. Não reintroduzir
+  `cmd.exe /c start`, WSH, `where` síncrono ou fallback que foque janela. Spawn
+  direto do browser só é permitido quando
+  `GEMINI_MCP_HOOK_ALLOW_FOCUSING_FALLBACK=true`.
+  O hook em si não deve fazer leitura síncrona de stdin nem `import()` dinâmico.
+  `SessionStart` não deve ler stdin. Before/AfterTool leem stdin de forma
+  assíncrona, tentam parsear assim que o JSON chega e falham aberto por timeout
+  curto (`GEMINI_MCP_HOOK_STDIN_TIMEOUT_MS`, default 120ms) se o cliente
+  mantiver o pipe aberto. O modo
   `node scripts/hooks/gemini-md-export-hook.mjs diagnose` deve continuar
-  disponível para imprimir estado, `/agent/clients`, plano de launch e caminhos
-  de `hook-last-run.json`/`hook-browser-launch.json`. Esse prelaunch é
-  controlado por `GEMINI_MCP_HOOK_LAUNCH_BROWSER` (default ligado),
-  `GEMINI_MCP_HOOK_BRIDGE_TIMEOUT_MS` (default 180ms) e pelo mesmo cooldown.
-  `gemini_browser_status` também deve acordar o
-  navegador quando não há clientes conectados e aguardar um curto período
-  (`GEMINI_MCP_BROWSER_STATUS_WAKE_WAIT_MS`, default 8000ms), porque o Gemini
-  CLI frequentemente consulta status antes de chamar uma tool de export.
+  disponível para imprimir estado, `/healthz`, `/agent/clients`, timeouts
+  efetivos, plano de launch e caminhos de `hook-last-run.json`/
+  `hook-browser-launch.json`. Esse prelaunch é controlado por
+  `GEMINI_MCP_HOOK_LAUNCH_BROWSER` (default ligado),
+  `GEMINI_MCP_HOOK_BRIDGE_TIMEOUT_MS` (default 180ms),
+  `GEMINI_MCP_HOOK_CONNECT_TIMEOUT_MS`,
+  `GEMINI_MCP_HOOK_ALLOW_FOCUSING_FALLBACK` e
+  `GEMINI_MCP_BROWSER`.
+  `gemini_browser_status` também passa por esse `BeforeTool`, porque o Gemini
+  CLI frequentemente consulta status antes de chamar uma tool de export; essa
+  primeira chamada deve ser suficiente para acordar o navegador quando o bridge
+  está ativo e sem clientes.
   `gemini_list_recent_chats` e `/agent/recent-chats` agora priorizam a lista
   trazida pelo heartbeat recente da extensão para responder rápido. Só
   mandam `list-conversations` para abrir/atualizar o sidebar quando o cache

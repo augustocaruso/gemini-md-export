@@ -23,12 +23,6 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
     'hooks',
     'gemini-md-export-hook.mjs',
   );
-  const hookPrelaunchPath = resolve(
-    extensionDir,
-    'scripts',
-    'hooks',
-    'prelaunch-browser-windows.ps1',
-  );
 
   assert.equal(existsSync(manifestPath), true);
   assert.equal(existsSync(contextPath), true);
@@ -39,7 +33,6 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.equal(existsSync(browserManifestPath), true);
   assert.equal(existsSync(hooksConfigPath), true);
   assert.equal(existsSync(hookScriptPath), true);
-  assert.equal(existsSync(hookPrelaunchPath), true);
 
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8'));
   assert.equal(manifest.contextFileName, 'GEMINI.md');
@@ -62,6 +55,10 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.notEqual(hooksConfig.hooks.BeforeTool[0].matcher, '*');
   assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /browser_status/);
   assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /mcp_\+gemini/);
+  assert.doesNotMatch(hooksConfig.hooks.BeforeTool[0].matcher, /get_export_dir/);
+  assert.doesNotMatch(hooksConfig.hooks.BeforeTool[0].matcher, /set_export_dir/);
+  assert.doesNotMatch(hooksConfig.hooks.BeforeTool[0].matcher, /export_job_status/);
+  assert.doesNotMatch(hooksConfig.hooks.BeforeTool[0].matcher, /export_job_cancel/);
   assert.equal(hooksConfig.hooks.BeforeTool[0].hooks[0].timeout, 20000);
 
   const browserManifest = JSON.parse(readFileSync(browserManifestPath, 'utf-8'));

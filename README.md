@@ -126,34 +126,36 @@ precisar do navegador confere versão/protocolo da extensão do Chrome e pede
 própria extensão recarrega as abas do Gemini em seguida. O reload manual do
 card em `chrome://extensions`/`edge://extensions` continua sendo o fallback
 para a primeira migração, mudança de permissões/manifest ou perfil errado.
-Se nenhuma aba do Gemini estiver conectada quando uma tool MCP for chamada, o
-MCP tenta abrir `https://gemini.google.com/app` no navegador certo: Chrome por
-padrão, depois Edge/Brave/Dia como fallback. `gemini_browser_status` também
-acorda o navegador quando está sem clientes conectados, porque o Gemini CLI
-costuma chamar status antes de escolher a tool de export. Use
-`GEMINI_MCP_BROWSER=edge` ou `chrome`/`brave`/`dia` para fixar o navegador. O
-MCP só envia `--profile-directory` quando
-`GEMINI_MCP_CHROME_PROFILE_DIRECTORY` é definido explicitamente; isso evita a
-caixa de seleção/perfil do Chrome em chamadas normais de tool. Para perfis
-específicos, use por exemplo `GEMINI_MCP_CHROME_PROFILE_DIRECTORY="Profile 1"`.
-No Windows, o launcher não usa mais `where` síncrono no caminho de runtime: ele
-tenta primeiro executar diretamente o browser encontrado em caminhos conhecidos
-ou configurado por variável de ambiente, observa erro imediato, e só depois cai
-para `cmd.exe /c start` como fallback. O resultado aparece em `browserWake`,
-incluindo `launch`/`directLaunch`, para diagnosticar falhas reais de abertura.
-Além do guard dentro do MCP, o hook `BeforeTool` da extensão do Gemini CLI faz
-um pré-aquecimento no Windows: antes de tools do exporter que dependem do
-navegador, ele checa rapidamente `http://127.0.0.1:47283/agent/clients`. Se já
-houver uma aba Gemini conectada, não abre nada. Se não houver cliente
-conectado, tenta abrir `https://gemini.google.com/app` por spawn direto e cai
-para `cmd.exe /c start` se o spawn direto falhar. O hook não depende de
-PowerShell, respeita cooldown e não deve ficar preso em "executing hook". A leitura do payload do hook é
-assíncrona e tem timeout curto (`GEMINI_MCP_HOOK_STDIN_TIMEOUT_MS`, default
-120ms), porque uma leitura síncrona de stdin pode travar se o cliente mantiver
-o pipe aberto. Para diagnosticar sem acionar nenhuma tool, rode o script do
-hook com `diagnose`; ele imprime o bridge, o plano de launch e os arquivos
-temporários `hook-last-run.json`/`hook-browser-launch.json`. Isso pode ser
-desativado com `GEMINI_MCP_HOOK_LAUNCH_BROWSER=false`.
+Na extensão do Gemini CLI, o MCP roda com
+`GEMINI_MCP_CHROME_LAUNCH_IF_CLOSED=false`: ele valida versão/protocolo e
+recarrega a extensão do navegador quando possível, mas não compete abrindo aba
+extra se o hook falhar. No Windows, quem acorda o navegador é o hook
+`BeforeTool` da própria extensão, apenas para tools que realmente dependem do
+navegador, incluindo `gemini_browser_status`. Antes de abrir qualquer coisa,
+ele consulta rapidamente `http://127.0.0.1:47283/agent/clients`; se já houver
+aba Gemini conectada, não abre nada, e se o bridge estiver inalcançável não faz
+launch cego.
+
+Quando o bridge está ativo e sem clientes, o hook abre
+`https://gemini.google.com/app` por um PowerShell temporário oculto, usando
+`Start-Process -WindowStyle Minimized`, e tenta restaurar o foco da janela
+anterior. Depois espera uma aba Gemini conectar até
+`GEMINI_MCP_HOOK_CONNECT_TIMEOUT_MS` (default 12000ms), sempre com hard exit
+menor que o timeout do Gemini CLI. O arquivo
+`hook-browser-launch.json` funciona como trava: duas chamadas rápidas não
+devem abrir duas abas. Não há fallback por `cmd.exe /c start`; spawn direto que
+pode focar janela só é permitido com
+`GEMINI_MCP_HOOK_ALLOW_FOCUSING_FALLBACK=true`.
+
+Use `GEMINI_MCP_BROWSER=edge` ou `chrome`/`brave`/`dia` para fixar o navegador.
+O argumento `--profile-directory` só é enviado quando
+`GEMINI_MCP_CHROME_PROFILE_DIRECTORY` é definido explicitamente. Para
+diagnosticar sem acionar nenhuma tool, rode
+`node scripts/hooks/gemini-md-export-hook.mjs diagnose`; ele imprime
+`/healthz`, `/agent/clients`, timeouts efetivos, plano de launch e os arquivos
+`hook-last-run.json`/`hook-browser-launch.json`. O prelaunch pode ser
+desativado com `GEMINI_MCP_HOOK_LAUNCH_BROWSER=false`; o timeout curto do
+bridge é `GEMINI_MCP_HOOK_BRIDGE_TIMEOUT_MS` (default 180ms).
 
 Durante a instalação no Windows, o instalador tenta registrar a extensão pelo
 comando oficial `gemini extensions install https://www.github.com/augustocaruso/gemini-md-export.git

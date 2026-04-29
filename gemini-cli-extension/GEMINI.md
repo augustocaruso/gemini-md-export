@@ -59,22 +59,30 @@ Operational guidance:
   opens `https://gemini.google.com/app` through a generated short PowerShell
   launcher that captures the current foreground window, starts the browser
   minimized, waits briefly, and tries to restore focus to the original terminal.
-  If that immediate launch fails, it falls back only to direct browser spawn
-  with argv items separated; do not reintroduce `cmd.exe /c start` or WSH here.
+  If that immediate launch fails, direct browser spawn is allowed only when
+  `GEMINI_MCP_HOOK_ALLOW_FOCUSING_FALLBACK=true`; do not reintroduce
+  `cmd.exe /c start`, WSH, synchronous `where`, or a fallback that focuses the
+  browser by default.
   After launching, the hook waits for `/agent/clients` to report a connected
   Gemini tab before it returns, up to `GEMINI_MCP_HOOK_CONNECT_TIMEOUT_MS`
   (default 12000ms). The hook and MCP share `hook-browser-launch.json`, so a
   tool call should not open a second tab while a recent hook launch is still
-  within cooldown. The hook itself must not use synchronous stdin reads.
+  within cooldown. If the bridge is unreachable, the hook must not launch the
+  browser blindly; record diagnostics and let the MCP return the actionable
+  error. The hook itself must not use synchronous stdin reads.
   `SessionStart`
   must not read stdin. BeforeTool/AfterTool read stdin asynchronously, parse as
   soon as a complete JSON payload arrives, and fail open after
   `GEMINI_MCP_HOOK_STDIN_TIMEOUT_MS` (default 120ms) if the client keeps stdin
   open. For debugging, run
-  `node scripts/hooks/gemini-md-export-hook.mjs diagnose`; it prints bridge
-  status, launch plan, and the paths to `hook-last-run.json` and
-  `hook-browser-launch.json`. If this is undesirable, set
-  `GEMINI_MCP_HOOK_LAUNCH_BROWSER=false`.
+  `node scripts/hooks/gemini-md-export-hook.mjs diagnose`; it prints
+  `/healthz`, `/agent/clients`, effective timeouts, launch plan, and the paths
+  to `hook-last-run.json` and `hook-browser-launch.json`. The final hook envs
+  are `GEMINI_MCP_HOOK_LAUNCH_BROWSER`,
+  `GEMINI_MCP_HOOK_CONNECT_TIMEOUT_MS`,
+  `GEMINI_MCP_HOOK_BRIDGE_TIMEOUT_MS`,
+  `GEMINI_MCP_HOOK_ALLOW_FOCUSING_FALLBACK`, and `GEMINI_MCP_BROWSER`. If this
+  is undesirable, set `GEMINI_MCP_HOOK_LAUNCH_BROWSER=false`.
 - When the user reports the MCP as disconnected on Windows, suggest running:
   `powershell -ExecutionPolicy Bypass -File .\diagnose-windows-mcp.ps1`
 - Multiple Gemini CLI terminals may start multiple MCP processes. Only the

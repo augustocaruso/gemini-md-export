@@ -15,7 +15,7 @@ const earlyNonNegativeInt = (value, fallback, max = 60_000) => {
 };
 const HARD_EXIT_MS = earlyNonNegativeInt(
   process.env.GEMINI_MCP_HOOK_HARD_EXIT_MS,
-  mode === 'before-tool' ? 22_000 : 750,
+  mode === 'before-tool' ? 18_000 : 750,
 );
 const hardExit = setTimeout(() => {
   writeHookDiagnostic({
@@ -47,6 +47,7 @@ const DEFAULT_HOOK_STDIN_TIMEOUT_MS = 120;
 const DEFAULT_HOOK_LAUNCH_OBSERVE_MS = 120;
 const DEFAULT_HOOK_CONNECT_TIMEOUT_MS = 12_000;
 const DEFAULT_HOOK_CONNECT_POLL_MS = 350;
+const DEFAULT_LAUNCH_LOCK_GRACE_MS = 2_000;
 const MAX_STDIN_BYTES = 1024 * 1024;
 const HOOK_BROWSER_STATE_FILENAME = 'hook-browser-launch.json';
 const HOOK_LAST_RUN_FILENAME = 'hook-last-run.json';
@@ -56,6 +57,8 @@ let diagnosticState = {
   pid: process.pid,
   mode,
   startedAt: new Date(RUN_STARTED_AT).toISOString(),
+  hardExitMs: HARD_EXIT_MS,
+  stageDurations: {},
 };
 
 const BROWSER_DEPENDENT_EXPORTER_TOOLS = new Set([
@@ -237,6 +240,37 @@ const writeHookDiagnostic = (patch) => {
   }
 };
 
+const recordStageDuration = (stage, startedAt) => {
+  diagnosticState.stageDurations = {
+    ...(diagnosticState.stageDurations || {}),
+    [stage]: Date.now() - startedAt,
+  };
+};
+
+const withStageTiming = async (stage, fn) => {
+  const startedAt = Date.now();
+  try {
+    return await fn();
+  } finally {
+    recordStageDuration(stage, startedAt);
+  }
+};
+
+const currentConnectTimeoutMs = () =>
+  parseNonNegativeInt(
+    process.env.GEMINI_MCP_HOOK_CONNECT_TIMEOUT_MS,
+    DEFAULT_HOOK_CONNECT_TIMEOUT_MS,
+  );
+
+const currentConnectPollMs = () =>
+  parseNonNegativeInt(
+    process.env.GEMINI_MCP_HOOK_CONNECT_POLL_MS,
+    DEFAULT_HOOK_CONNECT_POLL_MS,
+  );
+
+const buildLaunchId = () =>
+  `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+
 const buildWindowsRestoreFocusLaunchScript = (
   command,
   args = [],
@@ -284,14 +318,25 @@ const writeWindowsRestoreFocusLaunchScript = (command, args = []) => {
   return scriptPath;
 };
 
-const shouldSkipBrowserLaunchForCooldown = (now) => {
-  if (isEnabled(process.env.GEMINI_MCP_HOOK_ALWAYS_LAUNCH_BROWSER)) return false;
-  const cooldownMs = parseNonNegativeInt(
+const currentLaunchCooldownMs = () =>
+  parseNonNegativeInt(
     process.env.GEMINI_MCP_BROWSER_LAUNCH_COOLDOWN_MS,
     DEFAULT_BROWSER_LAUNCH_COOLDOWN_MS,
   );
+
+const launchLockGraceMs = () =>
+  parseNonNegativeInt(process.env.GEMINI_MCP_HOOK_LAUNCH_LOCK_GRACE_MS, DEFAULT_LAUNCH_LOCK_GRACE_MS);
+
+const buildLaunchLockExpiry = (now) => now + currentConnectTimeoutMs() + launchLockGraceMs();
+
+const activeLaunchLock = (state, now) =>
+  state?.status === 'launching' && Number(state.expiresAt || 0) > now;
+
+const shouldSkipBrowserLaunchForCooldown = (state, now) => {
+  if (isEnabled(process.env.GEMINI_MCP_HOOK_ALWAYS_LAUNCH_BROWSER)) return false;
+  const cooldownMs = currentLaunchCooldownMs();
   if (cooldownMs === 0) return false;
-  const lastAttemptAt = Number(readHookState().lastAttemptAt || 0);
+  const lastAttemptAt = Number(state?.lastAttemptAt || 0);
   return lastAttemptAt > 0 && now - lastAttemptAt < cooldownMs;
 };
 
@@ -339,10 +384,16 @@ const queryConnectedBrowserClients = () =>
               : [];
             finish({
               reachable: res.statusCode >= 200 && res.statusCode < 300,
+              statusCode: res.statusCode,
               connectedCount: connectedClients.length,
             });
           } catch (err) {
-            finish({ reachable: false, connectedCount: null, reason: `invalid-json: ${err.message}` });
+            finish({
+              reachable: false,
+              statusCode: res.statusCode,
+              connectedCount: null,
+              reason: `invalid-json: ${err.message}`,
+            });
           }
         });
       },
@@ -358,17 +409,68 @@ const queryConnectedBrowserClients = () =>
     req.end();
   });
 
+const queryBridgeHealth = () =>
+  new Promise((resolveResult) => {
+    const timeoutMs = parseNonNegativeInt(
+      process.env.GEMINI_MCP_HOOK_BRIDGE_TIMEOUT_MS,
+      DEFAULT_HOOK_BRIDGE_CHECK_TIMEOUT_MS,
+    );
+    const port = parseNonNegativeInt(process.env.GEMINI_MCP_BRIDGE_PORT, 47283);
+    let done = false;
+    const finish = (result) => {
+      if (done) return;
+      done = true;
+      resolveResult({ checked: true, ...result });
+    };
+
+    const req = request(
+      {
+        host: '127.0.0.1',
+        port,
+        path: '/healthz',
+        method: 'GET',
+        timeout: timeoutMs,
+      },
+      (res) => {
+        let body = '';
+        res.setEncoding('utf-8');
+        res.on('data', (chunk) => {
+          body += chunk;
+          if (body.length > 65536) {
+            req.destroy(new Error('response too large'));
+          }
+        });
+        res.on('end', () => {
+          let parsed = null;
+          try {
+            parsed = body ? JSON.parse(body) : null;
+          } catch {
+            parsed = null;
+          }
+          finish({
+            reachable: res.statusCode >= 200 && res.statusCode < 300,
+            statusCode: res.statusCode,
+            body: parsed,
+          });
+        });
+      },
+    );
+
+    req.on('timeout', () => {
+      req.destroy();
+      finish({ reachable: false, reason: 'timeout' });
+    });
+    req.on('error', (err) => {
+      finish({ reachable: false, reason: err.message });
+    });
+    req.end();
+  });
+
 const sleep = (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 
 const waitForConnectedBrowserClient = async () => {
-  const timeoutMs = parseNonNegativeInt(
-    process.env.GEMINI_MCP_HOOK_CONNECT_TIMEOUT_MS,
-    DEFAULT_HOOK_CONNECT_TIMEOUT_MS,
-  );
-  const pollMs = parseNonNegativeInt(
-    process.env.GEMINI_MCP_HOOK_CONNECT_POLL_MS,
-    DEFAULT_HOOK_CONNECT_POLL_MS,
-  );
+  const timeoutMs = currentConnectTimeoutMs();
+  const pollMs = currentConnectPollMs();
   const startedAt = Date.now();
   let lastStatus = null;
 
@@ -466,21 +568,77 @@ const observeDetachedSpawn = (command, args, observeMs) =>
 
 const prelaunchBrowserDetached = async (input) => {
   if (isDisabled(process.env.GEMINI_MCP_HOOK_LAUNCH_BROWSER)) return;
-  if (isDisabled(process.env.GEMINI_MCP_CHROME_LAUNCH_IF_CLOSED)) return;
   if (!isBrowserDependentExporterTool(input)) return;
   if (currentPlatform() !== 'win32') return;
 
   const now = Date.now();
-  if (shouldSkipBrowserLaunchForCooldown(now)) {
-    writeHookDiagnostic({ stage: 'browser-prelaunch-skipped', reason: 'cooldown' });
+  const toolName = getToolName(input) || null;
+  const sessionId = input?.session_id || input?.sessionId || null;
+  const lockStartedAt = Date.now();
+  const previousState = readHookState();
+
+  if (activeLaunchLock(previousState, now)) {
+    recordStageDuration('cooldownLock', lockStartedAt);
+    const connectWait = await withStageTiming('connectWait', waitForConnectedBrowserClient);
+    writeHookState({
+      ...previousState,
+      status: connectWait.connected ? 'connected' : 'timeout',
+      lockObservedByPid: process.pid,
+      lockObservedAt: new Date(now).toISOString(),
+      connectWait,
+      updatedAt: new Date().toISOString(),
+    });
+    writeHookDiagnostic({
+      stage: 'browser-prelaunch-skipped',
+      reason: 'active-launch-lock',
+      toolName,
+      sessionId,
+      connectWait,
+    });
     return;
   }
 
-  const bridgeStatus = await queryConnectedBrowserClients();
+  if (shouldSkipBrowserLaunchForCooldown(previousState, now)) {
+    recordStageDuration('cooldownLock', lockStartedAt);
+    writeHookDiagnostic({
+      stage: 'browser-prelaunch-skipped',
+      reason: 'cooldown',
+      toolName,
+      sessionId,
+      lastAttemptAt: previousState?.lastAttemptAt || null,
+      cooldownMs: currentLaunchCooldownMs(),
+    });
+    return;
+  }
+  recordStageDuration('cooldownLock', lockStartedAt);
+
+  const bridgeStatus = await withStageTiming('bridgeCheck', queryConnectedBrowserClients);
   if (bridgeStatus.connectedCount > 0) {
     writeHookDiagnostic({
       stage: 'browser-prelaunch-skipped',
       reason: 'already-connected',
+      bridgeStatus,
+    });
+    return;
+  }
+
+  if (!bridgeStatus.reachable) {
+    writeHookState({
+      source: 'hook',
+      status: 'skipped',
+      reason: bridgeStatus.checked ? 'bridge-unreachable' : 'bridge-check-disabled',
+      toolName,
+      sessionId,
+      bridgeStatus,
+      lastFailureAt: now,
+      updatedAt: new Date(now).toISOString(),
+      expiresAt: now,
+    });
+    writeHookDiagnostic({
+      stage: 'browser-prelaunch-skipped',
+      reason: bridgeStatus.checked ? 'bridge-unreachable' : 'bridge-check-disabled',
+      toolName,
+      sessionId,
       bridgeStatus,
     });
     return;
@@ -506,69 +664,108 @@ const prelaunchBrowserDetached = async (input) => {
   } catch (err) {
     launch.restoreFocusScriptError = err?.message || String(err);
   }
-  if (!launch.args) {
+  const allowFocusingFallback = isEnabled(process.env.GEMINI_MCP_HOOK_ALLOW_FOCUSING_FALLBACK);
+  if (!launch.args && allowFocusingFallback) {
     launch.method = launch.directMethod;
     launch.command = launch.directCommand;
     launch.args = launch.directArgs;
   }
+  const launchId = buildLaunchId();
   const state = {
     source: 'hook',
+    launchId,
+    status: 'launching',
     lastAttemptAt: now,
+    startedAt: new Date(now).toISOString(),
+    expiresAt: buildLaunchLockExpiry(now),
+    toolName,
+    sessionId,
     bridgeStatus,
-    ...launch,
+    launch: {
+      plan: {
+        method: launch.method,
+        browserKey: launch.browserKey,
+        browserName: launch.browserName,
+        fallbackFrom: launch.fallbackFrom,
+        command: launch.command,
+        args: launch.args,
+        browserCommand: launch.browserCommand,
+        browserArgs: launch.browserArgs,
+        profileDirectory: launch.profileDirectory,
+        restoreFocusScriptPath: launch.restoreFocusScriptPath || null,
+        restoreFocusScriptError: launch.restoreFocusScriptError || null,
+        focusingFallbackAllowed: allowFocusingFallback,
+      },
+    },
   };
   writeHookState(state);
   writeHookDiagnostic({
     stage: 'browser-prelaunch',
     bridgeStatus,
-    launch: {
-      method: launch.method,
-      browserName: launch.browserName,
-      command: launch.command,
-      args: launch.args,
-      browserCommand: launch.browserCommand,
-      browserArgs: launch.browserArgs,
-      restoreFocusScriptPath: launch.restoreFocusScriptPath || null,
-    },
+    launchId,
+    toolName,
+    sessionId,
+    launch: state.launch.plan,
   });
 
   if (isEnabled(process.env.GEMINI_MCP_HOOK_DRY_RUN)) {
-    writeHookState({ ...state, dryRun: true });
+    writeHookState({ ...state, status: 'dry-run', dryRun: true, updatedAt: new Date().toISOString() });
     return;
   }
 
-  const direct = await observeDetachedSpawn(
-    launch.command,
-    launch.args,
-    DEFAULT_HOOK_LAUNCH_OBSERVE_MS,
-  );
-  if (direct.ok) {
-    const connectWait = await waitForConnectedBrowserClient();
+  if (!launch.args) {
     writeHookState({
       ...state,
-      launch: direct,
+      status: 'failed',
+      lastFailureAt: Date.now(),
+      error:
+        launch.restoreFocusScriptError ||
+        'PowerShell launcher unavailable and focusing fallback is disabled.',
+      updatedAt: new Date().toISOString(),
+    });
+    return;
+  }
+
+  const direct = await withStageTiming('launch', () =>
+    observeDetachedSpawn(launch.command, launch.args, DEFAULT_HOOK_LAUNCH_OBSERVE_MS),
+  );
+  if (direct.ok) {
+    const connectWait = await withStageTiming('connectWait', waitForConnectedBrowserClient);
+    writeHookState({
+      ...state,
+      status: connectWait.connected ? 'connected' : 'timeout',
+      launch: {
+        ...state.launch,
+        result: direct,
+      },
       connectWait,
+      updatedAt: new Date().toISOString(),
     });
     return;
   }
 
   let directBrowser = null;
-  if (launch.command !== launch.directCommand) {
-    directBrowser = await observeDetachedSpawn(
-      launch.directCommand,
-      launch.directArgs,
-      DEFAULT_HOOK_LAUNCH_OBSERVE_MS,
+  if (allowFocusingFallback && launch.command !== launch.directCommand) {
+    directBrowser = await withStageTiming('launchFallback', () =>
+      observeDetachedSpawn(launch.directCommand, launch.directArgs, DEFAULT_HOOK_LAUNCH_OBSERVE_MS),
     );
     if (directBrowser.ok) {
-      const connectWait = await waitForConnectedBrowserClient();
+      const connectWait = await withStageTiming('connectWait', waitForConnectedBrowserClient);
       writeHookState({
         ...state,
-        method: launch.directMethod,
-        command: launch.directCommand,
-        args: launch.directArgs,
-        restoreFocusLaunch: direct,
-        launch: directBrowser,
+        status: connectWait.connected ? 'connected' : 'timeout',
+        launch: {
+          ...state.launch,
+          result: direct,
+          fallbackResult: directBrowser,
+          fallbackPlan: {
+            method: launch.directMethod,
+            command: launch.directCommand,
+            args: launch.directArgs,
+          },
+        },
         connectWait,
+        updatedAt: new Date().toISOString(),
       });
       return;
     }
@@ -576,9 +773,12 @@ const prelaunchBrowserDetached = async (input) => {
 
   const nextState = {
     ...state,
-    method: 'windows-hook-launch-failed',
-    restoreFocusLaunch: direct,
-    directLaunch: directBrowser,
+    status: 'failed',
+    launch: {
+      ...state.launch,
+      result: direct,
+      fallbackResult: directBrowser,
+    },
   };
   nextState.lastFailureAt = Date.now();
   nextState.error =
@@ -617,6 +817,7 @@ const parseHookInput = (raw) => {
 
 const readInput = async () =>
   new Promise((resolveInput) => {
+    const readStartedAt = Date.now();
     const timeoutMs = parseNonNegativeInt(
       process.env.GEMINI_MCP_HOOK_STDIN_TIMEOUT_MS,
       DEFAULT_HOOK_STDIN_TIMEOUT_MS,
@@ -636,6 +837,7 @@ const readInput = async () =>
       if (result.status === 'invalid-json') {
         console.error(`[gemini-md-export-hook] invalid JSON stdin: ${result.error}`);
       }
+      recordStageDuration('stdin', readStartedAt);
       writeHookDiagnostic({
         stage: 'stdin-read',
         stdinStatus: result.status,
@@ -697,7 +899,9 @@ const readInput = async () =>
   });
 
 const writeJson = (payload) => {
+  const outputStartedAt = Date.now();
   wroteOutput = true;
+  recordStageDuration('output', outputStartedAt);
   writeHookDiagnostic({
     stage: 'write-output',
     elapsedMs: Date.now() - RUN_STARTED_AT,
@@ -959,7 +1163,10 @@ const beforeTool = async (input) => {
 };
 
 const diagnose = async () => {
-  const bridgeStatus = await queryConnectedBrowserClients();
+  const [bridgeHealth, bridgeStatus] = await Promise.all([
+    queryBridgeHealth(),
+    queryConnectedBrowserClients(),
+  ]);
   const launch = currentPlatform() === 'win32' ? buildWindowsBrowserStartCommand() : null;
   return {
     ok: true,
@@ -971,6 +1178,26 @@ const diagnose = async () => {
       lastRun: hookLastRunPath(),
       browserLaunch: hookStatePath(),
     },
+    timeouts: {
+      hardExitMs: HARD_EXIT_MS,
+      stdinMs: parseNonNegativeInt(
+        process.env.GEMINI_MCP_HOOK_STDIN_TIMEOUT_MS,
+        DEFAULT_HOOK_STDIN_TIMEOUT_MS,
+      ),
+      bridgeMs: parseNonNegativeInt(
+        process.env.GEMINI_MCP_HOOK_BRIDGE_TIMEOUT_MS,
+        DEFAULT_HOOK_BRIDGE_CHECK_TIMEOUT_MS,
+      ),
+      connectMs: currentConnectTimeoutMs(),
+      connectPollMs: currentConnectPollMs(),
+      launchObserveMs: parseNonNegativeInt(
+        process.env.GEMINI_MCP_HOOK_LAUNCH_OBSERVE_MS,
+        DEFAULT_HOOK_LAUNCH_OBSERVE_MS,
+      ),
+      cooldownMs: currentLaunchCooldownMs(),
+      lockGraceMs: launchLockGraceMs(),
+    },
+    bridgeHealth,
     bridgeStatus,
     lastRun: readJsonFile(hookLastRunPath()),
     lastBrowserLaunch: readJsonFile(hookStatePath()),
@@ -979,8 +1206,9 @@ const diagnose = async () => {
           method: launch.method,
           browserName: launch.browserName,
           browserCommand: launch.browserCommand,
-          args: launch.args,
+          browserArgs: launch.browserArgs,
           profileDirectory: launch.profileDirectory,
+          focusingFallbackAllowed: isEnabled(process.env.GEMINI_MCP_HOOK_ALLOW_FOCUSING_FALLBACK),
         }
       : null,
   };
