@@ -686,6 +686,28 @@
     return hash.toString(36);
   };
 
+  const CONVERSATION_TURN_DOM_SELECTOR = 'user-query, model-response';
+
+  const conversationDomNodes = (doc = document) =>
+    Array.from(doc.querySelectorAll(CONVERSATION_TURN_DOM_SELECTOR));
+
+  const conversationDomSignature = (doc = document) => {
+    const nodes = conversationDomNodes(doc);
+    if (nodes.length === 0) return '';
+
+    const indexes = [...new Set([0, Math.floor((nodes.length - 1) / 2), nodes.length - 1])];
+    const sample = indexes
+      .map((index) => {
+        const node = nodes[index];
+        return `${node.tagName}:${cleanText(node.textContent).slice(0, 2000)}`;
+      })
+      .join('|');
+
+    return `${nodes.length}:${stableHash(sample)}`;
+  };
+
+  const conversationDomTurnCount = (doc = document) => conversationDomNodes(doc).length;
+
   const loadNotebookChatUrlCache = () => {
     if (notebookChatUrlCache) return notebookChatUrlCache;
     try {
@@ -2388,6 +2410,15 @@
     }
   };
 
+  const normalizeExpectedChatId = (item = {}) => {
+    const candidates = [
+      stripGeminiConversationPrefix(item.chatId || ''),
+      extractChatIdFromMaybeUrl(item.url),
+      stripGeminiConversationPrefix(item.id || ''),
+    ];
+    return candidates.find((candidate) => /^[a-f0-9]{12,}$/i.test(candidate || '')) || '';
+  };
+
   const findConversationForBridgeCommand = (args = {}) => {
     const conversations = collectBridgeConversationLinks();
     const item = args.item || {};
@@ -2744,7 +2775,8 @@
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
       try {
-        if (await check()) return;
+        const result = await check();
+        if (result) return result;
       } catch {
         // retry until timeout
       }
@@ -2944,11 +2976,51 @@
     };
   };
 
-  const waitForChatToLoad = async (targetChatId) => {
-    await waitFor(
-      () => currentChatId() === targetChatId && scrapeTurns(document).length > 0,
-      { timeoutMs: FRAME_TIMEOUT_MS, intervalMs: 400, label: `chat ${targetChatId}` },
-    );
+  const waitForChatToLoad = async (targetChatId, options = {}) => {
+    const normalizedTargetChatId = stripGeminiConversationPrefix(targetChatId);
+    const previousSignature = options.previousSignature || '';
+    const previousChatId = stripGeminiConversationPrefix(options.previousChatId || '');
+    let lastState = null;
+
+    return waitFor(
+      () => {
+        const chatId = currentChatId();
+        const signature = conversationDomSignature(document);
+        const turnCount = conversationDomTurnCount(document);
+        const changedFromPrevious = !previousSignature || signature !== previousSignature;
+        lastState = {
+          chatId,
+          targetChatId: normalizedTargetChatId,
+          previousChatId,
+          signature,
+          previousSignature,
+          turnCount,
+          changedFromPrevious,
+          title: scrapeTitle(),
+        };
+
+        if (chatId !== normalizedTargetChatId) return false;
+        if (!location.pathname.startsWith('/app/')) return false;
+        if (turnCount === 0) return false;
+
+        // A URL do Gemini pode trocar antes do Angular substituir os turns.
+        // Sem esta barreira, o export pode gravar o conteúdo do chat anterior
+        // usando o chatId novo.
+        if (previousSignature && !changedFromPrevious) return false;
+
+        return lastState;
+      },
+      {
+        timeoutMs: FRAME_TIMEOUT_MS,
+        intervalMs: 200,
+        label: `chat ${normalizedTargetChatId || targetChatId} com DOM atualizado`,
+      },
+    ).catch((err) => {
+      if (lastState) {
+        err.message = `${err.message} Ultimo estado: chat=${lastState.chatId || 'nenhum'}, turns=${lastState.turnCount}, mudouDOM=${lastState.changedFromPrevious ? 'sim' : 'nao'}.`;
+      }
+      throw err;
+    });
   };
 
   const getSidebarConversationById = (itemId) =>
@@ -3112,36 +3184,71 @@
     throw new Error('O histórico do browser não voltou para o caderno.');
   };
 
-  const waitForAnyChatToLoad = async (previousChatId, label = 'chat do caderno') => {
-    await waitFor(
+  const waitForAnyChatToLoad = async (previousChatId, label = 'chat do caderno', options = {}) => {
+    const normalizedPreviousChatId = stripGeminiConversationPrefix(previousChatId || '');
+    const previousSignature = options.previousSignature || '';
+    let lastState = null;
+
+    return waitFor(
       () => {
         const chatId = currentChatId();
-        return (
-          !!chatId &&
-          chatId !== previousChatId &&
-          location.pathname.startsWith('/app/') &&
-          scrapeTurns(document).length > 0
-        );
+        const signature = conversationDomSignature(document);
+        const turnCount = conversationDomTurnCount(document);
+        const changedFromPrevious = !previousSignature || signature !== previousSignature;
+        lastState = {
+          chatId,
+          previousChatId: normalizedPreviousChatId,
+          signature,
+          previousSignature,
+          turnCount,
+          changedFromPrevious,
+          title: scrapeTitle(),
+        };
+
+        if (!chatId || chatId === normalizedPreviousChatId) return false;
+        if (!location.pathname.startsWith('/app/')) return false;
+        if (turnCount === 0) return false;
+        if (previousSignature && !changedFromPrevious) return false;
+        return lastState;
       },
-      { timeoutMs: FRAME_TIMEOUT_MS, intervalMs: 400, label },
-    );
+      { timeoutMs: FRAME_TIMEOUT_MS, intervalMs: 200, label },
+    ).catch((err) => {
+      if (lastState) {
+        err.message = `${err.message} Ultimo estado: chat=${lastState.chatId || 'nenhum'}, turns=${lastState.turnCount}, mudouDOM=${lastState.changedFromPrevious ? 'sim' : 'nao'}.`;
+      }
+      throw err;
+    });
   };
 
   const navigateToKnownChatUrl = async (item) => {
-    if (item.chatId === currentChatId() && scrapeTurns(document).length > 0) {
-      return;
+    const previousChatId = currentChatId();
+    const previousSignature = conversationDomSignature(document);
+    const targetChatId = normalizeExpectedChatId(item);
+    if (!targetChatId) {
+      throw new Error(`Nao consegui identificar o ID da conversa "${item.title || item.id || ''}".`);
     }
 
-    if (item.chatId) {
+    if (targetChatId === previousChatId && conversationDomTurnCount(document) > 0) {
+      return {
+        chatId: previousChatId,
+        previousChatId,
+        previousSignature: '',
+        signature: previousSignature,
+        turnCount: conversationDomTurnCount(document),
+        skipped: true,
+      };
+    }
+
+    if (targetChatId) {
       rememberNotebookConversationUrl(
         item,
-        item.chatId,
-        item.url || `https://gemini.google.com/app/${item.chatId}`,
+        targetChatId,
+        item.url || `https://gemini.google.com/app/${targetChatId}`,
       );
     }
 
     const link = document.createElement('a');
-    link.href = item.url || `https://gemini.google.com/app/${item.chatId}`;
+    link.href = item.url || `https://gemini.google.com/app/${targetChatId}`;
     link.target = '_self';
     link.rel = 'noopener';
     link.style.display = 'none';
@@ -3149,8 +3256,10 @@
     link.click();
     link.remove();
 
-    await sleep(1200);
-    await waitForChatToLoad(item.chatId);
+    return waitForChatToLoad(targetChatId, {
+      previousChatId,
+      previousSignature,
+    });
   };
 
   const navigateToNotebookConversation = async (item, options = {}) => {
@@ -3172,8 +3281,7 @@
     });
 
     if (!element && conversationPlan.allowDirectUrlFallback) {
-      await navigateToKnownChatUrl(item);
-      return;
+      return navigateToKnownChatUrl(item);
     }
 
     if (!element) {
@@ -3181,14 +3289,16 @@
     }
 
     const previousChatId = currentChatId();
+    const previousSignature = conversationDomSignature(document);
     const clickable =
       element.querySelector('[data-test-id="navigate-to-recent-chat"]') ||
       element.querySelector('[role="button"]') ||
       element;
 
     clickable.click();
-    await sleep(1200);
-    await waitForAnyChatToLoad(previousChatId, item.title);
+    const navigationState = await waitForAnyChatToLoad(previousChatId, item.title, {
+      previousSignature,
+    });
     const chatId = currentChatId();
     if (chatId) {
       item.chatId = chatId;
@@ -3196,49 +3306,93 @@
       item.id = `c_${chatId}`;
       rememberNotebookConversationUrl(item, chatId, location.href);
     }
+    return navigationState;
   };
 
   const navigateToConversation = async (item, options = {}) => {
     if (item.source === 'notebook') {
-      await navigateToNotebookConversation(item, options);
-      return;
+      return navigateToNotebookConversation(item, options);
     }
 
-    if (item.chatId === currentChatId() && scrapeTurns(document).length > 0) {
-      return;
+    const previousChatId = currentChatId();
+    const previousSignature = conversationDomSignature(document);
+    const targetChatId = normalizeExpectedChatId(item);
+    if (!targetChatId) {
+      throw new Error(`Nao consegui identificar o ID da conversa "${item.title || item.id || ''}".`);
+    }
+
+    if (targetChatId === previousChatId && conversationDomTurnCount(document) > 0) {
+      return {
+        chatId: previousChatId,
+        previousChatId,
+        previousSignature: '',
+        signature: previousSignature,
+        turnCount: conversationDomTurnCount(document),
+        skipped: true,
+      };
     }
 
     const element = getSidebarConversationById(item.id);
     if (!element) {
       if ((item.chatId || item.url) && String(item.url || '').includes('/app/')) {
-        await navigateToKnownChatUrl(item);
-        return;
+        return navigateToKnownChatUrl(item);
       }
       throw new Error(`A conversa ${item.title} não está mais visível no sidebar.`);
     }
 
     const clickable = element.querySelector('a[href]') || element;
     clickable.click();
-    await sleep(1200);
-    await waitForChatToLoad(item.chatId);
+    return waitForChatToLoad(targetChatId, {
+      previousChatId,
+      previousSignature,
+    });
   };
 
-  const collectExportForCurrentConversation = async () => {
+  const collectExportForCurrentConversation = async (options = {}) => {
     const hydrated = await hydrateConversationToTop(document, window);
     if (!hydrated.stats.reachedTop || hydrated.stats.timedOut) {
       throw new Error(
         `Nao consegui carregar o inicio da conversa com seguranca antes de exportar (scroller: ${hydrated.stats.matchedBy}, tentativas: ${hydrated.stats.attempts}). Recarregue a aba e tente novamente.`,
       );
     }
-    return await buildExportPayload(document, location.href, {
+    const payload = await buildExportPayload(document, location.href, {
       turns: hydrated.turns,
-      hydration: hydrated.stats,
+      hydration: {
+        ...hydrated.stats,
+        navigation: options.navigation || null,
+        finalSignature: conversationDomSignature(document),
+      },
     });
+
+    const expectedChatId = stripGeminiConversationPrefix(options.expectedChatId || '');
+    if (expectedChatId && payload.chatId !== expectedChatId) {
+      throw new Error(
+        `Exportacao abortada: o browser abriu o chat ${payload.chatId}, mas o MCP pediu ${expectedChatId}. Nenhum arquivo foi salvo.`,
+      );
+    }
+
+    if (
+      options.previousSignature &&
+      options.previousChatId &&
+      stripGeminiConversationPrefix(options.previousChatId) !== payload.chatId &&
+      conversationDomSignature(document) === options.previousSignature
+    ) {
+      throw new Error(
+        'Exportacao abortada: a URL mudou, mas o conteudo da conversa ainda parece ser o chat anterior. Tente novamente depois que a pagina terminar de carregar.',
+      );
+    }
+
+    return payload;
   };
 
   const collectExportForConversation = async (item, options = {}) => {
-    await navigateToConversation(item, options);
-    return collectExportForCurrentConversation();
+    const navigation = await navigateToConversation(item, options);
+    return collectExportForCurrentConversation({
+      expectedChatId: normalizeExpectedChatId(item),
+      previousChatId: navigation?.previousChatId || '',
+      previousSignature: navigation?.previousSignature || '',
+      navigation: navigation || null,
+    });
   };
 
   const downloadBlob = (filename, content) =>
@@ -5189,6 +5343,9 @@
       snapshot: debugSnapshot,
       hydrateCurrentConversation: () => hydrateConversationToTop(document, window),
       exportPayload: () => buildExportPayload(document, location.href),
+      conversationDomSignature: () => conversationDomSignature(document),
+      waitForChatToLoadForDebug: (targetChatId, options = {}) =>
+        waitForChatToLoad(targetChatId, options),
       findTopBar: () => {
         const res = findTopBar();
         if (!res) return { matchedBy: null, target: null };

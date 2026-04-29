@@ -155,12 +155,22 @@ const bridgeStartup = new Promise((resolveStartup) => {
   bridgeStartupResolve = resolveStartup;
 });
 
-const log = (...args) => {
+const writeLog = (...args) => {
   process.stderr.write(`[${SERVER_NAME}] ${args.join(' ')}\n`);
 };
 
+const log = (...args) => {
+  if (process.env.GEMINI_MCP_LOG_LEVEL === 'info' || process.env.GEMINI_MCP_DEBUG === 'true') {
+    writeLog(...args);
+  }
+};
+
+const errorLog = (...args) => {
+  writeLog(...args);
+};
+
 const debugLog = (...args) => {
-  if (process.env.GEMINI_MCP_DEBUG === 'true') log(...args);
+  if (process.env.GEMINI_MCP_DEBUG === 'true') writeLog(...args);
 };
 
 const settleBridgeStartup = (role, error = null) => {
@@ -554,7 +564,7 @@ const toolTextResult = (structuredContent, { isError = false } = {}) => ({
   content: [
     {
       type: 'text',
-      text: JSON.stringify(structuredContent, null, 2),
+      text: JSON.stringify(structuredContent),
     },
   ],
   structuredContent,
@@ -743,7 +753,7 @@ const ensureBrowserExtensionReady = (args = {}, options = {}) =>
       getChromeExtensionInfo,
       reloadChromeExtension,
       launchChromeForGemini,
-      log,
+      log: debugLog,
     },
     {
       clientId: args.clientId || null,
@@ -844,6 +854,15 @@ const extractChatIdFromUrl = (value) => {
     const match = value.match(/\/app\/([a-f0-9]{12,})/i);
     return match?.[1] || null;
   }
+};
+
+const normalizeConversationChatId = (conversation = {}) => {
+  const candidates = [
+    stripGeminiPrefix(conversation.chatId || ''),
+    extractChatIdFromUrl(conversation.url),
+    stripGeminiPrefix(conversation.id || ''),
+  ];
+  return candidates.find((candidate) => /^[a-f0-9]{12,}$/i.test(candidate || '')) || '';
 };
 
 const resolveOutputDir = (outputDir) => {
@@ -1292,6 +1311,19 @@ const downloadConversationItemForClient = async (client, conversation, args = {}
 
   if (!result?.ok) {
     throw new Error(result?.error || 'Falha ao exportar conversa no browser.');
+  }
+
+  const expectedChatId = normalizeConversationChatId(conversation);
+  const payloadChatId = stripGeminiPrefix(result.payload?.chatId || '');
+  if (expectedChatId && payloadChatId && expectedChatId !== payloadChatId) {
+    throw new Error(
+      `Exportacao abortada: o browser retornou o chat ${payloadChatId}, mas o MCP pediu ${expectedChatId}. Nenhum arquivo foi salvo.`,
+    );
+  }
+  if (expectedChatId && !payloadChatId) {
+    throw new Error(
+      `Exportacao abortada: a extensao nao retornou chatId para confirmar a conversa ${expectedChatId}. Nenhum arquivo foi salvo.`,
+    );
   }
 
   const saved = writeExportPayloadBundle(result.payload, { outputDir: args.outputDir });
@@ -3190,7 +3222,7 @@ bridgeServer.on('error', (error) => {
     return;
   }
   settleBridgeStartup('failed', error);
-  log(formatBridgeListenError(error, { host: cli.host, port: cli.port }));
+  errorLog(formatBridgeListenError(error, { host: cli.host, port: cli.port }));
   shutdown('Encerrando MCP por falha no bridge HTTP.', 1);
 });
 

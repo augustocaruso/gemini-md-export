@@ -150,6 +150,11 @@ espera, pula por bridge morto ou encontra timeout, ele emite uma mensagem curta
 no JSON (`systemMessage`) para aparecer no terminal; quando já existe aba
 conectada, ele fica silencioso para não poluir chamadas normais.
 
+O MCP também deve ficar silencioso por padrão. Checagens internas de
+versão/protocolo, reload e wake do navegador só aparecem no terminal com
+`GEMINI_MCP_DEBUG=true` ou `GEMINI_MCP_LOG_LEVEL=info`; no uso normal, as
+tools retornam JSON compacto e diagnóstico detalhado fica nos status/relatórios.
+
 Use `GEMINI_MCP_BROWSER=edge` ou `chrome`/`brave`/`dia` para fixar o navegador.
 O argumento `--profile-directory` só é enviado quando
 `GEMINI_MCP_CHROME_PROFILE_DIRECTORY` é definido explicitamente. Para
@@ -266,6 +271,12 @@ usando o mesmo caminho de lazy-load do modal.
 Para evitar arquivos truncados, cada conversa é hidratada até o início antes da
 extração. Se a extensão não conseguir provar que chegou ao topo da conversa, o
 item falha no relatório em vez de salvar um Markdown incompleto.
+Para evitar conteúdo trocado entre chats, a navegação em lote não aceita apenas
+"URL nova + algum texto na tela": antes de exportar, a extensão compara uma
+assinatura leve dos turns do DOM anterior com a conversa atual. Se a URL mudou
+mas o DOM ainda parece ser o chat anterior, o item falha no relatório e nenhum
+arquivo é salvo. O MCP também valida `chatId` retornado pela extensão antes de
+gravar em disco.
 
 Endpoints locais úteis para diagnóstico quando as tools ainda não carregaram:
 

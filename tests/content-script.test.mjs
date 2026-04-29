@@ -310,3 +310,47 @@ test('exportPayload mantém warning quando lightbox não revela fonte legível',
 
   window.close();
 });
+
+test('waitForChatToLoad aguarda DOM novo antes de liberar export', { timeout: 5000 }, async () => {
+  const oldChatId = 'aaaaaaaaaaaa';
+  const newChatId = 'bbbbbbbbbbbb';
+  const { dom, runtimeErrors } = createGeminiMediaDom(`
+    <user-query><div>pergunta antiga</div></user-query>
+    <model-response><div>resposta antiga</div></model-response>
+  `);
+  const { window } = dom;
+  const debug = await evaluateContentScript(window);
+  const previousSignature = debug.conversationDomSignature();
+
+  window.history.replaceState({}, '', `/app/${oldChatId}`);
+  window.history.pushState({}, '', `/app/${newChatId}`);
+
+  let resolved = false;
+  const waitPromise = debug
+    .waitForChatToLoadForDebug(newChatId, {
+      previousChatId: oldChatId,
+      previousSignature,
+    })
+    .then((state) => {
+      resolved = true;
+      return state;
+    });
+
+  await new Promise((resolve) => window.setTimeout(resolve, 350));
+  assert.equal(
+    resolved,
+    false,
+    'URL nova com turns antigos nao deve liberar export imediatamente',
+  );
+
+  window.document.title = 'Conversa nova - Gemini';
+  window.document.querySelector('user-query div').textContent = 'pergunta nova';
+  window.document.querySelector('model-response div').textContent = 'resposta nova';
+
+  const state = await waitPromise;
+  assert.equal(state.chatId, newChatId);
+  assert.equal(state.changedFromPrevious, true);
+  assert.deepEqual(runtimeErrors, []);
+
+  window.close();
+});

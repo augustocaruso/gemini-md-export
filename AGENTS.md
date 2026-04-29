@@ -384,6 +384,16 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   Gemini CLI. O MCP bloqueia dois jobs simultâneos de histórico recente na
   mesma aba; se já houver um rodando, consultar/cancelar o job existente antes
   de iniciar outro.
+  Integridade vence velocidade: antes de exportar uma conversa depois de
+  navegação SPA, o content script compara uma assinatura leve dos turns do DOM
+  anterior com a página atual. URL nova com DOM antigo não libera export; o item
+  deve falhar no relatório em vez de salvar conteúdo do chat anterior com
+  `chatId` novo. O MCP também valida o `chatId` do payload antes de escrever
+  arquivo. Não remova essa barreira para ganhar performance.
+  O MCP deve ser silencioso em uso normal: logs detalhados de guard/reload/wake
+  só aparecem com `GEMINI_MCP_DEBUG=true` ou `GEMINI_MCP_LOG_LEVEL=info`; erros
+  acionáveis vão na resposta da tool/status e relatórios de job, não em spam de
+  terminal.
   Downloads resolvem uma conversa por `index` 1-based,
   `chatId` ou, em cadernos, `title`; pedem o Markdown à extensão e gravam
   localmente no diretório padrão configurado, sobrescrevendo arquivos
