@@ -287,7 +287,10 @@ sobrescrever e bloqueia qualquer nota que pareça ter virado wiki/nota editada.
 Essas notas wiki também entram no escopo de reparo: o agente preserva a nota,
 faz backup, reexporta o raw correto e cria um caso em `wiki-review/` para
 regenerar ou mesclar a wiki a partir da fonte corrigida. Elas não são
-sobrescritas automaticamente.
+sobrescritas automaticamente. O subagent de reparo usa modelo Flash e atua como
+verificador operacional: emite relatório preliminar e final; se uma wiki precisa
+ser reescrita, ele pede ao agente principal para chamar o subagent escritor de
+notas com o case file e o raw corrigido.
 
 Endpoints locais úteis para diagnóstico quando as tools ainda não carregaram:
 

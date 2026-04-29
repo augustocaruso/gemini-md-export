@@ -34,7 +34,11 @@ Operational guidance:
   before overwrite. If a bad chat has already become a wiki/Obsidian note, the
   wiki note is also repair scope: preserve it, back it up, create a
   `wiki-review` case file, and require a deliberate regenerate/merge strategy
-  from the corrected raw export instead of overwriting it automatically.
+  from the corrected raw export instead of overwriting it automatically. The
+  repair subagent is intentionally a Flash operational checker: it emits
+  preliminary and final reports, and when a wiki needs rewriting it asks the
+  parent agent to call the appropriate note-writing/knowledge-architect subagent
+  with the case file and staged corrected raw export.
 - When the user asks to update this exporter inside Gemini CLI, use Gemini CLI's
   built-in extension update flow instead of an MCP tool: tell the user to run
   `gemini extensions update gemini-md-export` or `gemini extensions update --all`

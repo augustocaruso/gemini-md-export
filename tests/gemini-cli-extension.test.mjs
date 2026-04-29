@@ -70,13 +70,19 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
 
   const repairAgent = readFileSync(repairAgentPath, 'utf-8');
   assert.match(repairAgent, /^---\nname: gemini-vault-repair/m);
+  assert.match(repairAgent, /^model: gemini-3-flash-preview$/m);
   assert.match(repairAgent, /mcp_gemini-md-export_gemini_download_chat/);
   assert.match(repairAgent, /vault-repair-audit\.mjs/);
+  assert.match(repairAgent, /preliminary-report/);
+  assert.match(repairAgent, /You cannot call another Gemini CLI subagent yourself/);
+  assert.match(repairAgent, /ask the parent agent to call the appropriate/);
   assert.match(repairAgent, /wikiCandidate/);
 
   const repairCommand = readFileSync(repairCommandPath, 'utf-8');
   assert.match(repairCommand, /gemini-vault-repair/);
   assert.match(repairCommand, /vault-repair-audit\.mjs/);
+  assert.match(repairCommand, /relatorio preliminar/);
+  assert.match(repairCommand, /nao deve chamar outro subagent/);
 
   const browserManifest = JSON.parse(readFileSync(browserManifestPath, 'utf-8'));
   const bridgeVersion = JSON.parse(readFileSync(bridgeVersionPath, 'utf-8'));

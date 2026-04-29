@@ -403,8 +403,12 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   de wiki/edição humana automaticamente. Se um raw contaminado virou wiki, a
   wiki também precisa reparo: preservar, backupear, reexportar raw correto e
   criar caso `wiki-review/<chatId>.json` para regenerar/mesclar de forma
-  deliberada. O build deve copiar `agents/`, `commands/` e `scripts/` para
-  `dist/gemini-cli-extension/`; subagents não entram em `gemini-extension.json`.
+  deliberada. Esse subagent deve usar modelo Flash e emitir relatório
+  preliminar e final; se precisar reescrever uma wiki, ele pede ao agente
+  principal para chamar o subagent escritor/arquitetura de notas com o case file
+  e o raw corrigido. O build deve copiar `agents/`, `commands/` e `scripts/`
+  para `dist/gemini-cli-extension/`; subagents não entram em
+  `gemini-extension.json`.
   Downloads resolvem uma conversa por `index` 1-based,
   `chatId` ou, em cadernos, `title`; pedem o Markdown à extensão e gravam
   localmente no diretório padrão configurado, sobrescrevendo arquivos

@@ -19,6 +19,11 @@ Contrato:
   o subagent deve reexportar o raw correto, preservar/backupear a wiki atual e
   criar um caso em `wiki-review/<chatId>.json` marcando
   `wiki_repair_required`, em vez de fingir que o raw corrigido resolve a wiki.
+- O subagent deve emitir um relatorio preliminar depois da auditoria e antes de
+  qualquer overwrite, e um relatorio final depois da verificacao/reparo.
+- O subagent nao deve chamar outro subagent. Se uma wiki precisar ser reescrita,
+  ele deve pedir ao agente principal para chamar o subagent escritor/arquitetura
+  de notas com o case file e o raw corrigido em staging.
 - A resposta final deve trazer contagens, caminhos de staging/backup/relatorio
   e lista curta das notas wiki que precisam ser regeneradas/mescladas a partir
   do raw corrigido.
