@@ -222,8 +222,12 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   nativo de extensão Chrome. Id `${UI_ID_PREFIX}-menu`, `position: fixed`
   ancorado abaixo/à direita do botão, `z-index: 10004` (acima do dock 10002,
   abaixo do toast 10050; o modal 10001 e o menu são mutuamente exclusivos
-  por fluxo). Tema via `--gm-dock-bg/--gm-dock-text/--gm-dock-border/--gm-accent`
-  (mesma família que o dock). O menu tem dois `menuitem`s: "Exportar como
+  por fluxo). Tema próprio: o menu aplica seu próprio palette
+  `--gm-menu-{bg,text,muted,border,divider,hover,focus,shadow,accent,font}`
+  via `buildMenuPalette()` no próprio elemento, **sem depender** de o dock/modal
+  estarem abertos para herdar `--gm-dock-*`. Antes o menu caía no fallback
+  dark do `var()` em tema claro, aparecendo escuro sobre página clara. O
+  menu tem dois `menuitem`s: "Exportar como
   Markdown" (chama `safeOpenExportModal`) e "Ignorar esta aba"
   (`menuitemcheckbox` com `aria-checked`). Fechamento por clique fora,
   `Escape`, scroll ou resize. A flag de ignorar é armazenada em

@@ -5418,12 +5418,43 @@
   };
 
   // Menu popover ancorado ao botão. Sem `chrome.action` popup; o menu é DOM
-  // próprio e usa as variáveis `--gm-*` para herdar o tema do dock/modal.
+  // próprio com palette `--gm-menu-*` aplicada no próprio elemento (não
+  // depende do dock/modal estarem abertos para herdar tema).
   const MENU_ZINDEX = 10004;
   let menuOutsideClickHandler = null;
   let menuKeydownHandler = null;
   let menuRepositionHandler = null;
   let menuScrollHandler = null;
+
+  const buildMenuPalette = () =>
+    isDarkTheme()
+      ? {
+          '--gm-menu-bg': 'rgba(35,38,43,0.98)',
+          '--gm-menu-text': '#e8eaed',
+          '--gm-menu-muted': '#9aa0a6',
+          '--gm-menu-border': 'rgba(255,255,255,0.08)',
+          '--gm-menu-divider': 'rgba(255,255,255,0.08)',
+          '--gm-menu-hover': 'rgba(232,234,237,0.08)',
+          '--gm-menu-focus': 'rgba(138,180,248,0.20)',
+          '--gm-menu-shadow': '0 8px 24px rgba(0,0,0,0.45), 0 2px 6px rgba(0,0,0,0.30)',
+          '--gm-menu-accent': '#8ab4f8',
+          '--gm-menu-font':
+            '"Google Sans Text","Google Sans",Roboto,"Segoe UI",system-ui,sans-serif',
+        }
+      : {
+          '--gm-menu-bg': 'rgba(255,255,255,0.99)',
+          '--gm-menu-text': '#202124',
+          '--gm-menu-muted': '#5f6368',
+          '--gm-menu-border': 'rgba(60,64,67,0.12)',
+          '--gm-menu-divider': 'rgba(60,64,67,0.10)',
+          '--gm-menu-hover': 'rgba(60,64,67,0.06)',
+          '--gm-menu-focus': 'rgba(26,115,232,0.12)',
+          '--gm-menu-shadow':
+            '0 8px 24px rgba(60,64,67,0.18), 0 2px 6px rgba(60,64,67,0.10)',
+          '--gm-menu-accent': '#1a73e8',
+          '--gm-menu-font':
+            '"Google Sans Text","Google Sans",Roboto,"Segoe UI",system-ui,sans-serif',
+        };
 
   const closeTopBarMenu = () => {
     const existing = document.getElementById(MENU_ID);
@@ -5452,10 +5483,21 @@
     const rect = btn.getBoundingClientRect();
     const viewportWidth =
       pageWindow.innerWidth || document.documentElement?.clientWidth || 0;
+    const viewportHeight =
+      pageWindow.innerHeight || document.documentElement?.clientHeight || 0;
     menu.style.position = 'fixed';
-    menu.style.top = `${Math.round(rect.bottom + 6)}px`;
-    menu.style.right = `${Math.max(8, Math.round(viewportWidth - rect.right))}px`;
+    // Alinha o canto superior direito do menu com o canto inferior direito do
+    // botão, com 6px de gap. Clamp para garantir que não vaze do viewport.
+    const top = Math.min(
+      Math.max(8, Math.round(rect.bottom + 6)),
+      Math.max(8, viewportHeight - 8),
+    );
+    const right = Math.max(8, Math.round(viewportWidth - rect.right));
+    menu.style.top = `${top}px`;
+    menu.style.right = `${right}px`;
     menu.style.left = 'auto';
+    menu.style.maxHeight = `${Math.max(160, viewportHeight - top - 16)}px`;
+    menu.style.overflowY = 'auto';
   };
 
   const styleMenuItem = (el) => {
@@ -5463,24 +5505,25 @@
       display: 'block',
       width: '100%',
       textAlign: 'left',
-      padding: '10px 12px',
+      padding: '8px 10px',
       background: 'transparent',
-      color: 'inherit',
+      color: 'var(--gm-menu-text)',
       border: '0',
-      borderRadius: '8px',
+      borderRadius: '6px',
       cursor: 'pointer',
-      fontSize: 'inherit',
-      fontFamily: 'inherit',
-      lineHeight: '1.3',
+      fontSize: '13px',
+      fontFamily: 'var(--gm-menu-font)',
+      lineHeight: '1.35',
+      transition: 'background-color 120ms ease',
     });
     el.addEventListener('mouseenter', () => {
-      el.style.background = 'rgba(138,180,248,0.14)';
+      el.style.background = 'var(--gm-menu-hover)';
     });
     el.addEventListener('mouseleave', () => {
       el.style.background = 'transparent';
     });
     el.addEventListener('focus', () => {
-      el.style.background = 'rgba(138,180,248,0.18)';
+      el.style.background = 'var(--gm-menu-focus)';
       el.style.outline = 'none';
     });
     el.addEventListener('blur', () => {
@@ -5498,20 +5541,30 @@
     Object.assign(row.style, {
       display: 'flex',
       alignItems: 'center',
-      gap: '8px',
+      gap: '10px',
     });
 
     const check = document.createElement('span');
     check.textContent = ignored ? '✓' : '';
     Object.assign(check.style, {
-      display: 'inline-block',
-      width: '16px',
-      textAlign: 'center',
-      fontWeight: '600',
-      color: ignored ? 'var(--gm-accent, #8ab4f8)' : 'transparent',
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      flex: '0 0 18px',
+      width: '18px',
+      height: '18px',
+      fontWeight: '700',
+      fontSize: '13px',
+      color: 'var(--gm-menu-accent)',
+      visibility: ignored ? 'visible' : 'hidden',
     });
     const label = document.createElement('span');
     label.textContent = 'Ignorar esta aba';
+    Object.assign(label.style, {
+      flex: '1 1 auto',
+      fontWeight: '500',
+      color: 'var(--gm-menu-text)',
+    });
     row.appendChild(check);
     row.appendChild(label);
 
@@ -5521,10 +5574,11 @@
       : 'Desliga a conexão com o MCP só nesta aba.';
     Object.assign(sub.style, {
       display: 'block',
-      marginTop: '2px',
-      paddingLeft: '24px',
+      marginTop: '3px',
+      paddingLeft: '28px',
       fontSize: '11px',
-      color: 'var(--gm-dock-muted, #aab4be)',
+      lineHeight: '1.35',
+      color: 'var(--gm-menu-muted)',
     });
 
     item.appendChild(row);
@@ -5538,21 +5592,25 @@
     menu.id = MENU_ID;
     menu.setAttribute('role', 'menu');
     menu.dataset.role = 'gm-md-export-menu';
+    const palette = buildMenuPalette();
+    Object.entries(palette).forEach(([k, v]) => menu.style.setProperty(k, v));
     Object.assign(menu.style, {
       position: 'fixed',
-      minWidth: '260px',
-      padding: '6px',
-      background: 'var(--gm-dock-bg, rgba(31,35,41,0.96))',
-      color: 'var(--gm-dock-text, #e8eaed)',
-      border: '1px solid var(--gm-dock-border, rgba(255,255,255,0.08))',
-      borderRadius: '12px',
-      boxShadow: '0 12px 32px rgba(0,0,0,0.32)',
-      fontFamily:
-        'var(--gm-font, "Google Sans Text","Google Sans",Roboto,"Segoe UI",system-ui,sans-serif)',
+      minWidth: '244px',
+      maxWidth: '320px',
+      padding: '4px',
+      background: 'var(--gm-menu-bg)',
+      color: 'var(--gm-menu-text)',
+      border: '1px solid var(--gm-menu-border)',
+      borderRadius: '10px',
+      boxShadow: 'var(--gm-menu-shadow)',
+      fontFamily: 'var(--gm-menu-font)',
       fontSize: '13px',
       zIndex: String(MENU_ZINDEX),
-      backdropFilter: 'blur(8px)',
-      WebkitBackdropFilter: 'blur(8px)',
+      backdropFilter: 'blur(10px)',
+      WebkitBackdropFilter: 'blur(10px)',
+      // Garante que itens internos tenham referência de var caso sejam
+      // re-renderizados (ex.: toggle "Ignorar"), evitando perder a paleta.
     });
 
     const exportItem = document.createElement('button');
@@ -5561,6 +5619,7 @@
     exportItem.dataset.role = 'gm-menu-export';
     exportItem.textContent = 'Exportar como Markdown';
     styleMenuItem(exportItem);
+    exportItem.style.fontWeight = '500';
     exportItem.addEventListener('click', () => {
       closeTopBarMenu();
       safeOpenExportModal();
@@ -5569,8 +5628,8 @@
     const divider = document.createElement('div');
     Object.assign(divider.style, {
       height: '1px',
-      margin: '6px 4px',
-      background: 'var(--gm-dock-border, rgba(255,255,255,0.08))',
+      margin: '4px 6px',
+      background: 'var(--gm-menu-divider)',
     });
 
     const ignoreItem = document.createElement('button');
