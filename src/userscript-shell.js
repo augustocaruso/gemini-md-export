@@ -5579,6 +5579,10 @@
       fontSize: '11px',
       lineHeight: '1.35',
       color: 'var(--gm-menu-muted)',
+      // Trava altura: as duas variantes do texto têm comprimentos parecidos
+      // mas podem quebrar para nº diferente de linhas; min-height absorve a
+      // diferença para o item não pular ao alternar o toggle.
+      minHeight: '30px',
     });
 
     item.appendChild(row);
@@ -5596,8 +5600,11 @@
     Object.entries(palette).forEach(([k, v]) => menu.style.setProperty(k, v));
     Object.assign(menu.style, {
       position: 'fixed',
-      minWidth: '244px',
-      maxWidth: '320px',
+      // Largura fixa: re-render do toggle "Ignorar esta aba" troca a
+      // submessage e fazia o popover ricochetear entre minWidth e maxWidth.
+      // Travar em 280px elimina o jump sem precisar normalizar texto.
+      width: '280px',
+      boxSizing: 'border-box',
       padding: '4px',
       background: 'var(--gm-menu-bg)',
       color: 'var(--gm-menu-text)',
