@@ -141,6 +141,32 @@ test('export total pula arquivos existentes por padrão', () => {
   assert.match(source, /skippedCount:/);
 });
 
+test('export missing cruza histórico completo com exports raw no vault', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const jobBlock = source.match(
+    /const runRecentChatsExportJob = async[\s\S]*?\nconst startRecentChatsExportJob/,
+  )?.[0];
+  const toolBlock = source.match(
+    /name: 'gemini_export_missing_chats'[\s\S]*?\n  \{\n    name: 'gemini_reexport_chats'/,
+  )?.[0];
+  assert.ok(jobBlock, 'runRecentChatsExportJob deve existir');
+  assert.ok(toolBlock, 'schema de gemini_export_missing_chats deve existir');
+  assert.match(source, /const scanDownloadedGeminiExportsInVault = \(vaultDir\) =>/);
+  assert.match(source, /looksLikeRawGeminiExport/);
+  assert.match(source, /FRONTMATTER_FIELD_RE/);
+  assert.match(jobBlock, /phase = 'scanning-vault'/);
+  assert.match(jobBlock, /scanDownloadedGeminiExportsInVault\(job\.existingScanDir\)/);
+  assert.match(jobBlock, /reason: 'existing-vault-export'/);
+  assert.match(jobBlock, /job\.webConversationCount = loadedItems\.length/);
+  assert.match(jobBlock, /job\.existingVaultCount = existingInVault\.length/);
+  assert.match(jobBlock, /job\.missingCount = missing\.length/);
+  assert.match(toolBlock, /required:\s*\['vaultDir'\]/);
+  assert.match(toolBlock, /exportMissingOnly:\s*true/);
+  assert.match(toolBlock, /skipExisting:\s*true/);
+  assert.match(source, /url\.pathname === '\/agent\/export-missing-chats'/);
+  assert.match(source, /'gemini_export_missing_chats'/);
+});
+
 test('reexport de chatIds conhecidos roda como job em background', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   assert.match(source, /name: 'gemini_reexport_chats'/);

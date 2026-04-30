@@ -13,21 +13,33 @@ Operational guidance:
   `offset` values, then continue from `pagination.nextOffset` until
   `pagination.reachedEnd` is true, `pagination.canLoadMore` is false, or a page
   returns no conversations.
-- When the user asks to import/export the whole Gemini chat history, do not list
-  the chats first. Start `gemini_export_recent_chats`, tell the user the job ID,
-  and poll `gemini_export_job_status` until the job finishes. The job writes the
-  Markdown files and an incremental JSON report locally. If the user asks to
-  stop the import/export, call `gemini_export_job_cancel`; already written
+- When the user asks to import/sync the whole Gemini chat history into an
+  Obsidian vault, the required workflow is a reconciliation, not a blind export:
+  call `gemini_export_missing_chats` with `vaultDir` pointing at the vault/folder
+  to scan. That job loads the entire reachable Gemini web sidebar, scans the
+  vault recursively for raw Gemini Markdown exports (`chat_id`, `source:
+  gemini-web`, raw turn headings, or `<chatId>.md` filenames), computes
+  `webConversationCount - existingVaultCount = missingCount`, and downloads only
+  the missing chats. Tell the user the job ID and poll
+  `gemini_export_job_status` until it finishes. If the user wants the missing
+  files in a specific raw-export folder, pass `outputDir`; otherwise the MCP uses
+  its configured export directory. Do not emulate this by listing pages in chat
+  or looping over `gemini_download_chat`.
+- When the user asks for a blind full export outside a vault reconciliation, do
+  not list the chats first. Start `gemini_export_recent_chats`, tell the user the
+  job ID, and poll `gemini_export_job_status` until the job finishes. The job
+  writes Markdown files and an incremental JSON report locally. If the user asks
+  to stop the import/export, call `gemini_export_job_cancel`; already written
   Markdown files and the report are preserved. Do not pass `maxChats` unless the
   user explicitly asks for a partial export; with no `maxChats`, the MCP loads
-  until the sidebar reaches its real end. Whole-history export is incremental:
-  by default it skips non-empty `<chatId>.md` files that already exist in the
-  output directory and records them as `skippedExisting`/`skippedCount` in the
-  report. Only pass `skipExisting=false` when the user explicitly asks to
-  overwrite/re-export already saved chats. If individual chats fail because the
-  extension could not prove it reached the beginning of the conversation,
-  report those failures from the job status instead of treating them as
-  completed exports.
+  until the sidebar reaches its real end. Blind whole-history export is still
+  incremental: by default it skips non-empty `<chatId>.md` files that already
+  exist in the output directory and records them as
+  `skippedExisting`/`skippedCount` in the report. Only pass `skipExisting=false`
+  when the user explicitly asks to overwrite/re-export already saved chats. If
+  individual chats fail because the extension could not prove it reached the
+  beginning of the conversation, report those failures from the job status
+  instead of treating them as completed exports.
 - When summarizing an export job, distinguish "100% of the requested partial
   batch" from "100% of the user's full Gemini history". Only call the full
   history complete when `fullHistoryRequested=true`, `fullHistoryVerified=true`,

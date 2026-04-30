@@ -65,6 +65,7 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.equal(hooksConfig.hooks?.SessionStart, undefined);
   assert.notEqual(hooksConfig.hooks.BeforeTool[0].matcher, '*');
   assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /browser_status/);
+  assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /export_missing_chats/);
   assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /mcp_\+gemini/);
   assert.doesNotMatch(hooksConfig.hooks.BeforeTool[0].matcher, /get_export_dir/);
   assert.doesNotMatch(hooksConfig.hooks.BeforeTool[0].matcher, /set_export_dir/);
@@ -117,6 +118,9 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.match(context, /Only ask for manual reload/);
   assert.match(context, /Do not keep\s+calling `gemini_download_chat`/);
   assert.match(context, /gemini_reexport_chats/);
+  assert.match(context, /gemini_export_missing_chats/);
+  assert.match(context, /webConversationCount - existingVaultCount = missingCount/);
+  assert.match(context, /Do not emulate this by listing pages in chat/);
 });
 
 test('auditor coleta todos os links Gemini de origem em nota wiki consolidada', () => {

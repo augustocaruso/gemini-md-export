@@ -3,9 +3,9 @@
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, isAbsolute, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import readline from 'node:readline';
 import {
@@ -975,6 +975,126 @@ const existingMarkdownExportForConversation = (conversation, { outputDir } = {})
   };
 };
 
+const VAULT_SCAN_IGNORED_DIRS = new Set([
+  '.git',
+  '.obsidian',
+  '.trash',
+  '.gemini-md-export-repair',
+  'node_modules',
+]);
+const VAULT_SCAN_MAX_MARKDOWN_FILES = Math.max(
+  1,
+  Math.min(200_000, Number(process.env.GEMINI_MCP_VAULT_SCAN_MAX_MARKDOWN_FILES || 50_000)),
+);
+const FRONTMATTER_FIELD_RE = /^([A-Za-z0-9_-]+):\s*(.*)$/gm;
+
+const parseSimpleFrontmatterFields = (text) => {
+  if (!String(text || '').startsWith('---\n')) return {};
+  const end = text.indexOf('\n---', 4);
+  if (end === -1) return {};
+  const frontmatter = text.slice(4, end);
+  const fields = {};
+  for (const match of frontmatter.matchAll(FRONTMATTER_FIELD_RE)) {
+    fields[match[1]] = match[2].trim().replace(/^["'](.*)["']$/, '$1');
+  }
+  return fields;
+};
+
+const chatIdFromText = (value) => {
+  const text = String(value || '');
+  const prefixed = text.match(/\bc_([a-f0-9]{12,})\b/i);
+  if (prefixed) return prefixed[1].toLowerCase();
+  const app = text.match(/\/app\/([a-f0-9]{12,})/i);
+  if (app) return app[1].toLowerCase();
+  const bare = text.match(/\b([a-f0-9]{12,})\b/i);
+  return bare?.[1]?.toLowerCase() || '';
+};
+
+const looksLikeRawGeminiExport = (text, fields) =>
+  fields.source === 'gemini-web' ||
+  !!chatIdFromText(fields.chat_id) ||
+  /^##\s+(?:🧑\s*)?(?:Usuário|Usuario)\b/im.test(text) ||
+  /^##\s+(?:🤖\s*)?Gemini\b/im.test(text);
+
+const walkVaultMarkdownFiles = (rootDir, out = []) => {
+  if (out.length >= VAULT_SCAN_MAX_MARKDOWN_FILES) return out;
+  for (const entry of readdirSync(rootDir, { withFileTypes: true })) {
+    if (entry.isDirectory()) {
+      if (VAULT_SCAN_IGNORED_DIRS.has(entry.name.toLowerCase())) continue;
+      walkVaultMarkdownFiles(resolve(rootDir, entry.name), out);
+      if (out.length >= VAULT_SCAN_MAX_MARKDOWN_FILES) break;
+      continue;
+    }
+    if (entry.isFile() && entry.name.toLowerCase().endsWith('.md')) {
+      out.push(resolve(rootDir, entry.name));
+      if (out.length >= VAULT_SCAN_MAX_MARKDOWN_FILES) break;
+    }
+  }
+  return out;
+};
+
+const scanDownloadedGeminiExportsInVault = (vaultDir) => {
+  const rootDir = resolveOutputDir(vaultDir);
+  const stat = statSync(rootDir);
+  if (!stat.isDirectory()) {
+    throw new Error(`O caminho do vault não é uma pasta: ${rootDir}`);
+  }
+
+  const chatIds = new Map();
+  const markdownFiles = walkVaultMarkdownFiles(rootDir);
+  let matchedFiles = 0;
+  let truncated = markdownFiles.length >= VAULT_SCAN_MAX_MARKDOWN_FILES;
+
+  for (const filePath of markdownFiles) {
+    let text = '';
+    try {
+      text = readFileSync(filePath, 'utf-8');
+    } catch {
+      continue;
+    }
+
+    const fields = parseSimpleFrontmatterFields(text);
+    if (!looksLikeRawGeminiExport(text, fields)) continue;
+    matchedFiles += 1;
+
+    const candidates = [
+      { value: fields.chat_id, source: 'frontmatter.chat_id' },
+      { value: fields.url, source: 'frontmatter.url' },
+      { value: basename(filePath, '.md'), source: 'filename' },
+    ];
+    for (const candidate of candidates) {
+      const chatId = chatIdFromText(candidate.value);
+      if (!chatId) continue;
+      if (!chatIds.has(chatId)) chatIds.set(chatId, []);
+      chatIds.get(chatId).push({
+        filePath,
+        relativePath: relative(rootDir, filePath),
+        source: candidate.source,
+      });
+    }
+  }
+
+  return {
+    rootDir,
+    markdownFilesScanned: markdownFiles.length,
+    rawExportFilesMatched: matchedFiles,
+    uniqueChatIds: chatIds.size,
+    truncated,
+    chatIds,
+  };
+};
+
+const summarizeVaultScan = (scan) =>
+  scan
+    ? {
+        rootDir: scan.rootDir,
+        markdownFilesScanned: scan.markdownFilesScanned,
+        rawExportFilesMatched: scan.rawExportFilesMatched,
+        uniqueChatIds: scan.uniqueChatIds,
+        truncated: scan.truncated,
+      }
+    : null;
+
 const writeExportPayload = (payload, { outputDir } = {}) => {
   if (!payload?.content && !payload?.contentBase64) {
     throw new Error('A extensão não retornou conteúdo para salvar.');
@@ -1809,6 +1929,12 @@ const summarizeExportJob = (job) => ({
   successCount: job.successCount,
   failureCount: job.failureCount,
   skippedCount: job.skippedCount || 0,
+  exportMissingOnly: job.exportMissingOnly === true,
+  existingScanDir: job.existingScanDir || null,
+  vaultScan: job.vaultScan || null,
+  webConversationCount: job.webConversationCount ?? null,
+  existingVaultCount: job.existingVaultCount ?? 0,
+  missingCount: job.missingCount ?? null,
   reachedEnd: job.reachedEnd ?? null,
   truncated: job.truncated ?? false,
   cancelRequested: job.cancelRequested,
@@ -1886,6 +2012,12 @@ const buildRecentChatsExportReport = (job, client, successes, failures) => ({
   failureCount: failures.length,
   skippedCount: job.skippedCount || 0,
   skipExisting: job.skipExisting === true,
+  exportMissingOnly: job.exportMissingOnly === true,
+  existingScanDir: job.existingScanDir || null,
+  vaultScan: job.vaultScan || null,
+  webConversationCount: job.webConversationCount ?? null,
+  existingVaultCount: job.existingVaultCount ?? 0,
+  missingCount: job.missingCount ?? null,
   reachedEnd: job.reachedEnd,
   truncated: job.truncated,
   loadWarning: job.loadWarning || null,
@@ -2035,6 +2167,8 @@ const broadcastRecentChatsJobProgress = (job, client, patch = {}) => {
       label = 'Exportação falhou.';
     } else if (phase === 'loading-history') {
       label = 'MCP carregando histórico do sidebar...';
+    } else if (phase === 'scanning-vault') {
+      label = 'MCP cruzando histórico do Gemini com o vault...';
     } else if (phase === 'exporting' && job.current?.skippedExisting) {
       const indexLabel = job.current.index ? ` (${job.current.index})` : '';
       label = `MCP pulando${indexLabel}: ${job.current.title || job.current.chatId}`;
@@ -2167,16 +2301,70 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
     const requestedSlice = job.exportAll
       ? conversations.slice(job.startIndex - 1)
       : conversations.slice(job.startIndex - 1, job.startIndex - 1 + job.maxChats);
-    const selected = requestedSlice.filter((conversation) => {
-        const key = stripGeminiPrefix(conversation.chatId || conversation.id) || conversation.url;
+    const loadedItems = requestedSlice
+      .map((conversation, sliceIndex) => ({
+        conversation,
+        index: job.startIndex + sliceIndex,
+      }))
+      .filter(({ conversation }) => {
+        const key =
+          normalizeConversationChatId(conversation) ||
+          stripGeminiPrefix(conversation.chatId || conversation.id) ||
+          conversation.url;
         if (!key || seen.has(key)) return false;
         seen.add(key);
         return true;
       });
 
+    job.webConversationCount = loadedItems.length;
+    let selected = loadedItems;
+
+    if (job.exportMissingOnly) {
+      job.phase = 'scanning-vault';
+      touchExportJob(job);
+      persistRecentChatsExportReport(job, client, successes, failures);
+      broadcastRecentChatsJobProgress(job, client);
+
+      const vaultScan = scanDownloadedGeminiExportsInVault(job.existingScanDir);
+      job.vaultScan = summarizeVaultScan(vaultScan);
+
+      const missing = [];
+      const existingInVault = [];
+      for (const item of loadedItems) {
+        const chatId = normalizeConversationChatId(item.conversation).toLowerCase();
+        if (chatId && vaultScan.chatIds.has(chatId)) {
+          const evidence = vaultScan.chatIds.get(chatId)?.[0] || null;
+          existingInVault.push({
+            index: item.index,
+            chatId,
+            title: item.conversation.title || null,
+            filePath: evidence?.filePath || null,
+            relativePath: evidence?.relativePath || null,
+            reason: 'existing-vault-export',
+          });
+          continue;
+        }
+        missing.push(item);
+      }
+
+      selected = missing;
+      job.existingVaultCount = existingInVault.length;
+      job.missingCount = missing.length;
+      job.skippedExisting.push(...existingInVault);
+      job.recentSkipped = job.skippedExisting.slice(-10);
+      job.skippedCount = job.skippedExisting.length;
+    } else {
+      job.missingCount = loadedItems.length;
+    }
+
     job.requested = selected.length;
     if (selected.length === 0) {
-      throw new Error('Nenhuma conversa recente carregada para exportar.');
+      job.status =
+        job.truncated || job.loadMoreTimedOut || job.vaultScan?.truncated
+          ? 'completed_with_errors'
+          : 'completed';
+      job.phase = 'done';
+      return;
     }
 
     job.phase = 'exporting';
@@ -2191,8 +2379,7 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
         break;
       }
 
-      const conversation = selected[i];
-      const index = job.startIndex + i;
+      const { conversation, index } = selected[i];
       job.current = {
         index,
         title: conversation.title || null,
@@ -2274,7 +2461,7 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
       touchExportJob(job);
       broadcastRecentChatsJobProgress(job, client);
       job.status =
-        failures.length > 0 || job.truncated || job.loadMoreTimedOut
+        failures.length > 0 || job.truncated || job.loadMoreTimedOut || job.vaultScan?.truncated
           ? 'completed_with_errors'
           : 'completed';
       job.phase = 'done';
@@ -2310,6 +2497,11 @@ const startRecentChatsExportJob = (client, args = {}) => {
   }
 
   const outputDir = resolveOutputDir(args.outputDir);
+  const existingScanDir = args.existingScanDir || args.vaultDir || null;
+  const exportMissingOnly = args.exportMissingOnly === true;
+  if (exportMissingOnly && !existingScanDir) {
+    throw new Error('Informe vaultDir/existingScanDir para cruzar o histórico do Gemini com o vault.');
+  }
   const hasExplicitMaxChats = args.maxChats !== undefined || args.limit !== undefined;
   const skipExisting =
     typeof args.skipExisting === 'boolean' ? args.skipExisting : !hasExplicitMaxChats;
@@ -2334,6 +2526,12 @@ const startRecentChatsExportJob = (client, args = {}) => {
     successCount: 0,
     failureCount: 0,
     skippedCount: 0,
+    exportMissingOnly,
+    existingScanDir: existingScanDir ? resolveOutputDir(existingScanDir) : null,
+    vaultScan: null,
+    webConversationCount: null,
+    existingVaultCount: 0,
+    missingCount: null,
     skipExisting,
     reachedEnd: false,
     truncated: false,
@@ -3093,6 +3291,87 @@ const rawTools = [
     },
   },
   {
+    name: 'gemini_export_missing_chats',
+    description:
+      'Inicia um job em background que carrega todo o histórico recente do Gemini web, cruza os chatIds com exports raw já presentes no vault, e baixa apenas as conversas faltantes.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        clientId: { type: 'string' },
+        vaultDir: {
+          type: 'string',
+          description:
+            'Pasta do vault/folder a escanear recursivamente por Markdown raw exportado do Gemini. Obrigatório.',
+        },
+        outputDir: {
+          type: 'string',
+          description:
+            'Diretório local onde salvar os chats faltantes. Default: diretório MCP configurado.',
+        },
+        refresh: {
+          type: 'boolean',
+          description:
+            'Se true, força atualizar o sidebar antes de carregar o histórico. Default segue a política de cache.',
+        },
+        batchSize: {
+          type: 'integer',
+          minimum: 10,
+          maximum: 200,
+          description:
+            'Diagnóstico: quantidade alvo de novas conversas por rodada de carregamento. Default: 50.',
+        },
+        maxLoadMoreRounds: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 500,
+          description:
+            'Diagnóstico: máximo de rodadas para puxar histórico completo. Default: 200.',
+        },
+        loadMoreAttempts: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 5,
+          description:
+            'Diagnóstico: tentativas de scroll por rodada. Default: 3.',
+        },
+        maxNoGrowthRounds: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 20,
+          description:
+            'Diagnóstico: rodadas consecutivas sem crescimento antes de parar. Default: 8.',
+        },
+        loadMoreBrowserRounds: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 20,
+          description:
+            'Diagnóstico: máximo de ciclos de scroll dentro da aba por rodada MCP. Default: 12.',
+        },
+        loadMoreBrowserTimeoutMs: {
+          type: 'integer',
+          minimum: 500,
+          maximum: 30000,
+          description:
+            'Diagnóstico: tempo máximo dentro da aba para cada rodada de lazy-load. Default: 12000.',
+        },
+      },
+      required: ['vaultDir'],
+      additionalProperties: false,
+    },
+    call: async (args = {}) => {
+      const client = requireClient(args.clientId);
+      return toolTextResult(
+        startRecentChatsExportJob(client, {
+          ...args,
+          existingScanDir: args.vaultDir,
+          exportMissingOnly: true,
+          skipExisting: true,
+        }),
+      );
+    },
+  },
+  {
     name: 'gemini_reexport_chats',
     description:
       'Inicia um job em background para reexportar uma lista explicita de chatIds do Gemini, salvando Markdown em disco e relatorio incremental sem bloquear o agente em dezenas de downloads.',
@@ -3151,13 +3430,13 @@ const rawTools = [
   {
     name: 'gemini_export_job_status',
     description:
-      'Consulta o andamento de um job de exportacao em lote iniciado por gemini_export_recent_chats ou gemini_reexport_chats.',
+      'Consulta o andamento de um job de exportacao em lote iniciado por gemini_export_recent_chats, gemini_export_missing_chats ou gemini_reexport_chats.',
     inputSchema: {
       type: 'object',
       properties: {
         jobId: {
           type: 'string',
-          description: 'ID retornado por gemini_export_recent_chats ou gemini_reexport_chats.',
+          description: 'ID retornado por gemini_export_recent_chats, gemini_export_missing_chats ou gemini_reexport_chats.',
         },
       },
       required: ['jobId'],
@@ -3182,7 +3461,7 @@ const rawTools = [
       properties: {
         jobId: {
           type: 'string',
-          description: 'ID retornado por gemini_export_recent_chats ou gemini_reexport_chats.',
+          description: 'ID retornado por gemini_export_recent_chats, gemini_export_missing_chats ou gemini_reexport_chats.',
         },
       },
       required: ['jobId'],
@@ -3367,6 +3646,7 @@ const BROWSER_DEPENDENT_TOOL_NAMES = new Set([
   'gemini_download_chat',
   'gemini_download_notebook_chat',
   'gemini_export_recent_chats',
+  'gemini_export_missing_chats',
   'gemini_reexport_chats',
   'gemini_export_notebook',
   'gemini_cache_status',
@@ -3657,6 +3937,33 @@ const bridgeServer = createServer(async (req, res) => {
           loadMoreBrowserRounds: url.searchParams.get('loadMoreBrowserRounds') || undefined,
           loadMoreBrowserTimeoutMs: url.searchParams.get('loadMoreBrowserTimeoutMs') || undefined,
           skipExisting: parseOptionalBoolean(url.searchParams.get('skipExisting')),
+        }),
+      );
+    } catch (err) {
+      sendAgentJson(res, 503, { error: err.message });
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/agent/export-missing-chats') {
+    try {
+      const client = requireClient(url.searchParams.get('clientId'));
+      sendAgentJson(
+        res,
+        202,
+        startRecentChatsExportJob(client, {
+          outputDir: url.searchParams.get('outputDir') || undefined,
+          vaultDir: url.searchParams.get('vaultDir') || url.searchParams.get('existingScanDir'),
+          existingScanDir: url.searchParams.get('existingScanDir') || url.searchParams.get('vaultDir'),
+          exportMissingOnly: true,
+          refresh: parseOptionalBoolean(url.searchParams.get('refresh')),
+          batchSize: url.searchParams.get('batchSize') || undefined,
+          maxLoadMoreRounds: url.searchParams.get('maxLoadMoreRounds') || undefined,
+          loadMoreAttempts: url.searchParams.get('loadMoreAttempts') || undefined,
+          maxNoGrowthRounds: url.searchParams.get('maxNoGrowthRounds') || undefined,
+          loadMoreBrowserRounds: url.searchParams.get('loadMoreBrowserRounds') || undefined,
+          loadMoreBrowserTimeoutMs: url.searchParams.get('loadMoreBrowserTimeoutMs') || undefined,
+          skipExisting: true,
         }),
       );
     } catch (err) {
