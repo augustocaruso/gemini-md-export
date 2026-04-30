@@ -161,9 +161,12 @@ test('export missing cruza histórico completo com exports raw no vault', () => 
   assert.match(jobBlock, /job\.existingVaultCount = existingInVault\.length/);
   assert.match(jobBlock, /job\.missingCount = missing\.length/);
   assert.match(toolBlock, /required:\s*\['vaultDir'\]/);
+  assert.match(toolBlock, /outputDir:\s*args\.outputDir \|\| args\.vaultDir/);
+  assert.match(toolBlock, /Default: vaultDir/);
   assert.match(toolBlock, /exportMissingOnly:\s*true/);
   assert.match(toolBlock, /skipExisting:\s*true/);
   assert.match(source, /url\.pathname === '\/agent\/export-missing-chats'/);
+  assert.match(source, /url\.searchParams\.get\('outputDir'\)[\s\S]*url\.searchParams\.get\('vaultDir'\)/);
   assert.match(source, /'gemini_export_missing_chats'/);
 });
 

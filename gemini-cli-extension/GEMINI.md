@@ -22,9 +22,10 @@ Operational guidance:
   `webConversationCount - existingVaultCount = missingCount`, and downloads only
   the missing chats. Tell the user the job ID and poll
   `gemini_export_job_status` until it finishes. If the user wants the missing
-  files in a specific raw-export folder, pass `outputDir`; otherwise the MCP uses
-  its configured export directory. Do not emulate this by listing pages in chat
-  or looping over `gemini_download_chat`.
+  files in a specific raw-export folder, pass `outputDir`; otherwise the MCP
+  saves them under `vaultDir`, so the Markdown and `assets/<chatId>/...` stay
+  inside the vault instead of falling back to Downloads. Do not emulate this by
+  listing pages in chat or looping over `gemini_download_chat`.
 - When the user asks for a blind full export outside a vault reconciliation, do
   not list the chats first. Start `gemini_export_recent_chats`, tell the user the
   job ID, and poll `gemini_export_job_status` until the job finishes. The job

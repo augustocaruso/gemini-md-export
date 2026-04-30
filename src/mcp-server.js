@@ -3306,7 +3306,7 @@ const rawTools = [
         outputDir: {
           type: 'string',
           description:
-            'Diretório local onde salvar os chats faltantes. Default: diretório MCP configurado.',
+            'Diretório local onde salvar os chats faltantes. Default: vaultDir, para manter Markdown e assets dentro do vault.',
         },
         refresh: {
           type: 'boolean',
@@ -3364,6 +3364,7 @@ const rawTools = [
       return toolTextResult(
         startRecentChatsExportJob(client, {
           ...args,
+          outputDir: args.outputDir || args.vaultDir,
           existingScanDir: args.vaultDir,
           exportMissingOnly: true,
           skipExisting: true,
@@ -3952,9 +3953,13 @@ const bridgeServer = createServer(async (req, res) => {
         res,
         202,
         startRecentChatsExportJob(client, {
-          outputDir: url.searchParams.get('outputDir') || undefined,
           vaultDir: url.searchParams.get('vaultDir') || url.searchParams.get('existingScanDir'),
           existingScanDir: url.searchParams.get('existingScanDir') || url.searchParams.get('vaultDir'),
+          outputDir:
+            url.searchParams.get('outputDir') ||
+            url.searchParams.get('vaultDir') ||
+            url.searchParams.get('existingScanDir') ||
+            undefined,
           exportMissingOnly: true,
           refresh: parseOptionalBoolean(url.searchParams.get('refresh')),
           batchSize: url.searchParams.get('batchSize') || undefined,
