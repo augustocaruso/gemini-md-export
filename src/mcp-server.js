@@ -55,6 +55,13 @@ const RELOAD_EXTENSION_COMMAND_TIMEOUT_MS = Number(
   process.env.GEMINI_MCP_RELOAD_EXTENSION_COMMAND_TIMEOUT_MS || 25_000,
 );
 const FOLDER_PICKER_TIMEOUT_MS = 5 * 60_000;
+const BRIDGE_ASSET_FETCH_TIMEOUT_MS = Number(
+  process.env.GEMINI_MCP_ASSET_FETCH_TIMEOUT_MS || 12_000,
+);
+const BRIDGE_ASSET_FETCH_MAX_BYTES = Math.max(
+  1024,
+  Math.min(50 * 1024 * 1024, Number(process.env.GEMINI_MCP_ASSET_FETCH_MAX_BYTES || 20 * 1024 * 1024)),
+);
 const ALLOWED_BRIDGE_ORIGIN = 'https://gemini.google.com';
 const RECENT_CHATS_CACHE_MAX_AGE_MS = Number(
   process.env.GEMINI_MCP_RECENT_CHATS_CACHE_MAX_AGE_MS || DEFAULT_RECENT_CHATS_CACHE_MAX_AGE_MS,
@@ -1180,6 +1187,62 @@ const writeExportFiles = (payload = {}) => {
       outputDir: payload.outputDir,
     }),
   );
+};
+
+const isPrivateNetworkHostname = (hostname) => {
+  const host = String(hostname || '').toLowerCase();
+  if (!host || host === 'localhost' || host.endsWith('.localhost')) return true;
+  if (host === '::1' || host === '[::1]') return true;
+  if (/^127\./.test(host) || /^10\./.test(host) || /^192\.168\./.test(host)) return true;
+  const match = host.match(/^172\.(\d{1,3})\./);
+  return !!match && Number(match[1]) >= 16 && Number(match[1]) <= 31;
+};
+
+const fetchAssetForBridge = async (source) => {
+  const url = new URL(String(source || ''));
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+    throw new Error('URL de mídia inválida.');
+  }
+  if (isPrivateNetworkHostname(url.hostname)) {
+    throw new Error('URL de mídia local/privada não permitida.');
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), BRIDGE_ASSET_FETCH_TIMEOUT_MS);
+  try {
+    const response = await fetch(url.href, {
+      headers: {
+        Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+        Referer: 'https://gemini.google.com/',
+        'User-Agent': `${SERVER_NAME}/${SERVER_VERSION}`,
+      },
+      redirect: 'follow',
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const contentLength = Number(response.headers.get('content-length') || 0);
+    if (contentLength > BRIDGE_ASSET_FETCH_MAX_BYTES) {
+      throw new Error(`Mídia muito grande (${contentLength} bytes).`);
+    }
+
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (buffer.length > BRIDGE_ASSET_FETCH_MAX_BYTES) {
+      throw new Error(`Mídia muito grande (${buffer.length} bytes).`);
+    }
+
+    return {
+      ok: true,
+      source: url.href,
+      mimeType: response.headers.get('content-type') || 'application/octet-stream',
+      contentBase64: buffer.toString('base64'),
+      bytes: buffer.length,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
 };
 
 const chooseExportDirectoryMac = async () => {
@@ -4229,6 +4292,20 @@ const bridgeServer = createServer(async (req, res) => {
         outputDir: files[0]?.outputDir || resolveOutputDir(payload.outputDir),
         files,
       });
+    } catch (err) {
+      sendBridgeJson(req, res, err.statusCode || 400, {
+        ok: false,
+        error: err.message,
+      });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/bridge/fetch-asset') {
+    try {
+      requireAllowedBridgeOrigin(req);
+      const payload = await readJsonBody(req);
+      sendBridgeJson(req, res, 200, await fetchAssetForBridge(payload.source));
     } catch (err) {
       sendBridgeJson(req, res, err.statusCode || 400, {
         ok: false,

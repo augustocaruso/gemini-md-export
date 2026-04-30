@@ -35,3 +35,20 @@ test('browser_status diagnostica e tenta self-heal sem depender do guard wrapper
   assert.match(statusBlock, /reloadWaitMs/);
   assert.doesNotMatch(guardedBlock, /gemini_browser_status/);
 });
+
+test('bridge busca mídia sem depender de CORS da extensão Chrome', () => {
+  const serverSource = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const contentSource = readFileSync(resolve(ROOT, 'src', 'userscript-shell.js'), 'utf-8');
+  const backgroundSource = readFileSync(resolve(ROOT, 'src', 'extension-background.js'), 'utf-8');
+
+  assert.match(serverSource, /const fetchAssetForBridge = async \(source\) =>/);
+  assert.match(serverSource, /url\.pathname === '\/bridge\/fetch-asset'/);
+  assert.match(serverSource, /isPrivateNetworkHostname/);
+  assert.match(serverSource, /BRIDGE_ASSET_FETCH_MAX_BYTES/);
+  assert.match(contentSource, /const fetchImageAssetViaBridge = async \(source\) =>/);
+  assert.match(contentSource, /\/bridge\/fetch-asset/);
+  assert.match(contentSource, /shouldFetchViaBridgeFirst/);
+  assert.match(contentSource, /shouldFetchViaBackgroundFirst\(source\)/);
+  assert.match(backgroundSource, /const credentialModes = isGoogleMediaHost \? \['include', 'omit'\] : \['omit'\]/);
+  assert.doesNotMatch(backgroundSource, /\['omit', 'include'\]/);
+});

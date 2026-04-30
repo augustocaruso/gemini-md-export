@@ -162,7 +162,7 @@ const fetchAsset = async (source) => {
   };
 
   let response;
-  const credentialModes = isGoogleMediaHost ? ['include', 'omit'] : ['omit', 'include'];
+  const credentialModes = isGoogleMediaHost ? ['include', 'omit'] : ['omit'];
   const errors = [];
 
   for (const credentials of credentialModes) {

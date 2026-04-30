@@ -2097,7 +2097,25 @@
       const url = new URL(source, location.href);
       return (
         (url.protocol === 'https:' || url.protocol === 'http:') &&
-        url.origin !== location.origin
+        url.origin !== location.origin &&
+        (
+          /(?:^|\.)googleusercontent\.com$/i.test(url.hostname) ||
+          /(?:^|\.)google\.com$/i.test(url.hostname)
+        )
+      );
+    } catch {
+      return false;
+    }
+  };
+
+  const shouldFetchViaBridgeFirst = (source) => {
+    try {
+      const url = new URL(source, location.href);
+      return (
+        isExtensionContext &&
+        (url.protocol === 'https:' || url.protocol === 'http:') &&
+        url.origin !== location.origin &&
+        !shouldFetchViaBackgroundFirst(source)
       );
     } catch {
       return false;
@@ -2374,6 +2392,21 @@
     };
   };
 
+  const fetchImageAssetViaBridge = async (source) => {
+    const response = await bridgeRequest('/bridge/fetch-asset', {
+      method: 'POST',
+      payload: { source },
+      timeoutMs: 15000,
+    });
+    if (!response?.ok || !response.contentBase64) {
+      throw new Error(response?.error || 'bridge-fetch-failed');
+    }
+    return {
+      mimeType: response.mimeType || 'application/octet-stream',
+      contentBase64: response.contentBase64,
+    };
+  };
+
   const fetchImageAsset = async (source) => {
     if (!source) return null;
     if (/^data:/i.test(source)) return parseDataUrlAsset(source);
@@ -2400,10 +2433,36 @@
       }
     };
 
+    if (shouldFetchViaBridgeFirst(source)) {
+      try {
+        return await fetchImageAssetViaBridge(source);
+      } catch (bridgeErr) {
+        try {
+          return await fetchFromPage();
+        } catch (pageErr) {
+          try {
+            return await fetchImageAssetViaBackground(source);
+          } catch (backgroundErr) {
+            throw new Error(
+              `bridge: ${bridgeErr?.message || String(bridgeErr)}; page: ${
+                pageErr?.message || String(pageErr)
+              }; background: ${backgroundErr?.message || String(backgroundErr)}`,
+            );
+          }
+        }
+      }
+    }
+
     if (shouldFetchViaBackgroundFirst(source)) {
       try {
         return await fetchImageAssetViaBackground(source);
       } catch (backgroundErr) {
+        try {
+          return await fetchImageAssetViaBridge(source);
+        } catch {
+          // O bridge é fallback sem CORS do navegador. Se ele também falhar,
+          // mantemos a mensagem combinada background+page abaixo.
+        }
         try {
           return await fetchFromPage();
         } catch (pageErr) {
@@ -2420,6 +2479,12 @@
       return await fetchFromPage();
     } catch (err) {
       if (isExtensionContext) {
+        try {
+          return await fetchImageAssetViaBridge(source);
+        } catch {
+          // Mantém o background como último fallback para instalações sem MCP
+          // local ou quando o bridge está temporariamente fora.
+        }
         try {
           return await fetchImageAssetViaBackground(source);
         } catch (backgroundErr) {
@@ -5886,7 +5951,7 @@
     pendingTimer: 0,
     lastRunAt: 0,
   };
-  const NOT_FOUND_GRACE_MS = 4000;
+  const NOT_FOUND_GRACE_MS = 12000;
   const INJECT_THROTTLE_MS = 250;
 
   const scheduleInjectButton = () => {
@@ -5950,9 +6015,16 @@
         for (const sel of TOP_BAR_SELECTORS) {
           document.querySelectorAll(sel).forEach((el) => all.push(el));
         }
+        const actionCount = document.querySelectorAll(
+          'button,[role="button"],a[role="button"]',
+        ).length;
         warn(
-          'top-bar não encontrado após 4s numa URL de conversa. Candidatos no DOM:',
+          `top-bar não encontrado após ${Math.round(
+            NOT_FOUND_GRACE_MS / 1000,
+          )}s numa URL de conversa. Candidatos no DOM:`,
           all.length,
+          'controles visíveis/possíveis:',
+          actionCount,
           'seletores tentados:',
           TOP_BAR_SELECTORS,
         );
