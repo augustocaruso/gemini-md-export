@@ -24,6 +24,11 @@ Operational guidance:
   extension could not prove it reached the beginning of the conversation, report
   those failures from the job status instead of treating them as completed
   exports.
+- When summarizing an export job, distinguish "100% of the requested partial
+  batch" from "100% of the user's full Gemini history". Only call the full
+  history complete when `fullHistoryRequested=true`, `fullHistoryVerified=true`,
+  `reachedEnd=true`, and `truncated=false`. If `scope=partial` or `maxChats` /
+  `limit` was provided, say it was a partial export.
 - When the user asks to repair an Obsidian vault after wrong Gemini chat
   content was saved under the wrong `chat_id`, use the bundled subagent
   `gemini-vault-repair` or the command `/exporter:repair-vault <vault path>`.

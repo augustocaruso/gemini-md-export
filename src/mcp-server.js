@@ -65,6 +65,9 @@ const RECENT_CHATS_LOAD_MORE_BUDGET_MS = Number(
 const RECENT_CHATS_LOAD_MORE_BROWSER_TIMEOUT_MS = Number(
   process.env.GEMINI_MCP_RECENT_CHATS_LOAD_MORE_BROWSER_TIMEOUT_MS || 3500,
 );
+const RECENT_CHATS_EXPORT_ALL_LOAD_MORE_BROWSER_TIMEOUT_MS = Number(
+  process.env.GEMINI_MCP_RECENT_CHATS_EXPORT_ALL_LOAD_MORE_BROWSER_TIMEOUT_MS || 12_000,
+);
 const CHROME_GUARD_CONFIG = {
   profileDirectory:
     process.env.GEMINI_MCP_CHROME_PROFILE_DIRECTORY ||
@@ -1467,29 +1470,60 @@ const loadAllRecentChatsForClient = async (client, args = {}) => {
   let latestSnapshot = client.lastSnapshot || null;
   let reachedEnd = recentChatsReachedEndForClient(client);
   let loadedAny = false;
+  let timedOut = false;
   let roundsCompleted = 0;
+  let noGrowthRounds = 0;
+  const loadTrace = [];
   let previousCount = recentConversationsForClient(client).length;
   const batchSize = Math.max(10, Math.min(200, Number(args.batchSize || 50)));
   const maxRounds = Math.max(1, Math.min(500, Number(args.maxLoadMoreRounds || args.loadMoreRounds || 200)));
   const attempts = Math.max(1, Math.min(5, Number(args.loadMoreAttempts || 3)));
+  const maxNoGrowthRounds = Math.max(1, Math.min(10, Number(args.maxNoGrowthRounds || 5)));
+  const browserTimeoutMs = Math.max(
+    500,
+    Math.min(
+      30_000,
+      Number(
+        args.loadMoreBrowserTimeoutMs ||
+          args.loadMoreTimeoutMs ||
+          RECENT_CHATS_EXPORT_ALL_LOAD_MORE_BROWSER_TIMEOUT_MS,
+      ),
+    ),
+  );
+  const commandTimeoutMs = Math.max(
+    browserTimeoutMs + 1500,
+    Number(args.loadMoreCommandTimeoutMs || args.loadMoreTimeoutMs || COMMAND_TIMEOUT_MS),
+  );
 
   for (let round = 0; round < maxRounds && !reachedEnd; round += 1) {
     if (args.shouldStop?.()) break;
 
+    const beforeCount = previousCount;
     const targetCount = previousCount + batchSize;
-    const result = await enqueueCommand(client.clientId, 'load-more-conversations', {
-      ensureSidebar: true,
-      attempts,
-      targetCount,
-      fastMode: true,
-      includeConversations: false,
-      includeSnapshot: false,
-    });
+    const roundStartedAt = Date.now();
+    const result = await enqueueCommand(
+      client.clientId,
+      'load-more-conversations',
+      {
+        ensureSidebar: true,
+        attempts,
+        targetCount,
+        fastMode: true,
+        timeoutMs: browserTimeoutMs,
+        includeConversations: true,
+        includeModalConversations: false,
+        includeSnapshot: false,
+      },
+      { timeoutMs: commandTimeoutMs },
+    );
 
     if (!result?.ok) {
       throw new Error(result?.error || 'Falha ao puxar historico completo no browser.');
     }
 
+    if (Array.isArray(result.conversations)) {
+      client.conversations = result.conversations;
+    }
     if (result.snapshot) {
       client.lastSnapshot = result.snapshot;
       latestSnapshot = result.snapshot;
@@ -1501,10 +1535,36 @@ const loadAllRecentChatsForClient = async (client, args = {}) => {
     );
     reachedEnd = result.reachedEnd === true || recentChatsReachedEndForClient(client);
     roundsCompleted += 1;
-    loadedAny = loadedAny || result.loadedAny === true || currentCount > previousCount;
+    timedOut = timedOut || result.timedOut === true;
+    const grew = result.loadedAny === true || currentCount > previousCount;
+    loadedAny = loadedAny || grew;
 
-    if (currentCount <= previousCount && result.loadedAny !== true) break;
-    previousCount = currentCount;
+    if (grew) {
+      noGrowthRounds = 0;
+      previousCount = currentCount;
+    } else {
+      noGrowthRounds += 1;
+    }
+
+    loadTrace.push({
+      round: round + 1,
+      beforeCount,
+      targetCount,
+      afterCount: currentCount,
+      delta: Math.max(0, currentCount - beforeCount),
+      loadedAny: result.loadedAny === true,
+      grew,
+      reachedEnd,
+      timedOut: result.timedOut === true,
+      noGrowthRounds,
+      browserTimeoutMs,
+      commandTimeoutMs,
+      attempts,
+      elapsedMs: Date.now() - roundStartedAt,
+      browserTrace: Array.isArray(result.loadTrace) ? result.loadTrace : [],
+    });
+
+    if (!grew && noGrowthRounds >= maxNoGrowthRounds) break;
   }
 
   try {
@@ -1518,7 +1578,10 @@ const loadAllRecentChatsForClient = async (client, args = {}) => {
   return {
     attempted: roundsCompleted > 0,
     loadedAny,
+    timedOut,
+    noGrowthRounds,
     roundsCompleted,
+    loadTrace,
     reachedEnd,
     snapshot: latestSnapshot,
     conversations: recentConversationsForClient(client),
@@ -1635,6 +1698,7 @@ const summarizeExportJob = (job) => ({
   type: job.type,
   status: job.status,
   phase: job.phase,
+  ...recentChatsExportScope(job),
   clientId: job.clientId,
   outputDir: job.outputDir,
   createdAt: job.createdAt,
@@ -1657,7 +1721,10 @@ const summarizeExportJob = (job) => ({
   reportFilename: job.reportFilename || null,
   error: job.error || null,
   refreshError: job.refreshError || null,
+  loadWarning: job.loadWarning || null,
   loadMoreRoundsCompleted: job.loadMoreRoundsCompleted || 0,
+  loadMoreTimedOut: job.loadMoreTimedOut === true,
+  loadMoreTrace: Array.isArray(job.loadMoreTrace) ? job.loadMoreTrace.slice(-20) : [],
   recentSuccesses: job.recentSuccesses.slice(-10),
   failures: job.failures.slice(-20),
 });
@@ -1677,12 +1744,25 @@ const findRunningRecentChatsExportJob = (clientId) =>
       !isTerminalExportJobStatus(job.status),
   );
 
+const recentChatsExportScope = (job) => {
+  const fullHistoryRequested = job.exportAll === true;
+  const fullHistoryVerified =
+    fullHistoryRequested && job.reachedEnd === true && job.truncated !== true;
+  return {
+    scope: fullHistoryRequested ? 'all-history' : 'partial',
+    fullHistoryRequested,
+    fullHistoryVerified,
+    partialLimit: fullHistoryRequested ? null : job.maxChats,
+  };
+};
+
 const buildRecentChatsExportReport = (job, client, successes, failures) => ({
   job: {
     jobId: job.jobId,
     type: job.type,
     status: job.status,
     phase: job.phase,
+    ...recentChatsExportScope(job),
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
     finishedAt: job.finishedAt || null,
@@ -1701,6 +1781,10 @@ const buildRecentChatsExportReport = (job, client, successes, failures) => ({
   failureCount: failures.length,
   reachedEnd: job.reachedEnd,
   truncated: job.truncated,
+  loadWarning: job.loadWarning || null,
+  loadMoreRoundsCompleted: job.loadMoreRoundsCompleted || 0,
+  loadMoreTimedOut: job.loadMoreTimedOut === true,
+  loadMoreTrace: Array.isArray(job.loadMoreTrace) ? job.loadMoreTrace : [],
   current: job.current || null,
   successes,
   failures,
@@ -1796,6 +1880,8 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
         shouldStop: () => job.cancelRequested === true,
       });
       job.loadMoreRoundsCompleted = loadMore.roundsCompleted;
+      job.loadMoreTimedOut = loadMore.timedOut === true;
+      job.loadMoreTrace = Array.isArray(loadMore.loadTrace) ? loadMore.loadTrace : [];
     } else {
       const targetCount = Math.min(MAX_RECENT_CHATS_LOAD_TARGET, job.startIndex - 1 + job.maxChats);
       await listRecentChatsForClient(client, {
@@ -1815,7 +1901,13 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
     const conversations = recentConversationsForClient(client);
     job.loadedCount = conversations.length;
     job.reachedEnd = recentChatsReachedEndForClient(client);
-    job.truncated = !job.exportAll && !job.reachedEnd && conversations.length >= MAX_RECENT_CHATS_LOAD_TARGET;
+    job.truncated = job.exportAll
+      ? !job.reachedEnd
+      : !job.reachedEnd && conversations.length >= MAX_RECENT_CHATS_LOAD_TARGET;
+    if (job.exportAll && job.truncated) {
+      job.loadWarning =
+        'Nao consegui confirmar que cheguei ao fim do historico do Gemini. Exportei as conversas carregadas, mas o lote pode estar incompleto.';
+    }
 
     const seen = new Set();
     const requestedSlice = job.exportAll
@@ -1900,7 +1992,10 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
       job.phase = 'writing-report';
       touchExportJob(job);
       broadcastRecentChatsJobProgress(job, client);
-      job.status = failures.length > 0 ? 'completed_with_errors' : 'completed';
+      job.status =
+        failures.length > 0 || job.truncated || job.loadMoreTimedOut
+          ? 'completed_with_errors'
+          : 'completed';
       job.phase = 'done';
     }
   } catch (err) {
@@ -1964,7 +2059,10 @@ const startRecentChatsExportJob = (client, args = {}) => {
     reportFilename: null,
     error: null,
     refreshError: null,
+    loadWarning: null,
     loadMoreRoundsCompleted: 0,
+    loadMoreTimedOut: false,
+    loadMoreTrace: [],
     recentSuccesses: [],
     failures: [],
   };
@@ -2431,6 +2529,41 @@ const rawTools = [
           type: 'boolean',
           description:
             'Se true, força atualizar o sidebar antes de carregar o histórico. Default segue a política de cache.',
+        },
+        batchSize: {
+          type: 'integer',
+          minimum: 10,
+          maximum: 200,
+          description:
+            'Diagnóstico: quantidade alvo de novas conversas por rodada de carregamento. Default: 50.',
+        },
+        maxLoadMoreRounds: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 500,
+          description:
+            'Diagnóstico: máximo de rodadas para puxar histórico completo. Default: 200.',
+        },
+        loadMoreAttempts: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 5,
+          description:
+            'Diagnóstico: tentativas de scroll por rodada. Default: 3.',
+        },
+        maxNoGrowthRounds: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 10,
+          description:
+            'Diagnóstico: rodadas consecutivas sem crescimento antes de parar. Default: 5.',
+        },
+        loadMoreBrowserTimeoutMs: {
+          type: 'integer',
+          minimum: 500,
+          maximum: 30000,
+          description:
+            'Diagnóstico: tempo máximo dentro da aba para cada rodada de lazy-load. Default: 12000.',
         },
       },
       additionalProperties: false,
@@ -2941,6 +3074,11 @@ const bridgeServer = createServer(async (req, res) => {
           startIndex: url.searchParams.get('startIndex'),
           maxChats: url.searchParams.get('maxChats') || url.searchParams.get('limit'),
           refresh: parseOptionalBoolean(url.searchParams.get('refresh')),
+          batchSize: url.searchParams.get('batchSize') || undefined,
+          maxLoadMoreRounds: url.searchParams.get('maxLoadMoreRounds') || undefined,
+          loadMoreAttempts: url.searchParams.get('loadMoreAttempts') || undefined,
+          maxNoGrowthRounds: url.searchParams.get('maxNoGrowthRounds') || undefined,
+          loadMoreBrowserTimeoutMs: url.searchParams.get('loadMoreBrowserTimeoutMs') || undefined,
         }),
       );
     } catch (err) {

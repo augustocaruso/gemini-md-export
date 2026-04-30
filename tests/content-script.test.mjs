@@ -115,6 +115,56 @@ const createGeminiMediaDom = (bodyHtml) => {
   return { dom, runtimeErrors };
 };
 
+const sidebarRows = (ids) =>
+  ids
+    .map(
+      (id, index) => `
+        <div data-test-id="conversation">
+          <a href="/app/${id}">
+            <span class="conversation-title">Chat ${index + 1} ${id.slice(0, 4)}</span>
+          </a>
+        </div>
+      `,
+    )
+    .join('');
+
+const createGeminiSidebarDom = (ids) => {
+  const virtualConsole = new VirtualConsole();
+  const runtimeErrors = [];
+  virtualConsole.on('jsdomError', (error) => runtimeErrors.push(error));
+
+  const dom = new JSDOM(
+    `<!doctype html>
+    <html>
+      <head><title>Histórico - Gemini</title></head>
+      <body>
+        <mat-sidenav data-rect="0,0,320,900">
+          <conversations-list>
+            ${sidebarRows(ids)}
+          </conversations-list>
+        </mat-sidenav>
+        <main>
+          <user-query><div>pergunta</div></user-query>
+          <model-response><div>resposta</div></model-response>
+        </main>
+      </body>
+    </html>`,
+    {
+      url: `https://gemini.google.com/app/${ids[0]}`,
+      runScripts: 'outside-only',
+      pretendToBeVisual: true,
+      virtualConsole,
+    },
+  );
+
+  installLayoutMocks(dom.window);
+  dom.window.console.log = () => {};
+  dom.window.console.warn = () => {};
+  dom.window.console.error = (...args) => runtimeErrors.push(args);
+
+  return { dom, runtimeErrors };
+};
+
 const installReadyImageMock = (window, selector = 'img') => {
   window.document.querySelectorAll(selector).forEach((img) => {
     Object.defineProperty(img, 'complete', { configurable: true, value: true });
@@ -290,6 +340,43 @@ test('isTabIgnored persiste entre aberturas do menu e zera bridge', { timeout: 2
   window.close();
 });
 
+test('bridge acumula conversas vistas quando sidebar virtualiza lista', { timeout: 2000 }, async () => {
+  const firstWindowIds = [
+    'a111111111111111',
+    'a222222222222222',
+    'a333333333333333',
+  ];
+  const secondWindowIds = [
+    'a333333333333333',
+    'a444444444444444',
+    'a555555555555555',
+  ];
+  const { dom, runtimeErrors } = createGeminiSidebarDom(firstWindowIds);
+  const { window } = dom;
+  const debug = await evaluateContentScript(window);
+
+  assert.deepEqual(
+    Array.from(debug.listBridgeConversations().map((item) => item.chatId)),
+    firstWindowIds,
+  );
+
+  window.document.querySelector('conversations-list').innerHTML =
+    sidebarRows(secondWindowIds);
+
+  assert.deepEqual(
+    Array.from(debug.listBridgeConversations().map((item) => item.chatId)),
+    [
+      'a111111111111111',
+      'a222222222222222',
+      'a333333333333333',
+      'a444444444444444',
+      'a555555555555555',
+    ],
+  );
+  assert.deepEqual(runtimeErrors, []);
+  window.close();
+});
+
 test('content script não contém fallback de captura visual', async () => {
   const [contentScript, backgroundScript] = await Promise.all([
     readFile(contentScriptUrl, 'utf8'),
@@ -315,6 +402,19 @@ test('content script mantém caminhos frequentes leves', async () => {
   assert.match(bridgeSummary, /conversationDomTurnCount\(document\)/);
   assert.match(source, /const MIN_FAST_POLL_BACKOFF_MS = 250/);
   assert.match(source, /const INJECT_THROTTLE_MS = 250/);
+});
+
+test('content script reporta diagnóstico de scroll ao puxar histórico', async () => {
+  const source = await readFile(new URL('../src/userscript-shell.js', import.meta.url), 'utf8');
+  assert.match(source, /lastLoadMoreTrace:\s*\[\]/);
+  assert.match(source, /const describeScrollContainer = \(el, matchedBy = null\) =>/);
+  assert.match(source, /describeScrollContainer\(scrollContainer, scrollContainerMatchedBy\)/);
+  assert.match(source, /beforeKnown/);
+  assert.match(source, /afterKnown/);
+  assert.match(source, /scrollBefore/);
+  assert.match(source, /scrollAfter/);
+  assert.match(source, /loadTrace:\s*command\.args\?\.includeLoadTrace === false/);
+  assert.match(source, /timedOut:\s*roundTimedOut/);
 });
 
 test('exportPayload baixa blob sem preparar a imagem antes', { timeout: 5000 }, async () => {

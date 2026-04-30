@@ -385,8 +385,10 @@
     mcpProgressJobId: null,
     isLoadingMore: false,
     loadMoreFailures: 0,
+    lastLoadMoreTrace: [],
     filterQuery: '',
     reachedSidebarEnd: false,
+    sidebarConversationCache: new Map(),
   };
   let sidebarConversationObserver = null;
   let sidebarRefreshTimer = 0;
@@ -1128,23 +1130,49 @@
     return merged;
   };
 
+  const conversationCacheKey = (item) => {
+    const chatId = stripConversationPrefix(item?.chatId || item?.id || '');
+    if (/^[a-f0-9]{12,}$/i.test(chatId)) return `chat:${chatId.toLowerCase()}`;
+    if (item?.url && /\/app\/[a-f0-9]{12,}/i.test(item.url)) return `url:${item.url}`;
+    return `title:${item?.title || ''}:${item?.timestamp || ''}`;
+  };
+
+  const rememberSidebarConversationLinks = (items) => {
+    for (const item of items) {
+      if (!item || item.source === 'notebook') continue;
+      const key = conversationCacheKey(item);
+      if (!key) continue;
+      const existing = state.sidebarConversationCache.get(key);
+      state.sidebarConversationCache.set(key, {
+        ...existing,
+        ...item,
+        source: 'sidebar',
+        current: item.current || false,
+      });
+    }
+    return Array.from(state.sidebarConversationCache.values());
+  };
+
+  const collectCachedSidebarConversationLinks = () =>
+    rememberSidebarConversationLinks(collectSidebarConversationLinks());
+
   const collectConversationLinks = () => {
     if (isNotebookPage()) {
       const notebookConversations = collectNotebookConversationLinks();
       if (notebookConversations.length > 0) return notebookConversations;
     }
 
-    return collectSidebarConversationLinks();
+    return collectCachedSidebarConversationLinks();
   };
 
   const collectBridgeConversationLinks = () =>
     isNotebookPage()
-      ? mergeConversationLists(collectSidebarConversationLinks(), collectNotebookConversationLinks())
-      : collectSidebarConversationLinks();
+      ? mergeConversationLists(collectCachedSidebarConversationLinks(), collectNotebookConversationLinks())
+      : collectCachedSidebarConversationLinks();
 
   const collectConversationLinkSnapshot = () => {
     const notebookPage = isNotebookPage();
-    const sidebarConversations = collectSidebarConversationLinks();
+    const sidebarConversations = collectCachedSidebarConversationLinks();
     const notebookConversations = notebookPage ? collectNotebookConversationLinks() : [];
     const modalConversations =
       notebookPage && notebookConversations.length > 0
@@ -1286,7 +1314,42 @@
     ...options,
   });
 
-  const waitForSidebarConversationGrowth = (beforeCount, timeoutMs = 1800) =>
+  const describeScrollContainer = (el, matchedBy = null) => {
+    if (!el) {
+      return {
+        found: false,
+        matchedBy,
+      };
+    }
+    const rect = el.getBoundingClientRect?.();
+    return {
+      found: true,
+      matchedBy,
+      tag: el.tagName?.toLowerCase() || '',
+      id: el.id || '',
+      className: String(el.className || ''),
+      role: el.getAttribute?.('role') || '',
+      testId: el.getAttribute?.('data-test-id') || '',
+      scrollTop: Math.round(Number(el.scrollTop || 0)),
+      scrollHeight: Math.round(Number(el.scrollHeight || 0)),
+      clientHeight: Math.round(Number(el.clientHeight || 0)),
+      hasOverflow: hasOverflow(el),
+      atBottom: isAtBottom(el),
+      rect: rect
+        ? {
+            top: Math.round(rect.top),
+            bottom: Math.round(rect.bottom),
+            height: Math.round(rect.height),
+          }
+        : null,
+    };
+  };
+
+  const waitForSidebarConversationGrowth = (
+    beforeCount,
+    timeoutMs = 1800,
+    beforeKnownCount = null,
+  ) =>
     new Promise((resolve) => {
       const conversationsList = isNotebookPage()
         ? findNotebookHistoryScroller().wrapper
@@ -1307,7 +1370,12 @@
 
       const checkGrowth = () => {
         const currentCount = getConversationElementsForCurrentPage().length;
-        if (currentCount > beforeCount) {
+        const currentKnownCount =
+          beforeKnownCount === null ? null : collectBridgeConversationLinks().length;
+        if (
+          currentCount > beforeCount ||
+          (currentKnownCount !== null && currentKnownCount > beforeKnownCount)
+        ) {
           scheduleSidebarRefresh();
           finish(true);
         }
@@ -1340,25 +1408,57 @@
     if (!isNotebookPage()) await ensureSidebarOpen();
 
     let scrollContainer = null;
+    let scrollContainerMatchedBy = null;
+    const before = getConversationElementsForCurrentPage().length;
+    const beforeKnown = collectBridgeConversationLinks().length;
+    const pickScrollContainer = (candidate, matchedBy) => {
+      if (!scrollContainer && candidate) {
+        scrollContainer = candidate;
+        scrollContainerMatchedBy = matchedBy;
+      }
+    };
+
     if (isNotebookPage()) {
-      scrollContainer = findNotebookHistoryScroller().scroller;
+      pickScrollContainer(findNotebookHistoryScroller().scroller, 'notebook-history-scroller');
     }
     const sidebarList = document.querySelector('conversations-list');
-    scrollContainer =
-      scrollContainer ||
-      (hasOverflow(sidebarList) ? sidebarList : findScrollableParent(sidebarList)) ||
-      (hasOverflow(document.querySelector('[role="navigation"]'))
-        ? document.querySelector('[role="navigation"]')
-        : null) ||
-      findScrollableParent(document.querySelector('[role="navigation"]')) ||
-      findScrollableParent(document.querySelector('[data-test-id="conversation"]'));
-    if (!scrollContainer) return { loaded: false, scroller: null };
+    pickScrollContainer(
+      hasOverflow(sidebarList) ? sidebarList : null,
+      'conversations-list overflow',
+    );
+    pickScrollContainer(findScrollableParent(sidebarList), 'conversations-list scroll-parent');
+    const navigation = document.querySelector('[role="navigation"]');
+    pickScrollContainer(
+      hasOverflow(navigation) ? navigation : null,
+      'navigation overflow',
+    );
+    pickScrollContainer(findScrollableParent(navigation), 'navigation scroll-parent');
+    pickScrollContainer(
+      findScrollableParent(document.querySelector('[data-test-id="conversation"]')),
+      'conversation scroll-parent',
+    );
+    if (!scrollContainer) {
+      return {
+        loaded: false,
+        scroller: null,
+        detail: {
+          reason: 'no-scroll-container',
+          beforeVisible: before,
+          beforeKnown,
+          afterVisible: before,
+          afterKnown: beforeKnown,
+          scrollBefore: describeScrollContainer(null),
+          scrollAfter: describeScrollContainer(null),
+        },
+      };
+    }
 
-    const before = getConversationElementsForCurrentPage().length;
     const growthPromise = waitForSidebarConversationGrowth(
       before,
       loadOptions.growthTimeoutMs,
+      beforeKnown,
     );
+    const scrollBefore = describeScrollContainer(scrollContainer, scrollContainerMatchedBy);
     scrollContainer.scrollTop = scrollContainer.scrollHeight;
     scrollContainer.dispatchEvent(new Event('scroll', { bubbles: true }));
     await sleep(loadOptions.preScrollPauseMs);
@@ -1375,15 +1475,43 @@
     }
     const loaded = await growthPromise;
     await sleep(loadOptions.postLoadSettleMs);
+    const afterKnown = collectBridgeConversationLinks().length;
+    const afterVisible = getConversationElementsForCurrentPage().length;
     const grew =
-      loaded || getConversationElementsForCurrentPage().length > before;
-    return { loaded: grew, scroller: scrollContainer };
+      loaded ||
+      afterVisible > before ||
+      afterKnown > beforeKnown;
+    return {
+      loaded: grew,
+      scroller: scrollContainer,
+      detail: {
+        reason: grew ? 'growth' : 'no-growth',
+        beforeVisible: before,
+        beforeKnown,
+        afterVisible,
+        afterKnown,
+        growthObserved: loaded,
+        scrollBefore,
+        scrollAfter: describeScrollContainer(scrollContainer, scrollContainerMatchedBy),
+      },
+    };
   };
 
   const loadMoreConversations = async (attempts = 2, options = {}) => {
     const loadOptions = resolveLoadMoreOptions(options);
-    if (state.isLoadingMore || state.loadMoreFailures >= 3) return false;
+    if (state.isLoadingMore || state.loadMoreFailures >= 3) {
+      state.lastLoadMoreTrace = [
+        {
+          phase: 'skipped',
+          reason: state.isLoadingMore ? 'already-loading' : 'too-many-failures',
+          loadMoreFailures: state.loadMoreFailures,
+          reachedSidebarEnd: state.reachedSidebarEnd,
+        },
+      ];
+      return false;
+    }
     state.isLoadingMore = true;
+    const trace = [];
     try {
       let loaded = false;
       let scroller = null;
@@ -1391,6 +1519,12 @@
         const result = await triggerSidebarLoading(loadOptions);
         loaded = result.loaded;
         scroller = result.scroller || scroller;
+        trace.push({
+          phase: 'attempt',
+          attempt: i + 1,
+          loaded,
+          ...(result.detail || {}),
+        });
         if (loaded) break;
         if (i < attempts - 1) {
           await sleep(loadOptions.retryPauseMs);
@@ -1422,18 +1556,25 @@
         });
         loaded = confirmation.loaded;
         scroller = confirmation.scroller || scroller;
+        trace.push({
+          phase: 'confirm-end',
+          attempt: attempts + 1,
+          loaded,
+          ...(confirmation.detail || {}),
+        });
         if (loaded) {
           state.loadMoreFailures = 0;
         }
         scrolledToBottom = isAtBottom(scroller);
       }
       state.reachedSidebarEnd =
-        !loaded && state.loadMoreFailures >= 1 && scrolledToBottom;
+        !loaded && state.loadMoreFailures >= 3 && scrolledToBottom;
       if (loaded) {
         state.reachedSidebarEnd = false;
       }
       refreshConversationState();
       updateModalState();
+      state.lastLoadMoreTrace = trace;
       return loaded;
     } finally {
       state.isLoadingMore = false;
@@ -1501,6 +1642,7 @@
       reachedSidebarEnd: state.reachedSidebarEnd,
       isLoadingMore: state.isLoadingMore,
       loadMoreFailures: state.loadMoreFailures,
+      lastLoadMoreTrace: state.lastLoadMoreTrace,
       batchExportSession: loadBatchExportSession(),
     };
   };
@@ -2686,6 +2828,7 @@
       let timedOut = false;
       let roundsCompleted = 0;
       let previousCount = before;
+      const loadTrace = [];
 
       for (let round = 0; round < maxRounds; round += 1) {
         const currentCount = collectBridgeConversationLinks().length;
@@ -2697,14 +2840,29 @@
           break;
         }
 
-        const loaded = await withTimeoutValue(
+        const timeoutSentinel = { timedOut: true };
+        const loadedResult = await withTimeoutValue(
           loadMoreConversations(attempts, loadOptions),
           remainingMs,
-          false,
+          timeoutSentinel,
         );
+        const roundTimedOut = loadedResult === timeoutSentinel;
+        const loaded = roundTimedOut ? false : loadedResult === true;
+        timedOut = timedOut || roundTimedOut;
         roundsCompleted += 1;
         const afterCount = collectBridgeConversationLinks().length;
+        const delta = Math.max(0, afterCount - previousCount);
         loadedAny = loadedAny || afterCount > previousCount;
+        loadTrace.push({
+          round: round + 1,
+          beforeCount: previousCount,
+          afterCount,
+          delta,
+          loaded,
+          timedOut: roundTimedOut,
+          reachedEnd: state.reachedSidebarEnd,
+          attempts: Array.isArray(state.lastLoadMoreTrace) ? state.lastLoadMoreTrace : [],
+        });
         if (afterCount <= previousCount) break;
         if (!loaded) break;
         await sleep(loadOptions.retryPauseMs);
@@ -2719,10 +2877,14 @@
         reachedEnd: state.reachedSidebarEnd,
         timedOut,
         roundsCompleted,
+        loadTrace: command.args?.includeLoadTrace === false ? undefined : loadTrace,
         conversations:
           command.args?.includeConversations === false ? undefined : collectBridgeConversationLinks(),
         modalConversations:
-          command.args?.includeConversations === false ? undefined : collectConversationLinks(),
+          command.args?.includeConversations === false ||
+          command.args?.includeModalConversations === false
+            ? undefined
+            : collectConversationLinks(),
         snapshot:
           command.args?.includeSnapshot === false
             ? undefined
