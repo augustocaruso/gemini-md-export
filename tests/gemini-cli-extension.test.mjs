@@ -84,6 +84,8 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.match(repairAgent, /stop before the scanner/);
   assert.match(repairAgent, /before any reexport\/download call/);
   assert.match(repairAgent, /blockingIssue/);
+  assert.match(repairAgent, /selfHeal/);
+  assert.match(repairAgent, /manual reload\s+only after/i);
   assert.match(repairAgent, /preliminary-report/);
   assert.match(repairAgent, /You cannot call another Gemini CLI subagent yourself/);
   assert.match(repairAgent, /ask the parent agent to call the appropriate/);
@@ -110,6 +112,9 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   const context = readFileSync(contextPath, 'utf-8');
   assert.match(context, /ready=false/);
   assert.match(context, /blockingIssue/);
+  assert.match(context, /selfHeal\.reloadAttempts/);
+  assert.match(context, /gemini_reload_gemini_tabs/);
+  assert.match(context, /Only ask for manual reload/);
   assert.match(context, /Do not keep\s+calling `gemini_download_chat`/);
   assert.match(context, /gemini_reexport_chats/);
 });

@@ -238,14 +238,16 @@ regenerated from the corrected source.
 ## Repair Flow
 
 1. Confirm browser/MCP health with `mcp_gemini-md-export_gemini_browser_status`.
-   This is a hard preflight, not a courtesy check. Continue only when the tool
-   returns `ready=true`, at least one `connectedClients` entry, and no
-   `blockingIssue`. If the tool errors, returns `ready=false`, returns
-   `blockingIssue`, or reports zero connected clients, stop before the scanner
-   and before any reexport/download call. Report the
-   exact status fields (`expectedChromeExtension`, `browserWake`,
-   `connectedClients`, and `blockingIssue`) and ask the parent/user to update
-   or reload the browser extension.
+   This is a hard preflight, not a courtesy check. The status tool self-heals by
+   default: it can request browser-extension reload when version/build are
+   stale. Continue only when the tool returns `ready=true`, at least one
+   `connectedClients` entry, and no `blockingIssue`. If the tool errors,
+   returns `ready=false`, returns `blockingIssue`, or reports zero connected
+   clients, stop before the scanner and before any reexport/download call.
+   Report the exact status fields (`expectedChromeExtension`, `browserWake`,
+   `selfHeal`, `connectedClients`, and `blockingIssue`). Ask for manual reload
+   only after `selfHeal` failed or says the loaded unpacked extension still
+   points to an old/wrong `browser-extension` folder.
 2. Create the repair directory.
 3. Run the audit helper on the provided path with `--include-notes --report`.
 4. Build the verification queue:

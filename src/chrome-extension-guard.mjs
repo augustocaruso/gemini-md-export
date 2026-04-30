@@ -107,7 +107,7 @@ const mismatchFor = (info, expected) => {
 const formatMismatchError = (mismatch, { afterReload = false } = {}) => {
   if (mismatch.kind === 'protocol') {
     return makeUserError(
-      `O protocolo da extensão do Chrome está incompatível. Esperado ${mismatch.expected}, recebido ${mismatch.actual ?? 'desconhecido'}. Recarregue manualmente o card da extensão em chrome://extensions; se continuar, reinstale apontando para a pasta browser-extension atualizada pelo Gemini CLI.`,
+      `O protocolo da extensão do Chrome está incompatível. Esperado ${mismatch.expected}, recebido ${mismatch.actual ?? 'desconhecido'}. O MCP tenta reload automático quando permitido; se continuar assim, confirme se a extensão unpacked aponta para a pasta browser-extension atualizada pelo Gemini CLI.`,
       'chrome_extension_protocol_mismatch',
       mismatch,
     );
@@ -129,7 +129,7 @@ const formatMismatchError = (mismatch, { afterReload = false } = {}) => {
       ? 'A extensão do Chrome/Dia ainda está com build antigo depois do reload.'
       : 'A extensão do Chrome/Dia está com build antigo.';
     return makeUserError(
-      `${prefix} Esperado ${mismatch.expected}, recebido ${mismatch.actual ?? 'desconhecido'}. Recarregue o card da extensão em chrome://extensions; se continuar, confirme se a extensão unpacked aponta para a pasta browser-extension atualizada.`,
+      `${prefix} Esperado ${mismatch.expected}, recebido ${mismatch.actual ?? 'desconhecido'}. O MCP tentou/permite reload automático; se continuar, confirme se a extensão unpacked aponta para a pasta browser-extension atualizada.`,
       'chrome_extension_build_mismatch',
       mismatch,
     );
@@ -334,7 +334,7 @@ export const ensureChromeExtensionReady = async (deps, options = {}) => {
 
     if (!reloadResult?.ok) {
       throw makeUserError(
-        `Não consegui pedir reload da extensão do Chrome. Recarregue manualmente o card em chrome://extensions. Detalhe: ${reloadResult?.error || reloadResult?.reason || 'sem resposta'}`,
+        `Não consegui pedir reload automático da extensão do Chrome. Antes de repetir a exportação, cheque gemini_browser_status e gemini_reload_gemini_tabs; reload manual do card em chrome://extensions fica como fallback. Detalhe: ${reloadResult?.error || reloadResult?.reason || 'sem resposta'}`,
         'chrome_extension_reload_failed',
         {
           reloadResult,
@@ -353,7 +353,7 @@ export const ensureChromeExtensionReady = async (deps, options = {}) => {
     );
     if (!probe) {
       throw makeUserError(
-        'Pedi reload da extensão do Chrome, mas ela não voltou a conectar. Recarregue manualmente o card da extensão em chrome://extensions e depois recarregue a aba do Gemini. Se houve mudança de permissões no manifest, o reload manual pode ser obrigatório.',
+        'Pedi reload automático da extensão do Chrome, mas ela não voltou a conectar. Rode gemini_browser_status para ver os clientes atuais e tente gemini_reload_gemini_tabs se houver abas conectadas. Reload manual do card da extensão em chrome://extensions só deve ser necessário se houve mudança de permissões/manifest ou se o navegador está apontando para uma pasta antiga.',
         'chrome_extension_reload_timeout',
         {
           reloadAttempts,

@@ -65,7 +65,11 @@ test('export all mantém lista acumulada do browser a cada rodada', () => {
   assert.match(block, /browserTrace:\s*Array\.isArray\(result\.loadTrace\)/);
   assert.match(block, /Array\.isArray\(result\.conversations\)/);
   assert.match(block, /maxNoGrowthRounds/);
-  assert.match(block, /args\.maxNoGrowthRounds\s*\|\|\s*5/);
+  assert.match(block, /args\.maxNoGrowthRounds\s*\|\|\s*8/);
+  assert.match(block, /untilEnd:\s*args\.untilEndInBrowser !== false/);
+  assert.match(block, /ignoreFailureCap:\s*true/);
+  assert.match(block, /resetReachedEnd:\s*round === 0/);
+  assert.match(block, /loadMoreBrowserRounds/);
   assert.doesNotMatch(block, /includeConversations:\s*false/);
 });
 
@@ -102,11 +106,39 @@ test('export recent chats expõe knobs de diagnóstico para lazy-load lento', ()
     'maxLoadMoreRounds',
     'loadMoreAttempts',
     'maxNoGrowthRounds',
+    'loadMoreBrowserRounds',
     'loadMoreBrowserTimeoutMs',
+    'skipExisting',
   ]) {
     assert.match(block, new RegExp(`${field}:`));
+  }
+  for (const field of [
+    'batchSize',
+    'maxLoadMoreRounds',
+    'loadMoreAttempts',
+    'maxNoGrowthRounds',
+    'loadMoreBrowserRounds',
+    'loadMoreBrowserTimeoutMs',
+  ]) {
     assert.match(source, new RegExp(`${field}: url\\.searchParams\\.get\\('${field}'\\)`));
   }
+  assert.match(source, /skipExisting:\s*parseOptionalBoolean\(url\.searchParams\.get\('skipExisting'\)\)/);
+});
+
+test('export total pula arquivos existentes por padrão', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const block = source.match(
+    /const runRecentChatsExportJob = async[\s\S]*?\nconst startRecentChatsExportJob/,
+  )?.[0];
+  assert.ok(block, 'runRecentChatsExportJob deve existir');
+  assert.match(source, /const existingMarkdownExportForConversation = \(conversation/);
+  assert.match(block, /if \(job\.skipExisting\)/);
+  assert.match(block, /existingMarkdownExportForConversation\(conversation/);
+  assert.match(block, /reason: 'existing-file'/);
+  assert.match(block, /job\.skippedExisting\.push\(skipped\)/);
+  assert.match(source, /const skipExisting =[\s\S]*!hasExplicitMaxChats/);
+  assert.match(source, /skippedExisting:/);
+  assert.match(source, /skippedCount:/);
 });
 
 test('reexport de chatIds conhecidos roda como job em background', () => {

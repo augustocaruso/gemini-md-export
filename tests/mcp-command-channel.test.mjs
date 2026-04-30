@@ -16,7 +16,7 @@ test('MCP não espera timeout longo quando comando não é entregue à aba', () 
   assert.match(source, /clearTimeout\(pending\.dispatchTimer\)/);
 });
 
-test('browser_status diagnostica bridge desconectado sem depender do guard', () => {
+test('browser_status diagnostica e tenta self-heal sem depender do guard wrapper', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const statusBlock = source.match(
     /name: 'gemini_browser_status'[\s\S]*?\n  \{\n    name: 'gemini_get_export_dir'/,
@@ -29,5 +29,9 @@ test('browser_status diagnostica bridge desconectado sem depender do guard', () 
   assert.match(statusBlock, /ready:\s*matchingClients\.length > 0/);
   assert.match(statusBlock, /blockingIssue/);
   assert.match(statusBlock, /no_connected_clients/);
+  assert.match(statusBlock, /selfHeal/);
+  assert.match(statusBlock, /ensureBrowserExtensionReady/);
+  assert.match(statusBlock, /allowReload:\s*args\.allowReload !== false/);
+  assert.match(statusBlock, /reloadWaitMs/);
   assert.doesNotMatch(guardedBlock, /gemini_browser_status/);
 });

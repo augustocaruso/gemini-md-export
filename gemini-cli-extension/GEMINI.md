@@ -20,10 +20,14 @@ Operational guidance:
   stop the import/export, call `gemini_export_job_cancel`; already written
   Markdown files and the report are preserved. Do not pass `maxChats` unless the
   user explicitly asks for a partial export; with no `maxChats`, the MCP loads
-  until the sidebar reaches its real end. If individual chats fail because the
-  extension could not prove it reached the beginning of the conversation, report
-  those failures from the job status instead of treating them as completed
-  exports.
+  until the sidebar reaches its real end. Whole-history export is incremental:
+  by default it skips non-empty `<chatId>.md` files that already exist in the
+  output directory and records them as `skippedExisting`/`skippedCount` in the
+  report. Only pass `skipExisting=false` when the user explicitly asks to
+  overwrite/re-export already saved chats. If individual chats fail because the
+  extension could not prove it reached the beginning of the conversation,
+  report those failures from the job status instead of treating them as
+  completed exports.
 - When summarizing an export job, distinguish "100% of the requested partial
   batch" from "100% of the user's full Gemini history". Only call the full
   history complete when `fullHistoryRequested=true`, `fullHistoryVerified=true`,
@@ -70,15 +74,22 @@ Operational guidance:
   responsible for opening the configured browser; the MCP server runs with
   `GEMINI_MCP_CHROME_LAUNCH_IF_CLOSED=false` so it does not compensate by
   opening another tab if the hook fails.
-- `gemini_browser_status` is also allowed to wake the browser when no Gemini
-  tab is connected. Do not treat status as a passive-only tool; Gemini CLI often
-  asks for status first, and that first status call should be enough to open the
-  configured browser.
+- `gemini_browser_status` is also allowed to wake the browser and self-heal the
+  browser extension. Do not treat status as a passive-only tool; Gemini CLI
+  often asks for status first, and that first status call should be enough to
+  open the configured browser and, when an old Chrome/Edge extension build is
+  connected, request the extension's own `RELOAD_SELF` flow. Inspect
+  `selfHeal.reloadAttempts`, `selfHeal.code`, and `connectedClients` before
+  asking the user to do anything manually.
 - Treat `gemini_browser_status.ready=false`, a non-null `blockingIssue`, or
   zero `connectedClients` as a blocker for browser-dependent work. Do not keep
   calling `gemini_download_chat`, vault repair, or export tools in a loop while
-  the browser bridge is disconnected; report the status fields and ask for
-  extension reload/update.
+  the browser bridge is disconnected. First call `gemini_browser_status` with
+  default `selfHeal=true`; if tabs are connected but only need page reload,
+  call `gemini_reload_gemini_tabs`. Only ask for manual reload of the
+  `chrome://extensions`/`edge://extensions` card after the automatic self-heal
+  fails or when the status says the loaded unpacked extension still points at an
+  old/wrong `browser-extension` folder.
 - On slow Windows machines, prefer background jobs over long synchronous tool
   loops. `gemini_reexport_chats` is the stable path for a known list of chatIds:
   it navigates and saves one chat at a time, writes an incremental JSON report,

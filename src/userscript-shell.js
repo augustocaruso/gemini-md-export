@@ -1499,12 +1499,19 @@
 
   const loadMoreConversations = async (attempts = 2, options = {}) => {
     const loadOptions = resolveLoadMoreOptions(options);
-    if (state.isLoadingMore || state.loadMoreFailures >= 3) {
+    const ignoreFailureCap = loadOptions.ignoreFailureCap === true;
+    const endFailureThreshold = Math.max(
+      3,
+      Math.min(20, Number(loadOptions.endFailureThreshold || 3)),
+    );
+    if (state.isLoadingMore || (!ignoreFailureCap && state.loadMoreFailures >= endFailureThreshold)) {
       state.lastLoadMoreTrace = [
         {
           phase: 'skipped',
           reason: state.isLoadingMore ? 'already-loading' : 'too-many-failures',
           loadMoreFailures: state.loadMoreFailures,
+          endFailureThreshold,
+          ignoreFailureCap,
           reachedSidebarEnd: state.reachedSidebarEnd,
         },
       ];
@@ -1568,7 +1575,7 @@
         scrolledToBottom = isAtBottom(scroller);
       }
       state.reachedSidebarEnd =
-        !loaded && state.loadMoreFailures >= 3 && scrolledToBottom;
+        !loaded && state.loadMoreFailures >= endFailureThreshold && scrolledToBottom;
       if (loaded) {
         state.reachedSidebarEnd = false;
       }
@@ -2806,10 +2813,16 @@
     if (command.type === 'load-more-conversations') {
       const loadOptions = resolveLoadMoreOptions({
         fastMode: command.args?.fastMode === true,
+        ignoreFailureCap: command.args?.ignoreFailureCap === true,
+        endFailureThreshold: command.args?.endFailureThreshold,
       });
       if (command.args?.ensureSidebar !== false) {
         await ensureSidebarOpen();
         await sleep(loadOptions.ensureSidebarDelayMs);
+      }
+      if (command.args?.resetReachedEnd === true) {
+        state.reachedSidebarEnd = false;
+        state.loadMoreFailures = 0;
       }
 
       const untilEnd = command.args?.untilEnd === true;

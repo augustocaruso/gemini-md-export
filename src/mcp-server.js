@@ -3,7 +3,7 @@
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { homedir } from 'node:os';
@@ -718,6 +718,12 @@ const normalizeWaitMs = (value, fallback, max = 30_000) => {
   return Math.max(0, Math.min(max, safe));
 };
 
+const normalizeReloadWaitMs = (value, fallback, max = 120_000) => {
+  const parsed = Number(value ?? fallback);
+  const safe = Number.isFinite(parsed) ? parsed : fallback;
+  return Math.max(0, Math.min(max, safe));
+};
+
 const waitForLiveClients = async (timeoutMs, pollIntervalMs = 500) => {
   const startedAt = Date.now();
   while (Date.now() - startedAt <= timeoutMs) {
@@ -934,6 +940,39 @@ const safeFilename = (filename) => {
     throw new Error('Nome de arquivo inválido retornado pela extensão.');
   }
   return raw;
+};
+
+const existingFileStat = (filePath) => {
+  try {
+    const stat = statSync(filePath);
+    return stat.isFile() && stat.size > 0 ? stat : null;
+  } catch {
+    return null;
+  }
+};
+
+const existingMarkdownExportForConversation = (conversation, { outputDir } = {}) => {
+  const chatId = normalizeConversationChatId(conversation);
+  if (!chatId) return null;
+
+  const directory = resolveOutputDir(outputDir);
+  const filename = safeFilename(`${chatId}.md`);
+  const filePath = resolve(directory, filename);
+  const relativePath = relative(directory, filePath);
+  if (relativePath.startsWith('..') || relativePath === '' || isAbsolute(relativePath)) {
+    throw new Error('Caminho de arquivo inválido ao verificar export existente.');
+  }
+
+  const stat = existingFileStat(filePath);
+  if (!stat) return null;
+
+  return {
+    outputDir: directory,
+    filename,
+    filePath,
+    bytes: stat.size,
+    chatId,
+  };
 };
 
 const writeExportPayload = (payload, { outputDir } = {}) => {
@@ -1511,7 +1550,8 @@ const loadMoreRecentChatsForClient = async (client, requestedLimit, args = {}) =
 
 const loadAllRecentChatsForClient = async (client, args = {}) => {
   let latestSnapshot = client.lastSnapshot || null;
-  let reachedEnd = recentChatsReachedEndForClient(client);
+  let reachedEnd =
+    args.trustCachedReachedEnd === true ? recentChatsReachedEndForClient(client) : false;
   let loadedAny = false;
   let timedOut = false;
   let roundsCompleted = 0;
@@ -1521,7 +1561,11 @@ const loadAllRecentChatsForClient = async (client, args = {}) => {
   const batchSize = Math.max(10, Math.min(200, Number(args.batchSize || 50)));
   const maxRounds = Math.max(1, Math.min(500, Number(args.maxLoadMoreRounds || args.loadMoreRounds || 200)));
   const attempts = Math.max(1, Math.min(5, Number(args.loadMoreAttempts || 3)));
-  const maxNoGrowthRounds = Math.max(1, Math.min(10, Number(args.maxNoGrowthRounds || 5)));
+  const maxNoGrowthRounds = Math.max(1, Math.min(20, Number(args.maxNoGrowthRounds || 8)));
+  const browserMaxRounds = Math.max(
+    1,
+    Math.min(20, Number(args.loadMoreBrowserRounds || args.browserMaxRounds || 12)),
+  );
   const browserTimeoutMs = Math.max(
     500,
     Math.min(
@@ -1552,6 +1596,11 @@ const loadAllRecentChatsForClient = async (client, args = {}) => {
         attempts,
         targetCount,
         fastMode: true,
+        untilEnd: args.untilEndInBrowser !== false,
+        ignoreFailureCap: true,
+        endFailureThreshold: maxNoGrowthRounds,
+        resetReachedEnd: round === 0 && args.trustCachedReachedEnd !== true,
+        maxRounds: browserMaxRounds,
         timeoutMs: browserTimeoutMs,
         includeConversations: true,
         includeModalConversations: false,
@@ -1601,6 +1650,7 @@ const loadAllRecentChatsForClient = async (client, args = {}) => {
       timedOut: result.timedOut === true,
       noGrowthRounds,
       browserTimeoutMs,
+      browserMaxRounds,
       commandTimeoutMs,
       attempts,
       elapsedMs: Date.now() - roundStartedAt,
@@ -1758,6 +1808,7 @@ const summarizeExportJob = (job) => ({
   completed: job.completed,
   successCount: job.successCount,
   failureCount: job.failureCount,
+  skippedCount: job.skippedCount || 0,
   reachedEnd: job.reachedEnd ?? null,
   truncated: job.truncated ?? false,
   cancelRequested: job.cancelRequested,
@@ -1772,6 +1823,7 @@ const summarizeExportJob = (job) => ({
   loadMoreTimedOut: job.loadMoreTimedOut === true,
   loadMoreTrace: Array.isArray(job.loadMoreTrace) ? job.loadMoreTrace.slice(-20) : [],
   recentSuccesses: job.recentSuccesses.slice(-10),
+  recentSkipped: Array.isArray(job.recentSkipped) ? job.recentSkipped.slice(-10) : [],
   failures: job.failures.slice(-20),
 });
 
@@ -1832,6 +1884,8 @@ const buildRecentChatsExportReport = (job, client, successes, failures) => ({
   completed: job.completed,
   successCount: successes.length,
   failureCount: failures.length,
+  skippedCount: job.skippedCount || 0,
+  skipExisting: job.skipExisting === true,
   reachedEnd: job.reachedEnd,
   truncated: job.truncated,
   loadWarning: job.loadWarning || null,
@@ -1840,6 +1894,7 @@ const buildRecentChatsExportReport = (job, client, successes, failures) => ({
   loadMoreTrace: Array.isArray(job.loadMoreTrace) ? job.loadMoreTrace : [],
   current: job.current || null,
   successes,
+  skippedExisting: Array.isArray(job.skippedExisting) ? job.skippedExisting : [],
   failures,
 });
 
@@ -1980,6 +2035,9 @@ const broadcastRecentChatsJobProgress = (job, client, patch = {}) => {
       label = 'Exportação falhou.';
     } else if (phase === 'loading-history') {
       label = 'MCP carregando histórico do sidebar...';
+    } else if (phase === 'exporting' && job.current?.skippedExisting) {
+      const indexLabel = job.current.index ? ` (${job.current.index})` : '';
+      label = `MCP pulando${indexLabel}: ${job.current.title || job.current.chatId}`;
     } else if (phase === 'exporting' && job.current?.title) {
       const indexLabel = job.current.index ? ` (${job.current.index})` : '';
       label = `MCP exportando${indexLabel}: ${job.current.title}`;
@@ -2001,6 +2059,7 @@ const broadcastRecentChatsJobProgress = (job, client, patch = {}) => {
     current,
     errorCount,
     label,
+    skippedCount: job.skippedCount || 0,
     title: job.current?.title || null,
     chatId: job.current?.chatId || null,
   });
@@ -2143,6 +2202,33 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
       broadcastRecentChatsJobProgress(job, client);
 
       try {
+        if (job.skipExisting) {
+          const existing = existingMarkdownExportForConversation(conversation, {
+            outputDir: job.outputDir,
+          });
+          if (existing) {
+            const skipped = {
+              index,
+              chatId: existing.chatId,
+              title: conversation.title || null,
+              filename: existing.filename,
+              filePath: existing.filePath,
+              bytes: existing.bytes,
+              reason: 'existing-file',
+            };
+            job.current = {
+              ...job.current,
+              chatId: existing.chatId,
+              skippedExisting: true,
+            };
+            job.skippedExisting.push(skipped);
+            job.recentSkipped.push(skipped);
+            job.recentSkipped = job.recentSkipped.slice(-10);
+            job.skippedCount = job.skippedExisting.length;
+            continue;
+          }
+        }
+
         const result = await downloadConversationItemForClient(client, conversation, {
           ...args,
           outputDir: job.outputDir,
@@ -2225,6 +2311,8 @@ const startRecentChatsExportJob = (client, args = {}) => {
 
   const outputDir = resolveOutputDir(args.outputDir);
   const hasExplicitMaxChats = args.maxChats !== undefined || args.limit !== undefined;
+  const skipExisting =
+    typeof args.skipExisting === 'boolean' ? args.skipExisting : !hasExplicitMaxChats;
   const job = {
     jobId: randomUUID(),
     type: 'recent-chats-export',
@@ -2245,6 +2333,8 @@ const startRecentChatsExportJob = (client, args = {}) => {
     completed: 0,
     successCount: 0,
     failureCount: 0,
+    skippedCount: 0,
+    skipExisting,
     reachedEnd: false,
     truncated: false,
     cancelRequested: false,
@@ -2259,6 +2349,8 @@ const startRecentChatsExportJob = (client, args = {}) => {
     loadMoreTimedOut: false,
     loadMoreTrace: [],
     recentSuccesses: [],
+    recentSkipped: [],
+    skippedExisting: [],
     failures: [],
   };
   exportJobs.set(job.jobId, job);
@@ -2601,15 +2693,77 @@ const rawTools = [
           description:
             'Tempo para aguardar uma aba Gemini já aberta reconectar antes de tentar abrir o navegador.',
         },
+        selfHeal: {
+          type: 'boolean',
+          description:
+            'Quando true ou omitido, tenta validar versão/protocolo/build e pedir reload automático da extensão se ela estiver stale.',
+        },
+        allowReload: {
+          type: 'boolean',
+          description:
+            'Quando true ou omitido, permite que o status peça reload automático da extensão Chrome se detectar versão/build antigos.',
+        },
+        reloadWaitMs: {
+          type: 'number',
+          description:
+            'Tempo máximo para aguardar a extensão reconectar depois de um reload automático.',
+        },
       },
       additionalProperties: false,
     },
     call: async (args = {}) => {
       cleanupStaleClients();
-      let liveClients = getLiveClients();
       let launchResult = null;
       let waitedMs = 0;
       const wakeBrowser = args.wakeBrowser !== false;
+      const selfHealEnabled = args.selfHeal !== false;
+      let selfHeal = {
+        attempted: false,
+        reason: selfHealEnabled ? 'not-needed' : 'disabled',
+      };
+
+      if (selfHealEnabled) {
+        try {
+          const ready = await ensureBrowserExtensionReady(
+            {
+              clientId: args.clientId || null,
+            },
+            {
+              allowLaunchChrome: wakeBrowser,
+              allowReload: args.allowReload !== false,
+              config: {
+                initialConnectTimeoutMs: normalizeWaitMs(
+                  args.initialWaitMs,
+                  BROWSER_STATUS_INITIAL_WAIT_MS,
+                ),
+                reloadTimeoutMs: normalizeReloadWaitMs(
+                  args.reloadWaitMs,
+                  CHROME_GUARD_CONFIG.reloadTimeoutMs,
+                ),
+              },
+            },
+          );
+          selfHeal = {
+            attempted: true,
+            ok: true,
+            reloadAttempts: ready.reloadAttempts || 0,
+            launchedChrome: ready.launchedChrome === true,
+            client: summarizeClient(ready.client),
+            info: ready.info || null,
+          };
+        } catch (err) {
+          selfHeal = {
+            attempted: true,
+            ok: false,
+            error: err.message,
+            code: err.code || null,
+            data: err.data || null,
+          };
+        }
+      }
+
+      cleanupStaleClients();
+      let liveClients = getLiveClients();
 
       if (wakeBrowser && liveClients.length === 0 && CHROME_GUARD_CONFIG.launchIfClosed) {
         liveClients = await waitForLiveClients(
@@ -2640,6 +2794,7 @@ const rawTools = [
         expectedChromeExtension: EXPECTED_CHROME_EXTENSION_INFO,
         matchingClientCount: matchingClients.length,
         connectedClients: liveClients.map(summarizeClient),
+        selfHeal,
         browserWake: launchResult
           ? {
               ...launchResult,
@@ -2882,6 +3037,11 @@ const rawTools = [
           description:
             'Se true, força atualizar o sidebar antes de carregar o histórico. Default segue a política de cache.',
         },
+        skipExisting: {
+          type: 'boolean',
+          description:
+            'Se true, pula arquivos <chatId>.md não vazios que já existem no destino. Default: true quando maxChats/limit é omitido; false em export parcial.',
+        },
         batchSize: {
           type: 'integer',
           minimum: 10,
@@ -2906,9 +3066,16 @@ const rawTools = [
         maxNoGrowthRounds: {
           type: 'integer',
           minimum: 1,
-          maximum: 10,
+          maximum: 20,
           description:
-            'Diagnóstico: rodadas consecutivas sem crescimento antes de parar. Default: 5.',
+            'Diagnóstico: rodadas consecutivas sem crescimento antes de parar. Default: 8.',
+        },
+        loadMoreBrowserRounds: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 20,
+          description:
+            'Diagnóstico: máximo de ciclos de scroll dentro da aba por rodada MCP. Default: 12.',
         },
         loadMoreBrowserTimeoutMs: {
           type: 'integer',
@@ -3487,7 +3654,9 @@ const bridgeServer = createServer(async (req, res) => {
           maxLoadMoreRounds: url.searchParams.get('maxLoadMoreRounds') || undefined,
           loadMoreAttempts: url.searchParams.get('loadMoreAttempts') || undefined,
           maxNoGrowthRounds: url.searchParams.get('maxNoGrowthRounds') || undefined,
+          loadMoreBrowserRounds: url.searchParams.get('loadMoreBrowserRounds') || undefined,
           loadMoreBrowserTimeoutMs: url.searchParams.get('loadMoreBrowserTimeoutMs') || undefined,
+          skipExisting: parseOptionalBoolean(url.searchParams.get('skipExisting')),
         }),
       );
     } catch (err) {

@@ -289,7 +289,7 @@ const browserNameFromLaunch = (launch) =>
   launch?.browserName || launch?.plan?.browserName || launch?.browserKey || 'navegador';
 
 const manualBrowserRecoveryMessage =
-  'Abra o Gemini no navegador/perfil correto e confirme que a extensao unpacked esta ativa em chrome://extensions ou edge://extensions.';
+  'Rode gemini_browser_status para acionar o auto-reload da extensao; se houver abas conectadas mas travadas, use gemini_reload_gemini_tabs. Recarregar o card em chrome://extensions ou edge://extensions e o ultimo recurso.';
 
 const systemMessageForConnectWait = (connectWait, launch, { reusedLaunch = false } = {}) => {
   const browserName = browserNameFromLaunch(launch);
@@ -1135,7 +1135,7 @@ const afterTool = (input) => {
   }
   if (analysis.bridgeProblem) {
     notes.push(
-      'A resposta sugere problema de bridge/extensao do navegador. Antes de repetir a mesma exportacao, cheque gemini_browser_status e considere update/restart do Gemini CLI ou reload manual do card da extensao.',
+      'A resposta sugere problema de bridge/extensao do navegador. Antes de repetir a mesma exportacao ou pedir acao manual, cheque gemini_browser_status: ele tenta auto-reload da extensao stale. Se houver abas conectadas mas presas, use gemini_reload_gemini_tabs. Reload manual do card da extensao e ultimo recurso.',
     );
   }
 

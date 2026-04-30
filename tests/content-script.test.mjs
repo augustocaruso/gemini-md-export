@@ -415,6 +415,10 @@ test('content script reporta diagnóstico de scroll ao puxar histórico', async 
   assert.match(source, /scrollAfter/);
   assert.match(source, /loadTrace:\s*command\.args\?\.includeLoadTrace === false/);
   assert.match(source, /timedOut:\s*roundTimedOut/);
+  assert.match(source, /ignoreFailureCap:\s*command\.args\?\.ignoreFailureCap === true/);
+  assert.match(source, /endFailureThreshold:\s*command\.args\?\.endFailureThreshold/);
+  assert.match(source, /command\.args\?\.resetReachedEnd === true/);
+  assert.match(source, /state\.reachedSidebarEnd = false/);
 });
 
 test('exportPayload baixa blob sem preparar a imagem antes', { timeout: 5000 }, async () => {
