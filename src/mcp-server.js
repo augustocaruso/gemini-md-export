@@ -45,6 +45,9 @@ const DEFAULT_EXPORT_DIR = process.env.GEMINI_MCP_EXPORT_DIR || resolve(homedir(
 const CLIENT_STALE_MS = 45_000;
 const LONG_POLL_TIMEOUT_MS = 25_000;
 const COMMAND_TIMEOUT_MS = Number(process.env.GEMINI_MCP_COMMAND_TIMEOUT_MS || 180_000);
+const COMMAND_DISPATCH_TIMEOUT_MS = Number(
+  process.env.GEMINI_MCP_COMMAND_DISPATCH_TIMEOUT_MS || 20_000,
+);
 const EXTENSION_INFO_COMMAND_TIMEOUT_MS = Number(
   process.env.GEMINI_MCP_EXTENSION_INFO_COMMAND_TIMEOUT_MS || 6000,
 );
@@ -497,6 +500,10 @@ const takeQueuedCommand = (client) => {
   const pending = pendingCommands.get(command.id);
   if (pending) {
     pending.dispatchedAt = Date.now();
+    if (pending.dispatchTimer) {
+      clearTimeout(pending.dispatchTimer);
+      pending.dispatchTimer = null;
+    }
   }
   return command;
 };
@@ -533,17 +540,23 @@ const enqueueCommand = (clientId, type, args = {}, options = {}) => {
 
   return new Promise((resolve, reject) => {
     const timeoutMs = Number(options.timeoutMs || COMMAND_TIMEOUT_MS);
+    const dispatchTimeoutMs = Math.max(
+      0,
+      Number(options.dispatchTimeoutMs ?? COMMAND_DISPATCH_TIMEOUT_MS),
+    );
     const pending = {
       clientId,
       resolve,
       reject,
       timer: null,
+      dispatchTimer: null,
       type,
       dispatchedAt: null,
     };
     const timer = setTimeout(() => {
       pendingCommands.delete(command.id);
       removeQueuedCommand(clientId, command.id);
+      if (pending.dispatchTimer) clearTimeout(pending.dispatchTimer);
       const error = new Error(`Timeout aguardando resposta do comando ${type}.`);
       error.code = 'command_timeout';
       error.commandType = type;
@@ -552,6 +565,21 @@ const enqueueCommand = (clientId, type, args = {}, options = {}) => {
     }, timeoutMs);
 
     pending.timer = timer;
+    if (dispatchTimeoutMs > 0) {
+      pending.dispatchTimer = setTimeout(() => {
+        if (pending.dispatchedAt) return;
+        pendingCommands.delete(command.id);
+        removeQueuedCommand(clientId, command.id);
+        clearTimeout(pending.timer);
+        const error = new Error(
+          `A aba do Gemini está conectada, mas não abriu o canal de comandos para ${type}. Recarregue a aba do Gemini e confirme que a extensão está ativa no navegador.`,
+        );
+        error.code = 'command_dispatch_timeout';
+        error.commandType = type;
+        error.commandDispatched = false;
+        reject(error);
+      }, dispatchTimeoutMs);
+    }
     pendingCommands.set(command.id, pending);
 
     client.queue.push(command);
@@ -563,6 +591,7 @@ const resolveCommand = (commandId, result) => {
   const pending = pendingCommands.get(commandId);
   if (!pending) return false;
   clearTimeout(pending.timer);
+  if (pending.dispatchTimer) clearTimeout(pending.dispatchTimer);
   pendingCommands.delete(commandId);
   pending.resolve(result);
   return true;
@@ -2285,8 +2314,17 @@ const rawTools = [
         waitedMs = Date.now() - startedAt;
       }
 
+      const matchingClients = liveClients.filter(clientMatchesExpectedBrowserExtension);
       return toolTextResult({
+        ready: matchingClients.length > 0,
+        blockingIssue:
+          liveClients.length === 0
+            ? 'no_connected_clients'
+            : matchingClients.length === 0
+              ? 'extension_version_mismatch'
+              : null,
         expectedChromeExtension: EXPECTED_CHROME_EXTENSION_INFO,
+        matchingClientCount: matchingClients.length,
         connectedClients: liveClients.map(summarizeClient),
         browserWake: launchResult
           ? {

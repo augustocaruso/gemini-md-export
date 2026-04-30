@@ -232,6 +232,14 @@ regenerated from the corrected source.
 ## Repair Flow
 
 1. Confirm browser/MCP health with `mcp_gemini-md-export_gemini_browser_status`.
+   This is a hard preflight, not a courtesy check. Continue only when the tool
+   returns `ready=true`, at least one `connectedClients` entry, and no
+   `blockingIssue`. If the tool errors, returns `ready=false`, returns
+   `blockingIssue`, or reports zero connected clients, stop before the scanner
+   and before any `mcp_gemini-md-export_gemini_download_chat` call. Report the
+   exact status fields (`expectedChromeExtension`, `browserWake`,
+   `connectedClients`, and `blockingIssue`) and ask the parent/user to update
+   or reload the browser extension.
 2. Create the repair directory.
 3. Run the audit helper on the provided path with `--include-notes --report`.
 4. Build the verification queue:
@@ -309,6 +317,8 @@ Stop and ask for direction when:
 
 - no vault/folder path is available;
 - MCP/browser status shows extension version mismatch or unreachable browser;
+- `mcp_gemini-md-export_gemini_browser_status` returns `ready=false`,
+  `blockingIssue`, no `connectedClients`, or a tool error;
 - a suspect note has wiki signals and replacing it would destroy user work;
 - re-exported chatId does not match the expected chatId;
 - more than one note maps to the same final path;

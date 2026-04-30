@@ -71,6 +71,11 @@ Operational guidance:
   tab is connected. Do not treat status as a passive-only tool; Gemini CLI often
   asks for status first, and that first status call should be enough to open the
   configured browser.
+- Treat `gemini_browser_status.ready=false`, a non-null `blockingIssue`, or
+  zero `connectedClients` as a blocker for browser-dependent work. Do not keep
+  calling `gemini_download_chat`, vault repair, or export tools in a loop while
+  the browser bridge is disconnected; report the status fields and ask for
+  extension reload/update.
 - The extension does not use a `SessionStart` hook for static context; the
   extension `GEMINI.md` file is the context source. This avoids hook execution
   just because the Gemini CLI started.
