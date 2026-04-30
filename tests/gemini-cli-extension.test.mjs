@@ -70,16 +70,19 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.doesNotMatch(hooksConfig.hooks.BeforeTool[0].matcher, /set_export_dir/);
   assert.doesNotMatch(hooksConfig.hooks.BeforeTool[0].matcher, /export_job_status/);
   assert.doesNotMatch(hooksConfig.hooks.BeforeTool[0].matcher, /export_job_cancel/);
+  assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /reexport/);
   assert.equal(hooksConfig.hooks.BeforeTool[0].hooks[0].timeout, 20000);
 
   const repairAgent = readFileSync(repairAgentPath, 'utf-8');
   assert.match(repairAgent, /^---\nname: gemini-vault-repair/m);
   assert.match(repairAgent, /^model: gemini-3-flash-preview$/m);
   assert.match(repairAgent, /mcp_gemini-md-export_gemini_download_chat/);
+  assert.match(repairAgent, /mcp_gemini-md-export_gemini_reexport_chats/);
+  assert.match(repairAgent, /mcp_gemini-md-export_gemini_export_job_status/);
   assert.match(repairAgent, /vault-repair-audit\.mjs/);
   assert.match(repairAgent, /Continue only when the tool\s+returns `ready=true`/);
   assert.match(repairAgent, /stop before the scanner/);
-  assert.match(repairAgent, /before any `mcp_gemini-md-export_gemini_download_chat` call/);
+  assert.match(repairAgent, /before any reexport\/download call/);
   assert.match(repairAgent, /blockingIssue/);
   assert.match(repairAgent, /preliminary-report/);
   assert.match(repairAgent, /You cannot call another Gemini CLI subagent yourself/);
@@ -108,6 +111,7 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.match(context, /ready=false/);
   assert.match(context, /blockingIssue/);
   assert.match(context, /Do not keep\s+calling `gemini_download_chat`/);
+  assert.match(context, /gemini_reexport_chats/);
 });
 
 test('auditor coleta todos os links Gemini de origem em nota wiki consolidada', () => {

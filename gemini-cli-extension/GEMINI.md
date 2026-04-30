@@ -34,8 +34,11 @@ Operational guidance:
   `gemini-vault-repair` or the command `/exporter:repair-vault <vault path>`.
   It audits Markdown exports with `scripts/vault-repair-audit.mjs`, then follows
   each raw export's `chat_id`/Gemini link by reexporting that exact chat to a
-  staging directory. The local audit only builds the queue and highlights
-  suspects; direct reexport is the authoritative check. It creates backups
+  staging directory. For more than a couple of raw exports, start
+  `gemini_reexport_chats` with the explicit chatId list and poll
+  `gemini_export_job_status`; do not loop over `gemini_download_chat` for dozens
+  of items, especially on Windows. The local audit only builds the queue and
+  highlights suspects; direct reexport is the authoritative check. It creates backups
   before overwrite. If a bad chat has already become a wiki/Obsidian note, the
   wiki note is also repair scope: preserve it, back it up, create a
   `wiki-review` case file, and require a deliberate regenerate/merge strategy
@@ -76,6 +79,11 @@ Operational guidance:
   calling `gemini_download_chat`, vault repair, or export tools in a loop while
   the browser bridge is disconnected; report the status fields and ask for
   extension reload/update.
+- On slow Windows machines, prefer background jobs over long synchronous tool
+  loops. `gemini_reexport_chats` is the stable path for a known list of chatIds:
+  it navigates and saves one chat at a time, writes an incremental JSON report,
+  broadcasts progress to the Gemini tab, and can be checked/cancelled with the
+  export job tools.
 - The extension does not use a `SessionStart` hook for static context; the
   extension `GEMINI.md` file is the context source. This avoids hook execution
   just because the Gemini CLI started.
@@ -130,6 +138,7 @@ Available capabilities include:
 - listing notebook chats
 - exporting the current chat
 - exporting the recent-chat history in a background batch job
+- reexporting an explicit list of chatIds in a background batch job
 - checking or cancelling a background export job
 - downloading a specific recent or notebook chat
 - manually reloading connected Gemini tabs when needed

@@ -69,6 +69,7 @@ const BROWSER_DEPENDENT_EXPORTER_TOOLS = new Set([
   'gemini_download_chat',
   'gemini_download_notebook_chat',
   'gemini_export_recent_chats',
+  'gemini_reexport_chats',
   'gemini_export_notebook',
   'gemini_cache_status',
   'gemini_clear_cache',

@@ -2,7 +2,7 @@
   "hooks": {
     "AfterTool": [
       {
-        "matcher": "^(gemini_(browser_status|get_export_dir|set_export_dir|list_recent_chats|list_notebook_chats|get_current_chat|download_chat|download_notebook_chat|export_notebook|export_recent_chats|export_job_status|export_job_cancel|cache_status|clear_cache|open_chat|reload_gemini_tabs|snapshot)|mcp_+gemini[-_]md[-_]export_+.*)$",
+        "matcher": "^(gemini_(browser_status|get_export_dir|set_export_dir|list_recent_chats|list_notebook_chats|get_current_chat|download_chat|download_notebook_chat|export_notebook|export_recent_chats|reexport_chats|export_job_status|export_job_cancel|cache_status|clear_cache|open_chat|reload_gemini_tabs|snapshot)|mcp_+gemini[-_]md[-_]export_+.*)$",
         "hooks": [
           {
             "name": "gemini-md-export-media-audit",
@@ -16,7 +16,7 @@
     ],
     "BeforeTool": [
       {
-        "matcher": "^(gemini_(browser_status|list_recent_chats|list_notebook_chats|get_current_chat|download_chat|download_notebook_chat|export_notebook|export_recent_chats|cache_status|clear_cache|open_chat|reload_gemini_tabs|snapshot)|mcp_+gemini[-_]md[-_]export_+gemini[-_](browser[-_]status|list[-_]recent[-_]chats|list[-_]notebook[-_]chats|get[-_]current[-_]chat|download[-_]chat|download[-_]notebook[-_]chat|export[-_]notebook|export[-_]recent[-_]chats|cache[-_]status|clear[-_]cache|open[-_]chat|reload[-_]gemini[-_]tabs|snapshot))$",
+        "matcher": "^(gemini_(browser_status|list_recent_chats|list_notebook_chats|get_current_chat|download_chat|download_notebook_chat|export_notebook|export_recent_chats|reexport_chats|cache_status|clear_cache|open_chat|reload_gemini_tabs|snapshot)|mcp_+gemini[-_]md[-_]export_+gemini[-_](browser[-_]status|list[-_]recent[-_]chats|list[-_]notebook[-_]chats|get[-_]current[-_]chat|download[-_]chat|download[-_]notebook[-_]chat|export[-_]notebook|export[-_]recent[-_]chats|reexport[-_]chats|cache[-_]status|clear[-_]cache|open[-_]chat|reload[-_]gemini[-_]tabs|snapshot))$",
         "hooks": [
           {
             "name": "gemini-md-export-browser-ready",

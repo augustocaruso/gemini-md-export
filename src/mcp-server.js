@@ -71,6 +71,20 @@ const RECENT_CHATS_LOAD_MORE_BROWSER_TIMEOUT_MS = Number(
 const RECENT_CHATS_EXPORT_ALL_LOAD_MORE_BROWSER_TIMEOUT_MS = Number(
   process.env.GEMINI_MCP_RECENT_CHATS_EXPORT_ALL_LOAD_MORE_BROWSER_TIMEOUT_MS || 12_000,
 );
+const DIRECT_REEXPORT_MAX_ITEMS = Math.max(
+  1,
+  Math.min(1000, Number(process.env.GEMINI_MCP_DIRECT_REEXPORT_MAX_ITEMS || 500)),
+);
+const DIRECT_REEXPORT_DELAY_MS = Math.max(
+  0,
+  Math.min(
+    30_000,
+    Number(
+      process.env.GEMINI_MCP_DIRECT_REEXPORT_DELAY_MS ||
+        (process.platform === 'win32' ? 750 : 250),
+    ),
+  ),
+);
 const CHROME_GUARD_CONFIG = {
   profileDirectory:
     process.env.GEMINI_MCP_CHROME_PROFILE_DIRECTORY ||
@@ -1727,22 +1741,25 @@ const summarizeExportJob = (job) => ({
   type: job.type,
   status: job.status,
   phase: job.phase,
-  ...recentChatsExportScope(job),
+  ...(job.type === 'recent-chats-export'
+    ? recentChatsExportScope(job)
+    : directChatsExportScope(job)),
   clientId: job.clientId,
   outputDir: job.outputDir,
   createdAt: job.createdAt,
   updatedAt: job.updatedAt,
   finishedAt: job.finishedAt || null,
-  startIndex: job.startIndex,
-  exportAll: job.exportAll,
-  maxChats: job.maxChats,
-  loadedCount: job.loadedCount,
+  startIndex: job.startIndex ?? null,
+  exportAll: job.exportAll ?? false,
+  maxChats: job.maxChats ?? null,
+  loadedCount: job.loadedCount ?? 0,
+  inputCount: job.inputCount ?? (Array.isArray(job.items) ? job.items.length : null),
   requested: job.requested,
   completed: job.completed,
   successCount: job.successCount,
   failureCount: job.failureCount,
-  reachedEnd: job.reachedEnd,
-  truncated: job.truncated,
+  reachedEnd: job.reachedEnd ?? null,
+  truncated: job.truncated ?? false,
   cancelRequested: job.cancelRequested,
   cancelledAt: job.cancelledAt || null,
   current: job.current || null,
@@ -1765,10 +1782,10 @@ const touchExportJob = (job) => {
 const isTerminalExportJobStatus = (status) =>
   ['completed', 'completed_with_errors', 'failed', 'cancelled'].includes(status);
 
-const findRunningRecentChatsExportJob = (clientId) =>
+const findRunningBrowserExportJob = (clientId) =>
   Array.from(exportJobs.values()).find(
     (job) =>
-      job.type === 'recent-chats-export' &&
+      ['recent-chats-export', 'direct-chats-export'].includes(job.type) &&
       job.clientId === clientId &&
       !isTerminalExportJobStatus(job.status),
   );
@@ -1784,6 +1801,13 @@ const recentChatsExportScope = (job) => {
     partialLimit: fullHistoryRequested ? null : job.maxChats,
   };
 };
+
+const directChatsExportScope = (job) => ({
+  scope: 'explicit-chat-ids',
+  fullHistoryRequested: false,
+  fullHistoryVerified: false,
+  partialLimit: job.requested || job.inputCount || null,
+});
 
 const buildRecentChatsExportReport = (job, client, successes, failures) => ({
   job: {
@@ -1833,6 +1857,110 @@ const persistRecentChatsExportReport = (job, client, successes, failures) => {
   overwriteExportReport(job.reportFile, buildRecentChatsExportReport(job, client, successes, failures));
 };
 
+const normalizeDirectReexportItems = (args = {}) => {
+  const rawItems = [];
+  if (Array.isArray(args.chatIds)) {
+    for (const chatId of args.chatIds) rawItems.push({ chatId });
+  }
+  if (Array.isArray(args.items)) {
+    for (const item of args.items) rawItems.push(item);
+  }
+  if (args.chatId) rawItems.push({ chatId: args.chatId, title: args.title });
+
+  if (rawItems.length === 0) {
+    throw new Error('Informe chatIds ou items para reexportar.');
+  }
+  if (rawItems.length > DIRECT_REEXPORT_MAX_ITEMS) {
+    throw new Error(`Muitos chats em um job; limite atual: ${DIRECT_REEXPORT_MAX_ITEMS}.`);
+  }
+
+  const seen = new Set();
+  const normalized = [];
+  for (const raw of rawItems) {
+    const item = typeof raw === 'string' ? { chatId: raw } : raw || {};
+    const idLike = item.chatId || item.id || '';
+    const chatId =
+      extractChatIdFromUrl(item.url) ||
+      extractChatIdFromUrl(idLike) ||
+      stripGeminiPrefix(idLike);
+    if (!/^[a-f0-9]{12,}$/i.test(chatId || '')) {
+      throw new Error(`chatId inválido para reexportação: ${String(item.chatId || item.url || item.id || raw)}`);
+    }
+
+    const key = chatId.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    const title = String(item.title || item.label || chatId).slice(0, 240);
+    normalized.push({
+      id: key,
+      chatId: key,
+      title,
+      url: `https://gemini.google.com/app/${key}`,
+      current: false,
+      source: 'direct-url',
+      request: {
+        title,
+        sourcePath: item.sourcePath || item.path || null,
+        originalIndex: normalized.length + 1,
+      },
+    });
+  }
+
+  if (normalized.length === 0) {
+    throw new Error('Nenhum chatId único válido para reexportar.');
+  }
+
+  return normalized;
+};
+
+const buildDirectChatsExportReport = (job, client, successes, failures) => ({
+  job: {
+    jobId: job.jobId,
+    type: job.type,
+    status: job.status,
+    phase: job.phase,
+    ...directChatsExportScope(job),
+    createdAt: job.createdAt,
+    updatedAt: job.updatedAt,
+    finishedAt: job.finishedAt || null,
+    cancelRequested: job.cancelRequested,
+    cancelledAt: job.cancelledAt || null,
+  },
+  client: summarizeClient(client),
+  outputDir: job.outputDir,
+  inputCount: job.inputCount,
+  requested: job.requested,
+  completed: job.completed,
+  successCount: successes.length,
+  failureCount: failures.length,
+  delayMs: job.delayMs,
+  current: job.current || null,
+  items: job.items.map((item, index) => ({
+    index: index + 1,
+    chatId: item.chatId,
+    title: item.title || null,
+    sourcePath: item.request?.sourcePath || null,
+    url: item.url,
+  })),
+  successes,
+  failures,
+});
+
+const persistDirectChatsExportReport = (job, client, successes, failures) => {
+  if (!job.reportFile) {
+    const reportFile = writeExportReport(
+      'direct-chats',
+      buildDirectChatsExportReport(job, client, successes, failures),
+      { outputDir: job.outputDir },
+    );
+    job.reportFile = reportFile.reportFile;
+    job.reportFilename = reportFile.reportFilename;
+    return;
+  }
+  overwriteExportReport(job.reportFile, buildDirectChatsExportReport(job, client, successes, failures));
+};
+
 const broadcastRecentChatsJobProgress = (job, client, patch = {}) => {
   if (!client) return;
   const total = patch.total ?? Math.max(job.requested || 0, job.completed || 0, 1);
@@ -1866,6 +1994,44 @@ const broadcastRecentChatsJobProgress = (job, client, patch = {}) => {
   setClientJobProgress(client, {
     source: 'mcp',
     kind: 'recent-chats-export',
+    jobId: job.jobId,
+    status,
+    phase,
+    total,
+    current,
+    errorCount,
+    label,
+    title: job.current?.title || null,
+    chatId: job.current?.chatId || null,
+  });
+};
+
+const broadcastDirectChatsJobProgress = (job, client, patch = {}) => {
+  if (!client) return;
+  const total = patch.total ?? Math.max(job.requested || 0, job.completed || 0, 1);
+  const current = patch.current ?? job.completed ?? 0;
+  const errorCount = patch.errorCount ?? job.failureCount ?? 0;
+  const status = patch.status ?? job.status ?? 'running';
+  const phase = patch.phase ?? job.phase ?? null;
+  let label = patch.label;
+  if (!label) {
+    if (status === 'cancelled') {
+      label = 'Reexportação cancelada.';
+    } else if (status === 'completed') {
+      label = 'Reexportação concluída.';
+    } else if (status === 'completed_with_errors') {
+      label = `Reexportação concluída com ${errorCount} erro${errorCount === 1 ? '' : 's'}.`;
+    } else if (status === 'failed') {
+      label = 'Reexportação falhou.';
+    } else if (phase === 'exporting' && job.current?.title) {
+      label = `MCP reexportando (${job.current.index}/${total}): ${job.current.title}`;
+    } else {
+      label = 'MCP reexportando chats selecionados...';
+    }
+  }
+  setClientJobProgress(client, {
+    source: 'mcp',
+    kind: 'direct-chats-export',
     jobId: job.jobId,
     status,
     phase,
@@ -2050,10 +2216,10 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
 };
 
 const startRecentChatsExportJob = (client, args = {}) => {
-  const running = findRunningRecentChatsExportJob(client.clientId);
+  const running = findRunningBrowserExportJob(client.clientId);
   if (running) {
     throw new Error(
-      `Já existe um job de exportação recente em andamento para esta aba: ${running.jobId}. Consulte o status ou cancele antes de iniciar outro.`,
+      `Já existe um job de exportação em andamento para esta aba: ${running.jobId}. Consulte o status ou cancele antes de iniciar outro.`,
     );
   }
 
@@ -2097,6 +2263,154 @@ const startRecentChatsExportJob = (client, args = {}) => {
   };
   exportJobs.set(job.jobId, job);
   void runRecentChatsExportJob(job, client, args);
+  return summarizeExportJob(job);
+};
+
+const runDirectChatsExportJob = async (job, client, args = {}) => {
+  const successes = [];
+  const failures = [];
+  try {
+    job.phase = 'exporting';
+    touchExportJob(job);
+    persistDirectChatsExportReport(job, client, successes, failures);
+    broadcastDirectChatsJobProgress(job, client);
+
+    for (let i = 0; i < job.items.length; i += 1) {
+      if (job.cancelRequested) {
+        job.status = 'cancelled';
+        job.phase = 'cancelled';
+        break;
+      }
+
+      const conversation = job.items[i];
+      const index = i + 1;
+      job.current = {
+        index,
+        title: conversation.title || null,
+        chatId: conversation.chatId,
+        sourcePath: conversation.request?.sourcePath || null,
+      };
+      touchExportJob(job);
+      broadcastDirectChatsJobProgress(job, client);
+
+      try {
+        const result = await downloadConversationItemForClient(client, conversation, {
+          ...args,
+          outputDir: job.outputDir,
+          returnToOriginal: false,
+        });
+        const success = {
+          index,
+          chatId: result.chatId,
+          title: result.title,
+          filename: result.filename,
+          filePath: result.filePath,
+          bytes: result.bytes,
+          mediaFileCount: result.mediaFileCount || 0,
+          mediaFailureCount: result.mediaFailureCount || 0,
+          turns: result.turns,
+          overwritten: result.overwritten,
+          sourcePath: conversation.request?.sourcePath || null,
+        };
+        successes.push(success);
+        job.recentSuccesses.push(success);
+        job.recentSuccesses = job.recentSuccesses.slice(-10);
+        job.successCount = successes.length;
+      } catch (err) {
+        const failure = {
+          index,
+          chatId: conversation.chatId,
+          title: conversation.title || null,
+          sourcePath: conversation.request?.sourcePath || null,
+          error: err.message,
+        };
+        failures.push(failure);
+        job.failures.push(failure);
+        job.failures = job.failures.slice(-20);
+        job.failureCount = failures.length;
+      } finally {
+        job.completed = i + 1;
+        touchExportJob(job);
+        persistDirectChatsExportReport(job, client, successes, failures);
+        broadcastDirectChatsJobProgress(job, client);
+      }
+
+      if (!job.cancelRequested && job.delayMs > 0 && i < job.items.length - 1) {
+        await sleep(job.delayMs);
+      }
+    }
+
+    if (!job.cancelRequested) {
+      job.phase = 'writing-report';
+      touchExportJob(job);
+      broadcastDirectChatsJobProgress(job, client);
+      job.status = failures.length > 0 ? 'completed_with_errors' : 'completed';
+      job.phase = 'done';
+    }
+  } catch (err) {
+    job.status = 'failed';
+    job.phase = 'failed';
+    job.error = err.message;
+    try {
+      persistDirectChatsExportReport(job, client, successes, failures);
+    } catch {
+      // O status em memória ainda mostra a falha se o relatório não puder ser gravado.
+    }
+  } finally {
+    job.current = null;
+    job.finishedAt = new Date().toISOString();
+    touchExportJob(job);
+    try {
+      persistDirectChatsExportReport(job, client, successes, failures);
+    } catch {
+      // Status em memória permanece disponível mesmo se o relatório final falhar.
+    }
+    broadcastDirectChatsJobProgress(job, client);
+  }
+};
+
+const startDirectChatsExportJob = (client, args = {}) => {
+  const running = findRunningBrowserExportJob(client.clientId);
+  if (running) {
+    throw new Error(
+      `Já existe um job de exportação em andamento para esta aba: ${running.jobId}. Consulte o status ou cancele antes de iniciar outro.`,
+    );
+  }
+
+  const items = normalizeDirectReexportItems(args);
+  const outputDir = resolveOutputDir(args.outputDir);
+  const delayMs = Math.max(
+    0,
+    Math.min(30_000, Number(args.delayMs ?? DIRECT_REEXPORT_DELAY_MS)),
+  );
+  const job = {
+    jobId: randomUUID(),
+    type: 'direct-chats-export',
+    status: 'running',
+    phase: 'queued',
+    clientId: client.clientId,
+    outputDir,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    finishedAt: null,
+    items,
+    inputCount: items.length,
+    requested: items.length,
+    completed: 0,
+    successCount: 0,
+    failureCount: 0,
+    cancelRequested: false,
+    cancelledAt: null,
+    current: null,
+    reportFile: null,
+    reportFilename: null,
+    error: null,
+    delayMs,
+    recentSuccesses: [],
+    failures: [],
+  };
+  exportJobs.set(job.jobId, job);
+  void runDirectChatsExportJob(job, client, args);
   return summarizeExportJob(job);
 };
 
@@ -2612,15 +2926,71 @@ const rawTools = [
     },
   },
   {
+    name: 'gemini_reexport_chats',
+    description:
+      'Inicia um job em background para reexportar uma lista explicita de chatIds do Gemini, salvando Markdown em disco e relatorio incremental sem bloquear o agente em dezenas de downloads.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        clientId: { type: 'string' },
+        outputDir: {
+          type: 'string',
+          description: 'Diretório local de destino. Default: diretório MCP configurado.',
+        },
+        chatId: {
+          type: 'string',
+          description: 'Atalho para reexportar um único chatId.',
+        },
+        chatIds: {
+          type: 'array',
+          maxItems: 500,
+          items: { type: 'string' },
+          description: 'Lista de chatIds hex ou URLs /app/<chatId> para reexportar.',
+        },
+        items: {
+          type: 'array',
+          maxItems: 500,
+          items: {
+            type: 'object',
+            properties: {
+              chatId: { type: 'string' },
+              url: { type: 'string' },
+              id: { type: 'string' },
+              title: { type: 'string' },
+              label: { type: 'string' },
+              sourcePath: { type: 'string' },
+              path: { type: 'string' },
+            },
+            additionalProperties: false,
+          },
+          description:
+            'Itens com chatId/url e metadados opcionais para rastrear a nota original no relatório.',
+        },
+        delayMs: {
+          type: 'integer',
+          minimum: 0,
+          maximum: 30000,
+          description:
+            'Pausa entre chats para dar fôlego ao navegador. Default: 750ms no Windows, 250ms nos demais.',
+        },
+      },
+      additionalProperties: false,
+    },
+    call: async (args = {}) => {
+      const client = requireClient(args.clientId);
+      return toolTextResult(startDirectChatsExportJob(client, args));
+    },
+  },
+  {
     name: 'gemini_export_job_status',
     description:
-      'Consulta o andamento de um job de exportacao em lote iniciado por gemini_export_recent_chats.',
+      'Consulta o andamento de um job de exportacao em lote iniciado por gemini_export_recent_chats ou gemini_reexport_chats.',
     inputSchema: {
       type: 'object',
       properties: {
         jobId: {
           type: 'string',
-          description: 'ID retornado por gemini_export_recent_chats.',
+          description: 'ID retornado por gemini_export_recent_chats ou gemini_reexport_chats.',
         },
       },
       required: ['jobId'],
@@ -2639,13 +3009,13 @@ const rawTools = [
   {
     name: 'gemini_export_job_cancel',
     description:
-      'Solicita cancelamento de um job de exportacao em lote. O job para antes da proxima conversa, preservando arquivos e relatório já gravados.',
+      'Solicita cancelamento de um job de exportacao/reexportacao em lote. O job para antes da proxima conversa, preservando arquivos e relatório já gravados.',
     inputSchema: {
       type: 'object',
       properties: {
         jobId: {
           type: 'string',
-          description: 'ID retornado por gemini_export_recent_chats.',
+          description: 'ID retornado por gemini_export_recent_chats ou gemini_reexport_chats.',
         },
       },
       required: ['jobId'],
@@ -2830,6 +3200,7 @@ const BROWSER_DEPENDENT_TOOL_NAMES = new Set([
   'gemini_download_chat',
   'gemini_download_notebook_chat',
   'gemini_export_recent_chats',
+  'gemini_reexport_chats',
   'gemini_export_notebook',
   'gemini_cache_status',
   'gemini_clear_cache',
@@ -3117,6 +3488,33 @@ const bridgeServer = createServer(async (req, res) => {
           loadMoreAttempts: url.searchParams.get('loadMoreAttempts') || undefined,
           maxNoGrowthRounds: url.searchParams.get('maxNoGrowthRounds') || undefined,
           loadMoreBrowserTimeoutMs: url.searchParams.get('loadMoreBrowserTimeoutMs') || undefined,
+        }),
+      );
+    } catch (err) {
+      sendAgentJson(res, 503, { error: err.message });
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/agent/reexport-chats') {
+    try {
+      const chatIds = [
+        ...url.searchParams.getAll('chatId'),
+        ...String(url.searchParams.get('chatIds') || '')
+          .split(/[,\s]+/)
+          .filter(Boolean),
+      ];
+      const itemsText = url.searchParams.get('items');
+      const items = itemsText ? JSON.parse(itemsText) : undefined;
+      const client = requireClient(url.searchParams.get('clientId'));
+      sendAgentJson(
+        res,
+        202,
+        startDirectChatsExportJob(client, {
+          outputDir: url.searchParams.get('outputDir') || undefined,
+          chatIds,
+          items,
+          delayMs: url.searchParams.get('delayMs') || undefined,
         }),
       );
     } catch (err) {

@@ -11,6 +11,9 @@ tools:
   - run_shell_command
   - mcp_gemini-md-export_gemini_browser_status
   - mcp_gemini-md-export_gemini_download_chat
+  - mcp_gemini-md-export_gemini_reexport_chats
+  - mcp_gemini-md-export_gemini_export_job_status
+  - mcp_gemini-md-export_gemini_export_job_cancel
   - mcp_gemini-md-export_gemini_get_export_dir
   - mcp_gemini-md-export_gemini_open_chat
 temperature: 0.1
@@ -105,7 +108,9 @@ Gemini link/re-export. Do not manually scan hundreds of full files in chat.
 The scanner is not enough. The authoritative check is:
 
 1. Take the note's `chat_id` or `/app/<chatId>` URL.
-2. Re-export that exact chat with `mcp_gemini-md-export_gemini_download_chat`.
+2. Re-export that exact chat with `mcp_gemini-md-export_gemini_reexport_chats`
+   for queued work, or `mcp_gemini-md-export_gemini_download_chat` for a
+   single spot-check.
 3. Compare the staged export against the note metadata/content.
 4. Repair only when the staged export is valid for the same `chatId`.
 
@@ -117,7 +122,8 @@ Default verification scope:
 - If the user supplied explicit paths, verify those paths first.
 
 This can be slow for hundreds of notes. That is acceptable for a one-time vault
-integrity repair. Work in batches and report counts, not full contents.
+integrity repair only when it runs as a background job with an incremental
+report. Work in batches and report counts, not full contents.
 
 ## Required Reports
 
@@ -236,7 +242,7 @@ regenerated from the corrected source.
    returns `ready=true`, at least one `connectedClients` entry, and no
    `blockingIssue`. If the tool errors, returns `ready=false`, returns
    `blockingIssue`, or reports zero connected clients, stop before the scanner
-   and before any `mcp_gemini-md-export_gemini_download_chat` call. Report the
+   and before any reexport/download call. Report the
    exact status fields (`expectedChromeExtension`, `browserWake`,
    `connectedClients`, and `blockingIssue`) and ask the parent/user to update
    or reload the browser extension.
@@ -264,11 +270,20 @@ regenerated from the corrected source.
      `wikiFooterGeminiSourceLinks`, `wikiFooterMissingSourceLinks`, and
      `requiredFinalGeminiSourceLinks` so later rewrite/consolidation steps can
      append every source chat link at the end of the final wiki note.
-   - If it is a raw export, call
-     `mcp_gemini-md-export_gemini_download_chat` with:
+   - If it is a raw export, prefer one background job for the raw-export queue:
+     call `mcp_gemini-md-export_gemini_reexport_chats` with:
+     - `items` carrying `chatId`, `title`, and `sourcePath`;
+     - `outputDir` = staging directory.
+     Poll `mcp_gemini-md-export_gemini_export_job_status` by `jobId` until the
+     job reaches `completed`, `completed_with_errors`, `failed`, or
+     `cancelled`. This is the default path for Windows and for more than three
+     raw exports because it avoids dozens of long synchronous tool calls.
+   - Only use `mcp_gemini-md-export_gemini_download_chat` for a single
+     spot-check or fallback when `gemini_reexport_chats` is unavailable. If you
+     do call it, pass:
      - `chatId`;
      - `outputDir` = staging directory;
-     - `returnToOriginal=false` for batches.
+     - `returnToOriginal=false`.
    - Verify the staged file:
      - filename is `<chatId>.md`;
      - frontmatter `chat_id` equals expected chatId;
@@ -330,7 +345,11 @@ Stop and ask for direction when:
 
 - Do not list hundreds of chats in Gemini CLI.
 - Do not ask for `gemini_list_recent_chats` unless you need a small smoke test.
-- Prefer `gemini_download_chat` by direct `chatId`; this extension supports
-  navigating by direct Gemini URL when the chat is not loaded in the sidebar.
-- Process in small batches and report progress by counts, not by dumping file
-  contents.
+- Prefer `gemini_reexport_chats` for known suspect chatIds; it runs as a
+  background job, writes a report, and is safer on slow Windows browsers than
+  repeated `gemini_download_chat` calls.
+- `gemini_download_chat` by direct `chatId` is still valid for one-off checks;
+  this extension supports navigating by direct Gemini URL when the chat is not
+  loaded in the sidebar.
+- Process in small batches or a single background job and report progress by
+  counts, not by dumping file contents.

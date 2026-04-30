@@ -108,3 +108,15 @@ test('export recent chats expõe knobs de diagnóstico para lazy-load lento', ()
     assert.match(source, new RegExp(`${field}: url\\.searchParams\\.get\\('${field}'\\)`));
   }
 });
+
+test('reexport de chatIds conhecidos roda como job em background', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  assert.match(source, /name: 'gemini_reexport_chats'/);
+  assert.match(source, /const startDirectChatsExportJob = \(client, args = \{\}\) =>/);
+  assert.match(source, /const runDirectChatsExportJob = async/);
+  assert.match(source, /extractChatIdFromUrl\(idLike\)/);
+  assert.match(source, /writeExportReport\(\s*'direct-chats'/);
+  assert.match(source, /findRunningBrowserExportJob\(client\.clientId\)/);
+  assert.match(source, /'gemini_reexport_chats'/);
+  assert.match(source, /url\.pathname === '\/agent\/reexport-chats'/);
+});
