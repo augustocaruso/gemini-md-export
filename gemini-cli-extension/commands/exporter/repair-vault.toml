@@ -8,11 +8,18 @@ Argumentos do usuario: {{args}}
 Contrato:
 - Se o usuario nao informou uma pasta/vault, pergunte antes de prosseguir.
 - Delegue a auditoria e reparo ao subagent `gemini-vault-repair`.
-- O subagent deve rodar o scanner local
+- O subagent deve preferir o runner local
+  `${extensionPath}/scripts/vault-repair.mjs ...`, que executa auditoria,
+  reexport, comparacao, backup, reparo e relatorios. Para dry-run, usar
+  `--dry-run`. Para triagem rapida, usar `--quick-triage`.
+- Se o runner nao estiver disponivel, o subagent deve rodar o scanner local
   `${extensionPath}/scripts/vault-repair-audit.mjs --include-notes --report ...`.
 - Para reparo serio, o subagent deve verificar cada raw export seguindo o
   `chat_id`/link da nota e reexportando aquele chat por MCP para staging; o
   scanner local apenas monta a fila e destaca suspeitas.
+- Diferenca apenas no YAML/frontmatter nao e divergencia de conteudo. O reparo
+  de raw export deve comparar o corpo Markdown e preservar o YAML original
+  byte-for-byte, trocando somente o corpo quando houver contaminacao.
 - O subagent deve criar backup antes de sobrescrever e nunca sobrescrever nota
   que tenha sinais de wiki/edicao humana automaticamente.
 - Se um chat errado virou nota wiki, a wiki tambem entra no escopo de reparo:

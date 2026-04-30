@@ -75,18 +75,42 @@ Default backup directory:
 <vault>/.gemini-md-export-repair/backups/<timestamp>
 ```
 
-## Audit Helper
+## Repair Runner
 
-Use the bundled scanner before making decisions:
+For normal repairs, use the bundled runner instead of hand-rolling the loop:
 
 ```bash
-node "${extensionPath}/scripts/vault-repair-audit.mjs" --include-notes --report "<repair-dir>/audit-report.json" "<vault-or-folder>"
+node "${extensionPath}/scripts/vault-repair.mjs" "<vault-or-folder>"
 ```
+
+Useful modes:
+
+- `--dry-run` writes the audit/preliminary report without re-export or
+  overwrite.
+- `--quick-triage` verifies only heuristic candidates.
+- `--path <file.md>` limits the run to explicit note paths.
+
+The runner performs the scanner pass, browser/MCP preflight, direct
+`gemini_reexport_chats` job, staged validation, backups, raw-note repair, wiki
+case creation, and final report. Raw-note comparison is body-only: YAML
+frontmatter differences such as tags, aliases, status, title, model, or
+`exported_at` must not count as content divergence. When a raw export is
+repaired, preserve the original frontmatter byte-for-byte and replace only the
+Markdown body.
 
 If `${extensionPath}` is unavailable, use the installed extension path:
 
 ```text
 ~/.gemini/extensions/gemini-md-export
+```
+
+## Audit Helper
+
+The runner calls the bundled scanner before making decisions. If you need a
+manual preliminary read, run:
+
+```bash
+node "${extensionPath}/scripts/vault-repair-audit.mjs" --include-notes --report "<repair-dir>/audit-report.json" "<vault-or-folder>"
 ```
 
 The scanner returns JSON with:
@@ -111,8 +135,10 @@ The scanner is not enough. The authoritative check is:
 2. Re-export that exact chat with `mcp_gemini-md-export_gemini_reexport_chats`
    for queued work, or `mcp_gemini-md-export_gemini_download_chat` for a
    single spot-check.
-3. Compare the staged export against the note metadata/content.
-4. Repair only when the staged export is valid for the same `chatId`.
+3. Compare the staged export against the original note body, ignoring YAML-only
+   differences.
+4. Repair only when the staged export is valid for the same `chatId`; preserve
+   original YAML/frontmatter and replace only the Markdown body.
 
 Default verification scope:
 
@@ -250,6 +276,8 @@ regenerated from the corrected source.
    points to an old/wrong `browser-extension` folder.
 2. Create the repair directory.
 3. Run the audit helper on the provided path with `--include-notes --report`.
+   Prefer `scripts/vault-repair.mjs` for the whole flow; use the lower-level
+   steps below only when the runner is unavailable or you are debugging it.
 4. Build the verification queue:
    - all raw Gemini export notes for normal repair;
    - only candidates for quick triage;
@@ -294,10 +322,14 @@ regenerated from the corrected source.
      - file is not identical to another staged file unless the chats genuinely
        have identical content.
    - If verified and the original is a raw export:
-     - If original and staged content are equivalent, record `verified_clean`.
+     - Compare original and staged Markdown bodies only. Ignore YAML/frontmatter
+       differences entirely so valuable user metadata is never treated as
+       contamination.
+     - If original and staged bodies are equivalent, record `verified_clean`.
      - If original differs, treat it as repair-needed.
      - copy original to the backup directory, preserving relative path;
-     - replace original with the staged file;
+     - preserve the original YAML/frontmatter byte-for-byte and replace only the
+       Markdown body with the staged body;
      - record status `repaired`.
    - If verification fails:
      - do not overwrite;

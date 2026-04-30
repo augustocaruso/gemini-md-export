@@ -49,14 +49,17 @@ Operational guidance:
 - When the user asks to repair an Obsidian vault after wrong Gemini chat
   content was saved under the wrong `chat_id`, use the bundled subagent
   `gemini-vault-repair` or the command `/exporter:repair-vault <vault path>`.
-  It audits Markdown exports with `scripts/vault-repair-audit.mjs`, then follows
-  each raw export's `chat_id`/Gemini link by reexporting that exact chat to a
-  staging directory. For more than a couple of raw exports, start
-  `gemini_reexport_chats` with the explicit chatId list and poll
+  Prefer `scripts/vault-repair.mjs`, which audits Markdown exports, follows each
+  raw export's `chat_id`/Gemini link by reexporting that exact chat to a staging
+  directory, compares bodies, creates backups, and writes preliminary/final
+  reports. YAML/frontmatter-only differences are not content divergence; raw
+  repairs must preserve the original frontmatter byte-for-byte and replace only
+  the Markdown body. For more than a couple of raw exports, the runner starts
+  `gemini_reexport_chats` with the explicit chatId list and polls
   `gemini_export_job_status`; do not loop over `gemini_download_chat` for dozens
   of items, especially on Windows. The local audit only builds the queue and
-  highlights suspects; direct reexport is the authoritative check. It creates backups
-  before overwrite. If a bad chat has already become a wiki/Obsidian note, the
+  highlights suspects; direct reexport is the authoritative check. If a bad chat
+  has already become a wiki/Obsidian note, the
   wiki note is also repair scope: preserve it, back it up, create a
   `wiki-review` case file, and require a deliberate regenerate/merge strategy
   from the corrected raw export instead of overwriting it automatically. The

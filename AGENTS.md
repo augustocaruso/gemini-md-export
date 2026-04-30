@@ -435,13 +435,17 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   A extensão Gemini CLI também publica o subagent
   `agents/gemini-vault-repair.md` e o comando
   `commands/exporter/repair-vault.toml`. Use esse subagent quando o usuário
-  quiser reparar notas já salvas com conteúdo possivelmente trocado: ele roda
-  `scripts/vault-repair-audit.mjs`, reexporta suspeitas por `chatId` para
-  staging, cria backup antes de sobrescrever e nunca sobrescreve nota com sinais
-  de wiki/edição humana automaticamente. Se um raw contaminado virou wiki, a
-  wiki também precisa reparo: preservar, backupear, reexportar raw correto e
-  criar caso `wiki-review/<chatId>.json` para regenerar/mesclar de forma
-  deliberada. Esse subagent deve usar modelo Flash e emitir relatório
+  quiser reparar notas já salvas com conteúdo possivelmente trocado: ele deve
+  preferir `scripts/vault-repair.mjs`, que roda o auditor, reexporta cada raw
+  export pelo `chatId`, compara apenas o corpo Markdown, preserva o YAML
+  original byte-for-byte e só troca o corpo quando houver contaminação real.
+  Diferença só em YAML/frontmatter não é divergência de conteúdo, porque esses
+  metadados podem ter sido enriquecidos manualmente no vault. O runner cria
+  backup antes de sobrescrever e nunca sobrescreve nota com sinais de
+  wiki/edição humana automaticamente. Se um raw contaminado virou wiki, a wiki
+  também precisa reparo: preservar, backupear, reexportar raw correto e criar
+  caso `wiki-review/<chatId>.json` para regenerar/mesclar de forma deliberada.
+  Esse subagent deve usar modelo Flash e emitir relatório
   preliminar e final; se precisar reescrever uma wiki, ele pede ao agente
   principal para chamar o subagent escritor/arquitetura de notas com o case file
   e o raw corrigido. Toda wiki regenerada, reescrita ou consolidada deve
