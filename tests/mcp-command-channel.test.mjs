@@ -56,6 +56,30 @@ test('browser_status expõe saúde da bridge MCP/Chrome', () => {
   assert.match(source, /diagnostics/);
 });
 
+test('MCP implementa afinidade confiável por claim de aba', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const contentSource = readFileSync(resolve(ROOT, 'src', 'userscript-shell.js'), 'utf-8');
+  const backgroundSource = readFileSync(resolve(ROOT, 'src', 'extension-background.js'), 'utf-8');
+  const buildSource = readFileSync(resolve(ROOT, 'scripts', 'build.mjs'), 'utf-8');
+
+  assert.match(source, /name: 'gemini_list_tabs'/);
+  assert.match(source, /name: 'gemini_claim_tab'/);
+  assert.match(source, /name: 'gemini_release_tab'/);
+  assert.match(source, /ambiguous_gemini_tabs/);
+  assert.match(source, /tabClaims = new Map/);
+  assert.match(source, /sessionClaims = new Map/);
+  assert.match(source, /allowLaunchChrome:\s*args\.openIfMissing !== false/);
+  assert.match(source, /_proxySessionId/);
+  assert.match(contentSource, /tab-claim-v1/);
+  assert.match(contentSource, /command\.type === 'claim-tab'/);
+  assert.match(contentSource, /command\.type === 'release-tab-claim'/);
+  assert.match(contentSource, /TAB_CLAIM_TITLE_PREFIX_RE/);
+  assert.match(backgroundSource, /chrome\.tabs\.group/);
+  assert.match(backgroundSource, /chrome\.tabGroups\.update/);
+  assert.match(backgroundSource, /tab-already-in-user-group/);
+  assert.match(buildSource, /'tabGroups'/);
+});
+
 test('browser_status diagnostica e tenta self-heal sem depender do guard wrapper', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const statusBlock = source.match(

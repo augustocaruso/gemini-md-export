@@ -5,6 +5,32 @@
 
 const EXTENSION_PROTOCOL_VERSION = Number('__EXTENSION_PROTOCOL_VERSION__');
 const PENDING_GEMINI_TABS_RELOAD_KEY = 'gemini-md-export.pendingGeminiTabsReload';
+const TAB_CLAIMS_STORAGE_KEY = 'gemini-md-export.tabClaims.v1';
+const TAB_GROUP_NONE = -1;
+const TAB_CLAIM_COLORS = new Set([
+  'grey',
+  'blue',
+  'red',
+  'yellow',
+  'green',
+  'pink',
+  'purple',
+  'cyan',
+  'orange',
+]);
+
+const clampText = (value, maxLength) =>
+  String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLength);
+
+const sanitizeClaimLabel = (value) => clampText(value, 16) || 'GME';
+
+const sanitizeClaimColor = (value) => {
+  const color = String(value || '').toLowerCase();
+  return TAB_CLAIM_COLORS.has(color) ? color : 'green';
+};
 
 const extensionInfo = (sender = {}) => {
   const manifest = chrome.runtime.getManifest();
@@ -39,16 +65,18 @@ const storageGet = (key) =>
     });
   });
 
-const storageSet = (value) =>
+const storageSetKey = (key, value) =>
   new Promise((resolve) => {
     if (!chrome.storage?.local) {
       resolve(false);
       return;
     }
-    chrome.storage.local.set({ [PENDING_GEMINI_TABS_RELOAD_KEY]: value }, () => {
+    chrome.storage.local.set({ [key]: value }, () => {
       resolve(!chrome.runtime.lastError);
     });
   });
+
+const storageSet = (value) => storageSetKey(PENDING_GEMINI_TABS_RELOAD_KEY, value);
 
 const storageRemove = (key) =>
   new Promise((resolve) => {
@@ -60,6 +88,248 @@ const storageRemove = (key) =>
       resolve(!chrome.runtime.lastError);
     });
   });
+
+const getTrackedTabClaims = async () => {
+  const value = await storageGet(TAB_CLAIMS_STORAGE_KEY);
+  return value && typeof value === 'object' ? value : {};
+};
+
+const setTrackedTabClaims = (claims) => storageSetKey(TAB_CLAIMS_STORAGE_KEY, claims || {});
+
+const chromeGetTab = (tabId) =>
+  new Promise((resolve) => {
+    if (!chrome.tabs?.get || !Number.isInteger(tabId)) {
+      resolve(null);
+      return;
+    }
+    chrome.tabs.get(tabId, (tab) => {
+      if (chrome.runtime.lastError) {
+        resolve(null);
+        return;
+      }
+      resolve(tab || null);
+    });
+  });
+
+const chromeGroupTab = (tabId) =>
+  new Promise((resolve) => {
+    if (!chrome.tabs?.group || !Number.isInteger(tabId)) {
+      resolve({ ok: false, reason: 'tabs-group-api-unavailable' });
+      return;
+    }
+    chrome.tabs.group({ tabIds: [tabId] }, (groupId) => {
+      if (chrome.runtime.lastError) {
+        resolve({ ok: false, reason: chrome.runtime.lastError.message });
+        return;
+      }
+      resolve({ ok: Number.isInteger(groupId), groupId });
+    });
+  });
+
+const chromeUpdateTabGroup = (groupId, updateProperties) =>
+  new Promise((resolve) => {
+    if (!chrome.tabGroups?.update || !Number.isInteger(groupId)) {
+      resolve({ ok: false, reason: 'tab-groups-api-unavailable' });
+      return;
+    }
+    chrome.tabGroups.update(groupId, updateProperties, (group) => {
+      if (chrome.runtime.lastError) {
+        resolve({ ok: false, reason: chrome.runtime.lastError.message });
+        return;
+      }
+      resolve({ ok: true, group });
+    });
+  });
+
+const chromeUngroupTab = (tabId) =>
+  new Promise((resolve) => {
+    if (!chrome.tabs?.ungroup || !Number.isInteger(tabId)) {
+      resolve({ ok: false, reason: 'tabs-ungroup-api-unavailable' });
+      return;
+    }
+    chrome.tabs.ungroup(tabId, () => {
+      if (chrome.runtime.lastError) {
+        resolve({ ok: false, reason: chrome.runtime.lastError.message });
+        return;
+      }
+      resolve({ ok: true });
+    });
+  });
+
+const setActionBadge = (tabId, text, color = '#188038') =>
+  new Promise((resolve) => {
+    if (!chrome.action?.setBadgeText || !Number.isInteger(tabId)) {
+      resolve({ ok: false, reason: 'action-badge-api-unavailable' });
+      return;
+    }
+    chrome.action.setBadgeText({ tabId, text }, () => {
+      if (chrome.runtime.lastError) {
+        resolve({ ok: false, reason: chrome.runtime.lastError.message });
+        return;
+      }
+      if (!chrome.action?.setBadgeBackgroundColor || !text) {
+        resolve({ ok: true });
+        return;
+      }
+      chrome.action.setBadgeBackgroundColor({ tabId, color }, () => {
+        resolve({ ok: !chrome.runtime.lastError });
+      });
+    });
+  });
+
+const clearActionBadge = (tabId) => setActionBadge(tabId, '');
+
+const applyTabClaim = async (message, sender = {}) => {
+  const tabId = sender.tab?.id;
+  if (!Number.isInteger(tabId)) {
+    return { ok: false, reason: 'sender-tab-unavailable' };
+  }
+
+  const claimId = clampText(message.claimId, 80);
+  if (!claimId) {
+    return { ok: false, reason: 'claim-id-required', tabId };
+  }
+
+  const label = sanitizeClaimLabel(message.label);
+  const color = sanitizeClaimColor(message.color);
+  const tab = await chromeGetTab(tabId);
+  const claims = await getTrackedTabClaims();
+  const existing = claims[String(tabId)] || null;
+  const currentGroupId =
+    Number.isInteger(tab?.groupId) ? tab.groupId : existing?.groupId ?? TAB_GROUP_NONE;
+
+  let visual = {
+    mode: 'action-badge',
+    tabId,
+    groupId: null,
+    reason: 'tab-groups-api-unavailable',
+  };
+
+  if (chrome.tabs?.group && chrome.tabGroups?.update) {
+    const alreadyOurGroup =
+      existing?.mode === 'tab-group' &&
+      Number.isInteger(existing.groupId) &&
+      currentGroupId === existing.groupId;
+    if (currentGroupId === TAB_GROUP_NONE || alreadyOurGroup) {
+      const grouped = alreadyOurGroup
+        ? { ok: true, groupId: existing.groupId }
+        : await chromeGroupTab(tabId);
+      if (grouped.ok) {
+        const updated = await chromeUpdateTabGroup(grouped.groupId, {
+          title: label,
+          color,
+        });
+        if (updated.ok) {
+          visual = {
+            mode: 'tab-group',
+            tabId,
+            groupId: grouped.groupId,
+            color,
+            label,
+            reason: alreadyOurGroup ? 'updated-existing-claim-group' : 'created-tab-group',
+          };
+        } else {
+          if (!alreadyOurGroup) {
+            await chromeUngroupTab(tabId);
+          }
+          visual = {
+            mode: 'action-badge',
+            tabId,
+            groupId: grouped.groupId,
+            reason: updated.reason || 'tab-group-update-failed',
+          };
+        }
+      } else {
+        visual = {
+          mode: 'action-badge',
+          tabId,
+          groupId: null,
+          reason: grouped.reason || 'tab-group-create-failed',
+        };
+      }
+    } else {
+      visual = {
+        mode: 'action-badge',
+        tabId,
+        groupId: currentGroupId,
+        reason: 'tab-already-in-user-group',
+      };
+    }
+  }
+
+  await setActionBadge(tabId, 'GME');
+
+  claims[String(tabId)] = {
+    claimId,
+    sessionId: clampText(message.sessionId, 120) || null,
+    label,
+    color,
+    mode: visual.mode,
+    groupId: visual.mode === 'tab-group' ? visual.groupId : null,
+    originalGroupId:
+      existing?.claimId === claimId
+        ? existing.originalGroupId ?? TAB_GROUP_NONE
+        : currentGroupId,
+    appliedAt: new Date().toISOString(),
+    expiresAt: message.expiresAt || null,
+  };
+  await setTrackedTabClaims(claims);
+
+  return {
+    ok: true,
+    tabId,
+    claimId,
+    sessionId: claims[String(tabId)].sessionId,
+    label,
+    color,
+    visual,
+  };
+};
+
+const releaseTabClaim = async (message, sender = {}) => {
+  const tabId = sender.tab?.id;
+  if (!Number.isInteger(tabId)) {
+    return { ok: false, reason: 'sender-tab-unavailable' };
+  }
+
+  const claims = await getTrackedTabClaims();
+  const key = String(tabId);
+  const existing = claims[key] || null;
+  const requestedClaimId = clampText(message.claimId, 80);
+
+  if (existing?.claimId && requestedClaimId && existing.claimId !== requestedClaimId) {
+    return {
+      ok: false,
+      reason: 'claim-id-mismatch',
+      tabId,
+      activeClaimId: existing.claimId,
+      requestedClaimId,
+    };
+  }
+
+  let visual = { mode: existing?.mode || 'none', tabId, released: false };
+  if (existing?.mode === 'tab-group' && existing.originalGroupId === TAB_GROUP_NONE) {
+    const ungrouped = await chromeUngroupTab(tabId);
+    visual = {
+      mode: 'tab-group',
+      tabId,
+      groupId: existing.groupId ?? null,
+      released: ungrouped.ok,
+      reason: ungrouped.reason || 'ungrouped',
+    };
+  }
+
+  await clearActionBadge(tabId);
+  delete claims[key];
+  await setTrackedTabClaims(claims);
+
+  return {
+    ok: true,
+    tabId,
+    claimId: existing?.claimId || requestedClaimId || null,
+    visual,
+  };
+};
 
 chrome.runtime.onInstalled.addListener((details) => {
   console.log('[gemini-md-export/ext]', 'instalada', {
@@ -118,6 +388,14 @@ const consumePendingGeminiTabsReload = async () => {
 setTimeout(() => {
   consumePendingGeminiTabsReload();
 }, 250);
+
+chrome.tabs?.onRemoved?.addListener?.((tabId) => {
+  getTrackedTabClaims().then((claims) => {
+    if (!claims[String(tabId)]) return;
+    delete claims[String(tabId)];
+    setTrackedTabClaims(claims);
+  });
+});
 
 const arrayBufferToBase64 = (buffer) => {
   const bytes = new Uint8Array(buffer);
@@ -213,6 +491,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message?.type === 'gemini-md-export/reload-gemini-tabs') {
     reloadGeminiTabs(message.reason || 'content-script').then(sendResponse);
+    return true;
+  }
+
+  if (message?.type === 'gemini-md-export/claim-tab') {
+    applyTabClaim(message, sender).then(sendResponse);
+    return true;
+  }
+
+  if (message?.type === 'gemini-md-export/release-tab-claim') {
+    releaseTabClaim(message, sender).then(sendResponse);
     return true;
   }
 

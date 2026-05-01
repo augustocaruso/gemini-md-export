@@ -334,13 +334,28 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   estiver true ou quando o status provar que o navegador ainda aponta para uma
   pasta/perfil antigo depois do self-heal. Falha de top-bar não bloqueia
   export por hotkey/API de debug se o content script está vivo.
-  O content script anuncia `tab-backpressure-v1`: comandos pesados por aba
+  O content script anuncia `tab-claim-v1`: o MCP pode reivindicar uma aba via
+  `gemini_claim_tab` e liberar via `gemini_release_tab`; heartbeats/snapshots
+  carregam `tabClaim`, e `requireClient` prefere `claimId`/`tabId`/`clientId`
+  explícitos ou a claim da sessão antes de qualquer fallback. Se houver várias
+  abas Gemini candidatas e nenhuma claim/seleção explícita, tools
+  browser-dependent retornam `ambiguous_gemini_tabs` em vez de escolher pela
+  aba ativa. O indicador visual da claim é na barra de abas do navegador: a
+  extensão tenta `chrome.tabs.group()` + `chrome.tabGroups.update()` para criar
+  um Tab Group com label/cor; se a aba já estiver em grupo do usuário ou a API
+  não existir, cai para badge/prefixo de título. **Não implementar isso como
+  overlay/borda dentro da página Gemini**: o pedido é sinalizar a aba do
+  navegador, não o DOM do app. `gemini_list_tabs` e `gemini_claim_tab` podem
+  abrir `https://gemini.google.com/app` automaticamente quando não houver aba
+  conectada, respeitando cooldown compartilhado de launch para não duplicar
+  janelas.
+  O content script também anuncia `tab-backpressure-v1`: comandos pesados por aba
   (`list-conversations`, `load-more-conversations`, `get-current-chat`,
   `get-chat-by-id`, `open-chat`) passam por `activeTabOperation`; se outro
   comando pesado chegar durante navegação/hidratação/listagem, a resposta vem
   com `busy=true`/`code: "tab_operation_in_progress"` em vez de disputar o DOM.
-  Não remova esse lock para ganhar paralelismo: a próxima etapa multi-aba
-  (`v0.4.3`) deve resolver paralelismo entre abas, não dentro da mesma aba.
+  Não remova esse lock para ganhar paralelismo: paralelismo confiável acontece
+  por múltiplas abas reivindicadas, não dentro da mesma aba.
   Observers devem passar por `scheduleDomWork` para coalescer top-bar/sidebar/
   modal em um frame e alimentar `metrics.domScheduler`. O modal virtualiza
   listas grandes com `.gm-list.is-virtual`/`MODAL_VIRTUALIZATION_THRESHOLD`;
@@ -358,9 +373,10 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   fallback para outro Chromium conhecido se o preferido não existir. No
   Windows não deve usar `where`/`spawnSync` no caminho de runtime para descobrir
   browser: isso já é um ponto possível de travamento. No bundle do Gemini CLI,
-  o MCP roda com `GEMINI_MCP_CHROME_LAUNCH_IF_CLOSED=false`; ele valida
-  versão/protocolo/build e recarrega a extensão, mas não compete com o hook
-  abrindo outra aba. No macOS usa `open -g -a`
+  o hook `BeforeTool` continua sendo o primeiro responsável por abrir o
+  navegador, e o MCP mantém fallback guardado para status/list/claim/export
+  quando não houver aba; ambos compartilham cooldown para não abrir abas
+  duplicadas. No macOS usa `open -g -a`
   para preferir app Chromium em vez do navegador padrão. O argumento de
   perfil só é enviado quando `GEMINI_MCP_CHROME_PROFILE_DIRECTORY` ou
   `GME_CHROME_PROFILE_DIRECTORY` for configurado explicitamente; não passar
@@ -457,7 +473,8 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   sidebar, listagem/export de cadernos, download individual, cache e navegação:
   `gemini_browser_status`, `gemini_diagnose_environment`,
   `gemini_mcp_diagnose_processes`,
-  `gemini_mcp_cleanup_stale_processes`, `gemini_get_export_dir`,
+  `gemini_mcp_cleanup_stale_processes`, `gemini_list_tabs`,
+  `gemini_claim_tab`, `gemini_release_tab`, `gemini_get_export_dir`,
   `gemini_set_export_dir`,
   `gemini_list_recent_chats`, `gemini_list_notebook_chats`,
   `gemini_get_current_chat`, `gemini_download_chat`,
@@ -554,6 +571,7 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   pelo browser; chamadas locais sem `Origin` seguem úteis para debug.
   Para inspeção local quando a sessão do cliente AI ainda não carregou as
   tools MCP, o bridge expõe endpoints sem CORS aberto: `/agent/clients`,
+  `/agent/tabs`, `/agent/claim-tab`, `/agent/release-tab`,
   `/agent/diagnostics`,
   `/agent/recent-chats?limit=50&offset=0`,
   `/agent/export-recent-chats`,

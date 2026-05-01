@@ -41,10 +41,21 @@ const SERVER_VERSION = pkg.version;
 const EXTENSION_PROTOCOL_VERSION = Number(bridgeVersion.protocolVersion);
 const PROTOCOL_VERSION = '2025-03-26';
 const PROCESS_STARTED_AT = new Date();
+const PROCESS_SESSION_ID =
+  process.env.GEMINI_MCP_SESSION_ID ||
+  process.env.GEMINI_CLI_SESSION_ID ||
+  process.env.CODEX_SESSION_ID ||
+  `mcp-${process.pid}-${PROCESS_STARTED_AT.getTime().toString(36)}`;
 const DEFAULT_HOST = process.env.GEMINI_MCP_BRIDGE_HOST || '127.0.0.1';
 const DEFAULT_PORT = Number(process.env.GEMINI_MCP_BRIDGE_PORT || 47283);
 const DEFAULT_EXPORT_DIR = process.env.GEMINI_MCP_EXPORT_DIR || resolve(homedir(), 'Downloads');
 const CLIENT_STALE_MS = 45_000;
+const TAB_CLAIM_DEFAULT_TTL_MS = Math.max(
+  60_000,
+  Math.min(24 * 60 * 60_000, Number(process.env.GEMINI_MCP_TAB_CLAIM_TTL_MS || 45 * 60_000)),
+);
+const TAB_CLAIM_COLORS = ['green', 'blue', 'yellow', 'purple', 'cyan', 'orange', 'pink'];
+const TAB_CLAIM_LABEL_PREFIX = 'GME';
 const CLIENT_DEGRADED_HEARTBEAT_MS = Number(
   process.env.GEMINI_MCP_CLIENT_DEGRADED_HEARTBEAT_MS || 20_000,
 );
@@ -223,6 +234,8 @@ const EXPECTED_CHROME_EXTENSION_INFO = {
 const clients = new Map();
 const pendingCommands = new Map();
 const exportJobs = new Map();
+const tabClaims = new Map();
+const sessionClaims = new Map();
 let configuredExportDir = DEFAULT_EXPORT_DIR;
 let shuttingDown = false;
 let bridgeRole = 'starting';
@@ -1247,6 +1260,7 @@ const buildEnvironmentDiagnostics = async () => {
       primaryClientsFetch: clientState.primaryClientsFetch,
       connectedClientCount: connectedClients.length,
       matchingClientCount: matchingClients.length,
+      tabClaims: summarizeTabClaims(),
       readiness: buildExtensionReadiness({
         connectedClients,
         matchingClients,
@@ -1616,6 +1630,13 @@ const readJsonBody = async (req) => {
   return JSON.parse(body || '{}');
 };
 
+const clientSelectorFromSearchParams = (searchParams) => ({
+  clientId: searchParams.get('clientId') || undefined,
+  tabId: searchParams.get('tabId') || undefined,
+  claimId: searchParams.get('claimId') || undefined,
+  sessionId: searchParams.get('sessionId') || undefined,
+});
+
 const getLiveClients = () => {
   const now = Date.now();
   return Array.from(clients.values())
@@ -1704,6 +1725,167 @@ const summarizePayloadMetrics = (client) => ({
   snapshot: summarizePayloadMetric(client?.payloadMetrics?.snapshot),
 });
 
+const normalizeSessionId = (value) => {
+  const text = String(value || '').trim();
+  return text || PROCESS_SESSION_ID;
+};
+
+const normalizeClaimId = (value) => {
+  const text = String(value || '').trim();
+  return text || randomUUID();
+};
+
+const normalizeTabId = (value) => {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) ? parsed : null;
+};
+
+const normalizeClaimTtlMs = (value) => {
+  const parsed = Number(value || TAB_CLAIM_DEFAULT_TTL_MS);
+  const safe = Number.isFinite(parsed) ? parsed : TAB_CLAIM_DEFAULT_TTL_MS;
+  return Math.max(30_000, Math.min(24 * 60 * 60_000, safe));
+};
+
+const colorForSession = (sessionId) => {
+  let hash = 0;
+  for (const char of String(sessionId || PROCESS_SESSION_ID)) {
+    hash = Math.imul(hash ^ char.charCodeAt(0), 16777619);
+  }
+  return TAB_CLAIM_COLORS[Math.abs(hash) % TAB_CLAIM_COLORS.length] || 'green';
+};
+
+const labelForSession = (sessionId, provided) => {
+  const text = String(provided || '').replace(/\s+/g, ' ').trim();
+  if (text) return text.slice(0, 16);
+  const suffix = String(sessionId || PROCESS_SESSION_ID)
+    .replace(/[^a-z0-9]/gi, '')
+    .slice(-4)
+    .toUpperCase();
+  return `${TAB_CLAIM_LABEL_PREFIX}${suffix ? ` ${suffix}` : ''}`.slice(0, 16);
+};
+
+const clientSelectorProperties = () => ({
+  clientId: { type: 'string' },
+  tabId: {
+    type: 'integer',
+    description: 'ID da aba do navegador retornado por gemini_list_tabs/gemini_browser_status.',
+  },
+  claimId: {
+    type: 'string',
+    description: 'Claim explícita retornada por gemini_claim_tab.',
+  },
+  sessionId: {
+    type: 'string',
+    description:
+      'Identificador lógico da sessão/agente. Se omitido, o MCP usa a sessão atual do processo/proxy.',
+  },
+});
+
+const normalizeClientSelector = (selector) => {
+  if (typeof selector === 'string') {
+    return {
+      clientId: selector || null,
+      tabId: null,
+      claimId: null,
+      sessionId: PROCESS_SESSION_ID,
+    };
+  }
+  const input = selector && typeof selector === 'object' ? selector : {};
+  return {
+    clientId: input.clientId || null,
+    tabId: normalizeTabId(input.tabId),
+    claimId: input.claimId || null,
+    sessionId: normalizeSessionId(input.sessionId || input._proxySessionId),
+  };
+};
+
+const isLiveClient = (client, now = Date.now()) =>
+  !!client && now - client.lastSeenAt <= CLIENT_STALE_MS;
+
+const cleanupExpiredTabClaims = () => {
+  const now = Date.now();
+  for (const [claimId, claim] of tabClaims.entries()) {
+    if (claim.expiresAtMs > now) continue;
+    tabClaims.delete(claimId);
+    if (sessionClaims.get(claim.sessionId) === claimId) {
+      sessionClaims.delete(claim.sessionId);
+    }
+  }
+};
+
+const liveClientForClaim = (claim) => {
+  if (!claim) return null;
+  const client = clients.get(claim.clientId);
+  return isLiveClient(client) ? client : null;
+};
+
+const summarizeTabClaim = (claim) => {
+  if (!claim) return null;
+  const client = clients.get(claim.clientId);
+  return {
+    claimId: claim.claimId,
+    sessionId: claim.sessionId,
+    clientId: claim.clientId,
+    tabId: claim.tabId ?? null,
+    windowId: claim.windowId ?? null,
+    label: claim.label,
+    color: claim.color,
+    status: isLiveClient(client) ? 'active' : 'client-missing',
+    createdAt: claim.createdAt,
+    renewedAt: claim.renewedAt,
+    expiresAt: new Date(claim.expiresAtMs).toISOString(),
+    visual: claim.visual || null,
+  };
+};
+
+const summarizeTabClaims = () => {
+  cleanupExpiredTabClaims();
+  return [...tabClaims.values()].map(summarizeTabClaim);
+};
+
+const claimForSession = (sessionId) => {
+  cleanupExpiredTabClaims();
+  const claimId = sessionClaims.get(normalizeSessionId(sessionId));
+  return claimId ? tabClaims.get(claimId) || null : null;
+};
+
+const claimForClient = (client) => {
+  cleanupExpiredTabClaims();
+  return [...tabClaims.values()].find((claim) => claim.clientId === client?.clientId) || null;
+};
+
+const removeTabClaim = (claimId) => {
+  const claim = tabClaims.get(claimId);
+  if (!claim) return null;
+  tabClaims.delete(claimId);
+  if (sessionClaims.get(claim.sessionId) === claimId) {
+    sessionClaims.delete(claim.sessionId);
+  }
+  return claim;
+};
+
+const ambiguousTabsError = (liveClients, selector = {}) => {
+  const error = new Error(
+    'Há várias abas do Gemini conectadas. Use gemini_list_tabs e depois informe clientId, tabId ou claimId antes de listar/exportar.',
+  );
+  error.code = 'ambiguous_gemini_tabs';
+  error.data = {
+    sessionId: normalizeSessionId(selector.sessionId),
+    connectedTabs: liveClients.map((client) => ({
+      clientId: client.clientId,
+      tabId: client.tabId ?? null,
+      windowId: client.windowId ?? null,
+      isActiveTab: client.isActiveTab ?? null,
+      title: client.page?.title || null,
+      url: client.page?.url || null,
+      chatId: client.page?.chatId || null,
+      tabClaim: summarizeTabClaim(claimForClient(client)),
+    })),
+    claims: summarizeTabClaims(),
+  };
+  return error;
+};
+
 const upsertClient = (payload, meta = {}) => {
   const existing = clients.get(payload.clientId);
   const next = existing || {
@@ -1734,6 +1916,7 @@ const upsertClient = (payload, meta = {}) => {
   next.protocolVersion =
     payload.protocolVersion !== undefined ? payload.protocolVersion : next.protocolVersion ?? null;
   next.buildStamp = payload.buildStamp || payload.page?.buildStamp || next.buildStamp || null;
+  next.tabClaim = payload.tabClaim || next.tabClaim || null;
   next.page = payload.page || next.page || null;
   next.commandPoll = payload.commandPoll || next.commandPoll || null;
   if (Array.isArray(payload.conversations)) {
@@ -1767,6 +1950,7 @@ const upsertClientSnapshot = (payload, meta = {}) => {
       modalConversations: payload.modalConversations,
       snapshotHash: payload.snapshotHash,
       capabilities: payload.capabilities,
+      tabClaim: payload.tabClaim,
     },
     {
       ...meta,
@@ -1912,20 +2096,49 @@ const toolTextResult = (structuredContent, { isError = false } = {}) => ({
   isError,
 });
 
-const requireClient = (clientId) => {
+const requireClient = (selector = {}) => {
   cleanupStaleClients();
+  cleanupExpiredTabClaims();
+  const normalized = normalizeClientSelector(selector);
   const liveClients = getLiveClients();
   if (liveClients.length === 0) {
     throw new Error('Nenhuma aba do Gemini conectada à extensão.');
   }
 
-  if (!clientId) return liveClients[0];
-
-  const client = liveClients.find((item) => item.clientId === clientId);
-  if (!client) {
-    throw new Error(`Cliente ${clientId} não está ativo.`);
+  if (normalized.claimId) {
+    const claim = tabClaims.get(normalized.claimId);
+    const claimClient = liveClientForClaim(claim);
+    if (!claim || !claimClient) {
+      throw new Error(`Claim ${normalized.claimId} não está ativa.`);
+    }
+    return claimClient;
   }
-  return client;
+
+  if (normalized.clientId) {
+    const client = liveClients.find((item) => item.clientId === normalized.clientId);
+    if (!client) {
+      throw new Error(`Cliente ${normalized.clientId} não está ativo.`);
+    }
+    return client;
+  }
+
+  if (normalized.tabId !== null) {
+    const client = liveClients.find((item) => Number(item.tabId) === normalized.tabId);
+    if (!client) {
+      throw new Error(`Aba ${normalized.tabId} não está ativa.`);
+    }
+    return client;
+  }
+
+  const sessionClaim = claimForSession(normalized.sessionId);
+  const sessionClaimClient = liveClientForClaim(sessionClaim);
+  if (sessionClaimClient) return sessionClaimClient;
+
+  if (liveClients.length === 1) {
+    return liveClients[0];
+  }
+
+  throw ambiguousTabsError(liveClients, normalized);
 };
 
 const isNotebookClient = (client) =>
@@ -1933,17 +2146,32 @@ const isNotebookClient = (client) =>
   String(client?.page?.pathname || '').startsWith('/notebook/') ||
   (client?.conversations || []).some((conversation) => conversation.source === 'notebook');
 
-const requireNotebookClient = (clientId) => {
-  if (clientId) {
-    const client = requireClient(clientId);
+const requireNotebookClient = (selector = {}) => {
+  const normalized = normalizeClientSelector(selector);
+  if (normalized.clientId || normalized.tabId !== null || normalized.claimId) {
+    const client = requireClient(normalized);
     if (!isNotebookClient(client)) {
-      throw new Error(`Cliente ${clientId} não está em uma página de caderno.`);
+      throw new Error(`Cliente ${client.clientId} não está em uma página de caderno.`);
     }
     return client;
   }
 
   cleanupStaleClients();
-  const client = getLiveClients().find(isNotebookClient);
+  cleanupExpiredTabClaims();
+  const sessionClaim = claimForSession(normalized.sessionId);
+  const sessionClaimClient = liveClientForClaim(sessionClaim);
+  if (sessionClaimClient) {
+    if (!isNotebookClient(sessionClaimClient)) {
+      throw new Error(`Cliente ${sessionClaimClient.clientId} não está em uma página de caderno.`);
+    }
+    return sessionClaimClient;
+  }
+
+  const notebookClients = getLiveClients().filter(isNotebookClient);
+  if (notebookClients.length > 1) {
+    throw ambiguousTabsError(notebookClients, normalized);
+  }
+  const client = notebookClients[0];
   if (!client) {
     throw new Error('Nenhuma aba do Gemini Notebook conectada à extensão.');
   }
@@ -2108,6 +2336,243 @@ const ensureBrowserExtensionReady = (args = {}, options = {}) =>
     },
   );
 
+const selectClaimableClient = async (args = {}) => {
+  cleanupStaleClients();
+  cleanupExpiredTabClaims();
+  let liveClients = getLiveClients();
+  const openIfMissing = args.openIfMissing !== false && args.wakeBrowser !== false;
+
+  if (liveClients.length === 0 && openIfMissing) {
+    await launchChromeForGemini({
+      profileDirectory: CHROME_GUARD_CONFIG.profileDirectory,
+    });
+    liveClients = await waitForLiveClients(
+      normalizeWaitMs(args.waitMs, BROWSER_STATUS_WAKE_WAIT_MS),
+      CHROME_GUARD_CONFIG.pollIntervalMs || 500,
+    );
+  }
+
+  if (Number.isInteger(Number(args.index))) {
+    const index = Number(args.index);
+    if (index < 1 || index > liveClients.length) {
+      throw new Error(`Índice de aba inválido: ${args.index}.`);
+    }
+    return liveClients[index - 1];
+  }
+
+  const chatId = String(args.chatId || '').trim().toLowerCase();
+  if (chatId) {
+    const match = liveClients.find(
+      (client) =>
+        String(client.page?.chatId || '').toLowerCase() === chatId ||
+        (client.conversations || []).some(
+          (conversation) => String(conversation.chatId || '').toLowerCase() === chatId,
+        ),
+    );
+    if (match) return match;
+    throw new Error(`Nenhuma aba conectada corresponde ao chatId ${chatId}.`);
+  }
+
+  return requireClient(args);
+};
+
+const claimTabForClient = async (client, args = {}) => {
+  cleanupExpiredTabClaims();
+  const sessionId = normalizeSessionId(args.sessionId || args._proxySessionId);
+  const ttlMs = normalizeClaimTtlMs(args.ttlMs);
+  const now = Date.now();
+  const existingSessionClaim = claimForSession(sessionId);
+  const existingClientClaim = claimForClient(client);
+
+  if (
+    existingSessionClaim &&
+    existingSessionClaim.clientId !== client.clientId &&
+    args.force !== true
+  ) {
+    const error = new Error(
+      'Esta sessão já reivindicou outra aba Gemini. Libere a claim atual ou use force=true para trocar.',
+    );
+    error.code = 'tab_claim_conflict';
+    error.data = {
+      currentClaim: summarizeTabClaim(existingSessionClaim),
+      requestedClient: summarizeClient(client),
+    };
+    throw error;
+  }
+
+  if (
+    existingSessionClaim &&
+    existingSessionClaim.clientId !== client.clientId &&
+    args.force === true
+  ) {
+    await releaseTabClaim({ claimId: existingSessionClaim.claimId, reason: 'claim-replaced' });
+  }
+
+  if (
+    existingClientClaim &&
+    existingClientClaim.sessionId !== sessionId &&
+    args.force !== true
+  ) {
+    const error = new Error(
+      'Esta aba Gemini já está reivindicada por outra sessão. Escolha outra aba ou use force=true para tomar a claim.',
+    );
+    error.code = 'tab_claim_conflict';
+    error.data = {
+      currentClaim: summarizeTabClaim(existingClientClaim),
+      requestedSessionId: sessionId,
+    };
+    throw error;
+  }
+
+  if (
+    existingClientClaim &&
+    existingClientClaim.sessionId !== sessionId &&
+    args.force === true
+  ) {
+    await releaseTabClaim({ claimId: existingClientClaim.claimId, reason: 'claim-taken-over' });
+  }
+
+  const claimId =
+    existingSessionClaim?.clientId === client.clientId
+      ? existingSessionClaim.claimId
+      : normalizeClaimId(args.claimId);
+  const label = labelForSession(sessionId, args.label);
+  const color = args.color || colorForSession(sessionId);
+  const expiresAtMs = now + ttlMs;
+
+  const ready = await ensureBrowserExtensionReady(
+    { clientId: client.clientId },
+    {
+      allowLaunchChrome: false,
+      allowReload: args.allowReload !== false,
+    },
+  );
+  const readyClient = ready.client || client;
+
+  const visual = await enqueueCommand(
+    readyClient.clientId,
+    'claim-tab',
+    {
+      claimId,
+      sessionId,
+      label,
+      color,
+      expiresAt: new Date(expiresAtMs).toISOString(),
+    },
+    {
+      timeoutMs: 10_000,
+      dispatchTimeoutMs: 5000,
+    },
+  );
+
+  if (!visual?.ok) {
+    const error = new Error(
+      `Não consegui aplicar o indicador visual na aba Gemini (${visual?.reason || visual?.error || 'sem resposta'}).`,
+    );
+    error.code = 'tab_claim_visual_failed';
+    error.data = { visual, client: summarizeClient(readyClient) };
+    throw error;
+  }
+
+  const claim = {
+    claimId,
+    sessionId,
+    clientId: readyClient.clientId,
+    tabId: readyClient.tabId ?? null,
+    windowId: readyClient.windowId ?? null,
+    label,
+    color,
+    visual: visual.visual || visual,
+    createdAt: existingSessionClaim?.createdAt || new Date(now).toISOString(),
+    renewedAt: new Date(now).toISOString(),
+    expiresAtMs,
+  };
+  tabClaims.set(claimId, claim);
+  sessionClaims.set(sessionId, claimId);
+
+  return {
+    ok: true,
+    client: summarizeClient(readyClient),
+    claim: summarizeTabClaim(claim),
+    visual,
+    reloadAttempts: ready.reloadAttempts || 0,
+  };
+};
+
+const releaseTabClaim = async (args = {}) => {
+  cleanupExpiredTabClaims();
+  const sessionId = normalizeSessionId(args.sessionId || args._proxySessionId);
+  const claimId = args.claimId || sessionClaims.get(sessionId);
+  if (!claimId) {
+    return {
+      ok: false,
+      reason: 'no-claim-for-session',
+      sessionId,
+      claims: summarizeTabClaims(),
+    };
+  }
+
+  const claim = tabClaims.get(claimId);
+  if (!claim) {
+    sessionClaims.delete(sessionId);
+    return {
+      ok: false,
+      reason: 'claim-not-found',
+      claimId,
+      sessionId,
+      claims: summarizeTabClaims(),
+    };
+  }
+
+  let visual = null;
+  const client = liveClientForClaim(claim);
+  if (client) {
+    try {
+      visual = await enqueueCommand(
+        client.clientId,
+        'release-tab-claim',
+        {
+          claimId,
+          reason: args.reason || 'mcp-release',
+        },
+        {
+          timeoutMs: 8000,
+          dispatchTimeoutMs: 4000,
+        },
+      );
+    } catch (err) {
+      visual = {
+        ok: false,
+        error: err?.message || String(err),
+        code: err?.code || null,
+      };
+    }
+  }
+
+  const removed = removeTabClaim(claimId);
+  return {
+    ok: true,
+    released: summarizeTabClaim(removed),
+    visual,
+    client: client ? summarizeClient(client) : null,
+  };
+};
+
+const ensureTabClaimForJob = async (client, args = {}, label = 'GME Job') => {
+  const sessionId = normalizeSessionId(args.sessionId || args._proxySessionId);
+  const existingSessionClaim = claimForSession(sessionId);
+  if (existingSessionClaim?.clientId === client.clientId) {
+    return summarizeTabClaim(existingSessionClaim);
+  }
+  if (args.autoClaim === false) return null;
+  const result = await claimTabForClient(client, {
+    ...args,
+    sessionId,
+    label: args.label || label,
+  });
+  return result.claim;
+};
+
 const buildBridgeHealth = (client, now = Date.now()) => {
   if (!client) {
     return {
@@ -2186,6 +2651,8 @@ const summarizeClient = (client) => ({
     lastCommandReceivedAt: client.commandPoll?.lastCommandReceivedAt || null,
   },
   page: client.page || null,
+  tabClaim: client.tabClaim || null,
+  serverClaim: summarizeTabClaim(claimForClient(client)),
   bridgeHealth: buildBridgeHealth(client),
   payloadMetrics: summarizePayloadMetrics(client),
   listedConversationCount: client.conversations?.length || 0,
@@ -2221,13 +2688,25 @@ const clientMatchesExpectedBrowserExtension = (client) =>
   (!EXPECTED_CHROME_EXTENSION_INFO.buildStamp ||
     String(clientBuildStamp(client) || '') === EXPECTED_CHROME_EXTENSION_INFO.buildStamp);
 
-const requireRecentChatsClient = (clientId) => {
-  if (clientId) return requireClient(clientId);
+const requireRecentChatsClient = (selector = {}) => {
+  const normalized = normalizeClientSelector(selector);
+  if (normalized.clientId || normalized.tabId !== null || normalized.claimId) {
+    return requireClient(normalized);
+  }
 
   cleanupStaleClients();
+  cleanupExpiredTabClaims();
   const liveClients = getLiveClients();
   if (liveClients.length === 0) {
     throw new Error('Nenhuma aba do Gemini conectada à extensão.');
+  }
+
+  const sessionClaim = claimForSession(normalized.sessionId);
+  const sessionClaimClient = liveClientForClaim(sessionClaim);
+  if (sessionClaimClient) return sessionClaimClient;
+
+  if (liveClients.length > 1) {
+    throw ambiguousTabsError(liveClients, normalized);
   }
 
   return [...liveClients].sort(
@@ -3857,6 +4336,7 @@ const summarizeExportJob = (job) => ({
     ? recentChatsExportScope(job)
     : directChatsExportScope(job)),
   clientId: job.clientId,
+  tabClaim: summarizeTabClaim(claimForClient(clients.get(job.clientId))),
   outputDir: job.outputDir,
   createdAt: job.createdAt,
   updatedAt: job.updatedAt,
@@ -5119,8 +5599,9 @@ const reloadGeminiTabs = async (args = {}) => {
     };
   }
 
-  if (args.clientId) {
-    const client = requireClient(args.clientId);
+  const selector = normalizeClientSelector(args);
+  if (selector.clientId || selector.tabId !== null || selector.claimId || claimForSession(selector.sessionId)) {
+    const client = requireClient(args);
     const result = await enqueueCommand(client.clientId, 'reload-page', { delayMs });
     return {
       ok: !!result?.ok,
@@ -5311,8 +5792,10 @@ const rawTools = [
               ? 'extension_version_mismatch'
               : null,
         expectedChromeExtension: EXPECTED_CHROME_EXTENSION_INFO,
+        sessionId: PROCESS_SESSION_ID,
         matchingClientCount: matchingClients.length,
         connectedClients: summarizedClients,
+        tabClaims: summarizeTabClaims(),
         extensionReadiness,
         manualReloadRequired: extensionReadiness.reload.manualReloadRequired,
         bridgeHealth: summarizedClients.map((client) => ({
@@ -5338,6 +5821,145 @@ const rawTools = [
             },
       });
     },
+  },
+  {
+    name: 'gemini_list_tabs',
+    description:
+      'Lista abas Gemini conectadas, claims ativas e IDs para escolher uma aba antes de listar/exportar. Se nenhuma aba existir, abre uma aba Gemini por padrão.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        openIfMissing: {
+          type: 'boolean',
+          description: 'Quando true ou omitido, abre uma aba Gemini se nenhuma estiver conectada.',
+        },
+        waitMs: {
+          type: 'number',
+          description: 'Tempo máximo para aguardar heartbeat depois de abrir a aba.',
+        },
+      },
+      additionalProperties: false,
+    },
+    call: async (args = {}) => {
+      cleanupStaleClients();
+      let launchResult = null;
+      let liveClients = getLiveClients();
+      if (liveClients.length === 0 && args.openIfMissing !== false) {
+        launchResult = await launchChromeForGemini({
+          profileDirectory: CHROME_GUARD_CONFIG.profileDirectory,
+        });
+        liveClients = await waitForLiveClients(
+          normalizeWaitMs(args.waitMs, BROWSER_STATUS_WAKE_WAIT_MS),
+          CHROME_GUARD_CONFIG.pollIntervalMs || 500,
+        );
+      }
+      return toolTextResult({
+        ok: true,
+        sessionId: PROCESS_SESSION_ID,
+        connectedTabCount: liveClients.length,
+        tabs: liveClients.map((client, index) => ({
+          index: index + 1,
+          ...summarizeClient(client),
+        })),
+        claims: summarizeTabClaims(),
+        browserWake: launchResult
+          ? {
+              ...launchResult,
+              connectedAfterWake: liveClients.length,
+            }
+          : {
+              attempted: false,
+              reason: liveClients.length > 0 ? 'already-connected' : 'open-disabled',
+            },
+        nextAction:
+          liveClients.length === 0
+            ? {
+                code: 'no_gemini_tab_connected',
+                message: 'Abra uma aba do Gemini ou chame gemini_list_tabs com openIfMissing=true.',
+              }
+            : liveClients.length === 1
+              ? {
+                  code: 'claim_single_tab',
+                  command: {
+                    tool: 'gemini_claim_tab',
+                    arguments: { clientId: liveClients[0].clientId },
+                  },
+                }
+              : {
+                  code: 'choose_tab',
+                  message: 'Escolha uma aba por index/clientId/tabId e chame gemini_claim_tab.',
+                },
+      });
+    },
+  },
+  {
+    name: 'gemini_claim_tab',
+    description:
+      'Reivindica uma aba Gemini para a sessão atual e marca a aba no navegador com Tab Group/badge. Use antes de trabalhar com várias abas.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ...clientSelectorProperties(),
+        index: {
+          type: 'integer',
+          minimum: 1,
+          description: 'Índice 1-based retornado por gemini_list_tabs.',
+        },
+        chatId: {
+          type: 'string',
+          description: 'Opcional: escolhe a aba que está nesse chat ou já tem esse chat carregado.',
+        },
+        label: {
+          type: 'string',
+          description: 'Rótulo curto mostrado no Tab Group, por exemplo GME A.',
+        },
+        color: {
+          type: 'string',
+          enum: ['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange'],
+        },
+        ttlMs: {
+          type: 'integer',
+          minimum: 30000,
+          maximum: 86400000,
+          description: 'Tempo de lease da claim. Default: 45 minutos.',
+        },
+        force: {
+          type: 'boolean',
+          description: 'Quando true, troca a claim da sessão para outra aba.',
+        },
+        openIfMissing: {
+          type: 'boolean',
+          description: 'Quando true ou omitido, abre uma aba Gemini se nenhuma estiver conectada.',
+        },
+        waitMs: {
+          type: 'number',
+          description: 'Tempo máximo para aguardar heartbeat depois de abrir aba.',
+        },
+        allowReload: {
+          type: 'boolean',
+          description: 'Permite self-heal da extensão antes de aplicar o indicador visual.',
+        },
+      },
+      additionalProperties: false,
+    },
+    call: async (args = {}) => {
+      const client = await selectClaimableClient(args);
+      return toolTextResult(await claimTabForClient(client, args));
+    },
+  },
+  {
+    name: 'gemini_release_tab',
+    description:
+      'Libera a claim de aba Gemini da sessão atual ou uma claimId explícita, removendo Tab Group/badge quando possível.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        claimId: { type: 'string' },
+        sessionId: { type: 'string' },
+      },
+      additionalProperties: false,
+    },
+    call: async (args = {}) => toolTextResult(await releaseTabClaim(args)),
   },
   {
     name: 'gemini_mcp_diagnose_processes',
@@ -5444,11 +6066,11 @@ const rawTools = [
   {
     name: 'gemini_list_recent_chats',
     description:
-      'Retorna uma página das conversas visíveis/carregáveis no sidebar do Gemini. Sem clientId, usa a aba viva com mais histórico já carregado.',
+      'Retorna uma página das conversas visíveis/carregáveis no sidebar do Gemini. Com múltiplas abas, use claimId/clientId/tabId.',
     inputSchema: {
       type: 'object',
       properties: {
-        clientId: { type: 'string' },
+        ...clientSelectorProperties(),
         limit: {
           type: 'integer',
           minimum: 1,
@@ -5472,7 +6094,7 @@ const rawTools = [
       additionalProperties: false,
     },
     call: async (args = {}) => {
-      const client = requireRecentChatsClient(args.clientId);
+      const client = requireRecentChatsClient(args);
       return toolTextResult(await listRecentChatsForClient(client, args));
     },
   },
@@ -5483,13 +6105,13 @@ const rawTools = [
     inputSchema: {
       type: 'object',
       properties: {
-        clientId: { type: 'string' },
+        ...clientSelectorProperties(),
         limit: { type: 'integer', minimum: 1, maximum: 500 },
       },
       additionalProperties: false,
     },
     call: async (args = {}) => {
-      const client = requireNotebookClient(args.clientId);
+      const client = requireNotebookClient(args);
       const limit = normalizeLimit(args.limit, 100, 500);
       const conversations = notebookConversationsForClient(client)
         .slice(0, limit)
@@ -5508,12 +6130,12 @@ const rawTools = [
     inputSchema: {
       type: 'object',
       properties: {
-        clientId: { type: 'string' },
+        ...clientSelectorProperties(),
       },
       additionalProperties: false,
     },
     call: async (args = {}) => {
-      const client = requireClient(args.clientId);
+      const client = requireClient(args);
       const result = await enqueueCommand(client.clientId, 'get-current-chat');
       return toolTextResult({
         client: summarizeClient(client),
@@ -5528,7 +6150,7 @@ const rawTools = [
     inputSchema: {
       type: 'object',
       properties: {
-        clientId: { type: 'string' },
+        ...clientSelectorProperties(),
         index: {
           type: 'integer',
           minimum: 1,
@@ -5551,7 +6173,7 @@ const rawTools = [
       additionalProperties: false,
     },
     call: async (args = {}) => {
-      const client = requireClient(args.clientId);
+      const client = requireClient(args);
       const result = await downloadChatForClient(client, args);
       return toolTextResult(result);
     },
@@ -5563,7 +6185,7 @@ const rawTools = [
     inputSchema: {
       type: 'object',
       properties: {
-        clientId: { type: 'string' },
+        ...clientSelectorProperties(),
         index: {
           type: 'integer',
           minimum: 1,
@@ -5584,7 +6206,7 @@ const rawTools = [
       additionalProperties: false,
     },
     call: async (args = {}) => {
-      const client = requireNotebookClient(args.clientId);
+      const client = requireNotebookClient(args);
       const result = await downloadNotebookChatForClient(client, args);
       return toolTextResult(result);
     },
@@ -5596,7 +6218,7 @@ const rawTools = [
     inputSchema: {
       type: 'object',
       properties: {
-        clientId: { type: 'string' },
+        ...clientSelectorProperties(),
         outputDir: {
           type: 'string',
           description: 'Diretório local de destino. Default: diretório MCP configurado.',
@@ -5689,7 +6311,8 @@ const rawTools = [
       additionalProperties: false,
     },
     call: async (args = {}) => {
-      const client = requireClient(args.clientId);
+      const client = requireClient(args);
+      await ensureTabClaimForJob(client, args, 'GME Export');
       return toolTextResult(startRecentChatsExportJob(client, args));
     },
   },
@@ -5700,7 +6323,7 @@ const rawTools = [
     inputSchema: {
       type: 'object',
       properties: {
-        clientId: { type: 'string' },
+        ...clientSelectorProperties(),
         vaultDir: {
           type: 'string',
           description:
@@ -5776,7 +6399,8 @@ const rawTools = [
       additionalProperties: false,
     },
     call: async (args = {}) => {
-      const client = requireClient(args.clientId);
+      const client = requireClient(args);
+      await ensureTabClaimForJob(client, args, 'GME Missing');
       return toolTextResult(
         startRecentChatsExportJob(client, {
           ...args,
@@ -5795,7 +6419,7 @@ const rawTools = [
     inputSchema: {
       type: 'object',
       properties: {
-        clientId: { type: 'string' },
+        ...clientSelectorProperties(),
         outputDir: {
           type: 'string',
           description: 'Diretório local de destino. Default: diretório MCP configurado.',
@@ -5840,7 +6464,8 @@ const rawTools = [
       additionalProperties: false,
     },
     call: async (args = {}) => {
-      const client = requireClient(args.clientId);
+      const client = requireClient(args);
+      await ensureTabClaimForJob(client, args, 'GME Reexport');
       return toolTextResult(startDirectChatsExportJob(client, args));
     },
   },
@@ -5905,7 +6530,7 @@ const rawTools = [
     inputSchema: {
       type: 'object',
       properties: {
-        clientId: { type: 'string' },
+        ...clientSelectorProperties(),
         outputDir: {
           type: 'string',
           description: 'Diretório local de destino. Default: diretório MCP configurado.',
@@ -5925,7 +6550,8 @@ const rawTools = [
       additionalProperties: false,
     },
     call: async (args = {}) => {
-      const client = requireNotebookClient(args.clientId);
+      const client = requireNotebookClient(args);
+      await ensureTabClaimForJob(client, args, 'GME Notebook');
       const result = await exportNotebookForClient(client, args);
       return toolTextResult(result, { isError: result.failureCount > 0 });
     },
@@ -5937,12 +6563,12 @@ const rawTools = [
     inputSchema: {
       type: 'object',
       properties: {
-        clientId: { type: 'string' },
+        ...clientSelectorProperties(),
       },
       additionalProperties: false,
     },
     call: async (args = {}) => {
-      const client = requireClient(args.clientId);
+      const client = requireClient(args);
       const result = await enqueueCommand(client.clientId, 'cache-status');
       return toolTextResult({
         client: summarizeClient(client),
@@ -5957,7 +6583,7 @@ const rawTools = [
     inputSchema: {
       type: 'object',
       properties: {
-        clientId: { type: 'string' },
+        ...clientSelectorProperties(),
         notebookId: {
           type: 'string',
           description: 'Opcional: limpa apenas entradas deste caderno.',
@@ -5966,7 +6592,7 @@ const rawTools = [
       additionalProperties: false,
     },
     call: async (args = {}) => {
-      const client = requireClient(args.clientId);
+      const client = requireClient(args);
       const result = await enqueueCommand(client.clientId, 'clear-cache', {
         notebookId: args.notebookId || null,
       });
@@ -5983,7 +6609,7 @@ const rawTools = [
     inputSchema: {
       type: 'object',
       properties: {
-        clientId: { type: 'string' },
+        ...clientSelectorProperties(),
         index: {
           type: 'integer',
           minimum: 1,
@@ -6001,7 +6627,7 @@ const rawTools = [
       additionalProperties: false,
     },
     call: async (args = {}) => {
-      const client = args.notebook ? requireNotebookClient(args.clientId) : requireClient(args.clientId);
+      const client = args.notebook ? requireNotebookClient(args) : requireClient(args);
       const result = await enqueueCommand(client.clientId, 'open-chat', args);
       return toolTextResult({
         client: summarizeClient(client),
@@ -6016,10 +6642,7 @@ const rawTools = [
     inputSchema: {
       type: 'object',
       properties: {
-        clientId: {
-          type: 'string',
-          description: 'Opcional: recarrega apenas uma aba específica. Sem isso, tenta recarregar todas as abas Gemini.',
-        },
+        ...clientSelectorProperties(),
         delayMs: {
           type: 'integer',
           minimum: 0,
@@ -6041,12 +6664,12 @@ const rawTools = [
     inputSchema: {
       type: 'object',
       properties: {
-        clientId: { type: 'string' },
+        ...clientSelectorProperties(),
       },
       additionalProperties: false,
     },
     call: async (args = {}) => {
-      const client = requireClient(args.clientId);
+      const client = requireClient(args);
       const result = await enqueueCommand(client.clientId, 'snapshot');
       return toolTextResult({
         client: summarizeClient(client),
@@ -6082,7 +6705,9 @@ const LOCAL_PROXY_TOOL_NAMES = new Set([
 const withChromeExtensionGuard = (tool) => ({
   ...tool,
   call: async (args = {}) => {
-    await ensureBrowserExtensionReady(args);
+    await ensureBrowserExtensionReady(args, {
+      allowLaunchChrome: args.openIfMissing !== false && args.wakeBrowser !== false,
+    });
     return tool.call(args);
   },
 });
@@ -6134,12 +6759,21 @@ const proxyToolCallToPrimary = async (name, args = {}) => {
     throw error;
   }
 
+  const proxiedArgs =
+    args && typeof args === 'object' && !Array.isArray(args)
+      ? {
+          ...args,
+          sessionId: args.sessionId || args._proxySessionId || PROCESS_SESSION_ID,
+          _proxySessionId: args._proxySessionId || PROCESS_SESSION_ID,
+        }
+      : args;
+
   const response = await fetch(`${primaryBridgeBaseUrl()}/agent/mcp-tool-call`, {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
     },
-    body: JSON.stringify({ name, arguments: args }),
+    body: JSON.stringify({ name, arguments: proxiedArgs }),
   });
   const text = await response.text();
   let payload = null;
@@ -6270,9 +6904,11 @@ const bridgeServer = createServer(async (req, res) => {
         version: SERVER_VERSION,
         protocolVersion: EXTENSION_PROTOCOL_VERSION,
         bridgeRole,
+        sessionId: PROCESS_SESSION_ID,
         process: summarizeProcess(),
       },
       connectedClients,
+      tabClaims: summarizeTabClaims(),
       bridgeAssetFetch: snapshotBridgeAssetMetrics(),
       ...(diagnostics
         ? {
@@ -6284,6 +6920,78 @@ const bridgeServer = createServer(async (req, res) => {
           }
         : {}),
     });
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/agent/tabs') {
+    try {
+      let liveClients = getLiveClients();
+      let launchResult = null;
+      if (liveClients.length === 0 && parseOptionalBoolean(url.searchParams.get('openIfMissing')) !== false) {
+        launchResult = await launchChromeForGemini({
+          profileDirectory: CHROME_GUARD_CONFIG.profileDirectory,
+        });
+        liveClients = await waitForLiveClients(
+          normalizeWaitMs(url.searchParams.get('waitMs'), BROWSER_STATUS_WAKE_WAIT_MS),
+          CHROME_GUARD_CONFIG.pollIntervalMs || 500,
+        );
+      }
+      sendAgentJson(res, 200, {
+        ok: true,
+        sessionId: PROCESS_SESSION_ID,
+        connectedTabCount: liveClients.length,
+        connectedClients: liveClients.map(summarizeClient),
+        tabClaims: summarizeTabClaims(),
+        browserWake: launchResult || { attempted: false },
+      });
+    } catch (err) {
+      sendAgentJson(res, 503, { ok: false, error: err.message, code: err.code || null });
+    }
+    return;
+  }
+
+  if (
+    (req.method === 'GET' || req.method === 'POST') &&
+    url.pathname === '/agent/claim-tab'
+  ) {
+    try {
+      const body = req.method === 'POST' ? await readJsonBody(req) : {};
+      const args = {
+        ...Object.fromEntries(url.searchParams.entries()),
+        ...body,
+      };
+      const client = await selectClaimableClient(args);
+      sendAgentJson(res, 200, await claimTabForClient(client, args));
+    } catch (err) {
+      sendAgentJson(res, 503, {
+        ok: false,
+        error: err.message,
+        code: err.code || null,
+        data: err.data || null,
+      });
+    }
+    return;
+  }
+
+  if (
+    (req.method === 'GET' || req.method === 'POST') &&
+    url.pathname === '/agent/release-tab'
+  ) {
+    try {
+      const body = req.method === 'POST' ? await readJsonBody(req) : {};
+      const args = {
+        ...Object.fromEntries(url.searchParams.entries()),
+        ...body,
+      };
+      sendAgentJson(res, 200, await releaseTabClaim(args));
+    } catch (err) {
+      sendAgentJson(res, 503, {
+        ok: false,
+        error: err.message,
+        code: err.code || null,
+        data: err.data || null,
+      });
+    }
     return;
   }
 
@@ -6377,11 +7085,13 @@ const bridgeServer = createServer(async (req, res) => {
 
   if (req.method === 'GET' && url.pathname === '/agent/recent-chats') {
     try {
-      const client = requireRecentChatsClient(url.searchParams.get('clientId'));
+      const selector = clientSelectorFromSearchParams(url.searchParams);
+      const client = requireRecentChatsClient(selector);
       sendAgentJson(
         res,
         200,
         await listRecentChatsForClient(client, {
+          ...selector,
           limit: url.searchParams.get('limit'),
           offset: url.searchParams.get('offset'),
           refresh: parseOptionalBoolean(url.searchParams.get('refresh')),
@@ -6395,11 +7105,14 @@ const bridgeServer = createServer(async (req, res) => {
 
   if (req.method === 'GET' && url.pathname === '/agent/export-recent-chats') {
     try {
-      const client = requireClient(url.searchParams.get('clientId'));
+      const selector = clientSelectorFromSearchParams(url.searchParams);
+      const client = requireClient(selector);
+      await ensureTabClaimForJob(client, selector, 'GME Export');
       sendAgentJson(
         res,
         202,
         startRecentChatsExportJob(client, {
+          ...selector,
           outputDir: url.searchParams.get('outputDir'),
           resumeReportFile: url.searchParams.get('resumeReportFile') || url.searchParams.get('reportFile') || undefined,
           startIndex: url.searchParams.get('startIndex'),
@@ -6423,11 +7136,14 @@ const bridgeServer = createServer(async (req, res) => {
 
   if (req.method === 'GET' && url.pathname === '/agent/export-missing-chats') {
     try {
-      const client = requireClient(url.searchParams.get('clientId'));
+      const selector = clientSelectorFromSearchParams(url.searchParams);
+      const client = requireClient(selector);
+      await ensureTabClaimForJob(client, selector, 'GME Missing');
       sendAgentJson(
         res,
         202,
         startRecentChatsExportJob(client, {
+          ...selector,
           vaultDir: url.searchParams.get('vaultDir') || url.searchParams.get('existingScanDir'),
           existingScanDir: url.searchParams.get('existingScanDir') || url.searchParams.get('vaultDir'),
           outputDir:
@@ -6464,11 +7180,14 @@ const bridgeServer = createServer(async (req, res) => {
       ];
       const itemsText = url.searchParams.get('items');
       const items = itemsText ? JSON.parse(itemsText) : undefined;
-      const client = requireClient(url.searchParams.get('clientId'));
+      const selector = clientSelectorFromSearchParams(url.searchParams);
+      const client = requireClient(selector);
+      await ensureTabClaimForJob(client, selector, 'GME Reexport');
       sendAgentJson(
         res,
         202,
         startDirectChatsExportJob(client, {
+          ...selector,
           outputDir: url.searchParams.get('outputDir') || undefined,
           chatIds,
           items,
@@ -6512,7 +7231,7 @@ const bridgeServer = createServer(async (req, res) => {
   if (req.method === 'GET' && url.pathname === '/agent/notebook-chats') {
     try {
       const limit = normalizeLimit(url.searchParams.get('limit'), 100, 500);
-      const client = requireNotebookClient(url.searchParams.get('clientId'));
+      const client = requireNotebookClient(clientSelectorFromSearchParams(url.searchParams));
       sendAgentJson(res, 200, {
         client: summarizeClient(client),
         notebookId: client.page?.notebookId || null,
@@ -6528,7 +7247,7 @@ const bridgeServer = createServer(async (req, res) => {
 
   if (req.method === 'GET' && url.pathname === '/agent/current-chat') {
     try {
-      const client = requireClient(url.searchParams.get('clientId'));
+      const client = requireClient(clientSelectorFromSearchParams(url.searchParams));
       const result = await enqueueCommand(client.clientId, 'get-current-chat');
       sendAgentJson(res, 200, {
         client: summarizeClient(client),
@@ -6543,13 +7262,13 @@ const bridgeServer = createServer(async (req, res) => {
   if (req.method === 'GET' && url.pathname === '/agent/download-chat') {
     try {
       const args = {
-        clientId: url.searchParams.get('clientId') || undefined,
+        ...clientSelectorFromSearchParams(url.searchParams),
         index: url.searchParams.has('index') ? Number(url.searchParams.get('index')) : undefined,
         chatId: url.searchParams.get('chatId') || undefined,
         outputDir: url.searchParams.get('outputDir') || undefined,
         returnToOriginal: url.searchParams.get('returnToOriginal') !== 'false',
       };
-      const client = requireClient(args.clientId);
+      const client = requireClient(args);
       const result = await downloadChatForClient(client, args);
       sendAgentJson(res, 200, result);
     } catch (err) {
@@ -6561,14 +7280,14 @@ const bridgeServer = createServer(async (req, res) => {
   if (req.method === 'GET' && url.pathname === '/agent/download-notebook-chat') {
     try {
       const args = {
-        clientId: url.searchParams.get('clientId') || undefined,
+        ...clientSelectorFromSearchParams(url.searchParams),
         index: url.searchParams.has('index') ? Number(url.searchParams.get('index')) : undefined,
         chatId: url.searchParams.get('chatId') || undefined,
         title: url.searchParams.get('title') || undefined,
         outputDir: url.searchParams.get('outputDir') || undefined,
         returnToOriginal: url.searchParams.get('returnToOriginal') !== 'false',
       };
-      const client = requireNotebookClient(args.clientId);
+      const client = requireNotebookClient(args);
       const result = await downloadNotebookChatForClient(client, args);
       sendAgentJson(res, 200, result);
     } catch (err) {
@@ -6580,14 +7299,15 @@ const bridgeServer = createServer(async (req, res) => {
   if (req.method === 'GET' && url.pathname === '/agent/export-notebook') {
     try {
       const args = {
-        clientId: url.searchParams.get('clientId') || undefined,
+        ...clientSelectorFromSearchParams(url.searchParams),
         outputDir: url.searchParams.get('outputDir') || undefined,
         startIndex: url.searchParams.has('startIndex')
           ? Number(url.searchParams.get('startIndex'))
           : undefined,
         limit: url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : undefined,
       };
-      const client = requireNotebookClient(args.clientId);
+      const client = requireNotebookClient(args);
+      await ensureTabClaimForJob(client, args, 'GME Notebook');
       const result = await exportNotebookForClient(client, args);
       sendAgentJson(res, result.failureCount > 0 ? 207 : 200, result);
     } catch (err) {
@@ -6598,7 +7318,7 @@ const bridgeServer = createServer(async (req, res) => {
 
   if (req.method === 'GET' && url.pathname === '/agent/cache-status') {
     try {
-      const client = requireClient(url.searchParams.get('clientId'));
+      const client = requireClient(clientSelectorFromSearchParams(url.searchParams));
       const result = await enqueueCommand(client.clientId, 'cache-status');
       sendAgentJson(res, 200, {
         client: summarizeClient(client),
@@ -6612,7 +7332,7 @@ const bridgeServer = createServer(async (req, res) => {
 
   if (req.method === 'GET' && url.pathname === '/agent/clear-cache') {
     try {
-      const client = requireClient(url.searchParams.get('clientId'));
+      const client = requireClient(clientSelectorFromSearchParams(url.searchParams));
       const result = await enqueueCommand(client.clientId, 'clear-cache', {
         notebookId: url.searchParams.get('notebookId') || null,
       });
@@ -6629,14 +7349,14 @@ const bridgeServer = createServer(async (req, res) => {
   if (req.method === 'GET' && url.pathname === '/agent/open-chat') {
     try {
       const args = {
-        clientId: url.searchParams.get('clientId') || undefined,
+        ...clientSelectorFromSearchParams(url.searchParams),
         index: url.searchParams.has('index') ? Number(url.searchParams.get('index')) : undefined,
         chatId: url.searchParams.get('chatId') || undefined,
         url: url.searchParams.get('url') || undefined,
         title: url.searchParams.get('title') || undefined,
         notebook: url.searchParams.get('notebook') === 'true',
       };
-      const client = args.notebook ? requireNotebookClient(args.clientId) : requireClient(args.clientId);
+      const client = args.notebook ? requireNotebookClient(args) : requireClient(args);
       const result = await enqueueCommand(client.clientId, 'open-chat', args);
       sendAgentJson(res, result?.ok ? 200 : 503, {
         client: summarizeClient(client),
@@ -6651,7 +7371,7 @@ const bridgeServer = createServer(async (req, res) => {
   if (req.method === 'GET' && url.pathname === '/agent/reload-tabs') {
     try {
       const result = await reloadGeminiTabs({
-        clientId: url.searchParams.get('clientId') || undefined,
+        ...clientSelectorFromSearchParams(url.searchParams),
         delayMs: url.searchParams.has('delayMs') ? Number(url.searchParams.get('delayMs')) : undefined,
         reason: url.searchParams.get('reason') || 'agent-endpoint',
       });
@@ -6664,8 +7384,7 @@ const bridgeServer = createServer(async (req, res) => {
 
   if (req.method === 'GET' && url.pathname === '/agent/inspect-media') {
     try {
-      const clientId = url.searchParams.get('clientId') || undefined;
-      const client = requireClient(clientId);
+      const client = requireClient(clientSelectorFromSearchParams(url.searchParams));
       const result = await enqueueCommand(client.clientId, 'inspect-media');
       sendJson(res, 200, {
         client: summarizeClient(client),

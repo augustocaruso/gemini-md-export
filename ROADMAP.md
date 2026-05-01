@@ -343,7 +343,7 @@ mais previsíveis e listas grandes usáveis.
 
 ## Proposta v0.4.3 — Afinidade confiável entre agente e aba Gemini
 
-Status: proposta.
+Status: implementado em v0.4.3.
 
 Objetivo: permitir várias instâncias de MCP/CLI/agente usando várias abas do
 Gemini Web de forma previsível, sem depender da aba ativa, do último heartbeat
@@ -383,12 +383,20 @@ Gemini abertas. Um agente pode listar/exportar a aba errada sem perceber.
   - mostrar claim atual;
   - trocar claim de sessão com confirmação quando houver job em andamento.
 - Indicador visual na aba reivindicada:
-  - overlay/borda discreta dentro do Gemini Web quando a aba está em uso por
-    uma sessão do exporter;
-  - texto curto: "Gemini Export ativo nesta aba";
+  - usar a barra de abas do navegador, não o DOM da página Gemini;
+  - caminho principal: `chrome.tabs.group()` + `chrome.tabGroups.update()`
+    para criar/atualizar um Tab Group colorido com label curto (`GME ...`);
+  - fallback quando a aba já está em grupo do usuário ou a API não está
+    disponível: badge da extensão e prefixo curto no título da aba;
   - cor/label diferente por sessão quando houver múltiplas claims;
-  - não interferir com clique, scroll, top-bar nem layout do Gemini;
+  - não alterar grupo de abas já criado pelo usuário;
   - desaparecer quando a claim expirar/liberar.
+- Abertura automática:
+  - `gemini_list_tabs`, `gemini_claim_tab` e o guard das tools
+    browser-dependent tentam abrir `https://gemini.google.com/app` quando não
+    existe aba conectada;
+  - o hook Windows e o MCP compartilham cooldown para evitar abrir abas
+    duplicadas enquanto uma tentativa já está em andamento.
 - Integração com jobs:
   - `gemini_export_recent_chats`, `gemini_export_missing_chats`,
     `gemini_reexport_chats` e notebook exports prendem a aba por claim;
@@ -408,6 +416,10 @@ Gemini abertas. Um agente pode listar/exportar a aba errada sem perceber.
 - Duas sessões diferentes devem conseguir usar duas abas diferentes ao mesmo
   tempo sem roubar comandos uma da outra.
 - Uma sessão com claim não deve ser redirecionada para a aba ativa por engano.
+- Sem aba conectada, o agente deve tentar abrir uma aba Gemini antes de pedir
+  intervenção manual.
+- O indicador visual não deve ser overlay dentro da página; deve usar Tab Group
+  nativo quando possível.
 - O usuário deve conseguir ver visualmente qual aba está "presa" ao exporter.
 - Se a aba reivindicada fecha ou fica stale, a próxima tool deve retornar erro
   claro e pedir escolher outra aba, não cair silenciosamente em outra.

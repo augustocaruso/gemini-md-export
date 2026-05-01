@@ -131,15 +131,16 @@ precisar do navegador confere versão/protocolo da extensão do Chrome e pede
 própria extensão recarrega as abas do Gemini em seguida. O reload manual do
 card em `chrome://extensions`/`edge://extensions` continua sendo o fallback
 para a primeira migração, mudança de permissões/manifest ou perfil errado.
-Na extensão do Gemini CLI, o MCP roda com
-`GEMINI_MCP_CHROME_LAUNCH_IF_CLOSED=false`: ele valida versão/protocolo e
-recarrega a extensão do navegador quando possível, mas não compete abrindo aba
-extra se o hook falhar. No Windows, quem acorda o navegador é o hook
-`BeforeTool` da própria extensão, apenas para tools que realmente dependem do
-navegador, incluindo `gemini_browser_status`. Antes de abrir qualquer coisa,
-ele consulta rapidamente `http://127.0.0.1:47283/agent/clients`; se já houver
-aba Gemini conectada, não abre nada, e se o bridge estiver inalcançável não faz
-launch cego.
+Na extensão do Gemini CLI, o hook `BeforeTool` continua sendo o primeiro a
+acordar o navegador no Windows, apenas para tools que realmente dependem do
+navegador, incluindo `gemini_browser_status`, `gemini_list_tabs` e
+`gemini_claim_tab`. O MCP também tem fallback guardado para abrir
+`https://gemini.google.com/app` quando uma tool precisa de aba e não há nenhuma
+conectada. Ambos usam o mesmo arquivo de cooldown, então duas chamadas rápidas
+não devem abrir duas abas. Antes de abrir qualquer coisa, o hook consulta
+rapidamente `http://127.0.0.1:47283/agent/clients`; se já houver aba Gemini
+conectada, não abre nada, e se o bridge estiver inalcançável não faz launch
+cego.
 
 Quando o bridge está ativo e sem clientes, o hook abre
 `https://gemini.google.com/app` por um PowerShell temporário oculto, usando
@@ -274,6 +275,9 @@ auto-update com `EBUSY: resource busy or locked, rmdir ...`.
 Tools disponíveis:
 
 - `gemini_browser_status`
+- `gemini_list_tabs`
+- `gemini_claim_tab`
+- `gemini_release_tab`
 - `gemini_mcp_diagnose_processes`
 - `gemini_mcp_cleanup_stale_processes`
 - `gemini_get_export_dir`
@@ -294,6 +298,15 @@ Tools disponíveis:
 - `gemini_open_chat`
 - `gemini_reload_gemini_tabs`
 - `gemini_snapshot`
+
+Quando houver mais de uma aba Gemini conectada, chame `gemini_list_tabs` e
+depois `gemini_claim_tab` com `clientId`, `tabId` ou `index`. A claim prende a
+sessão MCP/CLI naquela aba; sem claim ou seletor explícito, tools de listagem e
+export retornam `ambiguous_gemini_tabs` em vez de escolher a aba ativa por
+acidente. O indicador visual usa Tab Group nativo do Chrome/Edge quando
+possível, não overlay dentro da página Gemini. Se a aba já estiver em um grupo
+do usuário, a extensão preserva esse grupo e usa badge/prefixo de título como
+fallback.
 
 Para listas grandes, `gemini_list_recent_chats` é paginada. Use `limit` como
 tamanho da página e avance com `offset` (`0`, `50`, `100`...). O MCP carrega
@@ -319,8 +332,10 @@ separar gargalo de Gemini lento, bridge, mídia externa, disco ou vault.
 No lado da extensão, listas grandes do modal são virtualizadas a partir de
 centenas de conversas, então o modal não cria um nó DOM por item visível no
 histórico inteiro. O content script também coalesce trabalho de DOM em
-`scheduleDomWork` e expõe `metrics.domScheduler` no heartbeat/snapshot. Comandos
-pesados vindos do MCP usam backpressure por aba (`tab-backpressure-v1`): se uma
+`scheduleDomWork` e expõe `metrics.domScheduler` no heartbeat/snapshot. Ele
+anuncia `tab-claim-v1` para afinidade confiável entre
+sessão/agente e aba. Comandos pesados vindos do MCP usam backpressure por aba
+(`tab-backpressure-v1`): se uma
 aba já estiver carregando histórico, navegando ou exportando, comandos
 concorrentes retornam `busy=true` em vez de disputar o mesmo DOM.
 

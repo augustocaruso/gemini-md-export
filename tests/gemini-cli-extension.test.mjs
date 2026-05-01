@@ -70,6 +70,8 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.match(hooksConfig.hooks.AfterTool[0].matcher, /mcp_cleanup_stale_processes/);
   assert.notEqual(hooksConfig.hooks.BeforeTool[0].matcher, '*');
   assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /browser_status/);
+  assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /list_tabs/);
+  assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /claim_tab/);
   assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /export_missing_chats/);
   assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /mcp_\+gemini/);
   assert.doesNotMatch(hooksConfig.hooks.BeforeTool[0].matcher, /get_export_dir/);
@@ -123,6 +125,7 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.ok(browserManifest.host_permissions.includes('https://lh3.google.com/*'));
   assert.ok(browserManifest.host_permissions.includes('https://*.googleusercontent.com/*'));
   assert.ok(browserManifest.permissions.includes('storage'));
+  assert.ok(browserManifest.permissions.includes('tabGroups'));
   assert.equal(browserManifest.version, bridgeVersion.extensionVersion);
   assert.equal(typeof bridgeVersion.protocolVersion, 'number');
 
@@ -131,6 +134,9 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.match(context, /blockingIssue/);
   assert.match(context, /selfHeal\.reloadAttempts/);
   assert.match(context, /gemini_reload_gemini_tabs/);
+  assert.match(context, /gemini_list_tabs/);
+  assert.match(context, /gemini_claim_tab/);
+  assert.match(context, /ambiguous_gemini_tabs/);
   assert.match(context, /gemini_mcp_diagnose_processes/);
   assert.match(context, /gemini_mcp_cleanup_stale_processes/);
   assert.match(context, /Only ask for manual reload/);

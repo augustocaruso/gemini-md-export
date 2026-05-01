@@ -109,11 +109,22 @@ Operational guidance:
   configured Chromium browser. Prefer fixing `GEMINI_MCP_BROWSER`
   (`chrome`/`edge`/`brave`/`dia`) or `GEMINI_MCP_CHROME_PROFILE_DIRECTORY`
   over telling the user to repeat the same failed tool call.
+- With multiple Gemini tabs connected, do not guess. Call `gemini_list_tabs`,
+  choose the intended tab, then call `gemini_claim_tab` with `clientId`,
+  `tabId`, `index`, or `claimId`. Subsequent tools in the same MCP/proxy
+  session route through that claim; if there is no claim and more than one tab
+  is viable, browser-dependent tools should return `ambiguous_gemini_tabs`
+  instead of exporting the wrong tab. `gemini_claim_tab` marks the browser tab
+  with a native Chrome/Edge Tab Group label/color when available. If the tab is
+  already in a user group or the API is unavailable, it falls back to an
+  extension badge/title prefix; do not describe or implement this as an overlay
+  inside the Gemini page.
 - On Windows, browser launch must not use synchronous `where`/`spawnSync` in
   the runtime path. In the Gemini CLI extension, the BeforeTool hook is
-  responsible for opening the configured browser; the MCP server runs with
-  `GEMINI_MCP_CHROME_LAUNCH_IF_CLOSED=false` so it does not compensate by
-  opening another tab if the hook fails.
+  responsible for opening the configured browser first. The MCP also has a
+  guarded fallback for status/list/claim/export calls, but the shared
+  launch-cooldown file prevents duplicate tabs while the hook is already
+  waiting for a connection.
 - `gemini_browser_status` is also allowed to wake the browser and self-heal the
   browser extension. Do not treat status as a passive-only tool; Gemini CLI
   often asks for status first, and that first status call should be enough to
@@ -142,7 +153,11 @@ Operational guidance:
   `bridgeHealth.status="command_channel_stuck"` as a page/extension channel
   problem: prefer `gemini_reload_gemini_tabs` or `gemini_browser_status`
   self-heal before asking for manual Chrome extension reload.
-- The browser extension advertises `tab-backpressure-v1`. If a heavy command
+- The browser extension advertises `tab-claim-v1` and `tab-backpressure-v1`.
+  `tab-claim-v1` is the tab-affinity protocol: the content script reports the
+  active claim in heartbeat/snapshot, and MCP tools can claim/release tabs via
+  `gemini_claim_tab` and `gemini_release_tab`.
+  If a heavy command
   returns `busy=true` / `code="tab_operation_in_progress"`, do not retry in a
   tight loop or start a second export on the same tab. Poll the job/status or
   wait for the active operation to finish. The content script also reports

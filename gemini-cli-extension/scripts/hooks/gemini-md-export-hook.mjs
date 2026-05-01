@@ -63,6 +63,8 @@ let diagnosticState = {
 
 const BROWSER_DEPENDENT_EXPORTER_TOOLS = new Set([
   'gemini_browser_status',
+  'gemini_list_tabs',
+  'gemini_claim_tab',
   'gemini_list_recent_chats',
   'gemini_list_notebook_chats',
   'gemini_get_current_chat',

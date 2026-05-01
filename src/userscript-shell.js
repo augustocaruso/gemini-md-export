@@ -388,6 +388,7 @@
     'heartbeat-incremental-v1',
     'command-result-retry-v1',
     'tab-backpressure-v1',
+    'tab-claim-v1',
   ];
   const MODAL_VIRTUALIZATION_THRESHOLD = 120;
   const MODAL_VIRTUAL_ITEM_HEIGHT = 78;
@@ -403,6 +404,7 @@
   // do botão. Sobrevive reload da própria aba; some quando a aba é fechada.
   const TAB_IGNORE_SESSION_STORAGE_KEY = 'gemini-md-export.ignoreThisTab.v1';
   const TAB_IGNORE_CHANGED_EVENT = 'gm-md-export:tab-ignored-changed';
+  const TAB_CLAIM_TITLE_PREFIX_RE = /^\[GME(?: [^\]]+)?\]\s+/;
   const isExtensionContext =
     typeof chrome !== 'undefined' &&
     !!chrome.runtime?.id &&
@@ -485,6 +487,9 @@
     activeTabOperation: null,
     completedTabOperations: 0,
     rejectedTabOperations: 0,
+    tabClaim: null,
+    tabClaimExpiryTimer: 0,
+    tabClaimOriginalTitle: '',
     modalVirtual: {
       active: false,
       scheduled: false,
@@ -1828,6 +1833,7 @@
       modalPresent: !!document.getElementById(MODAL_ID),
       menuPresent: !!document.getElementById(MENU_ID),
       tabIgnored: isTabIgnored(),
+      tabClaim: tabClaimSummary(),
       legacyUiNodes: includeDomDiagnostics ? listLegacyUiNodes() : [],
       sidebarOpen: isSidebarOpen(),
       directoryPickerSupported: supportsDirectoryPicker(),
@@ -2024,6 +2030,117 @@
     error.cause = lastError;
     error.attempts = totalAttempts;
     throw error;
+  };
+
+  const tabClaimSummary = () => {
+    if (!state.tabClaim) return null;
+    return {
+      claimId: state.tabClaim.claimId,
+      sessionId: state.tabClaim.sessionId || null,
+      label: state.tabClaim.label || null,
+      color: state.tabClaim.color || null,
+      visual: state.tabClaim.visual || null,
+      claimedAt: state.tabClaim.claimedAt || null,
+      expiresAt: state.tabClaim.expiresAt || null,
+    };
+  };
+
+  const restoreTabClaimTitleFallback = () => {
+    if (!state.tabClaimOriginalTitle) {
+      if (TAB_CLAIM_TITLE_PREFIX_RE.test(document.title || '')) {
+        document.title = String(document.title || '').replace(TAB_CLAIM_TITLE_PREFIX_RE, '');
+      }
+      return;
+    }
+    if (document.title === state.tabClaimOriginalTitle) {
+      state.tabClaimOriginalTitle = '';
+      return;
+    }
+    if (TAB_CLAIM_TITLE_PREFIX_RE.test(document.title || '')) {
+      document.title = state.tabClaimOriginalTitle;
+    }
+    state.tabClaimOriginalTitle = '';
+  };
+
+  const applyTabClaimTitleFallback = (claim) => {
+    const label = String(claim?.label || 'GME').replace(/[\[\]]/g, '').trim() || 'GME';
+    const current = String(document.title || '');
+    const baseTitle = current.replace(TAB_CLAIM_TITLE_PREFIX_RE, '') || current || 'Gemini';
+    if (!state.tabClaimOriginalTitle) {
+      state.tabClaimOriginalTitle = baseTitle;
+    }
+    document.title = `[${label}] ${baseTitle}`;
+  };
+
+  const clearTabClaimExpiryTimer = () => {
+    if (!state.tabClaimExpiryTimer) return;
+    clearTimeout(state.tabClaimExpiryTimer);
+    state.tabClaimExpiryTimer = 0;
+  };
+
+  const clearLocalTabClaim = () => {
+    clearTabClaimExpiryTimer();
+    restoreTabClaimTitleFallback();
+    state.tabClaim = null;
+    markBridgeSnapshotDirty('tab-claim-cleared');
+  };
+
+  const releaseTabClaimViaExtension = async ({ claimId, reason } = {}) =>
+    extensionSendMessage(
+      {
+        type: 'gemini-md-export/release-tab-claim',
+        claimId: claimId || state.tabClaim?.claimId || null,
+        reason: reason || 'content-script',
+      },
+      { timeoutMs: 5000 },
+    );
+
+  const releaseCurrentTabClaim = async ({ claimId, reason, notifyServiceWorker = true } = {}) => {
+    const active = state.tabClaim;
+    let response = null;
+    if (notifyServiceWorker && (active?.claimId || claimId)) {
+      response = await releaseTabClaimViaExtension({
+        claimId: claimId || active?.claimId,
+        reason,
+      });
+    }
+    if (!claimId || !active?.claimId || active.claimId === claimId || response?.ok) {
+      clearLocalTabClaim();
+    }
+    return response || { ok: true, claimId: claimId || active?.claimId || null };
+  };
+
+  const scheduleTabClaimExpiry = () => {
+    clearTabClaimExpiryTimer();
+    const expiresAt = Date.parse(state.tabClaim?.expiresAt || '');
+    if (!Number.isFinite(expiresAt)) return;
+    const delayMs = Math.max(0, expiresAt - Date.now() + 250);
+    state.tabClaimExpiryTimer = setTimeout(() => {
+      releaseCurrentTabClaim({ reason: 'claim-expired' }).catch((err) => {
+        warn('Falha ao liberar claim expirada da aba.', err);
+        clearLocalTabClaim();
+      });
+    }, delayMs);
+  };
+
+  const rememberTabClaim = (claim, visualResponse) => {
+    const visual = visualResponse?.visual || visualResponse || null;
+    state.tabClaim = {
+      claimId: claim.claimId,
+      sessionId: claim.sessionId || null,
+      label: claim.label || 'GME',
+      color: claim.color || 'green',
+      expiresAt: claim.expiresAt || null,
+      claimedAt: new Date().toISOString(),
+      visual,
+    };
+    if (visual?.mode === 'tab-group') {
+      restoreTabClaimTitleFallback();
+    } else {
+      applyTabClaimTitleFallback(state.tabClaim);
+    }
+    scheduleTabClaimExpiry();
+    markBridgeSnapshotDirty('tab-claim-applied');
   };
 
   const fetchWithTimeout = async (url, options = {}, timeoutMs = 10000) => {
@@ -2237,6 +2354,7 @@
     extensionVersion: bridgeState.extensionVersion,
     protocolVersion: bridgeState.protocolVersion,
     buildStamp: bridgeState.buildStamp,
+    tabClaim: tabClaimSummary(),
     capabilities: BRIDGE_PROTOCOL_CAPABILITIES,
     commandPoll: {
       polling: bridgeState.polling,
@@ -2309,8 +2427,9 @@
       isActiveTab: bridgeState.isActiveTab,
       extensionVersion: bridgeState.extensionVersion,
       protocolVersion: bridgeState.protocolVersion,
-      buildStamp: bridgeState.buildStamp,
-      capabilities: BRIDGE_PROTOCOL_CAPABILITIES,
+    buildStamp: bridgeState.buildStamp,
+    tabClaim: tabClaimSummary(),
+    capabilities: BRIDGE_PROTOCOL_CAPABILITIES,
       commandPoll: {
         polling: bridgeState.polling,
         lastStartedAt: bridgeState.lastCommandPollStartedAt
@@ -3300,6 +3419,40 @@
         expectedBuildStamp: command.args?.expectedBuildStamp || null,
       });
       return response || { ok: false, reason: 'empty-reload-response' };
+    }
+
+    if (command.type === 'claim-tab') {
+      const args = command.args || {};
+      const claimId = String(args.claimId || '').trim();
+      if (!claimId) {
+        return { ok: false, reason: 'claim-id-required' };
+      }
+      const claim = {
+        claimId,
+        sessionId: args.sessionId || null,
+        label: args.label || 'GME',
+        color: args.color || 'green',
+        expiresAt: args.expiresAt || null,
+      };
+      const response = await extensionSendMessage(
+        {
+          type: 'gemini-md-export/claim-tab',
+          ...claim,
+        },
+        { timeoutMs: 5000 },
+      );
+      if (response?.ok) {
+        rememberTabClaim(claim, response);
+      }
+      return response || { ok: false, reason: 'empty-claim-response' };
+    }
+
+    if (command.type === 'release-tab-claim') {
+      const response = await releaseCurrentTabClaim({
+        claimId: command.args?.claimId || null,
+        reason: command.args?.reason || 'bridge-command',
+      });
+      return response || { ok: false, reason: 'empty-release-response' };
     }
 
     if (command.type === 'list-conversations') {
@@ -6178,6 +6331,11 @@
     if (bridgeState.heartbeatTimer) {
       clearInterval(bridgeState.heartbeatTimer);
       bridgeState.heartbeatTimer = 0;
+    }
+    if (state.tabClaim) {
+      releaseCurrentTabClaim({ reason: 'bridge-stopped' }).catch(() => {
+        clearLocalTabClaim();
+      });
     }
     closeBridgeEvents();
     bridgeState.started = false;
