@@ -13,6 +13,11 @@ O caminho principal hoje é:
 O projeto não usa API oficial do Gemini, cookies ou automação de login. Ele lê
 apenas o DOM já renderizado em uma aba do Gemini aberta pelo usuário.
 
+## Roadmap
+
+As próximas frentes de estabilidade, modo proxy, limpeza de processos antigos e
+performance do export total ficam em [ROADMAP.md](ROADMAP.md).
+
 ## Instalação Rápida no macOS
 
 Pré-requisitos:
@@ -230,6 +235,11 @@ Se você abrir uma segunda aba do terminal com `gemini`, a nova instância MCP
 não tenta disputar essa porta nem deve mostrar erro de bridge ocupado: ela
 permanece como servidor MCP por `stdio` e encaminha as tools para a instância
 primária que já está conectada à extensão do navegador.
+
+Quando a porta está ocupada, `gemini_browser_status` diferencia modo proxy
+saudável de primário antigo/travado ou porta usada por outro serviço. O
+diagnóstico inclui PID, versão, protocolo e dono provável da porta quando o
+sistema permite descobrir isso.
 
 O manifesto da extensão Gemini CLI não define `cwd` dentro de
 `~/.gemini/extensions/gemini-md-export`. Isso é intencional: no Windows, um MCP

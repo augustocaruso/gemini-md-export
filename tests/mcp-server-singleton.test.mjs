@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer as createHttpServer } from 'node:http';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
@@ -10,6 +10,7 @@ import test from 'node:test';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const SERVER_PATH = resolve(ROOT, 'src', 'mcp-server.js');
+const PACKAGE_VERSION = JSON.parse(readFileSync(resolve(ROOT, 'package.json'), 'utf-8')).version;
 
 const getFreePort = async () => {
   const server = createNetServer();
@@ -111,7 +112,7 @@ const spawnMcp = (port) => {
 test('segunda instância MCP não emite erro quando o bridge já está em uso e proxya tools', async (t) => {
   const port = await getFreePort();
   const primary = spawnMcp(port);
-  await waitForHealth(port);
+  const health = await waitForHealth(port);
   const secondary = spawnMcp(port);
   const outputDir = mkdtempSync(resolve(tmpdir(), 'gemini-md-export-proxy-'));
 
@@ -129,6 +130,12 @@ test('segunda instância MCP não emite erro quando o bridge já está em uso e 
   });
 
   assert.equal(initialized.result.serverInfo.name, 'gemini-md-export');
+  assert.equal(typeof health.pid, 'number');
+  assert.equal(typeof health.ppid, 'number');
+  assert.equal(typeof health.uptimeMs, 'number');
+  assert.equal(health.bridgeRole, 'primary');
+  assert.equal(health.process.pid, health.pid);
+  assert.equal(Array.isArray(health.argv), true);
 
   await sleep(200);
   assert.equal(secondary.child.exitCode, null);
@@ -158,7 +165,19 @@ test('segunda instância MCP diagnostica bridge primário com versão antiga', a
   const primary = createHttpServer((req, res) => {
     res.setHeader('content-type', 'application/json; charset=utf-8');
     if (req.url === '/healthz') {
-      res.end(JSON.stringify({ ok: true, name: 'gemini-md-export', version: '0.0.1', clients: 0 }));
+      res.end(JSON.stringify({
+        ok: true,
+        name: 'gemini-md-export',
+        version: '0.0.1',
+        protocolVersion: 1,
+        pid: 12345,
+        process: {
+          pid: 12345,
+          bridgeRole: 'primary',
+          startedAt: '2026-01-01T00:00:00.000Z',
+        },
+        clients: 0,
+      }));
       return;
     }
     if (req.url === '/agent/clients') {
@@ -195,6 +214,8 @@ test('segunda instância MCP diagnostica bridge primário com versão antiga', a
   assert.equal(status.result.isError, true);
   assert.equal(status.result.structuredContent.problem.code, 'primary_bridge_version_mismatch');
   assert.equal(status.result.structuredContent.problem.mismatch.actualVersion, '0.0.1');
+  assert.equal(status.result.structuredContent.problem.mismatch.process.pid, 12345);
+  assert.equal(status.result.structuredContent.primaryBridge.process.pid, 12345);
 
   const setDir = await secondary.callRpc({
     jsonrpc: '2.0',
@@ -210,5 +231,141 @@ test('segunda instância MCP diagnostica bridge primário com versão antiga', a
 
   assert.equal(setDir.result.isError, true);
   assert.equal(setDir.result.structuredContent.code, 'primary_bridge_version_mismatch');
+  assert.match(setDir.result.structuredContent.error, /PID 12345/);
   assert.match(setDir.result.structuredContent.error, /MCP 0\.0\.1/);
+  assert.equal(setDir.result.structuredContent.data.mismatch.process.pid, 12345);
+});
+
+test('segunda instância MCP diagnostica bridge primário com protocolo antigo', async (t) => {
+  const port = await getFreePort();
+  const primary = createHttpServer((req, res) => {
+    res.setHeader('content-type', 'application/json; charset=utf-8');
+    if (req.url === '/healthz') {
+      res.end(JSON.stringify({
+        ok: true,
+        name: 'gemini-md-export',
+        version: PACKAGE_VERSION,
+        protocolVersion: 1,
+        pid: 23456,
+        process: {
+          pid: 23456,
+          bridgeRole: 'primary',
+        },
+        clients: 0,
+      }));
+      return;
+    }
+    if (req.url === '/agent/clients') {
+      res.end(JSON.stringify({ expectedChromeExtension: {}, connectedClients: [] }));
+      return;
+    }
+    res.statusCode = 404;
+    res.end(JSON.stringify({ error: 'not found' }));
+  });
+  await listenHttp(primary, port);
+  const secondary = spawnMcp(port);
+
+  t.after(async () => {
+    await secondary.stop();
+    await closeHttp(primary);
+  });
+
+  const status = await secondary.callRpc({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'tools/call',
+    params: {
+      name: 'gemini_browser_status',
+      arguments: {},
+    },
+  });
+
+  assert.equal(status.result.isError, true);
+  assert.equal(status.result.structuredContent.mcp.proxyState, 'primary_incompatible');
+  assert.equal(status.result.structuredContent.problem.mismatch.kind, 'protocol');
+  assert.equal(status.result.structuredContent.problem.mismatch.actualProtocolVersion, 1);
+  assert.equal(status.result.structuredContent.problem.mismatch.process.pid, 23456);
+  assert.match(status.result.structuredContent.problem.message, /protocolo 1/);
+});
+
+test('segunda instância MCP diferencia porta ocupada por outro serviço', async (t) => {
+  const port = await getFreePort();
+  const primary = createHttpServer((req, res) => {
+    res.setHeader('content-type', 'application/json; charset=utf-8');
+    if (req.url === '/healthz') {
+      res.end(JSON.stringify({
+        ok: true,
+        name: 'outro-servico',
+        version: '9.9.9',
+        pid: 43210,
+      }));
+      return;
+    }
+    if (req.url === '/agent/clients') {
+      res.end(JSON.stringify({ connectedClients: [] }));
+      return;
+    }
+    res.statusCode = 404;
+    res.end(JSON.stringify({ error: 'not found' }));
+  });
+  await listenHttp(primary, port);
+  const secondary = spawnMcp(port);
+
+  t.after(async () => {
+    await secondary.stop();
+    await closeHttp(primary);
+  });
+
+  const status = await secondary.callRpc({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'tools/call',
+    params: {
+      name: 'gemini_browser_status',
+      arguments: {},
+    },
+  });
+
+  assert.equal(status.result.isError, true);
+  assert.equal(status.result.structuredContent.problem.mismatch.kind, 'name');
+  assert.equal(status.result.structuredContent.problem.mismatch.actualName, 'outro-servico');
+  assert.match(status.result.structuredContent.problem.message, /outro-servico/);
+  assert.match(status.result.structuredContent.problem.message, /não pelo gemini-md-export/);
+});
+
+test('segunda instância MCP diagnostica porta ocupada sem healthz HTTP', async (t) => {
+  const port = await getFreePort();
+  const sockets = new Set();
+  const blocker = createNetServer((socket) => {
+    // Mantém a conexão aberta o bastante para o healthz do proxy estourar timeout.
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+    socket.on('error', () => {});
+  });
+  await new Promise((resolveListen, rejectListen) => {
+    blocker.once('error', rejectListen);
+    blocker.listen(port, '127.0.0.1', resolveListen);
+  });
+  const secondary = spawnMcp(port);
+
+  t.after(async () => {
+    await secondary.stop();
+    for (const socket of sockets) socket.destroy();
+    await new Promise((resolveClose) => blocker.close(resolveClose));
+  });
+
+  const status = await secondary.callRpc({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'tools/call',
+    params: {
+      name: 'gemini_browser_status',
+      arguments: {},
+    },
+  });
+
+  assert.equal(status.result.isError, true);
+  assert.equal(status.result.structuredContent.problem.mismatch.kind, 'unreachable');
+  assert.equal(status.result.structuredContent.browserWake.reason, 'primary_unreachable');
+  assert.match(status.result.structuredContent.problem.message, /parece ocupada/);
 });

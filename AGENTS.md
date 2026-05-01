@@ -399,9 +399,16 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   `127.0.0.1:47283`, essa instância não deve logar erro nem morrer: ela entra
   em modo proxy por `stdio` e encaminha `tools/call` para a instância primária
   via `/agent/mcp-tool-call`. O objetivo é permitir múltiplos terminais Gemini
-  sem mensagens de bridge/extensão desconectada. Se esse proxy falhar, a
-  mensagem acionável deve pedir para fechar sessões antigas/reiniciar após
-  update, não tratar automaticamente como zumbi.
+  sem mensagens de bridge/extensão desconectada. `/healthz` do bridge primário
+  expõe `pid`, `ppid`, `protocolVersion`, `startedAt`, `uptimeMs`, `cwd`,
+  `argv` resumido e `bridgeRole`; em modo proxy, `gemini_browser_status`
+  também tenta identificar o dono da porta (`Get-NetTCPConnection` no Windows,
+  `lsof` no macOS/Linux) e retorna `mcp.proxyState`, `primaryBridge.process` e
+  `primaryBridge.portOwner`. `proxy_healthy` não é erro. Se o proxy falhar por
+  `primary_incompatible`, `primary_unreachable` ou `port_owned_by_other_service`,
+  a mensagem acionável deve citar PID/versão/caminho quando disponíveis e pedir
+  para fechar/reiniciar a sessão antiga; não trate automaticamente como zumbi e
+  não recomende matar processos sem diagnóstico.
   O MCP também expõe tools para status, diretório de export, listagem de
   sidebar, listagem/export de cadernos, download individual, cache e navegação:
   `gemini_browser_status`, `gemini_get_export_dir`, `gemini_set_export_dir`,

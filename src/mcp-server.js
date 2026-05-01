@@ -39,6 +39,7 @@ const SERVER_NAME = 'gemini-md-export';
 const SERVER_VERSION = pkg.version;
 const EXTENSION_PROTOCOL_VERSION = Number(bridgeVersion.protocolVersion);
 const PROTOCOL_VERSION = '2025-03-26';
+const PROCESS_STARTED_AT = new Date();
 const DEFAULT_HOST = process.env.GEMINI_MCP_BRIDGE_HOST || '127.0.0.1';
 const DEFAULT_PORT = Number(process.env.GEMINI_MCP_BRIDGE_PORT || 47283);
 const DEFAULT_EXPORT_DIR = process.env.GEMINI_MCP_EXPORT_DIR || resolve(homedir(), 'Downloads');
@@ -120,6 +121,9 @@ const BROWSER_STATUS_WAKE_WAIT_MS = Number(
 );
 const PRIMARY_BRIDGE_HEALTH_TIMEOUT_MS = Number(
   process.env.GEMINI_MCP_PRIMARY_BRIDGE_HEALTH_TIMEOUT_MS || 1200,
+);
+const PORT_OWNER_DIAGNOSTIC_TIMEOUT_MS = Number(
+  process.env.GEMINI_MCP_PORT_OWNER_DIAGNOSTIC_TIMEOUT_MS || 1500,
 );
 const detectExpectedBrowserBuildStamp = () => {
   if (process.env.GEMINI_MCP_EXPECTED_BUILD_STAMP) {
@@ -234,6 +238,177 @@ const bridgeUrlHost = (host) => {
 
 const primaryBridgeBaseUrl = () => `http://${bridgeUrlHost(cli.host)}:${cli.port}`;
 
+const summarizeProcess = () => ({
+  pid: process.pid,
+  ppid: process.ppid,
+  platform: process.platform,
+  nodeVersion: process.version,
+  execPath: process.execPath,
+  cwd: process.cwd(),
+  argv: process.argv.slice(0, 8),
+  root: ROOT,
+  startedAt: PROCESS_STARTED_AT.toISOString(),
+  uptimeMs: Math.round(process.uptime() * 1000),
+  bridgeRole,
+  host: cli.host,
+  port: cli.port,
+});
+
+const execFileText = (command, args = [], { timeoutMs = PORT_OWNER_DIAGNOSTIC_TIMEOUT_MS } = {}) =>
+  new Promise((resolveExec) => {
+    execFile(
+      command,
+      args,
+      {
+        timeout: timeoutMs,
+        windowsHide: true,
+        encoding: 'utf-8',
+      },
+      (error, stdout, stderr) => {
+        resolveExec({
+          ok: !error,
+          command,
+          args,
+          stdout: String(stdout || ''),
+          stderr: String(stderr || ''),
+          error: error?.message || null,
+          code: error?.code || null,
+          signal: error?.signal || null,
+        });
+      },
+    );
+  });
+
+const parseInteger = (value) => {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) ? parsed : null;
+};
+
+const diagnoseWindowsPortOwner = async (port) => {
+  const script = [
+    '$ErrorActionPreference = "Stop"',
+    `$conn = Get-NetTCPConnection -LocalPort ${Number(port)} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1`,
+    'if (-not $conn) { "{}"; exit 0 }',
+    '$proc = Get-Process -Id $conn.OwningProcess -ErrorAction SilentlyContinue',
+    '$cim = Get-CimInstance Win32_Process -Filter "ProcessId=$($conn.OwningProcess)" -ErrorAction SilentlyContinue',
+    '[pscustomobject]@{',
+    '  pid = [int]$conn.OwningProcess;',
+    '  processName = $proc.ProcessName;',
+    '  path = $proc.Path;',
+    '  commandLine = $cim.CommandLine;',
+    '  startTime = if ($proc.StartTime) { $proc.StartTime.ToString("o") } else { $null }',
+    '} | ConvertTo-Json -Compress',
+  ].join('; ');
+  const result = await execFileText('powershell.exe', [
+    '-NoProfile',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-Command',
+    script,
+  ]);
+  if (!result.ok) {
+    return {
+      ok: false,
+      platform: 'win32',
+      method: 'Get-NetTCPConnection',
+      error: result.error || result.stderr || 'Falha ao consultar dono da porta.',
+    };
+  }
+  try {
+    const payload = JSON.parse(result.stdout.trim() || '{}');
+    if (!payload?.pid) {
+      return { ok: true, platform: 'win32', method: 'Get-NetTCPConnection', found: false };
+    }
+    return {
+      ok: true,
+      platform: 'win32',
+      method: 'Get-NetTCPConnection',
+      found: true,
+      pid: parseInteger(payload.pid),
+      processName: payload.processName || null,
+      path: payload.path || null,
+      commandLine: payload.commandLine || null,
+      startTime: payload.startTime || null,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      platform: 'win32',
+      method: 'Get-NetTCPConnection',
+      error: err?.message || String(err),
+      raw: result.stdout.trim(),
+    };
+  }
+};
+
+const diagnoseUnixPortOwner = async (port) => {
+  const lsof = await execFileText('lsof', [
+    '-nP',
+    `-iTCP:${Number(port)}`,
+    '-sTCP:LISTEN',
+    '-FpRcL',
+  ]);
+  if (!lsof.ok) {
+    return {
+      ok: false,
+      platform: process.platform,
+      method: 'lsof',
+      error: lsof.error || lsof.stderr || 'Falha ao consultar dono da porta.',
+    };
+  }
+  const owner = {};
+  for (const line of lsof.stdout.split(/\r?\n/)) {
+    if (line.startsWith('p')) owner.pid = parseInteger(line.slice(1));
+    if (line.startsWith('R')) owner.ppid = parseInteger(line.slice(1));
+    if (line.startsWith('c')) owner.processName = line.slice(1) || null;
+    if (line.startsWith('L')) owner.user = line.slice(1) || null;
+  }
+  if (!owner.pid) {
+    return { ok: true, platform: process.platform, method: 'lsof', found: false };
+  }
+  const ps = await execFileText('ps', ['-p', String(owner.pid), '-o', 'pid=', '-o', 'ppid=', '-o', 'command=']);
+  const commandLine = ps.ok
+    ? ps.stdout
+        .trim()
+        .replace(/^\s*\d+\s+\d+\s+/, '')
+        .trim()
+    : null;
+  return {
+    ok: true,
+    platform: process.platform,
+    method: 'lsof',
+    found: true,
+    ...owner,
+    commandLine,
+    psError: ps.ok ? null : ps.error || ps.stderr || null,
+  };
+};
+
+const diagnoseBridgePortOwner = async () => {
+  if (process.env.GEMINI_MCP_PORT_OWNER_DIAGNOSTICS === 'false') {
+    return { ok: false, disabled: true, error: 'diagnostico desabilitado por ambiente' };
+  }
+  if (process.platform === 'win32') return diagnoseWindowsPortOwner(cli.port);
+  return diagnoseUnixPortOwner(cli.port);
+};
+
+const processFromHealthAndOwner = (health, owner) => {
+  const payload = health?.payload || {};
+  const processInfo = payload.process || {};
+  return {
+    pid: processInfo.pid ?? payload.pid ?? owner?.pid ?? null,
+    ppid: processInfo.ppid ?? payload.ppid ?? owner?.ppid ?? null,
+    platform: processInfo.platform ?? payload.platform ?? owner?.platform ?? null,
+    processName: owner?.processName || null,
+    commandLine: owner?.commandLine || null,
+    path: owner?.path || null,
+    cwd: processInfo.cwd ?? payload.cwd ?? null,
+    startedAt: processInfo.startedAt ?? payload.startedAt ?? null,
+    uptimeMs: processInfo.uptimeMs ?? payload.uptimeMs ?? null,
+    bridgeRole: processInfo.bridgeRole ?? payload.bridgeRole ?? null,
+  };
+};
+
 const fetchJsonWithTimeout = async (url, timeoutMs = PRIMARY_BRIDGE_HEALTH_TIMEOUT_MS) => {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -278,13 +453,18 @@ const primaryBridgeClients = async () => {
   }
 };
 
-const primaryBridgeMismatch = (health) => {
+const primaryBridgeMismatch = (health, owner = null) => {
   const payload = health?.payload || {};
+  const process = processFromHealthAndOwner(health, owner);
   if (!health?.ok) {
     return {
       kind: 'unreachable',
       expectedVersion: SERVER_VERSION,
       actualVersion: null,
+      expectedProtocolVersion: EXTENSION_PROTOCOL_VERSION,
+      actualProtocolVersion: null,
+      process,
+      portOwner: owner || null,
       detail: health?.error || health?.text || `HTTP ${health?.status ?? 'unknown'}`,
     };
   }
@@ -295,6 +475,10 @@ const primaryBridgeMismatch = (health) => {
       actualName: payload.name,
       expectedVersion: SERVER_VERSION,
       actualVersion: payload.version || null,
+      expectedProtocolVersion: EXTENSION_PROTOCOL_VERSION,
+      actualProtocolVersion: payload.protocolVersion ?? null,
+      process,
+      portOwner: owner || null,
     };
   }
   if (payload.version && payload.version !== SERVER_VERSION) {
@@ -302,6 +486,24 @@ const primaryBridgeMismatch = (health) => {
       kind: 'version',
       expectedVersion: SERVER_VERSION,
       actualVersion: payload.version,
+      expectedProtocolVersion: EXTENSION_PROTOCOL_VERSION,
+      actualProtocolVersion: payload.protocolVersion ?? null,
+      process,
+      portOwner: owner || null,
+    };
+  }
+  if (
+    payload.protocolVersion !== undefined &&
+    Number(payload.protocolVersion) !== Number(EXTENSION_PROTOCOL_VERSION)
+  ) {
+    return {
+      kind: 'protocol',
+      expectedVersion: SERVER_VERSION,
+      actualVersion: payload.version || null,
+      expectedProtocolVersion: EXTENSION_PROTOCOL_VERSION,
+      actualProtocolVersion: payload.protocolVersion,
+      process,
+      portOwner: owner || null,
     };
   }
   return null;
@@ -309,13 +511,17 @@ const primaryBridgeMismatch = (health) => {
 
 const primaryBridgeMismatchMessage = (mismatch) => {
   if (!mismatch) return null;
+  const pid = mismatch.process?.pid ? ` PID ${mismatch.process.pid}` : '';
   if (mismatch.kind === 'version') {
-    return `Outra instância do gemini-md-export está segurando a porta ${cli.host}:${cli.port} com MCP ${mismatch.actualVersion}, mas esta sessão carregou MCP ${mismatch.expectedVersion}. Feche/reinicie as sessões antigas do Gemini CLI ou encerre o processo node antigo do exporter antes de repetir a tool.`;
+    return `Outra instância do gemini-md-export${pid} está segurando a porta ${cli.host}:${cli.port} com MCP ${mismatch.actualVersion}, mas esta sessão carregou MCP ${mismatch.expectedVersion}. Feche/reinicie as sessões antigas do Gemini CLI ou encerre o processo antigo do exporter antes de repetir a tool.`;
+  }
+  if (mismatch.kind === 'protocol') {
+    return `Outra instância do gemini-md-export${pid} está segurando a porta ${cli.host}:${cli.port} com protocolo ${mismatch.actualProtocolVersion ?? 'desconhecido'}, mas esta sessão espera protocolo ${mismatch.expectedProtocolVersion}. Reinicie as sessões antigas do Gemini CLI para o bridge primário subir atualizado.`;
   }
   if (mismatch.kind === 'name') {
-    return `A porta ${cli.host}:${cli.port} está ocupada por ${mismatch.actualName || 'outro serviço'}, não pelo ${SERVER_NAME}. Feche esse processo ou altere GEMINI_MCP_BRIDGE_PORT.`;
+    return `A porta ${cli.host}:${cli.port} está ocupada por ${mismatch.actualName || 'outro serviço'}${pid}, não pelo ${SERVER_NAME}. Feche esse processo ou altere GEMINI_MCP_BRIDGE_PORT.`;
   }
-  return `A porta ${cli.host}:${cli.port} parece ocupada, mas esta instância não conseguiu consultar o bridge primário (${mismatch.detail || 'sem detalhe'}). Reinicie o Gemini CLI e confira se a extensão gemini-md-export está instalada.`;
+  return `A porta ${cli.host}:${cli.port} parece ocupada${pid}, mas esta instância não conseguiu consultar o bridge primário (${mismatch.detail || 'sem detalhe'}). Reinicie o Gemini CLI; se persistir, feche o processo dono da porta ou reinicie a máquina.`;
 };
 
 const parseArgs = (argv) => {
@@ -3944,7 +4150,8 @@ const executeToolCall = async (name, args = {}) => {
 
 const proxyToolCallToPrimary = async (name, args = {}) => {
   const health = await primaryBridgeHealth();
-  const mismatch = primaryBridgeMismatch(health);
+  const portOwner = await diagnoseBridgePortOwner();
+  const mismatch = primaryBridgeMismatch(health, portOwner);
   if (mismatch) {
     const error = new Error(primaryBridgeMismatchMessage(mismatch));
     error.code = 'primary_bridge_version_mismatch';
@@ -3955,6 +4162,7 @@ const proxyToolCallToPrimary = async (name, args = {}) => {
         version: SERVER_VERSION,
       },
       primaryBridge: health.payload || null,
+      portOwner,
       mismatch,
     };
     throw error;
@@ -3988,21 +4196,35 @@ const proxyToolCallToPrimary = async (name, args = {}) => {
 const proxyBrowserStatus = async () => {
   const health = await primaryBridgeHealth();
   const clients = await primaryBridgeClients();
-  const mismatch = primaryBridgeMismatch(health);
+  const portOwner = await diagnoseBridgePortOwner();
+  const mismatch = primaryBridgeMismatch(health, portOwner);
+  const primaryProcess = processFromHealthAndOwner(health, portOwner);
+  const proxyState = mismatch
+    ? mismatch.kind === 'unreachable'
+      ? 'primary_unreachable'
+      : mismatch.kind === 'name'
+        ? 'port_owned_by_other_service'
+        : 'primary_incompatible'
+    : 'proxy_healthy';
 
   return toolTextResult(
     {
       mcp: {
         name: SERVER_NAME,
         version: SERVER_VERSION,
+        protocolVersion: EXTENSION_PROTOCOL_VERSION,
         bridgeRole,
         proxyingToPrimary: !mismatch,
+        proxyState,
+        process: summarizeProcess(),
       },
       primaryBridge: {
         ok: health.ok,
         status: health.status,
         health: health.payload || null,
         error: health.error || null,
+        process: primaryProcess,
+        portOwner,
       },
       expectedChromeExtension: EXPECTED_CHROME_EXTENSION_INFO,
       connectedClients: Array.isArray(clients.payload?.connectedClients)
@@ -4010,13 +4232,14 @@ const proxyBrowserStatus = async () => {
         : [],
       browserWake: {
         attempted: false,
-        reason: mismatch ? 'primary-mcp-version-mismatch' : 'proxy-mode',
+        reason: mismatch ? proxyState : 'proxy-mode',
       },
       problem: mismatch
         ? {
             code: 'primary_bridge_version_mismatch',
             message: primaryBridgeMismatchMessage(mismatch),
             mismatch,
+            portOwner,
           }
         : null,
       installCheck:
@@ -4052,10 +4275,25 @@ const bridgeServer = createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && url.pathname === '/healthz') {
+    const processInfo = summarizeProcess();
     sendJson(res, 200, {
       ok: true,
       name: SERVER_NAME,
       version: SERVER_VERSION,
+      protocolVersion: EXTENSION_PROTOCOL_VERSION,
+      mcpProtocolVersion: PROTOCOL_VERSION,
+      bridgeRole,
+      host: cli.host,
+      port: cli.port,
+      pid: processInfo.pid,
+      ppid: processInfo.ppid,
+      platform: processInfo.platform,
+      nodeVersion: processInfo.nodeVersion,
+      uptimeMs: processInfo.uptimeMs,
+      startedAt: processInfo.startedAt,
+      cwd: processInfo.cwd,
+      argv: processInfo.argv,
+      process: processInfo,
       clients: getLiveClients().length,
     });
     return;
@@ -4066,6 +4304,13 @@ const bridgeServer = createServer(async (req, res) => {
     const connectedClients = getLiveClients().map(summarizeClient);
     sendAgentJson(res, 200, {
       expectedChromeExtension: EXPECTED_CHROME_EXTENSION_INFO,
+      mcp: {
+        name: SERVER_NAME,
+        version: SERVER_VERSION,
+        protocolVersion: EXTENSION_PROTOCOL_VERSION,
+        bridgeRole,
+        process: summarizeProcess(),
+      },
       connectedClients,
       ...(diagnostics
         ? {

@@ -114,6 +114,14 @@ Operational guidance:
   `bridgeHealth.status="command_channel_stuck"` as a page/extension channel
   problem: prefer `gemini_reload_gemini_tabs` or `gemini_browser_status`
   self-heal before asking for manual Chrome extension reload.
+- Multiple Gemini CLI sessions can create more than one MCP process. If
+  `gemini_browser_status` reports `mcp.bridgeRole="proxy"`, inspect
+  `mcp.proxyState`, `problem`, `primaryBridge.process`, and
+  `primaryBridge.portOwner` before giving recovery advice. `proxy_healthy` is
+  not an error. For `primary_incompatible`, `primary_unreachable`, or
+  `port_owned_by_other_service`, report the PID/version/path when available and
+  recommend closing/restarting the stale Gemini CLI/exporter process; do not
+  ask the user to kill processes blindly.
 - On slow Windows machines, prefer background jobs over long synchronous tool
   loops. `gemini_reexport_chats` is the stable path for a known list of chatIds:
   it navigates and saves one chat at a time, writes an incremental JSON report,
