@@ -101,6 +101,9 @@ test('MCP implementa afinidade confiável por claim de aba', () => {
   assert.match(contentSource, /tab-claim-v1/);
   assert.match(contentSource, /command\.type === 'claim-tab'/);
   assert.match(contentSource, /command\.type === 'release-tab-claim'/);
+  assert.match(contentSource, /isExtensionContextInvalidatedError/);
+  assert.match(contentSource, /reason: 'extension-context-invalidated'/);
+  assert.match(contentSource, /localOnly: true/);
   assert.match(contentSource, /TAB_CLAIM_TITLE_PREFIX_RE/);
   assert.match(backgroundSource, /chrome\.tabs\.group/);
   assert.match(backgroundSource, /chrome\.tabGroups\.update/);

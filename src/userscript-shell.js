@@ -409,6 +409,8 @@
     typeof chrome !== 'undefined' &&
     !!chrome.runtime?.id &&
     typeof chrome.runtime.sendMessage === 'function';
+  const isExtensionContextInvalidatedError = (err) =>
+    /Extension context invalidated/i.test(String(err?.message || err || ''));
   const trustedHtmlPolicy = (() => {
     try {
       if (!pageWindow.trustedTypes?.createPolicy) return null;
@@ -2117,10 +2119,20 @@
     const active = state.tabClaim;
     let response = null;
     if (notifyServiceWorker && (active?.claimId || claimId)) {
-      response = await releaseTabClaimViaExtension({
-        claimId: claimId || active?.claimId,
-        reason,
-      });
+      try {
+        response = await releaseTabClaimViaExtension({
+          claimId: claimId || active?.claimId,
+          reason,
+        });
+      } catch (err) {
+        if (!isExtensionContextInvalidatedError(err)) throw err;
+        response = {
+          ok: false,
+          claimId: claimId || active?.claimId || null,
+          reason: 'extension-context-invalidated',
+          localOnly: true,
+        };
+      }
     }
     if (!claimId || !active?.claimId || active.claimId === claimId || response?.ok) {
       clearLocalTabClaim();
@@ -2135,6 +2147,10 @@
     const delayMs = Math.max(0, expiresAt - Date.now() + 250);
     state.tabClaimExpiryTimer = setTimeout(() => {
       releaseCurrentTabClaim({ reason: 'claim-expired' }).catch((err) => {
+        if (isExtensionContextInvalidatedError(err)) {
+          clearLocalTabClaim();
+          return;
+        }
         warn('Falha ao liberar claim expirada da aba.', err);
         clearLocalTabClaim();
       });
