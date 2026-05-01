@@ -326,6 +326,14 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   e `/agent/clients?diagnostics=1` expõem `bridgeHealth` por cliente
   (`healthy`, `degraded`, `stale`, `version_mismatch`,
   `command_channel_stuck`) com ação recomendada antes de pedir reload manual.
+  `gemini_browser_status` também retorna `extensionReadiness`, separando
+  service worker (`GET_EXTENSION_INFO`/`source: "service-worker"`), content
+  script conectado, aba Gemini, build stamp esperado/em execução, resultado do
+  reload automático e diagnóstico do top-bar (`page.topBar`). Só pedir reload
+  manual do card da extensão quando `extensionReadiness.reload.manualReloadRequired`
+  estiver true ou quando o status provar que o navegador ainda aponta para uma
+  pasta/perfil antigo depois do self-heal. Falha de top-bar não bloqueia
+  export por hotkey/API de debug se o content script está vivo.
   Antes de executar tools que dependem do navegador, o MCP passa por
   `ensureChromeExtensionReady()` em `src/chrome-extension-guard.mjs`: lê
   `bridge-version.json`, chama o comando interno `get-extension-info`, compara

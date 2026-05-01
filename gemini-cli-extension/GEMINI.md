@@ -119,8 +119,10 @@ Operational guidance:
   often asks for status first, and that first status call should be enough to
   open the configured browser and, when an old Chrome/Edge extension build is
   connected, request the extension's own `RELOAD_SELF` flow. Inspect
-  `selfHeal.reloadAttempts`, `selfHeal.code`, `bridgeHealth`, and
-  `connectedClients` before asking the user to do anything manually.
+  `selfHeal.reloadAttempts`, `selfHeal.code`, `extensionReadiness`,
+  `bridgeHealth`, and `connectedClients` before asking the user to do anything
+  manually. `extensionReadiness` separates service worker, content script,
+  Gemini tab, build stamp, reload outcome, and top-bar status.
 - Treat `gemini_browser_status.ready=false`, a non-null `blockingIssue`, or
   zero `connectedClients` as a blocker for browser-dependent work. Do not keep
   calling `gemini_download_chat`, vault repair, or export tools in a loop while
@@ -129,7 +131,9 @@ Operational guidance:
   call `gemini_reload_gemini_tabs`. Only ask for manual reload of the
   `chrome://extensions`/`edge://extensions` card after the automatic self-heal
   fails or when the status says the loaded unpacked extension still points at an
-  old/wrong `browser-extension` folder.
+  old/wrong `browser-extension` folder. A top-bar failure is not by itself a
+  reason to stop: if the content script is connected, hotkey/debug modal export
+  can still work.
 - Bridge protocol v2 separates liveness from heavy inventory. The content
   script sends lightweight `/bridge/heartbeat`, posts full conversation lists
   through `/bridge/snapshot` only when needed, and prefers `/bridge/events`

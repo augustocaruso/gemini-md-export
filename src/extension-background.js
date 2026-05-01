@@ -17,6 +17,7 @@ const extensionInfo = (sender = {}) => {
     extensionId: chrome.runtime.id,
     manifestVersion: manifest.manifest_version,
     buildStamp: '__BUILD_STAMP__',
+    source: 'service-worker',
     tabId: tab?.id ?? null,
     windowId: tab?.windowId ?? null,
     isActiveTab: tab?.active ?? null,

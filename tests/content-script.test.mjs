@@ -388,7 +388,10 @@ test('content script não contém fallback de captura visual', async () => {
 });
 
 test('content script mantém caminhos frequentes leves', async () => {
-  const source = await readFile(new URL('../src/userscript-shell.js', import.meta.url), 'utf8');
+  const [source, backgroundScript] = await Promise.all([
+    readFile(new URL('../src/userscript-shell.js', import.meta.url), 'utf8'),
+    readFile(new URL('../src/extension-background.js', import.meta.url), 'utf8'),
+  ]);
   const heartbeatPayload = source.match(
     /const buildBridgeHeartbeatPayload = \(\) => \([\s\S]*?\n  \}\);\n\n  const buildBridgeSnapshotPayload/,
   )?.[0];
@@ -409,6 +412,12 @@ test('content script mantém caminhos frequentes leves', async () => {
     'heartbeat não deve coletar inventário completo de conversas',
   );
   assert.match(source, /const buildBridgePageSummary = \(\) => \(\{[\s\S]*conversationDomTurnCount\(document\)/);
+  assert.match(source, /topBar:\s*buildTopBarDiagnostics\(\)/);
+  assert.match(source, /const collectTopBarDiagnosticCandidates = \(\{/);
+  assert.match(source, /missing_on_conversation/);
+  assert.match(source, /extensionSendMessageWithRetry/);
+  assert.match(source, /lastExtensionPingAttempts/);
+  assert.match(backgroundScript, /source:\s*'service-worker'/);
   assert.match(snapshotPayload, /collectConversationLinkSnapshot\(\)/);
   assert.match(source, /new EventSource\(url\)/);
   assert.match(source, /\/bridge\/snapshot/);

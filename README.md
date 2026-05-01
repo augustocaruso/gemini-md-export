@@ -159,6 +159,11 @@ O MCP também deve ficar silencioso por padrão. Checagens internas de
 versão/protocolo, reload e wake do navegador só aparecem no terminal com
 `GEMINI_MCP_DEBUG=true` ou `GEMINI_MCP_LOG_LEVEL=info`; no uso normal, as
 tools retornam JSON compacto e diagnóstico detalhado fica nos status/relatórios.
+`gemini_browser_status` inclui `extensionReadiness`, separando service worker,
+content script, aba Gemini, build stamp esperado/em execução, resultado do
+reload automático e diagnóstico do top-bar. Só peça reload manual do card da
+extensão unpacked quando `extensionReadiness.reload.manualReloadRequired=true`
+ou quando o status indicar perfil/pasta errados após o self-heal automático.
 
 Use `GEMINI_MCP_BROWSER=edge` ou `chrome`/`brave`/`dia` para fixar o navegador.
 O argumento `--profile-directory` só é enviado quando
@@ -169,6 +174,19 @@ diagnosticar sem acionar nenhuma tool, rode
 `hook-last-run.json`/`hook-browser-launch.json`. O prelaunch pode ser
 desativado com `GEMINI_MCP_HOOK_LAUNCH_BROWSER=false`; o timeout curto do
 bridge é `GEMINI_MCP_HOOK_BRIDGE_TIMEOUT_MS` (default 180ms).
+
+Smoke manual rápido no DevTools da aba Gemini:
+
+```js
+__geminiMdExportDebug.snapshot().bridgeStatus()
+__geminiMdExportDebug.findTopBar()
+__geminiMdExportDebug.openExportModal()
+```
+
+Confira se `buildStamp` bate com o esperado em `gemini_browser_status`, se
+`findTopBar().matchedBy` não é `null` numa conversa e se o modal consegue
+trocar destino/salvar via bridge. Se o MCP estiver ausente, o fallback esperado
+é Downloads com aviso em português no modal/toast.
 
 Durante a instalação no Windows, o instalador tenta registrar a extensão pelo
 comando oficial `gemini extensions install https://www.github.com/augustocaruso/gemini-md-export.git

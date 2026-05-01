@@ -243,9 +243,9 @@ somente o que falta e retomar quando interromper.
   apenas dos faltantes, relatório incremental e retomada por `resumeReportFile`.
 - Ao final, o usuário deve saber se acabou de verdade ou se precisa retomar.
 
-## Proposta v0.4.1 — Resiliência da extensão Chrome
+## v0.4.1 — Resiliência da extensão Chrome
 
-Status: proposta.
+Status: implementada.
 
 Objetivo: reduzir casos em que a extensão fica carregada, mas antiga, lenta ou
 sem responder ao MCP.
@@ -258,19 +258,25 @@ sem responder ao MCP.
   - aba Gemini conectada;
   - build stamp esperado;
   - build stamp em execução.
+  - entregue via `gemini_browser_status.extensionReadiness` e
+    `gemini_diagnose_environment.extension.readiness`.
 - Tornar o reload automático mais visível no status:
   - quando tentou;
   - quando funcionou;
   - quando o Chrome ainda manteve versão antiga;
   - quando exige clique manual no card da extensão unpacked.
+  - entregue via `extensionReadiness.reload.*`.
 - Adicionar timeout/recuperação para ping da extensão:
   - retry curto;
   - erro acionável;
   - sugestão de reload somente depois da tentativa automática.
+  - entregue no content script com retry curto e métricas
+    `metrics.extensionPing`.
 - Melhorar diagnóstico do top-bar:
   - separar ausência normal em home/settings de quebra real em conversa;
   - incluir candidatos DOM quando a URL for conversa válida;
   - manter o console silencioso fora de falha real.
+  - entregue em `page.topBar` e no warning único após o grace period.
 - Criar smoke manual documentado para DevTools:
   - build stamp;
   - `__geminiMdExportDebug.findTopBar()`;
@@ -278,6 +284,7 @@ sem responder ao MCP.
   - seletor de pasta;
   - save via bridge;
   - fallback para Downloads.
+  - entregue no README/contexto da extensão Gemini CLI.
 
 ### Critérios de aceite
 

@@ -1025,6 +1025,143 @@ const clientMatchesExpectedInfo = (client) =>
     String(client?.buildStamp || client?.page?.buildStamp || '') ===
       EXPECTED_CHROME_EXTENSION_INFO.buildStamp);
 
+const compactUnique = (items) => [
+  ...new Set(items.filter((item) => item !== null && item !== undefined && item !== '')),
+];
+
+const extensionMismatchForClient = (client, expected = EXPECTED_CHROME_EXTENSION_INFO) => {
+  if (!client) return { kind: 'missing_client' };
+  if (Number(client.protocolVersion) !== Number(expected.protocolVersion)) {
+    return {
+      kind: 'protocol',
+      actual: client.protocolVersion ?? null,
+      expected: expected.protocolVersion,
+    };
+  }
+  if (String(client.extensionVersion || '') !== String(expected.extensionVersion || '')) {
+    return {
+      kind: 'version',
+      actual: client.extensionVersion ?? null,
+      expected: expected.extensionVersion,
+    };
+  }
+  const actualBuildStamp = client.buildStamp || client.page?.buildStamp || null;
+  if (expected.buildStamp && String(actualBuildStamp || '') !== String(expected.buildStamp)) {
+    return {
+      kind: 'build',
+      actual: actualBuildStamp,
+      expected: expected.buildStamp,
+    };
+  }
+  return null;
+};
+
+const buildExtensionReadiness = ({
+  connectedClients = [],
+  matchingClients = [],
+  selfHeal = null,
+  expected = EXPECTED_CHROME_EXTENSION_INFO,
+} = {}) => {
+  const clients = Array.isArray(connectedClients) ? connectedClients : [];
+  const matching = Array.isArray(matchingClients) ? matchingClients : [];
+  const serviceWorkerInfo = selfHeal?.info || null;
+  const serviceWorkerSource = serviceWorkerInfo?.source || null;
+  const serviceWorkerConfirmed =
+    serviceWorkerInfo?.ok === true && serviceWorkerSource !== 'heartbeat-fallback';
+  const serviceWorkerStatus = serviceWorkerConfirmed
+    ? 'alive'
+    : selfHeal?.attempted && selfHeal?.ok === false
+      ? 'unreachable'
+      : serviceWorkerSource === 'heartbeat-fallback'
+        ? 'unknown_heartbeat_fallback'
+        : 'unknown';
+  const mismatches = clients
+    .map((client) => ({
+      clientId: client.clientId,
+      tabId: client.tabId ?? null,
+      windowId: client.windowId ?? null,
+      isActiveTab: client.isActiveTab ?? null,
+      mismatch: extensionMismatchForClient(client, expected),
+      extensionVersion: client.extensionVersion ?? null,
+      protocolVersion: client.protocolVersion ?? null,
+      buildStamp: client.buildStamp ?? client.page?.buildStamp ?? null,
+    }))
+    .filter((item) => item.mismatch);
+  const reloadAttempts = Number(selfHeal?.reloadAttempts || 0);
+  const reloadWorked = selfHeal?.ok === true && reloadAttempts > 0;
+  const manualReloadRequired =
+    selfHeal?.ok === false &&
+    [
+      'chrome_extension_version_mismatch',
+      'chrome_extension_build_mismatch',
+      'chrome_extension_protocol_mismatch',
+      'chrome_extension_reload_failed',
+      'chrome_extension_reload_timeout',
+    ].includes(selfHeal.code || '');
+  const status =
+    clients.length === 0
+      ? 'no_content_script'
+      : matching.length === 0
+        ? 'version_or_build_mismatch'
+        : serviceWorkerStatus === 'unreachable'
+          ? 'service_worker_unreachable'
+          : 'ready';
+
+  return {
+    status,
+    expected,
+    serviceWorker: {
+      status: serviceWorkerStatus,
+      source: serviceWorkerSource,
+      version: serviceWorkerInfo?.extensionVersion || serviceWorkerInfo?.version || null,
+      protocolVersion: serviceWorkerInfo?.protocolVersion ?? null,
+      buildStamp: serviceWorkerInfo?.buildStamp || null,
+      lastError: selfHeal?.ok === false ? selfHeal.error || null : null,
+    },
+    contentScript: {
+      status: clients.length > 0 ? 'connected' : 'missing',
+      connectedClientCount: clients.length,
+      matchingClientCount: matching.length,
+    },
+    geminiTab: {
+      status: clients.length > 0 ? 'connected' : 'missing',
+      activeClientCount: clients.filter((client) => client.isActiveTab === true).length,
+      tabIds: compactUnique(clients.map((client) => client.tabId ?? null)),
+      windowIds: compactUnique(clients.map((client) => client.windowId ?? null)),
+    },
+    buildStamp: {
+      expected: expected.buildStamp || null,
+      running: compactUnique(clients.map((client) => client.buildStamp || client.page?.buildStamp || null)),
+    },
+    reload: {
+      attempted: selfHeal?.attempted === true && reloadAttempts > 0,
+      selfHealAttempted: selfHeal?.attempted === true,
+      ok: selfHeal?.ok ?? null,
+      attempts: reloadAttempts,
+      worked: reloadWorked,
+      manualReloadRequired,
+      message: manualReloadRequired
+        ? 'O reload automático foi tentado ou não conseguiu resolver; agora vale pedir reload manual no card da extensão unpacked.'
+        : reloadWorked
+          ? 'Reload automático funcionou; a extensão voltou com versão/protocolo/build esperados.'
+          : 'Nenhum reload automático foi necessário.',
+    },
+    mismatches,
+    topBar: {
+      statusByClient: clients.map((client) => ({
+        clientId: client.clientId,
+        tabId: client.tabId ?? null,
+        status: client.page?.topBar?.status || null,
+        route: client.page?.topBar?.route || null,
+        matchedBy: client.page?.topBar?.matchedBy || null,
+        warning: client.page?.topBar?.warning || null,
+        candidateCount: client.page?.topBar?.topBarCandidateCount ?? null,
+        visibleCandidateCount: client.page?.topBar?.visibleTopBarCandidateCount ?? null,
+      })),
+    },
+  };
+};
+
 const environmentNextAction = ({ processDiagnostics, clients, matchingClients }) => {
   if (processDiagnostics?.problem) {
     return {
@@ -1110,6 +1247,11 @@ const buildEnvironmentDiagnostics = async () => {
       primaryClientsFetch: clientState.primaryClientsFetch,
       connectedClientCount: connectedClients.length,
       matchingClientCount: matchingClients.length,
+      readiness: buildExtensionReadiness({
+        connectedClients,
+        matchingClients,
+        selfHeal: { attempted: false, reason: 'not-run-in-environment-diagnostics' },
+      }),
       connectedClients,
     },
     export: {
@@ -5154,6 +5296,12 @@ const rawTools = [
 
       const matchingClients = liveClients.filter(clientMatchesExpectedBrowserExtension);
       const summarizedClients = liveClients.map(summarizeClient);
+      const summarizedMatchingClients = matchingClients.map(summarizeClient);
+      const extensionReadiness = buildExtensionReadiness({
+        connectedClients: summarizedClients,
+        matchingClients: summarizedMatchingClients,
+        selfHeal,
+      });
       return toolTextResult({
         ready: matchingClients.length > 0,
         blockingIssue:
@@ -5165,6 +5313,8 @@ const rawTools = [
         expectedChromeExtension: EXPECTED_CHROME_EXTENSION_INFO,
         matchingClientCount: matchingClients.length,
         connectedClients: summarizedClients,
+        extensionReadiness,
+        manualReloadRequired: extensionReadiness.reload.manualReloadRequired,
         bridgeHealth: summarizedClients.map((client) => ({
           clientId: client.clientId,
           tabId: client.tabId,

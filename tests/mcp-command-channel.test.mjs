@@ -45,9 +45,13 @@ test('browser_status expõe saúde da bridge MCP/Chrome', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
 
   assert.match(source, /const buildBridgeHealth = \(client/);
+  assert.match(source, /const buildExtensionReadiness = \(\{/);
   assert.match(source, /command_channel_stuck/);
   assert.match(source, /heartbeat_delayed/);
   assert.match(source, /bridgeHealth/);
+  assert.match(source, /extensionReadiness/);
+  assert.match(source, /serviceWorker/);
+  assert.match(source, /contentScript/);
   assert.match(source, /diagnostics/);
 });
 
@@ -68,6 +72,8 @@ test('browser_status diagnostica e tenta self-heal sem depender do guard wrapper
   assert.match(statusBlock, /ensureBrowserExtensionReady/);
   assert.match(statusBlock, /allowReload:\s*args\.allowReload !== false/);
   assert.match(statusBlock, /reloadWaitMs/);
+  assert.match(statusBlock, /buildExtensionReadiness/);
+  assert.match(statusBlock, /manualReloadRequired/);
   assert.doesNotMatch(guardedBlock, /gemini_browser_status/);
 });
 

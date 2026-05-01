@@ -91,6 +91,7 @@
     'top-bar-actions',
     '[data-test-id="top-bar-actions"]',
   ];
+  const TOP_BAR_NOT_FOUND_GRACE_MS = 4000;
   const OGB_SELECTORS = [
     '.boqOnegoogleliteOgbOneGoogleBar',
     '#gb',
@@ -282,6 +283,75 @@
       matchedBy: `top-bar-actions rightmost @ right=${Math.round(pick.rect.right)} of ${all.length} candidate(s)`,
     };
   };
+  const summarizeDiagnosticRect = (rect) => ({
+    left: Math.round(rect.left),
+    top: Math.round(rect.top),
+    right: Math.round(rect.right),
+    width: Math.round(rect.width),
+    height: Math.round(rect.height),
+  });
+  const summarizeDiagnosticElement = (el, selector = null) => {
+    const rect = el.getBoundingClientRect();
+    return {
+      selector,
+      tag: el.tagName.toLowerCase(),
+      id: el.id || null,
+      className: String(el.className || '').slice(0, 80) || null,
+      label: controlLabel(el).slice(0, 80) || null,
+      visible: rect.width > 0 && rect.height > 0,
+      rect: summarizeDiagnosticRect(rect),
+    };
+  };
+  const collectTopBarDiagnosticCandidates = ({ limit = 8, includeActions = false } = {}) => {
+    const seen = new Set();
+    const topBars = [];
+    for (const selector of TOP_BAR_SELECTORS) {
+      document.querySelectorAll(selector).forEach((el) => {
+        if (seen.has(el)) return;
+        seen.add(el);
+        topBars.push(summarizeDiagnosticElement(el, selector));
+      });
+    }
+
+    const controls = includeActions
+      ? Array.from(document.querySelectorAll('button,[role="button"],a[role="button"]'))
+          .filter((el) => el.id !== BUTTON_ID && !el.closest?.(`#${BUTTON_SLOT_ID}`))
+          .map((el) => ({ el, rect: visibleRect(el), label: controlLabel(el) }))
+          .filter(
+            ({ rect }) => rect && (rect.top <= 120 || rect.left >= window.innerWidth * 0.55),
+          )
+      : [];
+
+    return {
+      selectorAttempts: TOP_BAR_SELECTORS,
+      topBarCandidateCount: topBars.length,
+      visibleTopBarCandidateCount: topBars.filter((item) => item.visible).length,
+      topBars: topBars.slice(0, limit),
+      actionControlCount: controls.length,
+      actionControls: controls
+        .slice(0, limit)
+        .map(({ el }) => summarizeDiagnosticElement(el, 'button,[role="button"],a[role="button"]')),
+    };
+  };
+  const buildTopBarDiagnostics = ({ includeCandidates = false } = {}) => {
+    const onConversationUrl = !!extractChatId(location.pathname);
+    const found = findTopBar();
+    const candidates = collectTopBarDiagnosticCandidates({
+      limit: includeCandidates ? 12 : 4,
+      includeActions: includeCandidates || (!found && onConversationUrl),
+    });
+    return {
+      status: found ? 'found' : onConversationUrl ? 'missing_on_conversation' : 'not_expected_here',
+      route: onConversationUrl ? 'conversation' : isNotebookPage() ? 'notebook' : 'other',
+      matchedBy: found?.matchedBy || null,
+      warning:
+        !found && onConversationUrl
+          ? 'top-bar da conversa não encontrado; hotkey/API de debug ainda podem abrir o modal'
+          : null,
+      graceMs: TOP_BAR_NOT_FOUND_GRACE_MS,
+      ...candidates,
+    };
+  };
   const SIDEBAR_ITEM_SELECTOR = 'conversations-list [data-test-id="conversation"]';
   const NOTEBOOK_CHAT_ROW_SELECTOR = 'project-chat-history project-chat-row';
   const NOTEBOOK_CHAT_HISTORY_SELECTOR =
@@ -445,6 +515,9 @@
     lastHeartbeatStartedAt: 0,
     lastHeartbeatDurationMs: null,
     lastExtensionPingAt: 0,
+    lastExtensionPingOkAt: 0,
+    lastExtensionPingAttempts: 0,
+    lastExtensionPingError: null,
     heartbeatInFlight: false,
     snapshotInFlight: false,
     eventSource: null,
@@ -1849,6 +1922,32 @@
       `Tempo esgotado ao falar com a extensão (${message?.type || 'mensagem'}).`,
     );
 
+  const extensionSendMessageWithRetry = async (
+    message,
+    { timeoutMs = 2500, attempts = 2, retryDelayMs = 180 } = {},
+  ) => {
+    let lastError = null;
+    const totalAttempts = Math.max(1, Math.min(4, Number(attempts) || 1));
+    for (let attempt = 1; attempt <= totalAttempts; attempt += 1) {
+      try {
+        const response = await extensionSendMessage(message, { timeoutMs });
+        return { ok: true, response, attempts: attempt };
+      } catch (err) {
+        lastError = err;
+        if (attempt < totalAttempts) {
+          await sleep(retryDelayMs * attempt);
+        }
+      }
+    }
+    const error = new Error(
+      `${lastError?.message || 'Não consegui falar com a extensão.'} ` +
+        `Tentei ${totalAttempts} vez(es).`,
+    );
+    error.cause = lastError;
+    error.attempts = totalAttempts;
+    throw error;
+  };
+
   const fetchWithTimeout = async (url, options = {}, timeoutMs = 10000) => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -2049,6 +2148,7 @@
     isActiveTab: bridgeState.isActiveTab,
     protocolVersion: bridgeState.protocolVersion,
     buildStamp: bridgeState.buildStamp,
+    topBar: buildTopBarDiagnostics(),
   });
 
   const buildBridgeHeartbeatPayload = () => ({
@@ -2082,6 +2182,16 @@
       lastHeartbeatDurationMs: bridgeState.lastHeartbeatDurationMs,
       lastError: bridgeState.lastError,
       eventsConnected: bridgeState.eventsConnected,
+      extensionPing: {
+        lastAttemptAt: bridgeState.lastExtensionPingAt
+          ? new Date(bridgeState.lastExtensionPingAt).toISOString()
+          : null,
+        lastOkAt: bridgeState.lastExtensionPingOkAt
+          ? new Date(bridgeState.lastExtensionPingOkAt).toISOString()
+          : null,
+        lastAttempts: bridgeState.lastExtensionPingAttempts,
+        lastError: bridgeState.lastExtensionPingError,
+      },
     },
     page: {
       ...buildBridgePageSummary(),
@@ -3006,7 +3116,11 @@
     }
 
     if (command.type === 'get-extension-info') {
-      const response = await extensionSendMessage({ type: 'GET_EXTENSION_INFO' });
+      const ping = await extensionSendMessageWithRetry(
+        { type: 'GET_EXTENSION_INFO' },
+        { timeoutMs: 3500, attempts: 2, retryDelayMs: 200 },
+      );
+      const response = ping.response;
       if (response?.ok && response.protocolVersion !== undefined) {
         bridgeState.protocolVersion = response.protocolVersion;
       }
@@ -3014,7 +3128,12 @@
         bridgeState.extensionVersion = response.extensionVersion || response.version;
       }
       if (response?.buildStamp) bridgeState.buildStamp = response.buildStamp;
-      return response || { ok: false, reason: 'empty-extension-info-response' };
+      return {
+        ...(response || { ok: false, reason: 'empty-extension-info-response' }),
+        contentScript: true,
+        serviceWorker: response?.ok === true,
+        attempts: ping.attempts,
+      };
     }
 
     if (command.type === 'reload-extension-self') {
@@ -5460,11 +5579,15 @@
       return;
     }
     try {
-      const extensionContext = await extensionSendMessage(
+      const ping = await extensionSendMessageWithRetry(
         { type: 'gemini-md-export/ping' },
-        { timeoutMs: 2500 },
+        { timeoutMs: 2500, attempts: 2, retryDelayMs: 160 },
       );
+      const extensionContext = ping.response;
       bridgeState.lastExtensionPingAt = Date.now();
+      bridgeState.lastExtensionPingOkAt = bridgeState.lastExtensionPingAt;
+      bridgeState.lastExtensionPingAttempts = ping.attempts;
+      bridgeState.lastExtensionPingError = null;
       if (extensionContext?.tabId !== undefined) bridgeState.tabId = extensionContext.tabId;
       if (extensionContext?.windowId !== undefined) bridgeState.windowId = extensionContext.windowId;
       if (extensionContext?.isActiveTab !== undefined) {
@@ -5476,6 +5599,9 @@
       }
       if (extensionContext?.buildStamp) bridgeState.buildStamp = extensionContext.buildStamp;
     } catch (err) {
+      bridgeState.lastExtensionPingAt = Date.now();
+      bridgeState.lastExtensionPingAttempts = err?.attempts || 1;
+      bridgeState.lastExtensionPingError = err?.message || String(err);
       bridgeState.lastError = err?.message || String(err);
     }
   };
@@ -5739,7 +5865,15 @@
     bridgeState.clientId = randomId();
 
     try {
-      const response = await extensionSendMessage({ type: 'gemini-md-export/ping' });
+      const ping = await extensionSendMessageWithRetry(
+        { type: 'gemini-md-export/ping' },
+        { timeoutMs: 3500, attempts: 2, retryDelayMs: 200 },
+      );
+      const response = ping.response;
+      bridgeState.lastExtensionPingAt = Date.now();
+      bridgeState.lastExtensionPingOkAt = bridgeState.lastExtensionPingAt;
+      bridgeState.lastExtensionPingAttempts = ping.attempts;
+      bridgeState.lastExtensionPingError = null;
       if (response?.tabId !== undefined) bridgeState.tabId = response.tabId;
       if (response?.windowId !== undefined) bridgeState.windowId = response.windowId;
       if (response?.isActiveTab !== undefined) bridgeState.isActiveTab = response.isActiveTab;
@@ -5747,6 +5881,9 @@
       if (response?.protocolVersion !== undefined) bridgeState.protocolVersion = response.protocolVersion;
       if (response?.buildStamp) bridgeState.buildStamp = response.buildStamp;
     } catch (err) {
+      bridgeState.lastExtensionPingAt = Date.now();
+      bridgeState.lastExtensionPingAttempts = err?.attempts || 1;
+      bridgeState.lastExtensionPingError = err?.message || String(err);
       warn('Falha ao obter contexto da extensão.', err);
     }
 
@@ -6321,7 +6458,7 @@
     pendingTimer: 0,
     lastRunAt: 0,
   };
-  const NOT_FOUND_GRACE_MS = 12000;
+  const NOT_FOUND_GRACE_MS = TOP_BAR_NOT_FOUND_GRACE_MS;
   const INJECT_THROTTLE_MS = 250;
 
   const scheduleInjectButton = () => {
@@ -6381,22 +6518,12 @@
         Date.now() - injectState.notFoundSince >= NOT_FOUND_GRACE_MS;
       if (stuck) {
         injectState.notFoundWarned = true;
-        const all = [];
-        for (const sel of TOP_BAR_SELECTORS) {
-          document.querySelectorAll(sel).forEach((el) => all.push(el));
-        }
-        const actionCount = document.querySelectorAll(
-          'button,[role="button"],a[role="button"]',
-        ).length;
+        const diagnostics = buildTopBarDiagnostics({ includeCandidates: true });
         warn(
           `top-bar não encontrado após ${Math.round(
             NOT_FOUND_GRACE_MS / 1000,
-          )}s numa URL de conversa. Candidatos no DOM:`,
-          all.length,
-          'controles visíveis/possíveis:',
-          actionCount,
-          'seletores tentados:',
-          TOP_BAR_SELECTORS,
+          )}s numa URL de conversa. Diagnóstico:`,
+          diagnostics,
         );
       }
       return;
@@ -6466,6 +6593,12 @@
         extensionVersion: bridgeState.extensionVersion,
         buildStamp: bridgeState.buildStamp,
         lastError: bridgeState.lastError,
+        extensionPing: {
+          lastAttemptAt: bridgeState.lastExtensionPingAt || null,
+          lastOkAt: bridgeState.lastExtensionPingOkAt || null,
+          lastAttempts: bridgeState.lastExtensionPingAttempts,
+          lastError: bridgeState.lastExtensionPingError,
+        },
         bridgeBaseUrl: BRIDGE_BASE_URL,
         lastHeartbeatAt: bridgeState.lastHeartbeatAt || null,
         lastHeartbeatDurationMs: bridgeState.lastHeartbeatDurationMs,
