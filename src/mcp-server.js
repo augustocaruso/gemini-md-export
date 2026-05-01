@@ -70,6 +70,17 @@ const FLIGHT_RECORDER_MEMORY_LIMIT = Math.max(
   Math.min(1000, Number(process.env.GEMINI_MCP_FLIGHT_RECORDER_MEMORY_LIMIT || 200)),
 );
 const CLIENT_STALE_MS = 45_000;
+const DEFAULT_BRIDGE_KEEP_ALIVE_MS = Math.max(
+  1000,
+  Math.min(
+    24 * 60 * 60_000,
+    Number(
+      process.env.GEMINI_MD_EXPORT_BRIDGE_KEEP_ALIVE_MS ||
+        process.env.GEMINI_MCP_BRIDGE_KEEP_ALIVE_MS ||
+        15 * 60_000,
+    ),
+  ),
+);
 const TAB_CLAIM_DEFAULT_TTL_MS = Math.max(
   60_000,
   Math.min(24 * 60 * 60_000, Number(process.env.GEMINI_MCP_TAB_CLAIM_TTL_MS || 45 * 60_000)),
@@ -256,12 +267,17 @@ const pendingCommands = new Map();
 const exportJobs = new Map();
 const tabClaims = new Map();
 const sessionClaims = new Map();
+const CLI_BIN_PATH = resolve(ROOT, 'bin', 'gemini-md-export.mjs');
 let configuredExportDir = DEFAULT_EXPORT_DIR;
 let shuttingDown = false;
 let bridgeRole = 'starting';
 let bridgeListening = false;
 let bridgeStartupSettled = false;
 let bridgeStartupResolve;
+let activeBridgeRequests = 0;
+let lastBridgeActivityAt = Date.now();
+let lastChromeHeartbeatAt = 0;
+let idleShutdownTimer = null;
 const bridgeStartup = new Promise((resolveStartup) => {
   bridgeStartupResolve = resolveStartup;
 });
@@ -386,6 +402,90 @@ const waitForBridgeStartup = async (timeoutMs = 1000) => {
   ]);
 };
 
+const activeExportJobs = () =>
+  Array.from(exportJobs.values()).filter((job) => !isTerminalExportJobStatus(job.status));
+
+const touchBridgeActivity = () => {
+  lastBridgeActivityAt = Date.now();
+};
+
+const bridgeIdleLifecycleSnapshot = () => {
+  const now = Date.now();
+  const activeJobs = activeExportJobs();
+  const liveClientCount = getLiveClients().length;
+  const heartbeatAgeMs = lastChromeHeartbeatAt ? now - lastChromeHeartbeatAt : null;
+  const idleForMs = Math.max(0, now - lastBridgeActivityAt);
+  const blockedBy = [];
+  if (activeBridgeRequests > 0) blockedBy.push('active_request');
+  if (activeJobs.length > 0) blockedBy.push('active_job');
+  if (liveClientCount > 0) blockedBy.push('recent_extension_heartbeat');
+
+  return {
+    enabled: cli.exitWhenIdle === true,
+    keepAliveMs: cli.keepAliveMs,
+    idleForMs,
+    activeRequestCount: activeBridgeRequests,
+    activeJobCount: activeJobs.length,
+    liveClientCount,
+    lastActivityAt: new Date(lastBridgeActivityAt).toISOString(),
+    lastChromeHeartbeatAt: lastChromeHeartbeatAt
+      ? new Date(lastChromeHeartbeatAt).toISOString()
+      : null,
+    heartbeatAgeMs,
+    blockedBy,
+    exitsWhenIdle: cli.exitWhenIdle === true && blockedBy.length === 0,
+    remainingMs:
+      cli.exitWhenIdle === true && blockedBy.length === 0
+        ? Math.max(0, cli.keepAliveMs - idleForMs)
+        : null,
+  };
+};
+
+const scheduleIdleShutdownCheck = () => {
+  if (!cli.exitWhenIdle || shuttingDown) return;
+  if (idleShutdownTimer) clearTimeout(idleShutdownTimer);
+  const snapshot = bridgeIdleLifecycleSnapshot();
+  const delayMs =
+    snapshot.blockedBy.length > 0
+      ? Math.min(30_000, Math.max(1000, cli.keepAliveMs))
+      : Math.max(1000, Math.min(30_000, snapshot.remainingMs || 0));
+  idleShutdownTimer = setTimeout(() => {
+    maybeShutdownIdleBridge();
+  }, delayMs);
+  idleShutdownTimer.unref?.();
+};
+
+const maybeShutdownIdleBridge = () => {
+  if (!cli.exitWhenIdle || shuttingDown) return;
+  cleanupStaleClients();
+  const snapshot = bridgeIdleLifecycleSnapshot();
+  if (snapshot.blockedBy.length > 0 || snapshot.idleForMs < cli.keepAliveMs) {
+    scheduleIdleShutdownCheck();
+    return;
+  }
+  recordFlightEvent('bridge_idle_shutdown', snapshot);
+  shutdown(
+    `Bridge local idle por ${snapshot.idleForMs}ms; encerrando processo bridge-only iniciado pela CLI.`,
+    0,
+  );
+};
+
+const trackBridgeRequestLifecycle = (req, res) => {
+  activeBridgeRequests += 1;
+  touchBridgeActivity();
+  let finished = false;
+  const finish = () => {
+    if (finished) return;
+    finished = true;
+    activeBridgeRequests = Math.max(0, activeBridgeRequests - 1);
+    touchBridgeActivity();
+    scheduleIdleShutdownCheck();
+  };
+  res.once('finish', finish);
+  res.once('close', finish);
+  req.once('error', finish);
+};
+
 const bridgeUrlHost = (host) => {
   if (!host || host === '0.0.0.0') return '127.0.0.1';
   if (host.includes(':') && !host.startsWith('[')) return `[${host}]`;
@@ -406,6 +506,7 @@ const summarizeProcess = () => ({
   startedAt: PROCESS_STARTED_AT.toISOString(),
   uptimeMs: Math.round(process.uptime() * 1000),
   bridgeRole,
+  bridgeOnly: cli.bridgeOnly === true,
   host: cli.host,
   port: cli.port,
 });
@@ -1606,6 +1707,11 @@ const parseArgs = (argv) => {
   const out = {
     host: DEFAULT_HOST,
     port: DEFAULT_PORT,
+    bridgeOnly: process.env.GEMINI_MD_EXPORT_BRIDGE_ONLY === 'true',
+    exitWhenIdle:
+      process.env.GEMINI_MD_EXPORT_EXIT_WHEN_IDLE === 'true' ||
+      process.env.GEMINI_MCP_BRIDGE_EXIT_WHEN_IDLE === 'true',
+    keepAliveMs: DEFAULT_BRIDGE_KEEP_ALIVE_MS,
     help: false,
   };
 
@@ -1623,6 +1729,23 @@ const parseArgs = (argv) => {
     if (arg === '--port' && argv[i + 1]) {
       out.port = Number(argv[i + 1]);
       i += 1;
+      continue;
+    }
+    if (arg === '--bridge-only') {
+      out.bridgeOnly = true;
+      continue;
+    }
+    if (arg === '--exit-when-idle') {
+      out.exitWhenIdle = true;
+      continue;
+    }
+    if (arg === '--no-exit-when-idle') {
+      out.exitWhenIdle = false;
+      continue;
+    }
+    if (arg === '--keep-alive-ms' && argv[i + 1]) {
+      out.keepAliveMs = Math.max(1000, Number(argv[i + 1]) || DEFAULT_BRIDGE_KEEP_ALIVE_MS);
+      i += 1;
     }
   }
 
@@ -1638,10 +1761,15 @@ if (cli.help) {
       '',
       'Usage:',
       `  node ${fileURLToPath(import.meta.url)} [--host 127.0.0.1] [--port 47283]`,
+      `  node ${fileURLToPath(import.meta.url)} --bridge-only [--host 127.0.0.1] [--port 47283]`,
+      `  node ${fileURLToPath(import.meta.url)} --bridge-only --exit-when-idle --keep-alive-ms 900000`,
       '',
       'This process serves two roles:',
       '  1. MCP server over stdio for the AI client',
       '  2. Local HTTP bridge for the browser extension',
+      '',
+      'Use --bridge-only to run only the local HTTP bridge without MCP stdio.',
+      'Use --exit-when-idle for CLI-started bridges that should close after inactivity.',
       '',
     ].join('\n'),
   );
@@ -7889,6 +8017,122 @@ const advancedExportArgs = (args = {}) => {
   };
 };
 
+const shellQuote = (value) => {
+  const text = String(value);
+  if (/^[A-Za-z0-9_/:=.,@%+-]+$/.test(text)) return text;
+  return `"${text.replace(/(["\\$`])/g, '\\$1')}"`;
+};
+
+const addCliFlag = (args, flag, value) => {
+  if (value === undefined || value === null || value === '') return;
+  if (value === true) {
+    args.push(flag);
+    return;
+  }
+  if (value === false) return;
+  args.push(flag, String(value));
+};
+
+const chatIdsFromExportArgs = (args = {}) => {
+  const values = [];
+  if (args.chatId) values.push(args.chatId);
+  if (Array.isArray(args.chatIds)) values.push(...args.chatIds);
+  if (Array.isArray(args.items)) {
+    for (const item of args.items) {
+      if (item?.chatId) values.push(item.chatId);
+      else if (item?.id) values.push(item.id);
+      else if (item?.url) values.push(item.url);
+    }
+  }
+  return [...new Set(values.map((value) => String(value).trim()).filter(Boolean))];
+};
+
+const buildCliExportCommand = (action, args = {}) => {
+  const bridgeUrl = `http://${cli.host}:${cli.port}`;
+  const commandArgs = [CLI_BIN_PATH];
+  const missingArguments = [];
+  const vaultDir = args.vaultDir || args.existingScanDir || null;
+  const reportFile = args.resumeReportFile || args.reportFile || null;
+
+  if (action === 'sync') {
+    commandArgs.push('sync', vaultDir || '<vaultDir>');
+    if (!vaultDir) missingArguments.push('vaultDir');
+  } else if (action === 'missing') {
+    commandArgs.push('export', 'missing', vaultDir || '<vaultDir>');
+    if (!vaultDir) missingArguments.push('vaultDir');
+  } else if (action === 'reexport') {
+    const chatIds = chatIdsFromExportArgs(args);
+    commandArgs.push('export', 'reexport');
+    for (const chatId of chatIds) commandArgs.push('--chat-id', chatId);
+    if (chatIds.length === 0) missingArguments.push('chatId');
+  } else if (action === 'notebook') {
+    commandArgs.push('export', 'notebook');
+  } else if (action === 'resume') {
+    commandArgs.push('export', 'resume', reportFile || '<reportFile>');
+    if (!reportFile) missingArguments.push('reportFile');
+  } else {
+    commandArgs.push('export', 'recent');
+  }
+
+  addCliFlag(commandArgs, '--output-dir', args.outputDir || (action === 'sync' || action === 'missing' ? vaultDir : null));
+  addCliFlag(commandArgs, '--resume-report-file', reportFile);
+  addCliFlag(commandArgs, '--sync-state-file', args.syncStateFile);
+  addCliFlag(commandArgs, '--known-boundary-count', args.knownBoundaryCount);
+  addCliFlag(commandArgs, '--max-chats', args.maxChats || args.limit);
+  addCliFlag(commandArgs, '--batch-size', args.batchSize);
+  addCliFlag(commandArgs, '--start-index', args.startIndex);
+  addCliFlag(commandArgs, '--delay-ms', args.delayMs);
+  if (args.refresh === true) commandArgs.push('--refresh');
+  if (args.refresh === false) commandArgs.push('--no-refresh');
+  addCliFlag(commandArgs, '--client-id', args.clientId);
+  addCliFlag(commandArgs, '--tab-id', args.tabId);
+  addCliFlag(commandArgs, '--claim-id', args.claimId);
+  addCliFlag(commandArgs, '--bridge-url', bridgeUrl);
+  commandArgs.push('--plain');
+
+  return {
+    command: process.execPath,
+    args: commandArgs,
+    cwd: homedir(),
+    commandLine: [process.execPath, ...commandArgs].map(shellQuote).join(' '),
+    missingArguments,
+  };
+};
+
+const cliFirstExportResult = (action, args = {}) => {
+  const cliCommand = buildCliExportCommand(action, args);
+  const readyCheck = {
+    tool: 'gemini_ready',
+    arguments: { action: 'status', selfHeal: true, allowReload: true },
+  };
+  return {
+    ok: false,
+    status: 'cli_required',
+    code: 'use_cli',
+    action,
+    reason:
+      'Export/sync/reexport/notebook sao jobs longos. Na arquitetura CLI-first, execute a CLI diretamente para ter progresso, RESULT_JSON e lifecycle correto da bridge.',
+    cli: cliCommand,
+    command: cliCommand.command,
+    args: cliCommand.args,
+    cwd: cliCommand.cwd,
+    nextAction: {
+      code: cliCommand.missingArguments.length > 0 ? 'fill_missing_arguments_then_run_cli' : 'run_cli_command',
+      message:
+        cliCommand.missingArguments.length > 0
+          ? `Preencha ${cliCommand.missingArguments.join(', ')} e rode o comando CLI retornado.`
+          : 'Rode o comando CLI retornado diretamente no shell; use a linha RESULT_JSON final para resumir.',
+      command: cliCommand,
+      optionalReadyCheck: readyCheck,
+    },
+    help: {
+      command: process.execPath,
+      args: [CLI_BIN_PATH, action === 'sync' ? 'sync' : 'export', action === 'sync' ? '--help' : action, action === 'sync' ? undefined : '--help'].filter(Boolean),
+      cwd: homedir(),
+    },
+  };
+};
+
 const rawTools = [
   {
     name: 'gemini_ready',
@@ -8010,7 +8254,7 @@ const rawTools = [
   {
     name: 'gemini_export',
     description:
-      'Inicia export/sync em lote em background: recent, missing, sync, reexport ou notebook. Retorna progresso compacto e jobId.',
+      'Orienta export/sync em lote pelo caminho CLI-first: recent, missing, sync, reexport ou notebook. Nao inicia job escondido pelo MCP.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -8038,22 +8282,7 @@ const rawTools = [
     },
     call: async (args = {}) => {
       const action = args.action || 'recent';
-      const legacyName =
-        action === 'missing'
-          ? 'gemini_export_missing_chats'
-          : action === 'sync'
-            ? 'gemini_sync_vault'
-            : action === 'reexport'
-              ? 'gemini_reexport_chats'
-              : action === 'notebook'
-                ? 'gemini_export_notebook'
-                : 'gemini_export_recent_chats';
-      return callLegacyToolCompacted(
-        'gemini_export',
-        action,
-        legacyName,
-        advancedExportArgs(args),
-      );
+      return toolTextResult(cliFirstExportResult(action, advancedExportArgs(args)));
     },
   },
   {
@@ -8321,6 +8550,7 @@ const proxyBrowserStatus = async () => {
 };
 
 const bridgeServer = createServer(async (req, res) => {
+  trackBridgeRequestLifecycle(req, res);
   cleanupStaleClients();
 
   if (!req.url || !req.method) {
@@ -8352,6 +8582,7 @@ const bridgeServer = createServer(async (req, res) => {
       protocolVersion: EXTENSION_PROTOCOL_VERSION,
       mcpProtocolVersion: PROTOCOL_VERSION,
       bridgeRole,
+      bridgeOnly: cli.bridgeOnly === true,
       host: cli.host,
       port: cli.port,
       pid: processInfo.pid,
@@ -8365,6 +8596,7 @@ const bridgeServer = createServer(async (req, res) => {
       process: processInfo,
       bridgeAssetFetch: snapshotBridgeAssetMetrics(),
       clients: getLiveClients().length,
+      idleLifecycle: bridgeIdleLifecycleSnapshot(),
     });
     return;
   }
@@ -8477,6 +8709,32 @@ const bridgeServer = createServer(async (req, res) => {
 
   if (req.method === 'GET' && url.pathname === '/agent/diagnostics') {
     sendAgentJson(res, 200, await buildEnvironmentDiagnostics());
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/agent/processes') {
+    sendAgentJson(res, 200, await buildProcessDiagnostics());
+    return;
+  }
+
+  if (
+    (req.method === 'GET' || req.method === 'POST') &&
+    url.pathname === '/agent/cleanup-stale-processes'
+  ) {
+    try {
+      const body = req.method === 'POST' ? await readJsonBody(req) : {};
+      const args = {
+        ...Object.fromEntries(url.searchParams.entries()),
+        ...body,
+        confirm: parseOptionalBoolean(body.confirm ?? url.searchParams.get('confirm')),
+        dryRun: parseOptionalBoolean(body.dryRun ?? url.searchParams.get('dryRun')),
+        force: parseOptionalBoolean(body.force ?? url.searchParams.get('force')),
+        waitMs: body.waitMs ?? url.searchParams.get('waitMs') ?? undefined,
+      };
+      sendAgentJson(res, 200, await cleanupStaleMcpProcesses(args));
+    } catch (err) {
+      sendAgentJson(res, 503, { ok: false, error: err.message, code: err.code || null });
+    }
     return;
   }
 
@@ -8716,17 +8974,24 @@ const bridgeServer = createServer(async (req, res) => {
     return;
   }
 
-  if (req.method === 'GET' && url.pathname === '/agent/reexport-chats') {
+  if ((req.method === 'GET' || req.method === 'POST') && url.pathname === '/agent/reexport-chats') {
     try {
+      const body = req.method === 'POST' ? await readJsonBody(req) : {};
       const chatIds = [
         ...url.searchParams.getAll('chatId'),
+        ...(Array.isArray(body.chatIds) ? body.chatIds : []),
+        ...(body.chatId ? [body.chatId] : []),
         ...String(url.searchParams.get('chatIds') || '')
           .split(/[,\s]+/)
           .filter(Boolean),
       ];
       const itemsText = url.searchParams.get('items');
-      const items = itemsText ? JSON.parse(itemsText) : undefined;
-      const selector = clientSelectorFromSearchParams(url.searchParams);
+      const items = body.items || (itemsText ? JSON.parse(itemsText) : undefined);
+      const bodySelector = body && typeof body === 'object' ? body : {};
+      const selector = {
+        ...clientSelectorFromSearchParams(url.searchParams),
+        ...bodySelector,
+      };
       const client = requireClient(selector);
       await ensureTabClaimForJob(client, selector, 'GME Reexport');
       sendAgentJson(
@@ -8734,10 +8999,11 @@ const bridgeServer = createServer(async (req, res) => {
         202,
         startDirectChatsExportJob(client, {
           ...selector,
-          outputDir: url.searchParams.get('outputDir') || undefined,
+          ...bodySelector,
+          outputDir: body.outputDir || url.searchParams.get('outputDir') || undefined,
           chatIds,
           items,
-          delayMs: url.searchParams.get('delayMs') || undefined,
+          delayMs: body.delayMs || url.searchParams.get('delayMs') || undefined,
         }),
       );
     } catch (err) {
@@ -9078,6 +9344,8 @@ const bridgeServer = createServer(async (req, res) => {
         return;
       }
 
+      lastChromeHeartbeatAt = Date.now();
+      touchBridgeActivity();
       const client = upsertClient(payload, {
         payloadBytes: Buffer.byteLength(body, 'utf8'),
         heartbeat: true,
@@ -9193,13 +9461,19 @@ bridgeServer.listen(cli.port, cli.host, () => {
     port: cli.port,
     version: SERVER_VERSION,
     protocolVersion: EXTENSION_PROTOCOL_VERSION,
+    idleLifecycle: bridgeIdleLifecycleSnapshot(),
   });
+  scheduleIdleShutdownCheck();
 });
 
 const shutdown = (reason, exitCode = 0) => {
   if (shuttingDown) return;
   shuttingDown = true;
   if (reason) log(reason);
+  if (idleShutdownTimer) {
+    clearTimeout(idleShutdownTimer);
+    idleShutdownTimer = null;
+  }
 
   for (const client of clients.values()) {
     if (!client.pendingPoll) continue;
@@ -9238,6 +9512,13 @@ const shutdown = (reason, exitCode = 0) => {
 bridgeServer.on('error', (error) => {
   if (error?.code === 'EADDRINUSE') {
     settleBridgeStartup('proxy', error);
+    if (cli.bridgeOnly) {
+      debugLog(
+        `bridge HTTP já está em uso em ${cli.host}:${cli.port}; processo bridge-only vai encerrar sem iniciar MCP.`,
+      );
+      shutdown('Bridge local já está ativo; encerrando bridge-only.', 0);
+      return;
+    }
     debugLog(
       `bridge HTTP já está em uso em ${cli.host}:${cli.port}; esta instância MCP vai encaminhar tools para a instância primária.`,
     );
@@ -9376,23 +9657,27 @@ const handleMessage = async (message) => {
   await handleRequest(message);
 };
 
-const rl = readline.createInterface({
-  input: process.stdin,
-  crlfDelay: Infinity,
-});
+if (!cli.bridgeOnly) {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    crlfDelay: Infinity,
+  });
 
-rl.on('line', async (line) => {
-  const trimmed = line.trim();
-  if (!trimmed) return;
+  rl.on('line', async (line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return;
 
-  try {
-    const message = JSON.parse(trimmed);
-    await handleMessage(message);
-  } catch (err) {
-    respondError(null, -32700, `Parse error: ${err.message}`);
-  }
-});
+    try {
+      const message = JSON.parse(trimmed);
+      await handleMessage(message);
+    } catch (err) {
+      respondError(null, -32700, `Parse error: ${err.message}`);
+    }
+  });
 
-rl.on('close', () => {
-  shutdown('STDIN do cliente MCP foi fechado; encerrando processo.', 0);
-});
+  rl.on('close', () => {
+    shutdown('STDIN do cliente MCP foi fechado; encerrando processo.', 0);
+  });
+} else {
+  debugLog('bridge-only ativo; servidor MCP por stdio não será iniciado.');
+}

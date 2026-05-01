@@ -30,7 +30,8 @@ Default tool output is compact. Ask for `detail: "full"` only while debugging.
 - Small chat listing, current chat, open chat, or one-off download:
   call `gemini_chats`.
 - Recent export, full import, missing-chat import, incremental sync, reexport,
-  or notebook export: call `gemini_export`.
+  or notebook export: run the bundled CLI directly. If `gemini_export` is
+  called, treat `code: "use_cli"` as an instruction to run its returned command.
 - Background progress/cancel: call `gemini_job`.
 - Export directory and extension cache: call `gemini_config`.
 - Diagnostics, process inspection, cleanup, support bundle, flight recorder, or
@@ -58,18 +59,51 @@ long playbooks into this context:
 - `/exporter:repair-vault`: audit and repair contaminated raw exports/wiki
   cases.
 
+## CLI/TUI Export UI
+
+The extension also ships `bin/gemini-md-export.mjs`, a terminal UI wrapper over
+the same local bridge used by MCP.
+
+- The CLI can start the local bridge in `bridge-only` mode when the bridge is
+  down; CLI-started bridges exit automatically after idle unless
+  `--no-exit-when-idle` is set. Use `--no-start-bridge` only for controlled
+  diagnostics.
+- The CLI owns browser wake for long jobs: it checks `/agent/ready` with
+  `wakeBrowser=false`, opens Gemini Web in the configured Chromium browser when
+  no tab is connected, then waits for the extension before starting the job.
+- For a visible human progress UI inside Gemini CLI, run it through shell mode
+  or `run_shell_command` with an interactive shell/pty:
+  `node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" sync <vaultDir> --tui`
+- On Windows, use:
+  `node "$env:USERPROFILE\.gemini\extensions\gemini-md-export\bin\gemini-md-export.mjs" sync <vaultDir> --tui`
+- For agent-readable execution, prefer `--plain`; it emits stable progress
+  lines and a final `RESULT_JSON` block.
+- To discover the contract, run `gemini-md-export --help`,
+  `gemini-md-export sync --help`, or `gemini-md-export job status --help`.
+- CLI subcommands include `browser status`, `export recent`, `export missing`,
+  `export resume`, `export reexport`, `export notebook`, `job status`,
+  `job cancel`, `export-dir get/set`, `cleanup stale-processes`, and
+  `repair-vault`.
+- For automation, use `--json` for final JSON only or `--jsonl` for progress
+  events.
+- Do not use custom-command shell injection for long sync jobs; it injects the
+  output into the prompt. Ask the agent to run the CLI as a shell command
+  instead.
+
 ## Guardrails
 
 - Do not dump full history into the chat. For "all history", "sync", or
-  "missing chats", start a `gemini_export` background job and poll
-  `gemini_job`.
+  "missing chats", use the CLI wrapper for long jobs. MCP `gemini_export`
+  should return `code: "use_cli"` with the exact command instead of starting a
+  hidden long-running job.
 - Do not ask for manual Chrome extension reload before trying
   `gemini_ready { "action": "status", "selfHeal": true, "allowReload": true }`,
   unless the loaded extension is too old to support self-heal.
 - If multiple Gemini tabs are connected, use `gemini_tabs` to claim the intended
   tab before browser-dependent work.
-- If no Gemini tab is connected, `gemini_tabs { "action": "list",
-  "openIfMissing": true }` or browser-dependent hooks can open one.
+- If no Gemini tab is connected, the CLI opens one for long jobs. For small MCP
+  tab/chat operations, use `gemini_tabs { "action": "list",
+  "openIfMissing": true }` or the narrow browser-dependent hook.
 - Keep Markdown/assets inside the vault when `vaultDir` is known; avoid browser
   Downloads as the intended destination.
 - Integrity beats speed: never save a chat if the DOM still belongs to a
@@ -105,8 +139,8 @@ List or claim tabs:
 
 Sync a vault:
 
-```json
-{ "action": "sync", "vaultDir": "/path/to/vault", "outputDir": "/path/to/vault" }
+```bash
+node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" sync "/path/to/vault" --plain
 ```
 
 Poll a job:

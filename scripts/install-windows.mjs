@@ -729,7 +729,10 @@ const verifyGeminiCliExtensionInstall = () => {
   const manifestPath = resolve(targetDir, 'gemini-extension.json');
   const browserManifestPath = resolve(targetDir, 'browser-extension', 'manifest.json');
   const mcpPath = resolve(targetDir, 'src', 'mcp-server.js');
+  const bridgePath = resolve(targetDir, 'src', 'bridge-server.js');
+  const cliPath = resolve(targetDir, 'bin', 'gemini-md-export.mjs');
   const hooksPath = resolve(targetDir, 'hooks', 'hooks.json');
+  const syncSkillPath = resolve(targetDir, 'skills', 'gemini-vault-sync', 'SKILL.md');
 
   if (!existsSync(manifestPath)) {
     return {
@@ -755,7 +758,10 @@ const verifyGeminiCliExtensionInstall = () => {
   const missingFiles = [
     browserManifestPath,
     mcpPath,
+    bridgePath,
+    cliPath,
     hooksPath,
+    syncSkillPath,
   ].filter((filePath) => !existsSync(filePath));
   const wrongName = manifest.name !== SERVER_NAME;
   const wrongVersion = String(manifest.version || '') !== String(expectedGeminiCliExtensionVersion);
@@ -787,7 +793,10 @@ const verifyGeminiCliExtensionInstall = () => {
     version: manifest.version,
     browserManifestPath,
     mcpPath,
+    bridgePath,
+    cliPath,
     hooksPath,
+    syncSkillPath,
   };
 };
 

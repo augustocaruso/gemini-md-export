@@ -6,6 +6,24 @@ do Obsidian. O caminho principal é extensão unpacked + MCP local + instaladore
 macOS/Windows via GitHub. O userscript gerado pelo build é legado
 de debug e não deve ser apresentado como fluxo recomendado ao usuário final.
 
+## Processo de trabalho
+
+- Para propostas de arquitetura, roadmap, spikes, pesquisas e mudanças de
+  direção, o fluxo padrão é: discutir, explorar alternativas, atualizar o
+  roadmap e só então implementar depois de aprovação explícita do usuário.
+- Pedidos como "investigue", "descubra", "explore", "o que você acha" ou
+  "faça acontecer" em contexto de descoberta não autorizam edição de código por
+  si só.
+- A aprovação precisa ser inequívoca e específica para a proposta atual, por
+  exemplo: "aprovado", "implemente", "pode seguir com essa proposta" ou
+  equivalente.
+- Spikes já feitos sem aprovação explícita podem permanecer no workspace para
+  review, mas não devem ser versionados, publicados ou tratados como caminho
+  recomendado sem nova aprovação explícita.
+- Quando o usuário pedir diretamente uma edição pontual, como "atualize este
+  arquivo" ou "corrija este bug", execute o pedido sem ampliar o escopo para
+  uma proposta maior.
+
 ## Contexto
 
 - Usuário final: um médico que usa Gemini web para conversas de estudo e

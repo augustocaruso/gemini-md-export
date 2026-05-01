@@ -32,6 +32,15 @@ const listenHttp = async (server, port) =>
 const closeHttp = async (server) =>
   new Promise((resolveClose) => server.close(resolveClose));
 
+const waitForProcessExit = async (child, timeoutMs = 4000) => {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (child.exitCode !== null) return child.exitCode;
+    await sleep(50);
+  }
+  return null;
+};
+
 const waitForHealth = async (port) => {
   const startedAt = Date.now();
   while (Date.now() - startedAt < 5000) {
@@ -107,6 +116,45 @@ const spawnMcp = (port) => {
     child,
     callRpc,
     stop,
+    stderr: () => stderr,
+  };
+};
+
+const spawnBridgeOnly = (port, extraArgs = []) => {
+  const child = spawn(process.execPath, [SERVER_PATH, '--bridge-only', ...extraArgs], {
+    cwd: ROOT,
+    env: {
+      ...process.env,
+      GEMINI_MCP_BRIDGE_PORT: String(port),
+      GEMINI_MCP_CHROME_LAUNCH_IF_CLOSED: 'false',
+      GEMINI_MCP_PORT_OWNER_DIAGNOSTIC_TIMEOUT_MS: '1000',
+      GEMINI_MCP_PROCESS_DIAGNOSTIC_TIMEOUT_MS: '1000',
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  let stdout = '';
+  let stderr = '';
+  child.stdout.on('data', (chunk) => {
+    stdout += chunk.toString('utf-8');
+  });
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk.toString('utf-8');
+  });
+
+  const stop = async () => {
+    if (child.exitCode !== null) return;
+    child.kill('SIGTERM');
+    await Promise.race([
+      new Promise((resolveExit) => child.once('exit', resolveExit)),
+      sleep(1000).then(() => child.kill('SIGKILL')),
+    ]);
+  };
+
+  return {
+    child,
+    stop,
+    stdout: () => stdout,
     stderr: () => stderr,
   };
 };
@@ -245,6 +293,22 @@ test('segunda instância MCP não emite erro quando o bridge já está em uso e 
     arguments: { action: 'list', source: 'recent', limit: 20 },
   });
 
+  const exportCall = await secondary.callRpc({
+    jsonrpc: '2.0',
+    id: 23,
+    method: 'tools/call',
+    params: {
+      name: 'gemini_export',
+      arguments: { action: 'sync', vaultDir: outputDir },
+    },
+  });
+  assert.equal(exportCall.result.isError, false);
+  assert.equal(exportCall.result.structuredContent.code, 'use_cli');
+  assert.equal(exportCall.result.structuredContent.status, 'cli_required');
+  assert.equal(exportCall.result.structuredContent.command, process.execPath);
+  assert.match(exportCall.result.structuredContent.args.join(' '), /gemini-md-export\.mjs sync/);
+  assert.ok(exportCall.result.structuredContent.args.includes('--plain'));
+
   const processDiagnosis = await secondary.callRpc({
     jsonrpc: '2.0',
     id: 21,
@@ -277,6 +341,79 @@ test('segunda instância MCP não emite erro quando o bridge já está em uso e 
   const exportDirResponse = await fetch(`http://127.0.0.1:${port}/agent/export-dir`);
   const exportDir = await exportDirResponse.json();
   assert.equal(exportDir.outputDir, outputDir);
+});
+
+test('modo bridge-only sobe HTTP sem servidor MCP por stdio', async (t) => {
+  const port = await getFreePort();
+  const bridge = spawnBridgeOnly(port);
+
+  t.after(async () => {
+    await bridge.stop();
+  });
+
+  const health = await waitForHealth(port);
+
+  assert.equal(health.ok, true);
+  assert.equal(health.bridgeRole, 'primary');
+  assert.equal(health.bridgeOnly, true);
+  assert.equal(health.process.bridgeOnly, true);
+
+  await sleep(200);
+  assert.equal(bridge.child.exitCode, null);
+  assert.equal(bridge.stdout(), '');
+  assert.doesNotMatch(bridge.stderr(), /Parse error|tools\/list|tools\/call/i);
+});
+
+test('bridge-only com exit-when-idle anuncia lifecycle e encerra apos idle', async (t) => {
+  const port = await getFreePort();
+  const bridge = spawnBridgeOnly(port, ['--exit-when-idle', '--keep-alive-ms', '1000']);
+
+  t.after(async () => {
+    await bridge.stop();
+  });
+
+  const health = await waitForHealth(port);
+  assert.equal(health.idleLifecycle.enabled, true);
+  assert.equal(health.idleLifecycle.keepAliveMs, 1000);
+
+  const exitCode = await waitForProcessExit(bridge.child, 4000);
+  assert.notEqual(exitCode, null);
+});
+
+test('MCP secundário proxya tools para bridge-only primário', async (t) => {
+  const port = await getFreePort();
+  const bridge = spawnBridgeOnly(port);
+  const health = await waitForHealth(port);
+  const mcp = spawnMcp(port);
+
+  t.after(async () => {
+    await mcp.stop();
+    await bridge.stop();
+  });
+
+  assert.equal(health.bridgeOnly, true);
+
+  const initialized = await mcp.callRpc({
+    jsonrpc: '2.0',
+    id: 101,
+    method: 'initialize',
+    params: {},
+  });
+  assert.equal(initialized.result.serverInfo.name, 'gemini-md-export');
+
+  const status = await mcp.callRpc({
+    jsonrpc: '2.0',
+    id: 102,
+    method: 'tools/call',
+    params: {
+      name: 'gemini_config',
+      arguments: { action: 'get_export_dir' },
+    },
+  });
+
+  assert.equal(status.result.isError, false);
+  assert.equal(status.result.structuredContent.ok, true);
+  assert.match(status.result.structuredContent.outputDir, /Downloads|gemini/i);
 });
 
 test('cleanup exige alvo seguro e promove a segunda instância após encerrar primário antigo', async (t) => {

@@ -250,6 +250,11 @@ if (existsSync(resolve(ROOT, 'gemini-cli-extension', 'scripts'))) {
     { recursive: true },
   );
 }
+if (existsSync(resolve(ROOT, 'bin'))) {
+  cpSync(resolve(ROOT, 'bin'), resolve(geminiCliExtensionDir, 'bin'), {
+    recursive: true,
+  });
+}
 mkdirSync(resolve(geminiCliExtensionDir, 'scripts'), { recursive: true });
 cpSync(
   resolve(ROOT, 'scripts', 'bridge-smoke.mjs'),
@@ -259,6 +264,7 @@ cpSync(extensionDir, resolve(geminiCliExtensionDir, 'browser-extension'), {
   recursive: true,
 });
 cpSync(resolve(ROOT, 'src', 'mcp-server.js'), resolve(geminiCliExtensionDir, 'src', 'mcp-server.js'));
+cpSync(resolve(ROOT, 'src', 'bridge-server.js'), resolve(geminiCliExtensionDir, 'src', 'bridge-server.js'));
 cpSync(
   resolve(ROOT, 'src', 'chrome-extension-guard.mjs'),
   resolve(geminiCliExtensionDir, 'src', 'chrome-extension-guard.mjs'),
@@ -300,5 +306,9 @@ if (existsSync(resolve(geminiCliExtensionDir, 'skills'))) {
 if (existsSync(resolve(geminiCliExtensionDir, 'scripts'))) {
   console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'scripts')}`);
 }
+if (existsSync(resolve(geminiCliExtensionDir, 'bin'))) {
+  console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'bin')}`);
+}
 console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'browser-extension')}`);
 console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'src', 'mcp-server.js')}`);
+console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'src', 'bridge-server.js')}`);

@@ -18,63 +18,68 @@ repair, and resumed export jobs.
 
 ## Main Flows
 
-1. Check readiness:
+### Preferred CLI Flow
+
+Use the bundled CLI for long sync/import jobs when shell access is available.
+It talks directly to the local bridge, shows progress in the terminal, and
+finishes with a machine-readable result.
+If the bridge is down, the CLI can start it in `bridge-only` mode before
+calling `/agent/*`.
+Use `export missing <vaultDir>` for explicit missing-only imports, `sync
+<vaultDir>` for incremental vault sync, and `export resume <reportFile>` when a
+previous report should be resumed.
+
+For a human-visible progress UI inside Gemini CLI:
+
+```bash
+node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" sync "/path/to/vault" --tui
+```
+
+On Windows PowerShell:
+
+```powershell
+node "$env:USERPROFILE\.gemini\extensions\gemini-md-export\bin\gemini-md-export.mjs" sync "C:\path\to\vault" --tui
+```
+
+For agent-readable execution, use `--plain` instead of `--tui`; parse the final
+`RESULT_JSON` line and avoid interpreting progress-bar text. Use `--json` for
+final JSON only or `--jsonl` when another program needs progress events.
+Use `--help` on the CLI or subcommand when you need the exact flags, output
+formats, examples, or exit codes.
+
+Do not inject a long-running CLI command with custom-command `!{...}` because
+that copies all output into the prompt. Ask the agent to run the CLI through
+the shell tool instead.
+
+### MCP Role
+
+Use MCP for control-plane checks, not for starting long sync/export jobs.
+
+Check readiness:
 
 ```json
 { "tool": "gemini_ready", "arguments": { "action": "check" } }
 ```
 
-2. For a vault that was already synced before, run incremental sync:
+If you accidentally call `gemini_export` for `sync`, `missing`, `recent`,
+`reexport`, or `notebook`, it should return `code: "use_cli"` with an exact
+`command`, `args`, and `cwd`. Run that CLI command directly through the shell.
+Do not poll `gemini_job` unless a CLI/bridge response has already returned a
+real `jobId`.
 
-```json
-{
-  "tool": "gemini_export",
-  "arguments": {
-    "action": "sync",
-    "vaultDir": "/path/to/vault",
-    "outputDir": "/path/to/vault"
-  }
-}
-```
-
-3. For first import or suspected gaps, scan the vault and export missing chats:
-
-```json
-{
-  "tool": "gemini_export",
-  "arguments": {
-    "action": "missing",
-    "vaultDir": "/path/to/vault",
-    "outputDir": "/path/to/vault"
-  }
-}
-```
-
-4. For a bounded recent export:
-
-```json
-{
-  "tool": "gemini_export",
-  "arguments": {
-    "action": "recent",
-    "maxChats": 25
-  }
-}
-```
-
-5. Poll compact status:
-
-```json
-{ "tool": "gemini_job", "arguments": { "action": "status", "jobId": "<jobId>" } }
-```
-
-Use `detail: "full"` only when debugging a failed job or report mismatch.
+Use `gemini_tabs` before the CLI when tab identity is ambiguous, and
+`gemini_support` when the bridge/extension is slow, stale, or disconnected.
+Use `detail: "full"` only for root-cause debugging.
 
 ## Resume
 
-If the previous response contains `reportFile`, pass it as `resumeReportFile`
-or `reportFile` on the next `gemini_export` call. The exporter skips chats
-already completed in that report.
+If the previous response contains `reportFile`, run:
+
+```bash
+node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" export resume "/path/to/report.json" --plain
+```
+
+The exporter skips chats already completed in that report.
 
 ## Human Output
 

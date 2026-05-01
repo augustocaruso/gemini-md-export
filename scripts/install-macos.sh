@@ -158,8 +158,11 @@ const root = path.dirname(manifestPath);
 const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
 const required = [
   path.join(root, 'src', 'mcp-server.js'),
+  path.join(root, 'src', 'bridge-server.js'),
+  path.join(root, 'bin', 'gemini-md-export.mjs'),
   path.join(root, 'browser-extension', 'manifest.json'),
   path.join(root, 'hooks', 'hooks.json'),
+  path.join(root, 'skills', 'gemini-vault-sync', 'SKILL.md'),
 ];
 const missing = required.filter((file) => !fs.existsSync(file));
 if (manifest.name !== 'gemini-md-export') {

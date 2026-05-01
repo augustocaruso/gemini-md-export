@@ -4,59 +4,19 @@ Este roadmap registra as próximas frentes de estabilidade e performance do
 Gemini Markdown Export. A ordem abaixo prioriza confiabilidade operacional antes
 de acelerar exportações grandes.
 
-## v0.5.0 — Streamline MCP com Gemini CLI Agent Skills
+## Governança
 
-Status: implementado nesta atualização.
-
-Objetivo: reduzir contexto permanente do agente e tornar os fluxos longos mais
-confiáveis por progressive disclosure: MCP público pequeno, `GEMINI.md` curto e
-playbooks em skills da extensão Gemini CLI.
-
-### Entregas
-
-- Publicar somente 7 tools MCP:
-  - `gemini_ready`;
-  - `gemini_tabs`;
-  - `gemini_chats`;
-  - `gemini_export`;
-  - `gemini_job`;
-  - `gemini_config`;
-  - `gemini_support`.
-- Manter os handlers antigos apenas como implementação interna.
-- Remover nomes antigos de `tools/list`; chamadas diretas aos nomes antigos
-  retornam `code: "tool_renamed"` com `{ tool, arguments }` exato.
-- Respostas compactas por padrão: `ok`, `ready/status`, ids, contagens,
-  `progressMessage`, `nextAction`, paths e warnings essenciais.
-- `detail: "full"` libera diagnóstico rico quando necessário.
-- Preservar endpoints HTTP `/agent/*` para debug manual/local.
-- Reescrever `gemini-cli-extension/GEMINI.md` como roteador curto:
-  - qual tool chamar;
-  - quando ativar skill;
-  - guardrails: sem APIs privadas/cookies, sem despejar histórico inteiro no
-    chat, sem reload manual antes do self-heal.
-- Adicionar skills empacotadas em `gemini-cli-extension/skills/`:
-  - `gemini-vault-sync`;
-  - `gemini-vault-repair`;
-  - `gemini-mcp-diagnostics`;
-  - `gemini-tabs-and-browser`.
-- Adicionar comando top-level `/sync` para o humano disparar sync completo do
-  vault conhecido sem precisar lembrar a chamada MCP.
-- Copiar `skills/` no build para `dist/gemini-cli-extension/skills/`.
-- Atualizar hooks para os 7 nomes novos, com pré-launch action-aware.
-- Atualizar runner de reparo, smoke tests e docs operacionais para as tools
-  novas.
-- Atualizar a skill Codex `gemini-cli-extension-autoupdate` para documentar
-  skills de extensões Gemini CLI como mecanismo oficial de playbooks.
-
-### Critérios de aceite
-
-- `tools/list` retorna exatamente os 7 nomes públicos.
-- Nomes antigos não executam e retornam migração explícita.
-- `GEMINI.md` permanece pequeno e referencia skills em vez de embutir
-  playbooks.
-- Build contém `skills/<name>/SKILL.md` com frontmatter.
-- Export/sync/repair/status continuam passando pelos handlers já testados.
-- Hook do navegador acorda o Chrome apenas para ações que dependem do browser.
+- Ordem do arquivo: versões implementadas em ordem crescente, depois propostas e
+  pesquisas futuras.
+- Propostas de arquitetura, pesquisa ou spike não autorizam implementação por
+  si só.
+- Uma proposta só deve virar mudança de código/release depois de aprovação
+  explícita do usuário para aquela proposta específica.
+- Spikes já feitos sem aprovação explícita podem ficar no workspace para review,
+  mas devem ser marcados como spike não aprovado e não devem ser versionados ou
+  publicados como release sem nova aprovação.
+- Fluxo de trabalho padrão: discutir, explorar alternativas, atualizar roadmap
+  e só então implementar após aprovação explícita.
 
 ## v0.2.1 — Ciclo de vida do MCP e modo proxy
 
@@ -157,7 +117,7 @@ sacrificar integridade.
   truncamento.
 - Falhas de mídia aparecem como warnings rastreáveis, não como travamento do job.
 
-## Proposta v0.3.1 — Hardening operacional e prova em campo
+## v0.3.1 — Hardening operacional e prova em campo
 
 Status: implementado na versão `0.3.1`.
 
@@ -210,7 +170,7 @@ especialmente no Windows, sem adicionar comportamento grande novo.
 
 ## v0.3.2 — Medição e performance do export total
 
-Status: implementada.
+Status: implementada na versão `0.7.1`.
 
 Objetivo: reduzir lentidão real do fluxo "importar todo o histórico" com
 medição, limites adaptativos e menos trabalho repetido.
@@ -395,7 +355,7 @@ mais previsíveis e listas grandes usáveis.
 - Um job em andamento deve impedir comandos concorrentes perigosos na mesma aba.
 - O usuário deve enxergar a fase real do trabalho no export local/MCP.
 
-## Proposta v0.4.3 — Afinidade confiável entre agente e aba Gemini
+## v0.4.3 — Afinidade confiável entre agente e aba Gemini
 
 Status: implementado em v0.4.3.
 
@@ -478,7 +438,7 @@ Gemini abertas. Um agente pode listar/exportar a aba errada sem perceber.
 - Se a aba reivindicada fecha ou fica stale, a próxima tool deve retornar erro
   claro e pedir escolher outra aba, não cair silenciosamente em outra.
 
-## Proposta v0.4.4 — Interação DOM mais rápida e previsível
+## v0.4.4 — Interação DOM mais rápida e previsível
 
 Status: implementada em `0.4.6`.
 
@@ -582,7 +542,7 @@ a experiência parece lenta mesmo com a bridge saudável.
 - O relatório/status deve mostrar se a demora veio de sidebar, scroll,
   navegação, hidratação ou extração.
 
-## Proposta v0.4.5 — Sincronização incremental do vault
+## v0.4.5 — Sincronização incremental do vault
 
 Status: implementada em `0.4.6`.
 
@@ -651,7 +611,7 @@ conhecida, não em uma quantidade arbitrária.
   percorrer o histórico inteiro.
 - Arquivos existentes no vault não devem ser sobrescritos sem pedido explícito.
 
-## Proposta v0.4.6 — Observabilidade e recuperação assistida
+## v0.4.6 — Observabilidade e recuperação assistida
 
 Status: primeiro incremento implementado em `0.4.6`.
 
@@ -743,9 +703,107 @@ realmente pronta para uso?", sem perder compatibilidade durante updates.
 - Cliente conectado mas não pronto não gera aba duplicada.
 - Bridges antigos ainda funcionam via fallback para `/agent/clients`.
 
-## Proposta v0.5.0 — CLI-first sobre a bridge local
+## v0.5.0 — Streamline MCP com Gemini CLI Agent Skills
 
-Status: proposta.
+Status: implementado.
+
+Objetivo: reduzir contexto permanente do agente e tornar os fluxos longos mais
+confiáveis por progressive disclosure: MCP público pequeno, `GEMINI.md` curto e
+playbooks em skills da extensão Gemini CLI.
+
+### Entregas
+
+- Publicar somente 7 tools MCP:
+  - `gemini_ready`;
+  - `gemini_tabs`;
+  - `gemini_chats`;
+  - `gemini_export`;
+  - `gemini_job`;
+  - `gemini_config`;
+  - `gemini_support`.
+- Manter os handlers antigos apenas como implementação interna.
+- Remover nomes antigos de `tools/list`; chamadas diretas aos nomes antigos
+  retornam `code: "tool_renamed"` com `{ tool, arguments }` exato.
+- Respostas compactas por padrão: `ok`, `ready/status`, ids, contagens,
+  `progressMessage`, `nextAction`, paths e warnings essenciais.
+- `detail: "full"` libera diagnóstico rico quando necessário.
+- Preservar endpoints HTTP `/agent/*` para debug manual/local.
+- Reescrever `gemini-cli-extension/GEMINI.md` como roteador curto:
+  - qual tool chamar;
+  - quando ativar skill;
+  - guardrails: sem APIs privadas/cookies, sem despejar histórico inteiro no
+    chat, sem reload manual antes do self-heal.
+- Adicionar skills empacotadas em `gemini-cli-extension/skills/`:
+  - `gemini-vault-sync`;
+  - `gemini-vault-repair`;
+  - `gemini-mcp-diagnostics`;
+  - `gemini-tabs-and-browser`.
+- Adicionar comando top-level `/sync` para o humano disparar sync completo do
+  vault conhecido sem precisar lembrar a chamada MCP.
+- Copiar `skills/` no build para `dist/gemini-cli-extension/skills/`.
+- Atualizar hooks para os 7 nomes novos, com pré-launch action-aware.
+- Atualizar runner de reparo, smoke tests e docs operacionais para as tools
+  novas.
+- Atualizar a skill Codex `gemini-cli-extension-autoupdate` para documentar
+  skills de extensões Gemini CLI como mecanismo oficial de playbooks.
+
+### Critérios de aceite
+
+- `tools/list` retorna exatamente os 7 nomes públicos.
+- Nomes antigos não executam e retornam migração explícita.
+- `GEMINI.md` permanece pequeno e referencia skills em vez de embutir
+  playbooks.
+- Build contém `skills/<name>/SKILL.md` com frontmatter.
+- Export/sync/repair/status continuam passando pelos handlers já testados.
+- Hook do navegador acorda o Chrome apenas para ações que dependem do browser.
+
+## v0.5.1 — CLI/TUI de exportação sobre a bridge local
+
+Status: implementada; validação visual no Gemini CLI real ainda recomendada
+antes de release amplo.
+
+Objetivo: conciliar UX humana no Gemini CLI com saída estável para agentes.
+O mesmo binário fala direto com a bridge local, sem passar pelo MCP, e escolhe
+automaticamente a melhor apresentação.
+
+Nota: o rascunho técnico no workspace foi mantido e agora está sendo fechado em
+ordem como a próxima etapa do roadmap. Ele ainda não deve ser publicado como
+release até os critérios abaixo ficarem verdes.
+
+### Decisão
+
+- TUI/barra de progresso para humanos quando houver TTY/pty.
+- Modo `--plain` para agente: progresso em linhas estáveis e `RESULT_JSON`
+  final curto.
+- Modo `--json` para automação que só precisa do resultado final.
+- Modo `--jsonl` para automação que precisa consumir progresso evento a evento.
+- Sem dependências externas de TUI: o Gemini CLI já pode fornecer pty via
+  `tools.shell.enableInteractiveShell`; quando não fornece, o binário cai para
+  modo de linhas sem ANSI.
+- MCP continua existindo como fallback e interface curta de status/config.
+
+### Rascunho técnico atual
+
+- `bin/gemini-md-export.mjs` como script Node executado pelo Node já disponível
+  no ambiente; não há runtime Node empacotado.
+- Subcomandos iniciais `sync`, `doctor`, `job status` e `job cancel`.
+- Contrato de ajuda implementado para `help`, `--help`, `<comando> --help`,
+  `--version`, exemplos, formatos de saída e exit codes.
+- Painel TUI com fase, barra, conversa atual, contadores, warnings e
+  relatório.
+- Saídas `--plain`, `--json` e `--jsonl` para compatibilizar humano, agente e
+  automação.
+- Build copia `bin/` para `dist/gemini-cli-extension/`.
+- Testes cobrem bundle e contratos básicos de saída.
+
+### Pendências de validação
+
+- Validar no Gemini CLI real como a TUI se comporta com e sem shell interativo
+  configurado.
+
+## v0.6.0 — CLI-first sobre a bridge local
+
+Status: implementada.
 
 Objetivo: tornar a CLI a interface operacional principal para agentes e
 usuários avançados, usando a bridge local existente como camada de integração
@@ -766,8 +824,50 @@ extensão nem o bridge local, porque o conteúdo ainda vem do DOM do Gemini Web
 logado no navegador. O que sai do caminho crítico é o MCP como superfície
 primária para jobs longos.
 
+### Estado Implementado
+
+- A CLI fala direto com `/agent/*` e não chama MCP para jobs longos.
+- `src/bridge-server.js` é o entrypoint próprio da bridge local. Ele reutiliza o
+  core atual em modo `--bridge-only`, mas não abre servidor MCP por `stdio`.
+- `src/mcp-server.js --bridge-only` continua disponível como compatibilidade de
+  baixo nível.
+- A CLI inicia automaticamente a bridge em modo `bridge-only` quando ela está
+  indisponível, preservando `--no-start-bridge` para diagnósticos controlados.
+- Quando um MCP encontra a bridge já ativa, ele entra em proxy e encaminha
+  chamadas para `/agent/mcp-tool-call`; isso faz o MCP operar como cliente fino
+  da bridge quando há um primário `bridge-only`.
+
+### Separação MCP/Bridge
+
+Papéis implementados:
+
+```text
+bridge daemon/processo local
+  -> HTTP/SSE para extensão Chrome
+  -> endpoints /agent/* para CLI e MCP
+
+CLI
+  -> cliente principal da bridge para jobs longos
+
+MCP
+  -> cliente fino/opcional da bridge para readiness, status, tabs, config e
+     compatibilidade
+```
+
+Essa separação evita que MCP seja o único dono do ciclo de vida da bridge. O MCP
+ainda existe para compatibilidade/discovery, mas a CLI consegue manter a bridge
+disponível sem passar por MCP.
+
 ### Entregas
 
+- Criar contrato de ajuda da CLI antes dos comandos operacionais:
+  - `help`;
+  - `--help`;
+  - `<comando> --help`;
+  - `--version`;
+  - exemplos curtos;
+  - formatos de saída;
+  - tabela de exit codes.
 - Criar `bin/gemini-md-export` com subcomandos estáveis:
   - `doctor`;
   - `browser status`;
@@ -816,6 +916,14 @@ primária para jobs longos.
 - Jobs longos devem gravar relatório incremental com caminho explícito para
   retomada. O progresso visual da TUI e o `RESULT_JSON` final vêm do mesmo
   estado persistido pela bridge.
+- Separar a bridge em entrypoint/processo próprio antes de tornar a CLI o
+  caminho recomendado.
+- Preservar um modo `bridge-only` testado para ambientes onde a bridge deve
+  ficar viva sem depender do MCP do Gemini CLI.
+- Permitir que a CLI acorde a bridge local em modo `bridge-only` antes de
+  chamar `/agent/*`, sem passar por MCP.
+- Transformar o MCP em cliente fino da bridge, preservando as 7 tools públicas e
+  os erros de migração dos nomes antigos.
 - Atualizar `gemini-cli-extension/GEMINI.md`, comandos e skill para orientar:
   - usar CLI para exportações longas;
   - usar MCP apenas quando a tool nativa for indispensável ou legado;
@@ -828,6 +936,8 @@ primária para jobs longos.
 - Um agente consegue executar "importar todo o histórico" somente com CLI +
   skill/contexto, sem chamar tool MCP.
 - O mesmo comando pode ser copiado e rodado por um humano no terminal.
+- `gemini-md-export --help` e `<comando> --help` dão contexto suficiente para um
+  agente usar a CLI sem depender de playbook longo.
 - Em terminal interativo, o usuário vê uma UI de progresso legível dentro do
   Gemini CLI.
 - Em execução por agente, `--plain` + `RESULT_JSON` final dá contexto humano e
@@ -837,34 +947,199 @@ primária para jobs longos.
 - Retomada por relatório funciona igual ou melhor que no MCP.
 - Erros comuns geram mensagens e exit codes acionáveis, sem stack trace como
   resposta principal.
+- A bridge continua disponível para a extensão/CLI mesmo quando MCP estiver
+  desabilitado, em proxy ou não carregado pelo Gemini CLI.
 
-## Proposta v0.6.0 — MCP opcional/legado
+## v0.7.0 — MCP opcional/legado
 
-Status: proposta.
+Status: implementada na versão `0.7.0`.
 
 Objetivo: reduzir o MCP a uma camada opcional de compatibilidade, mantendo a
 CLI como caminho recomendado para operações reais.
 
+### Decisão consolidada
+
+A arquitetura `CLI-first` não elimina a necessidade de skills. Ela redistribui
+responsabilidades para reduzir contexto permanente e deixar cada superfície
+fazer o que faz melhor:
+
+- CLI/TUI é o caminho de execução e UX para jobs longos:
+  - `sync`;
+  - `export missing`;
+  - `export recent`;
+  - `export resume`;
+  - `export reexport`;
+  - `export notebook`;
+  - `doctor`;
+  - `repair-vault`.
+- `gemini-md-export --help` e `<comando> --help` viram a fonte da verdade para
+  sintaxe, flags, formatos de saída e exit codes.
+- Bridge local continua sendo a integração com Chrome/Gemini Web: HTTP/SSE,
+  abas conectadas, escrita no vault, jobs e progresso.
+- MCP fino fica como plano de controle e compatibilidade:
+  - readiness/status;
+  - tabs/claim/reload;
+  - config;
+  - suporte/diagnóstico;
+  - mensagens de migração para comandos CLI.
+- Skills continuam como playbooks enxutos de julgamento operacional:
+  - quando usar `/sync` ou `gemini-md-export sync`;
+  - quando retomar por relatório em vez de recomeçar;
+  - como lidar com aba errada/múltiplas abas;
+  - como diagnosticar bridge/extensão lenta;
+  - como fazer repair sem sobrescrever trabalho manual.
+
+Regra principal: o MCP não deve chamar a CLI por baixo para executar jobs
+longos. Quando a operação real for export/sync/repair prolongado, o agente deve
+usar a CLI diretamente; o MCP só orienta, diagnostica ou retorna migração
+acionável.
+
 ### Entregas
 
-- Marcar no contexto do agente que jobs longos devem preferir CLI.
+- Marcar no contexto do agente que jobs longos devem usar CLI.
 - Manter MCP apenas para:
   - compatibilidade com instalações antigas;
   - discovery/status simples;
+  - tabs/claim/reload;
+  - config;
+  - suporte/diagnóstico;
   - ambientes onde o agente não tenha shell disponível.
+- Transformar tools MCP de export/sync/repair longo em orientação CLI-first:
+  - retornar `code: "use_cli"` ou equivalente;
+  - incluir comando exato em `{ command, args, cwd }`;
+  - incluir `nextAction` curto em português;
+  - preservar `detail: "full"` para diagnóstico, não para despejar listas
+    enormes no contexto.
 - Remover duplicação de lógica entre MCP e CLI:
   - ambos chamam os mesmos helpers/core;
   - nenhuma regra de exportação vive só no MCP.
+- Revisar skills empacotadas para remover detalhes que agora pertencem ao
+  `--help` da CLI e manter somente playbooks:
+  - `gemini-vault-sync`;
+  - `gemini-vault-repair`;
+  - `gemini-mcp-diagnostics`;
+  - `gemini-tabs-and-browser`.
+- Atualizar `/sync` para apontar explicitamente para o fluxo CLI-first quando
+  shell estiver disponível, usando o vault conhecido do `GEMINI.md` principal.
 - Atualizar instaladores para instalar/validar CLI + extensão Chrome + bridge.
 - Criar aviso de depreciação suave para tools MCP de exportação longa, apontando
   o comando CLI equivalente.
+- Atualizar `README.md` para apresentar CLI/bridge como caminho recomendado e
+  MCP como plano fino de controle/diagnóstico.
+- Definir ciclo de vida da bridge iniciada pela CLI:
+  - bridge iniciada sob demanda pela CLI usa `exit-when-idle` por padrão;
+  - não encerra enquanto houver job ativo;
+  - não encerra enquanto houver heartbeat recente da extensão Chrome;
+  - não encerra enquanto houver request/long-poll/SSE ativo;
+  - encerra após janela de inatividade configurável, por exemplo 10-15 minutos;
+  - expor flags `--keep-alive-ms`, `--exit-when-idle` e `--no-exit-when-idle`
+    no entrypoint da bridge/CLI;
+  - preservar compatibilidade: bridge iniciada pelo MCP pode manter o
+    comportamento atual, a menos que uma flag de idle seja definida.
 
 ### Critérios de aceite
 
 - O MCP pode ser desligado sem quebrar o fluxo principal CLI + bridge.
 - A documentação principal não apresenta MCP como caminho recomendado para
   export total.
+- Skills não repetem manual de comandos da CLI; elas apontam para `--help` e
+  focam em decisão operacional.
+- `gemini-md-export --help` é suficiente para um agente descobrir sintaxe e
+  opções sem depender de contexto permanente grande.
+- Uma chamada MCP de export/sync longo não inicia job escondido: ela retorna o
+  comando CLI recomendado e o motivo.
 - O usuário ainda consegue recuperar ambientes antigos sem reinstalação brusca.
+- Uma bridge iniciada automaticamente pela CLI não fica zumbi indefinidamente:
+  após concluir jobs e passar a janela de idle sem clientes/requests, ela
+  encerra sozinha.
+- Uma bridge com job ativo, heartbeat recente ou request/stream ativo não deve
+  encerrar por idle.
+
+## v0.7.1 — Hook slimming e browser wake pela CLI
+
+Status: implementada.
+
+Objetivo: simplificar a estratégia de hooks depois da migração CLI-first,
+deixando hooks como preparação leve da sessão e segurança de desenvolvimento,
+enquanto a CLI assume a responsabilidade completa por abrir Gemini Web quando
+um comando real precisa do navegador.
+
+### Decisão consolidada
+
+O comportamento deve ser fácil de explicar e igual para humano e agente:
+
+```text
+Gemini CLI session start
+  -> hook inicia/aquece bridge local, se necessário
+  -> não abre Chrome/Gemini
+
+Humano/agente roda gemini-md-export sync/export...
+  -> CLI garante bridge
+  -> CLI abre Chrome/Gemini em background se nenhuma aba estiver conectada
+  -> CLI espera extensão conectar
+  -> CLI executa job e mostra TUI/RESULT_JSON
+```
+
+Isso evita depender de um hook invisível para a experiência funcionar. O usuário
+que roda a CLI diretamente fora do Gemini CLI deve ter a mesma automação de
+bridge/browser que o agente tem.
+
+### Entregas
+
+- Adicionar hook `SessionStart` mínimo para warmup da bridge:
+  - consultar `/healthz`;
+  - se a bridge não responder, iniciar `src/bridge-server.js --exit-when-idle`;
+  - usar timeout curto;
+  - não abrir Chrome;
+  - ficar silencioso em sucesso/no-op;
+  - emitir `systemMessage` apenas quando houver problema útil.
+- Mover browser wake para a CLI:
+  - antes de `sync`, `export recent`, `export missing`, `export resume`,
+    `export reexport` e `export notebook`, a CLI chama `/agent/ready`;
+  - se não houver aba Gemini conectada, a CLI abre
+    `https://gemini.google.com/app` em background;
+  - aguarda conexão da extensão por timeout configurável;
+  - respeita flags `--no-wake`, `--ready-wait-ms`, `--no-self-heal` e
+    `--no-reload`;
+  - registra mensagens claras no modo humano/plain.
+- Reduzir o `BeforeTool` browser hook:
+  - remover `gemini_export` do prelaunch, porque no MCP ele só retorna
+    `code: "use_cli"`;
+  - não acordar navegador para `gemini_job`, `gemini_config get_export_dir` ou
+    suporte/diagnóstico passivo;
+  - manter wake apenas para tools MCP que realmente leem/alteram a aba:
+    `gemini_tabs`, `gemini_chats`, `gemini_ready status` e ações explícitas de
+    snapshot/cache quando necessário;
+  - continuar falhando aberto quando a bridge não estiver pronta.
+- Manter scope guard como hook separado de segurança de desenvolvimento:
+  - sem browser launch;
+  - sem consulta à bridge;
+  - bloqueando apenas paths proibidos como cookies, APIs privadas,
+    `chrome.debugger`, screenshots/capture fallback e permissões perigosas.
+- Migrar auditoria de mídia para a CLI/resultado:
+  - `RESULT_JSON` deve expor `mediaWarnings`/`warningCount`/`failedCount`;
+  - a CLI deve usar exit code de warning quando mídia falhar sem bloquear o
+    Markdown principal;
+  - `AfterTool` de mídia pode ficar restrito a chamadas MCP pequenas ou ser
+    removido se ficar redundante.
+- Atualizar docs e skills para explicar:
+  - hook inicial só aquece bridge;
+  - CLI é dona de abrir Chrome/Gemini em background;
+  - hooks não executam sync/export por baixo.
+
+### Critérios de aceite
+
+- Iniciar uma sessão Gemini CLI com a extensão instalada deixa a bridge pronta
+  ou em processo de warmup sem abrir Chrome.
+- Rodar `gemini-md-export sync ...` diretamente em um terminal humano abre
+  Gemini Web em background quando necessário e prossegue sem depender de hook.
+- Chamar `gemini_export` MCP não abre Chrome; retorna `use_cli` rapidamente.
+- `BeforeTool` não adiciona latência perceptível a status/config/suporte
+  passivos.
+- Scope guard continua bloqueando caminhos proibidos em tarefas de
+  desenvolvimento.
+- Testes cobrem SessionStart bridge warmup, CLI browser wake e ausência de
+  prelaunch para `gemini_export`.
 
 ## Pesquisa futura — Transporte da bridge local
 

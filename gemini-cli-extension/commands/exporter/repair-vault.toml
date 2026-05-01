@@ -15,8 +15,8 @@ Contrato:
 - Se o runner nao estiver disponivel, o subagent deve rodar o scanner local
   `${extensionPath}/scripts/vault-repair-audit.mjs --include-notes --report ...`.
 - Para reparo serio, o subagent deve verificar cada raw export seguindo o
-  `chat_id`/link da nota e reexportando aquele chat por MCP para staging; o
-  scanner local apenas monta a fila e destaca suspeitas.
+  `chat_id`/link da nota e reexportando aquele chat pelo runner/CLI para
+  staging; o scanner local apenas monta a fila e destaca suspeitas.
 - Diferenca apenas no YAML/frontmatter nao e divergencia de conteudo. O reparo
   de raw export deve comparar o corpo Markdown e preservar o YAML original
   byte-for-byte, trocando somente o corpo quando houver contaminacao.

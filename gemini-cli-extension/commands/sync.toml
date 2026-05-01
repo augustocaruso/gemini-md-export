@@ -15,13 +15,29 @@ Contrato:
 - So pergunte pelo caminho se nenhum vault puder ser inferido do contexto atual.
 - Nao liste todo o historico de conversas no chat.
 - Nao chame paginas de listagem enormes para decidir o que baixar.
-- Primeiro verifique prontidao com `gemini_ready`.
-- Se houver multiplas abas Gemini e a tool pedir escolha, use `gemini_tabs`
-  para listar/claim antes de exportar.
-- Use `gemini_export` com `action: "sync"`, `vaultDir` e `outputDir` apontando
-  para o vault.
-- Acompanhe com `gemini_job` ate status terminal:
-  `completed`, `completed_with_errors`, `failed` ou `cancelled`.
+- Preferencia: use o binario CLI da extensao, porque ele mostra progresso no
+  terminal, consegue iniciar a bridge em modo `bridge-only` quando ela esta
+  fora, e evita polling MCP no chat.
+- Se o usuario pediu visualmente uma UI/barra de progresso, execute o CLI com
+  `--tui` via shell interativo/pty quando disponivel:
+  macOS/Linux:
+  `node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" sync "<vaultDir>" --tui`
+  Windows/PowerShell:
+  `node "$env:USERPROFILE\\.gemini\\extensions\\gemini-md-export\\bin\\gemini-md-export.mjs" sync "<vaultDir>" --tui`
+- Se voce for ler o resultado como agente, use `--plain` em vez de `--tui`; ele
+  termina com `RESULT_JSON`.
+- Para importar somente ausentes de forma explícita, use `export missing
+  "<vaultDir>" --plain`; para retomar relatório, use `export resume
+  "<reportFile>" --plain`.
+- Para descobrir flags/contrato antes de rodar, chame
+  `node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" sync --help`
+  (ou o caminho equivalente no Windows).
+- Se voce chamar `gemini_export` por engano, ele deve responder
+  `code: "use_cli"` com o comando exato. Rode esse comando no shell; nao espere
+  que o MCP inicie um job longo escondido.
+- Se o binario nao existir ou shell nao estiver disponivel, use `gemini_ready`
+  e `gemini_support` apenas para diagnosticar o ambiente e devolver uma proxima
+  acao concreta ao usuario.
 - Se existir `resumeReportFile`/`reportFile` de uma tentativa anterior no
   contexto ou no retorno da tool, retome em vez de reiniciar do zero.
 - Mantenha Markdown e assets dentro do vault, nunca em Downloads como destino

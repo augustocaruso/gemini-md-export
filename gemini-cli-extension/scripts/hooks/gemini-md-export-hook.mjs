@@ -4,9 +4,12 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { request } from 'node:http';
 import { tmpdir } from 'node:os';
-import { resolve, win32 } from 'node:path';
+import { dirname, resolve, win32 } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const mode = process.argv[2] || '';
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const EXTENSION_ROOT = resolve(__dirname, '..', '..');
 let wroteOutput = false;
 const earlyNonNegativeInt = (value, fallback, max = 60_000) => {
   const parsed = Number.parseInt(String(value ?? ''), 10);
@@ -15,7 +18,7 @@ const earlyNonNegativeInt = (value, fallback, max = 60_000) => {
 };
 const HARD_EXIT_MS = earlyNonNegativeInt(
   process.env.GEMINI_MCP_HOOK_HARD_EXIT_MS,
-  mode === 'before-tool' ? 18_000 : 750,
+  mode === 'before-tool' ? 18_000 : mode === 'session-start' ? 2500 : 750,
 );
 const hardExit = setTimeout(() => {
   writeHookDiagnostic({
@@ -47,6 +50,7 @@ const DEFAULT_HOOK_STDIN_TIMEOUT_MS = 120;
 const DEFAULT_HOOK_LAUNCH_OBSERVE_MS = 120;
 const DEFAULT_HOOK_CONNECT_TIMEOUT_MS = 12_000;
 const DEFAULT_HOOK_CONNECT_POLL_MS = 350;
+const DEFAULT_SESSION_BRIDGE_WAIT_MS = 1200;
 const DEFAULT_LAUNCH_LOCK_GRACE_MS = 2_000;
 const MAX_STDIN_BYTES = 1024 * 1024;
 const HOOK_BROWSER_STATE_FILENAME = 'hook-browser-launch.json';
@@ -62,10 +66,9 @@ let diagnosticState = {
 };
 
 const BROWSER_DEPENDENT_EXPORTER_TOOL_ACTIONS = {
-  gemini_ready: new Set(['check', 'status']),
+  gemini_ready: new Set(['status']),
   gemini_tabs: new Set(['list', 'claim', 'reload']),
   gemini_chats: new Set(['list', 'current', 'open', 'download']),
-  gemini_export: new Set(['recent', 'missing', 'sync', 'reexport', 'notebook']),
   gemini_config: new Set(['cache_status', 'clear_cache']),
   gemini_support: new Set(['snapshot']),
 };
@@ -755,6 +758,113 @@ const queryEnvironmentDiagnostics = () =>
     });
     req.end();
   });
+
+const bridgeServerPath = () => {
+  const candidates = [
+    resolve(EXTENSION_ROOT, 'src', 'bridge-server.js'),
+    resolve(EXTENSION_ROOT, 'src', 'mcp-server.js'),
+    resolve(EXTENSION_ROOT, '..', 'src', 'bridge-server.js'),
+    resolve(EXTENSION_ROOT, '..', 'src', 'mcp-server.js'),
+  ];
+  return firstExisting(candidates);
+};
+
+const waitForBridgeHealth = async (timeoutMs) => {
+  const startedAt = Date.now();
+  let last = null;
+  while (Date.now() - startedAt <= timeoutMs) {
+    last = await queryBridgeHealth();
+    if (last.reachable) return last;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 80));
+  }
+  return last || { checked: true, reachable: false, reason: 'timeout' };
+};
+
+const sessionStartBridgeWarmup = async () => {
+  writeHookDiagnostic({
+    stage: 'session-start-bridge-warmup',
+  });
+  if (isDisabled(process.env.GEMINI_MCP_HOOK_SESSION_BRIDGE_WARMUP)) return silent();
+
+  const health = await withStageTiming('bridgeHealth', queryBridgeHealth);
+  if (health.reachable) {
+    writeHookDiagnostic({
+      stage: 'session-start-bridge-ready',
+      bridgeHealth: health,
+    });
+    return silent();
+  }
+
+  const serverPath = bridgeServerPath();
+  if (!serverPath) {
+    return silent('Gemini Exporter: nao encontrei bridge-server.js para aquecer a bridge local.');
+  }
+
+  const port = parseNonNegativeInt(process.env.GEMINI_MCP_BRIDGE_PORT, 47283);
+  const keepAliveMs = parseNonNegativeInt(
+    process.env.GEMINI_MD_EXPORT_BRIDGE_KEEP_ALIVE_MS ||
+      process.env.GEMINI_MCP_BRIDGE_KEEP_ALIVE_MS,
+    15 * 60_000,
+  );
+  const serverArgs = serverPath.endsWith('mcp-server.js')
+    ? [serverPath, '--bridge-only', '--host', '127.0.0.1', '--port', String(port)]
+    : [serverPath, '--host', '127.0.0.1', '--port', String(port)];
+  serverArgs.push('--exit-when-idle', '--keep-alive-ms', String(keepAliveMs));
+
+  const state = {
+    source: 'session-start',
+    status: 'launching',
+    serverPath,
+    serverArgs,
+    port,
+    keepAliveMs,
+    startedAt: new Date().toISOString(),
+  };
+
+  if (isEnabled(process.env.GEMINI_MCP_HOOK_DRY_RUN)) {
+    writeHookDiagnostic({
+      stage: 'session-start-bridge-dry-run',
+      bridgeWarmup: state,
+    });
+    return silent('Gemini Exporter: dry-run do SessionStart montou o warmup da bridge sem iniciar processo.');
+  }
+
+  try {
+    const child = spawn(process.execPath, serverArgs, {
+      cwd: tmpdir(),
+      detached: true,
+      stdio: 'ignore',
+      env: {
+        ...process.env,
+        GEMINI_MCP_CHROME_LAUNCH_IF_CLOSED: 'false',
+      },
+    });
+    child.unref?.();
+    state.pid = child.pid || null;
+    writeHookDiagnostic({
+      stage: 'session-start-bridge-spawned',
+      bridgeWarmup: state,
+    });
+  } catch (err) {
+    return silent(`Gemini Exporter: nao consegui iniciar a bridge no SessionStart (${err.message}).`);
+  }
+
+  const waitMs = parseNonNegativeInt(
+    process.env.GEMINI_MCP_HOOK_SESSION_BRIDGE_WAIT_MS,
+    DEFAULT_SESSION_BRIDGE_WAIT_MS,
+  );
+  const ready = await withStageTiming('bridgeWarmupWait', () => waitForBridgeHealth(waitMs));
+  writeHookDiagnostic({
+    stage: ready.reachable ? 'session-start-bridge-warmed' : 'session-start-bridge-timeout',
+    bridgeWarmup: state,
+    bridgeHealth: ready,
+  });
+
+  if (ready.reachable) return silent();
+  return silent(
+    `Gemini Exporter: tentei iniciar a bridge no inicio da sessao, mas /healthz ainda nao respondeu (${ready.reason || 'timeout'}).`,
+  );
+};
 
 const sleep = (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 
@@ -1532,7 +1642,7 @@ const run = async () => {
     platform: currentPlatform(),
     argv: process.argv.slice(2),
   });
-  if (mode === 'session-start') return contextOutput(SESSION_CONTEXT);
+  if (mode === 'session-start') return sessionStartBridgeWarmup();
   if (mode === 'diagnose') return diagnose();
   const input = await readInput();
   if (mode === 'after-tool') return afterTool(input);

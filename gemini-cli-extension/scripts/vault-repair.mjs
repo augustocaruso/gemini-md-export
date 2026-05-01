@@ -278,6 +278,19 @@ const callMcpTool = async ({ bridgeUrl, name, args = {} }) => {
   return structured;
 };
 
+const callAgentEndpoint = async ({ bridgeUrl, path, method = 'GET', body = null }) => {
+  const response = await fetch(`${bridgeUrl}${path}`, {
+    method,
+    headers: body ? { 'content-type': 'application/json' } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || payload.ok === false) {
+    throw new Error(payload.error || `Falha HTTP ${response.status} em ${path}`);
+  }
+  return payload;
+};
+
 const ensureBrowserReady = async (options) => {
   const status = await callMcpTool({
     bridgeUrl: options.bridgeUrl,
@@ -345,11 +358,11 @@ const reexportChats = async ({ items, paths, options }) => {
   const jobs = [];
 
   for (const chunk of chunkItems(items, DIRECT_REEXPORT_CHUNK_SIZE)) {
-    const started = await callMcpTool({
+    const started = await callAgentEndpoint({
       bridgeUrl: options.bridgeUrl,
-      name: 'gemini_export',
-      args: {
-        action: 'reexport',
+      path: '/agent/reexport-chats',
+      method: 'POST',
+      body: {
         outputDir: paths.stagingDir,
         items: chunk,
       },

@@ -15,6 +15,7 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   const manifestPath = resolve(extensionDir, 'gemini-extension.json');
   const contextPath = resolve(extensionDir, 'GEMINI.md');
   const serverPath = resolve(extensionDir, 'src', 'mcp-server.js');
+  const bridgeServerPath = resolve(extensionDir, 'src', 'bridge-server.js');
   const guardPath = resolve(extensionDir, 'src', 'chrome-extension-guard.mjs');
   const browserLaunchPath = resolve(extensionDir, 'src', 'browser-launch.mjs');
   const jobProgressBroadcastPath = resolve(extensionDir, 'src', 'job-progress-broadcast.mjs');
@@ -42,6 +43,7 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.equal(existsSync(manifestPath), true);
   assert.equal(existsSync(contextPath), true);
   assert.equal(existsSync(serverPath), true);
+  assert.equal(existsSync(bridgeServerPath), true);
   assert.equal(existsSync(guardPath), true);
   assert.equal(existsSync(browserLaunchPath), true);
   assert.equal(existsSync(jobProgressBroadcastPath), true);
@@ -79,17 +81,26 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   const hooksConfig = JSON.parse(readFileSync(hooksConfigPath, 'utf-8'));
   assert.ok(Array.isArray(hooksConfig.hooks?.AfterTool));
   assert.ok(Array.isArray(hooksConfig.hooks?.BeforeTool));
-  assert.equal(hooksConfig.hooks?.SessionStart, undefined);
-  assert.match(hooksConfig.hooks.AfterTool[0].matcher, /ready/);
-  assert.match(hooksConfig.hooks.AfterTool[0].matcher, /support/);
+  assert.ok(Array.isArray(hooksConfig.hooks?.SessionStart));
+  assert.equal(
+    hooksConfig.hooks.SessionStart[0].hooks[0].name,
+    'gemini-md-export-bridge-warmup',
+  );
+  assert.match(hooksConfig.hooks.AfterTool[0].matcher, /chats/);
+  assert.doesNotMatch(hooksConfig.hooks.AfterTool[0].matcher, /ready/);
+  assert.doesNotMatch(hooksConfig.hooks.AfterTool[0].matcher, /support/);
   assert.notEqual(hooksConfig.hooks.BeforeTool[0].matcher, '*');
   assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /ready/);
   assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /tabs/);
   assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /chats/);
-  assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /export/);
   assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /mcp_\+gemini/);
   assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /config/);
   assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /support/);
+  const browserReadyMatcher = new RegExp(hooksConfig.hooks.BeforeTool[0].matcher);
+  assert.equal(browserReadyMatcher.test('gemini_export'), false);
+  assert.equal(browserReadyMatcher.test('mcp_gemini-md-export_gemini_export'), false);
+  assert.equal(browserReadyMatcher.test('gemini_job'), false);
+  assert.equal(browserReadyMatcher.test('mcp_gemini-md-export_gemini_job'), false);
   assert.doesNotMatch(hooksConfig.hooks.BeforeTool[0].matcher, /browser_status/);
   assert.doesNotMatch(hooksConfig.hooks.BeforeTool[0].matcher, /export_job_status/);
   assert.equal(hooksConfig.hooks.BeforeTool[0].hooks[0].timeout, 20000);
@@ -126,11 +137,11 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
 
   const syncCommand = readFileSync(syncCommandPath, 'utf-8');
   assert.match(syncCommand, /gemini-vault-sync/);
-  assert.match(syncCommand, /gemini_export/);
-  assert.match(syncCommand, /action: "sync"/);
+  assert.match(syncCommand, /code: "use_cli"/);
+  assert.match(syncCommand, /gemini-md-export\.mjs/);
   assert.match(syncCommand, /vault correto ja conhecido/);
   assert.match(syncCommand, /Nao pergunte pelo caminho apenas porque/);
-  assert.match(syncCommand, /gemini_job/);
+  assert.doesNotMatch(syncCommand, /acompanhe com `gemini_job`/);
   assert.match(syncCommand, /nao liste todo o historico/i);
 
   const repairCommand = readFileSync(repairCommandPath, 'utf-8');
@@ -170,6 +181,7 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.match(context, /gemini-tabs-and-browser/);
   assert.match(context, /detail: "full"/);
   assert.match(context, /code: "tool_renamed"/);
+  assert.match(context, /code: "use_cli"/);
   assert.doesNotMatch(context, /gemini_export_recent_chats/);
   assert.doesNotMatch(context, /gemini_download_chat/);
 });
@@ -352,15 +364,25 @@ test('repair runner compara somente corpo e preserva YAML original ao reparar ra
 
     const server = createServer(async (req, res) => {
       try {
-        if (req.method !== 'POST' || req.url !== '/agent/mcp-tool-call') {
+        if (
+          req.url !== '/agent/mcp-tool-call' &&
+          req.url !== '/agent/reexport-chats' &&
+          !String(req.url).startsWith('/agent/export-job-status')
+        ) {
           res.writeHead(404, { 'content-type': 'application/json' });
           res.end(JSON.stringify({ ok: false, error: 'not found' }));
           return;
         }
 
-        const payload = await readRequestJson(req);
-        const args = payload.arguments || {};
-        if (payload.name === 'gemini_export' && args.action === 'reexport') {
+        const payload = req.method === 'POST' ? await readRequestJson(req) : {};
+        const args =
+          req.url === '/agent/reexport-chats'
+            ? payload
+            : payload.arguments || {};
+        if (
+          (payload.name === 'gemini_export' && args.action === 'reexport') ||
+          req.url === '/agent/reexport-chats'
+        ) {
           mkdirSync(args.outputDir, { recursive: true });
           const successes = args.items.map((item, index) => {
             const filePath = resolve(args.outputDir, `${item.chatId}.md`);
@@ -420,20 +442,30 @@ test('repair runner compara somente corpo e preserva YAML original ao reparar ra
           };
           writeFileSync(reportFile, `${JSON.stringify(report, null, 2)}\n`, 'utf-8');
           jobs.set(jobId, { reportFile, successes });
-          sendToolResult(res, {
+          const started = {
             jobId,
             status: 'running',
             reportFile,
             successCount: successes.length,
             failureCount: 0,
-          });
+          };
+          if (req.url === '/agent/reexport-chats') {
+            res.writeHead(202, { 'content-type': 'application/json' });
+            res.end(JSON.stringify(started));
+          } else {
+            sendToolResult(res, started);
+          }
           return;
         }
 
-        if (payload.name === 'gemini_job' && args.action === 'status') {
-          const job = jobs.get(args.jobId);
-          sendToolResult(res, {
-            jobId: args.jobId,
+        if (
+          (payload.name === 'gemini_job' && args.action === 'status') ||
+          String(req.url).startsWith('/agent/export-job-status')
+        ) {
+          const jobId = args.jobId || new URL(req.url, 'http://127.0.0.1').searchParams.get('jobId');
+          const job = jobs.get(jobId);
+          const statusPayload = {
+            jobId,
             status: 'completed',
             phase: 'done',
             reportFile: job.reportFile,
@@ -441,7 +473,13 @@ test('repair runner compara somente corpo e preserva YAML original ao reparar ra
             failureCount: 0,
             recentSuccesses: job.successes,
             failures: [],
-          });
+          };
+          if (String(req.url).startsWith('/agent/export-job-status')) {
+            res.writeHead(200, { 'content-type': 'application/json' });
+            res.end(JSON.stringify(statusPayload));
+          } else {
+            sendToolResult(res, statusPayload);
+          }
           return;
         }
 

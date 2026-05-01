@@ -123,14 +123,46 @@ const closeServer = (server) =>
     server.close(() => resolveClose());
   });
 
-test('SessionStart injeta contexto curto do exporter', () => {
-  const output = runHook('session-start', { hook_event_name: 'SessionStart', source: 'startup' });
-  const context = additionalContextOf(output);
+test('SessionStart aquece somente a bridge local, sem contexto estatico', async () => {
+  const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-hook-session-'));
+  const probe = createServer((_req, res) => res.end('probe'));
+  const port = await listen(probe);
+  await closeServer(probe);
+  let bridgePid = null;
 
-  assert.equal(output.suppressOutput, true);
-  assert.match(context, /gemini-md-export MCP tools/);
-  assert.match(context, /mediaFailureCount/);
-  assert.match(context, /Forbidden paths/);
+  try {
+    const output = await runHookAsync(
+      'session-start',
+      { hook_event_name: 'SessionStart', source: 'startup' },
+      {
+        GEMINI_MCP_HOOK_STATE_DIR: tmpRoot,
+        GEMINI_MCP_BRIDGE_PORT: String(port),
+        GEMINI_MCP_HOOK_BRIDGE_TIMEOUT_MS: '80',
+        GEMINI_MCP_HOOK_SESSION_BRIDGE_WAIT_MS: '2500',
+        GEMINI_MCP_HOOK_HARD_EXIT_MS: '3500',
+        GEMINI_MD_EXPORT_BRIDGE_KEEP_ALIVE_MS: '60000',
+      },
+    );
+
+    assert.equal(output.suppressOutput, true);
+    assert.equal(output.hookSpecificOutput, undefined);
+    assert.equal(output.systemMessage, undefined);
+
+    const health = await fetch(`http://127.0.0.1:${port}/healthz`).then((response) => response.json());
+    bridgePid = health.pid;
+    assert.equal(health.bridgeOnly, true);
+    assert.equal(health.process.bridgeOnly, true);
+    assert.equal(health.idleLifecycle.enabled, true);
+  } finally {
+    if (bridgePid) {
+      try {
+        process.kill(bridgePid, 'SIGTERM');
+      } catch {
+        // Bridge may have already exited.
+      }
+    }
+    rmSync(tmpRoot, { recursive: true, force: true });
+  }
 });
 
 test('AfterTool avisa quando mediaFailureCount e maior que zero', () => {
@@ -302,7 +334,7 @@ test('BeforeTool abre Gemini pelo launcher PowerShell quando nao ha cliente cone
       {
         hook_event_name: 'BeforeTool',
         tool_name: 'mcp_gemini-md-export_gemini_ready',
-        tool_input: {},
+        tool_input: { action: 'status' },
       },
       {
         GEMINI_MCP_HOOK_PLATFORM: 'win32',
@@ -350,7 +382,7 @@ test('BeforeTool normaliza prefixo MCP com underscores duplos', async () => {
       {
         hook_event_name: 'BeforeTool',
         tool_name: 'mcp__gemini_md_export__gemini_ready',
-        tool_input: {},
+        tool_input: { action: 'status' },
       },
       {
         GEMINI_MCP_HOOK_PLATFORM: 'win32',
@@ -396,7 +428,7 @@ test('BeforeTool espera a aba Gemini conectar depois de abrir pelo hook', async 
       {
         hook_event_name: 'BeforeTool',
         tool_name: 'mcp_gemini-md-export_gemini_ready',
-        tool_input: {},
+        tool_input: { action: 'status' },
       },
       {
         GEMINI_MCP_HOOK_PLATFORM: 'win32',
@@ -499,7 +531,7 @@ test('BeforeTool nao abre browser as cegas quando bridge esta inalcançavel', as
         hook_event_name: 'BeforeTool',
         session_id: 'session-a',
         tool_name: 'mcp_gemini-md-export_gemini_ready',
-        tool_input: {},
+        tool_input: { action: 'status' },
       },
       {
         GEMINI_MCP_HOOK_PLATFORM: 'win32',
@@ -544,7 +576,7 @@ test('BeforeTool timeout de conexao sai antes do hard exit da CLI', async () => 
       {
         hook_event_name: 'BeforeTool',
         tool_name: 'mcp_gemini-md-export_gemini_ready',
-        tool_input: {},
+        tool_input: { action: 'status' },
       },
       {
         GEMINI_MCP_HOOK_PLATFORM: 'win32',
@@ -567,6 +599,47 @@ test('BeforeTool timeout de conexao sai antes do hard exit da CLI', async () => 
     assert.equal(state.status, 'timeout');
     assert.equal(state.connectWait.connected, false);
     assert.equal(state.connectWait.timeoutMs, 120);
+  } finally {
+    await closeServer(server);
+    rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test('BeforeTool nao preabre navegador para gemini_export CLI-first', async () => {
+  const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-hook-test-'));
+  const server = createServer((_req, res) => {
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({
+      ready: false,
+      connectedClientCount: 0,
+      selectableTabCount: 0,
+      matchingClientCount: 0,
+      commandReadyClientCount: 0,
+      blockingIssue: 'no_connected_clients',
+    }));
+  });
+  const port = await listen(server);
+
+  try {
+    const output = await runHookAsync(
+      'before-tool',
+      {
+        hook_event_name: 'BeforeTool',
+        tool_name: 'mcp_gemini-md-export_gemini_export',
+        tool_input: { action: 'sync' },
+      },
+      {
+        GEMINI_MCP_HOOK_PLATFORM: 'win32',
+        GEMINI_MCP_HOOK_DRY_RUN: 'true',
+        GEMINI_MCP_HOOK_STATE_DIR: tmpRoot,
+        GEMINI_MCP_BRIDGE_PORT: String(port),
+        GEMINI_MCP_BROWSER_LAUNCH_COOLDOWN_MS: '0',
+      },
+    );
+
+    assert.equal(output.suppressOutput, true);
+    assert.equal(output.systemMessage, undefined);
+    assert.equal(existsSync(resolve(tmpRoot, 'hook-browser-launch.json')), false);
   } finally {
     await closeServer(server);
     rmSync(tmpRoot, { recursive: true, force: true });
@@ -796,6 +869,8 @@ test('BeforeTool considera gemini_ready como tool que acorda o navegador', () =>
   const hookSource = readFileSync(hookPath, 'utf-8');
 
   assert.match(hookSource, /gemini_ready/);
+  assert.match(hookSource, /gemini_ready:\s+new Set\(\['status'\]\)/);
+  assert.doesNotMatch(hookSource, /gemini_export:\s+new Set/);
   assert.match(hookSource, /open-gemini-restore-focus\.ps1/);
   assert.match(hookSource, /SetForegroundWindow/);
   assert.match(hookSource, /waitForConnectedBrowserClient/);

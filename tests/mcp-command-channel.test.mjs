@@ -77,6 +77,8 @@ test('MCP v0.5 lista somente as 7 tools públicas de domínio', () => {
   ]);
   assert.match(source, /code: 'tool_renamed'/);
   assert.match(source, /legacyToolReplacement/);
+  assert.match(source, /code: 'use_cli'/);
+  assert.match(source, /cliFirstExportResult/);
 });
 
 test('MCP implementa afinidade confiável por claim de aba', () => {

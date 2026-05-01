@@ -32,7 +32,7 @@ node scripts/vault-repair.mjs /path/to/vault
 The script audits notes, reexports exact chat IDs, validates staged Markdown,
 creates backups, and writes a report.
 
-## MCP Checks
+## Browser Checks
 
 Before browser work:
 
@@ -40,24 +40,14 @@ Before browser work:
 { "tool": "gemini_ready", "arguments": { "action": "status" } }
 ```
 
-For known suspect IDs, reexport in a background job:
+For known suspect IDs, prefer the runner above or the CLI:
 
-```json
-{
-  "tool": "gemini_export",
-  "arguments": {
-    "action": "reexport",
-    "outputDir": "/path/to/staging",
-    "items": [{ "chatId": "<chatId>", "sourcePath": "/path/to/note.md" }]
-  }
-}
+```bash
+node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" export reexport --chat-id "<chatId>" --output-dir "/path/to/staging" --plain
 ```
 
-Poll:
-
-```json
-{ "tool": "gemini_job", "arguments": { "action": "status", "jobId": "<jobId>" } }
-```
+MCP `gemini_export` is CLI-first in v0.7.0 and should return `code: "use_cli"`
+instead of starting hidden long jobs.
 
 For one-off checks only:
 
