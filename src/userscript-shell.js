@@ -307,6 +307,16 @@
   const BRIDGE_HEARTBEAT_MS = 8000;
   const BRIDGE_POLL_TIMEOUT_MS = 30000;
   const BRIDGE_POLL_ERROR_BACKOFF_MS = 250;
+  const BRIDGE_EVENTS_BASE_BACKOFF_MS = 500;
+  const BRIDGE_EVENTS_MAX_BACKOFF_MS = 15000;
+  const BRIDGE_HEARTBEAT_PING_MS = 30000;
+  const BRIDGE_SNAPSHOT_MIN_INTERVAL_MS = 1200;
+  const BRIDGE_SNAPSHOT_MAX_INTERVAL_MS = 30000;
+  const BRIDGE_PROTOCOL_CAPABILITIES = [
+    'events-v1',
+    'snapshot-v1',
+    'command-result-retry-v1',
+  ];
   const BRIDGE_CLIENT_STALE_MS = 45000;
   const BRIDGE_FILE_TIMEOUT_MS = 60000;
   const BRIDGE_PICKER_TIMEOUT_MS = 5 * 60000;
@@ -389,6 +399,10 @@
     filterQuery: '',
     reachedSidebarEnd: false,
     sidebarConversationCache: new Map(),
+    bridgeSnapshotDirty: true,
+    bridgeSnapshotDirtyReason: 'startup',
+    bridgeSnapshotHash: '',
+    lastBridgeSnapshotAt: 0,
   };
   let sidebarConversationObserver = null;
   let sidebarRefreshTimer = 0;
@@ -427,11 +441,49 @@
     heartbeatTimer: 0,
     polling: false,
     lastHeartbeatAt: 0,
+    lastHeartbeatStartedAt: 0,
+    lastHeartbeatDurationMs: null,
+    lastExtensionPingAt: 0,
+    heartbeatInFlight: false,
+    snapshotInFlight: false,
+    eventSource: null,
+    eventsConnected: false,
+    eventsConnecting: false,
+    eventsReconnectTimer: 0,
+    eventsBackoffMs: BRIDGE_EVENTS_BASE_BACKOFF_MS,
+    commandResultCache: new Map(),
     lastCommandPollStartedAt: 0,
     lastCommandPollEndedAt: 0,
     lastCommandReceivedAt: 0,
   };
   const MIN_FAST_POLL_BACKOFF_MS = 250;
+
+  const markBridgeSnapshotDirty = (reason = 'changed') => {
+    state.bridgeSnapshotDirty = true;
+    state.bridgeSnapshotDirtyReason = reason;
+  };
+
+  const bridgeBackoffWithJitter = (currentMs, baseMs, maxMs) => {
+    const current = Number.isFinite(currentMs) && currentMs > 0 ? currentMs : baseMs;
+    const jitter = Math.floor(Math.random() * Math.max(1, Math.floor(current * 0.25)));
+    return Math.min(maxMs, current + jitter);
+  };
+
+  const resetBridgeEventBackoff = () => {
+    bridgeState.eventsBackoffMs = BRIDGE_EVENTS_BASE_BACKOFF_MS;
+  };
+
+  const increaseBridgeEventBackoff = () => {
+    bridgeState.eventsBackoffMs = Math.min(
+      BRIDGE_EVENTS_MAX_BACKOFF_MS,
+      bridgeBackoffWithJitter(
+        bridgeState.eventsBackoffMs * 2,
+        BRIDGE_EVENTS_BASE_BACKOFF_MS,
+        BRIDGE_EVENTS_MAX_BACKOFF_MS,
+      ),
+    );
+    return bridgeState.eventsBackoffMs;
+  };
 
   // --- metadata da página -----------------------------------------------
 
@@ -1193,6 +1245,7 @@
   const refreshConversationState = () => {
     const previousSelection = new Set(state.selectedChatIds);
     state.conversations = collectConversationLinks();
+    markBridgeSnapshotDirty('conversation-state');
     state.selectedChatIds = new Set(
       state.conversations
         .filter((item) =>
@@ -1269,6 +1322,7 @@
     clearTimeout(sidebarRefreshTimer);
     sidebarRefreshTimer = setTimeout(() => {
       refreshConversationState();
+      markBridgeSnapshotDirty('sidebar-mutation');
       const modal = document.getElementById(MODAL_ID);
       if (modal && !modal.hidden) {
         updateModalState();
@@ -1963,13 +2017,87 @@
     }
   };
 
-  const buildBridgeSummary = () => {
+  const stableSnapshotHash = (items) => {
+    let hash = 2166136261;
+    const text = JSON.stringify(
+      (items || []).map((item) => [
+        item.chatId || '',
+        item.id || '',
+        item.title || '',
+        item.url || '',
+        item.source || '',
+      ]),
+    );
+    for (let i = 0; i < text.length; i += 1) {
+      hash ^= text.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(16).padStart(8, '0');
+  };
+
+  const buildBridgePageSummary = () => ({
+    url: location.href,
+    pathname: location.pathname,
+    title: scrapeTitle(),
+    chatId: currentChatId(),
+    notebookId: currentNotebookId(),
+    kind: isNotebookPage() ? 'notebook' : 'chat',
+    model: scrapeModel(),
+    turnCount: conversationDomTurnCount(document),
+    reachedSidebarEnd: state.reachedSidebarEnd,
+    isActiveTab: bridgeState.isActiveTab,
+    protocolVersion: bridgeState.protocolVersion,
+    buildStamp: bridgeState.buildStamp,
+  });
+
+  const buildBridgeHeartbeatPayload = () => ({
+    clientId: bridgeState.clientId,
+    tabId: bridgeState.tabId,
+    windowId: bridgeState.windowId,
+    isActiveTab: bridgeState.isActiveTab,
+    extensionVersion: bridgeState.extensionVersion,
+    protocolVersion: bridgeState.protocolVersion,
+    buildStamp: bridgeState.buildStamp,
+    capabilities: BRIDGE_PROTOCOL_CAPABILITIES,
+    commandPoll: {
+      polling: bridgeState.polling,
+      eventsConnected: bridgeState.eventsConnected,
+      lastStartedAt: bridgeState.lastCommandPollStartedAt
+        ? new Date(bridgeState.lastCommandPollStartedAt).toISOString()
+        : null,
+      lastEndedAt: bridgeState.lastCommandPollEndedAt
+        ? new Date(bridgeState.lastCommandPollEndedAt).toISOString()
+        : null,
+      lastCommandReceivedAt: bridgeState.lastCommandReceivedAt
+        ? new Date(bridgeState.lastCommandReceivedAt).toISOString()
+        : null,
+    },
+    observedAt: new Date().toISOString(),
+    staleAfterMs: BRIDGE_CLIENT_STALE_MS,
+    snapshotDirty: state.bridgeSnapshotDirty,
+    snapshotDirtyReason: state.bridgeSnapshotDirtyReason,
+    snapshotHash: state.bridgeSnapshotHash || null,
+    metrics: {
+      lastHeartbeatDurationMs: bridgeState.lastHeartbeatDurationMs,
+      lastError: bridgeState.lastError,
+      eventsConnected: bridgeState.eventsConnected,
+    },
+    page: {
+      ...buildBridgePageSummary(),
+      listedConversationCount: state.conversations.length,
+      bridgeConversationCount: state.sidebarConversationCache.size,
+      notebookCacheCount: notebookChatUrlCacheSummary().size,
+    },
+  });
+
+  const buildBridgeSnapshotPayload = () => {
     const {
       modalConversations,
       bridgeConversations,
       sidebarConversations,
       notebookConversations,
     } = collectConversationLinkSnapshot();
+    const snapshotHash = stableSnapshotHash(bridgeConversations);
     return {
       clientId: bridgeState.clientId,
       tabId: bridgeState.tabId,
@@ -1978,6 +2106,7 @@
       extensionVersion: bridgeState.extensionVersion,
       protocolVersion: bridgeState.protocolVersion,
       buildStamp: bridgeState.buildStamp,
+      capabilities: BRIDGE_PROTOCOL_CAPABILITIES,
       commandPoll: {
         polling: bridgeState.polling,
         lastStartedAt: bridgeState.lastCommandPollStartedAt
@@ -1991,28 +2120,18 @@
           : null,
       },
       observedAt: new Date().toISOString(),
+      snapshotHash,
       staleAfterMs: BRIDGE_CLIENT_STALE_MS,
       page: {
-        url: location.href,
-        pathname: location.pathname,
-        title: scrapeTitle(),
-        chatId: currentChatId(),
-        notebookId: currentNotebookId(),
-        kind: isNotebookPage() ? 'notebook' : 'chat',
-        model: scrapeModel(),
-        turnCount: conversationDomTurnCount(document),
+        ...buildBridgePageSummary(),
         listedConversationCount: modalConversations.length,
         bridgeConversationCount: bridgeConversations.length,
         sidebarConversationCount: sidebarConversations.length,
         notebookConversationCount: notebookConversations.length,
         notebookCacheCount: notebookChatUrlCacheSummary().size,
-        reachedSidebarEnd: state.reachedSidebarEnd,
-        isActiveTab: bridgeState.isActiveTab,
-        protocolVersion: bridgeState.protocolVersion,
-        buildStamp: bridgeState.buildStamp,
       },
-      conversations: bridgeConversations.slice(0, 100),
-      modalConversations: modalConversations.slice(0, 100),
+      conversations: bridgeConversations.slice(0, 1000),
+      modalConversations: modalConversations.slice(0, 1000),
     };
   };
 
@@ -5262,11 +5381,25 @@
     }
   };
 
-  const sendBridgeHeartbeat = async () => {
-    if (!bridgeState.started) return;
-
+  const refreshExtensionContext = async ({ force = false } = {}) => {
+    const missingContext =
+      bridgeState.tabId === null ||
+      bridgeState.windowId === null ||
+      !bridgeState.extensionVersion ||
+      !bridgeState.buildStamp;
+    if (
+      !force &&
+      !missingContext &&
+      Date.now() - bridgeState.lastExtensionPingAt < BRIDGE_HEARTBEAT_PING_MS
+    ) {
+      return;
+    }
     try {
-      const extensionContext = await extensionSendMessage({ type: 'gemini-md-export/ping' });
+      const extensionContext = await extensionSendMessage(
+        { type: 'gemini-md-export/ping' },
+        { timeoutMs: 2500 },
+      );
+      bridgeState.lastExtensionPingAt = Date.now();
       if (extensionContext?.tabId !== undefined) bridgeState.tabId = extensionContext.tabId;
       if (extensionContext?.windowId !== undefined) bridgeState.windowId = extensionContext.windowId;
       if (extensionContext?.isActiveTab !== undefined) {
@@ -5277,47 +5410,124 @@
         bridgeState.protocolVersion = extensionContext.protocolVersion;
       }
       if (extensionContext?.buildStamp) bridgeState.buildStamp = extensionContext.buildStamp;
-    } catch {
-      // O service worker pode acordar entre heartbeats; o bridge HTTP continua tentando.
-    }
-
-    const response = await bridgeRequest('/bridge/heartbeat', {
-      method: 'POST',
-      payload: buildBridgeSummary(),
-      timeoutMs: 4000,
-    });
-
-    bridgeState.lastHeartbeatAt = Date.now();
-    if (response?.clientId && !bridgeState.clientId) {
-      bridgeState.clientId = response.clientId;
-    }
-    try {
-      handleMcpJobProgressBroadcast(response?.jobProgress || null);
     } catch (err) {
-      warn('Falha ao processar jobProgress do bridge.', err);
+      bridgeState.lastError = err?.message || String(err);
     }
-    if (response?.command) {
-      await handleBridgeCommand(response.command);
+  };
+
+  const sendBridgeSnapshot = async ({ force = false } = {}) => {
+    if (!bridgeState.started || bridgeState.snapshotInFlight) return null;
+    const ageMs = Date.now() - state.lastBridgeSnapshotAt;
+    if (!force && !state.bridgeSnapshotDirty && ageMs < BRIDGE_SNAPSHOT_MAX_INTERVAL_MS) {
+      return null;
     }
-    // Se o bridge acabou de voltar, o heartbeat já serve como nudge para o
-    // loop de comandos sair rápido de backoff/transiente e reabrir o long-poll.
-    pollBridgeCommands();
+    if (!force && ageMs < BRIDGE_SNAPSHOT_MIN_INTERVAL_MS) return null;
+
+    bridgeState.snapshotInFlight = true;
+    try {
+      const payload = buildBridgeSnapshotPayload();
+      const response = await bridgeRequest('/bridge/snapshot', {
+        method: 'POST',
+        payload,
+        timeoutMs: 10000,
+      });
+      if (response?.ok) {
+        state.bridgeSnapshotHash = payload.snapshotHash;
+        state.bridgeSnapshotDirty = false;
+        state.bridgeSnapshotDirtyReason = '';
+        state.lastBridgeSnapshotAt = Date.now();
+      }
+      return response;
+    } finally {
+      bridgeState.snapshotInFlight = false;
+    }
+  };
+
+  const sendBridgeHeartbeat = async () => {
+    if (!bridgeState.started || bridgeState.heartbeatInFlight) return;
+    bridgeState.heartbeatInFlight = true;
+    bridgeState.lastHeartbeatStartedAt = Date.now();
+
+    try {
+      await refreshExtensionContext();
+      const response = await bridgeRequest('/bridge/heartbeat', {
+        method: 'POST',
+        payload: buildBridgeHeartbeatPayload(),
+        timeoutMs: 4000,
+      });
+
+      bridgeState.lastHeartbeatAt = Date.now();
+      bridgeState.lastHeartbeatDurationMs =
+        bridgeState.lastHeartbeatAt - bridgeState.lastHeartbeatStartedAt;
+      bridgeState.lastError = null;
+      if (response?.clientId && !bridgeState.clientId) {
+        bridgeState.clientId = response.clientId;
+      }
+      try {
+        handleMcpJobProgressBroadcast(response?.jobProgress || null);
+      } catch (err) {
+        warn('Falha ao processar jobProgress do bridge.', err);
+      }
+      if (response?.snapshotRequested) {
+        await sendBridgeSnapshot({ force: true });
+      }
+      if (response?.command) {
+        await handleBridgeCommand(response.command);
+      }
+      if (response?.transport?.eventsConnected) {
+        pollBridgeCommands(false);
+      } else {
+        pollBridgeCommands(true);
+      }
+    } catch (err) {
+      bridgeState.lastError = err?.message || String(err);
+      throw err;
+    } finally {
+      bridgeState.heartbeatInFlight = false;
+    }
   };
 
   const postBridgeCommandResult = async (command, result) => {
-    await bridgeRequest('/bridge/command-result', {
-      method: 'POST',
-      payload: {
-        clientId: bridgeState.clientId,
-        commandId: command.id,
-        result,
-      },
-      timeoutMs: 10000,
+    let lastError = null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        return await bridgeRequest('/bridge/command-result', {
+          method: 'POST',
+          payload: {
+            clientId: bridgeState.clientId,
+            commandId: command.id,
+            result,
+          },
+          timeoutMs: 10000,
+        });
+      } catch (err) {
+        lastError = err;
+        await sleep(150 * (attempt + 1));
+      }
+    }
+    throw lastError;
+  };
+
+  const rememberBridgeCommandResult = (commandId, result) => {
+    bridgeState.commandResultCache.set(commandId, {
+      result,
+      at: Date.now(),
     });
+    for (const [key, cached] of bridgeState.commandResultCache.entries()) {
+      if (Date.now() - cached.at > 5 * 60_000) {
+        bridgeState.commandResultCache.delete(key);
+      }
+    }
   };
 
   const handleBridgeCommand = async (command) => {
+    if (!command?.id) return;
     bridgeState.lastCommandReceivedAt = Date.now();
+    const cached = bridgeState.commandResultCache.get(command.id);
+    if (cached) {
+      await postBridgeCommandResult(command, cached.result);
+      return;
+    }
     let result;
     try {
       result = await executeBridgeCommand(command);
@@ -5327,14 +5537,98 @@
         error: err?.message || String(err),
       };
     }
+    rememberBridgeCommandResult(command.id, result);
     await postBridgeCommandResult(command, result);
   };
 
-  const pollBridgeCommands = async () => {
-    if (!bridgeState.started || bridgeState.polling) return;
-    bridgeState.polling = true;
+  const handleBridgeEventMessage = async (event) => {
+    let payload = null;
+    try {
+      payload = JSON.parse(event.data || '{}');
+    } catch {
+      payload = null;
+    }
+    if (event.type === 'command' && payload?.command) {
+      await handleBridgeCommand(payload.command);
+      return;
+    }
+    if (event.type === 'jobProgress') {
+      handleMcpJobProgressBroadcast(payload || null);
+    }
+  };
 
-    while (bridgeState.started) {
+  const closeBridgeEvents = () => {
+    if (bridgeState.eventsReconnectTimer) {
+      clearTimeout(bridgeState.eventsReconnectTimer);
+      bridgeState.eventsReconnectTimer = 0;
+    }
+    if (bridgeState.eventSource) {
+      try {
+        bridgeState.eventSource.close();
+      } catch {
+        // ignore stale EventSource
+      }
+      bridgeState.eventSource = null;
+    }
+    bridgeState.eventsConnected = false;
+    bridgeState.eventsConnecting = false;
+  };
+
+  const scheduleBridgeEventsReconnect = () => {
+    if (!bridgeState.started || bridgeState.eventsReconnectTimer) return;
+    const delayMs = increaseBridgeEventBackoff();
+    bridgeState.eventsReconnectTimer = setTimeout(() => {
+      bridgeState.eventsReconnectTimer = 0;
+      connectBridgeEvents();
+    }, delayMs);
+  };
+
+  function connectBridgeEvents() {
+    if (
+      !bridgeState.started ||
+      bridgeState.eventsConnected ||
+      bridgeState.eventsConnecting ||
+      typeof EventSource !== 'function'
+    ) {
+      return;
+    }
+    bridgeState.eventsConnecting = true;
+    const url = `${BRIDGE_BASE_URL}/bridge/events?clientId=${encodeURIComponent(bridgeState.clientId)}`;
+    const events = new EventSource(url);
+    bridgeState.eventSource = events;
+    events.addEventListener('open', () => {
+      bridgeState.eventsConnected = true;
+      bridgeState.eventsConnecting = false;
+      bridgeState.lastError = null;
+      resetBridgeEventBackoff();
+      pollBridgeCommands(false);
+    });
+    events.addEventListener('command', (event) => {
+      handleBridgeEventMessage(event).catch((err) => {
+        bridgeState.lastError = err?.message || String(err);
+      });
+    });
+    events.addEventListener('jobProgress', (event) => {
+      handleBridgeEventMessage(event).catch((err) => {
+        bridgeState.lastError = err?.message || String(err);
+      });
+    });
+    events.addEventListener('error', () => {
+      if (bridgeState.eventSource === events) {
+        closeBridgeEvents();
+        scheduleBridgeEventsReconnect();
+        pollBridgeCommands(true);
+      }
+    });
+  }
+
+  const pollBridgeCommands = async (enabled = true) => {
+    if (!enabled) return;
+    if (!bridgeState.started || bridgeState.polling || bridgeState.eventsConnected) return;
+    bridgeState.polling = true;
+    let errorBackoffMs = BRIDGE_POLL_ERROR_BACKOFF_MS;
+
+    while (bridgeState.started && !bridgeState.eventsConnected) {
       try {
         bridgeState.lastCommandPollStartedAt = Date.now();
         const response = await bridgeRequest(
@@ -5342,6 +5636,7 @@
           { timeoutMs: BRIDGE_POLL_TIMEOUT_MS },
         );
         bridgeState.lastCommandPollEndedAt = Date.now();
+        errorBackoffMs = BRIDGE_POLL_ERROR_BACKOFF_MS;
 
         if (!response?.command) {
           if (Date.now() - bridgeState.lastCommandPollStartedAt < MIN_FAST_POLL_BACKOFF_MS) {
@@ -5354,7 +5649,15 @@
       } catch (err) {
         bridgeState.lastCommandPollEndedAt = Date.now();
         bridgeState.lastError = err?.message || String(err);
-        await sleep(BRIDGE_POLL_ERROR_BACKOFF_MS);
+        await sleep(errorBackoffMs);
+        errorBackoffMs = Math.min(
+          BRIDGE_EVENTS_MAX_BACKOFF_MS,
+          bridgeBackoffWithJitter(
+            errorBackoffMs * 2,
+            BRIDGE_POLL_ERROR_BACKOFF_MS,
+            BRIDGE_EVENTS_MAX_BACKOFF_MS,
+          ),
+        );
       }
     }
 
@@ -5383,6 +5686,7 @@
     }
 
     bridgeState.started = true;
+    connectBridgeEvents();
 
     const heartbeatTick = async () => {
       try {
@@ -5394,7 +5698,7 @@
 
     await heartbeatTick();
     bridgeState.heartbeatTimer = setInterval(heartbeatTick, BRIDGE_HEARTBEAT_MS);
-    pollBridgeCommands();
+    pollBridgeCommands(!bridgeState.eventsConnected);
     log('bridge da extensão iniciado', {
       bridgeBaseUrl: BRIDGE_BASE_URL,
       clientId: bridgeState.clientId,
@@ -5410,6 +5714,7 @@
       clearInterval(bridgeState.heartbeatTimer);
       bridgeState.heartbeatTimer = 0;
     }
+    closeBridgeEvents();
     bridgeState.started = false;
   };
 
@@ -6098,6 +6403,13 @@
         lastError: bridgeState.lastError,
         bridgeBaseUrl: BRIDGE_BASE_URL,
         lastHeartbeatAt: bridgeState.lastHeartbeatAt || null,
+        lastHeartbeatDurationMs: bridgeState.lastHeartbeatDurationMs,
+        eventsConnected: bridgeState.eventsConnected,
+        eventsBackoffMs: bridgeState.eventsBackoffMs,
+        polling: bridgeState.polling,
+        snapshotDirty: state.bridgeSnapshotDirty,
+        snapshotHash: state.bridgeSnapshotHash || null,
+        lastBridgeSnapshotAt: state.lastBridgeSnapshotAt || null,
         tabIgnored: isTabIgnored(),
       }),
       isTabIgnored: () => isTabIgnored(),

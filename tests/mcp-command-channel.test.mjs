@@ -16,6 +16,31 @@ test('MCP não espera timeout longo quando comando não é entregue à aba', () 
   assert.match(source, /clearTimeout\(pending\.dispatchTimer\)/);
 });
 
+test('MCP protocolo v2 usa SSE para comandos e snapshot separado', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const bridgeVersion = JSON.parse(readFileSync(resolve(ROOT, 'bridge-version.json'), 'utf-8'));
+
+  assert.equal(bridgeVersion.protocolVersion, 2);
+  assert.match(source, /url\.pathname === '\/bridge\/events'/);
+  assert.match(source, /text\/event-stream/);
+  assert.match(source, /sendClientEvent\(client, 'command'/);
+  assert.match(source, /url\.pathname === '\/bridge\/snapshot'/);
+  assert.match(source, /upsertClientSnapshot/);
+  assert.match(source, /snapshotRequested/);
+  assert.match(source, /commandDelivery:\s*heartbeatCommand/);
+  assert.match(source, /duplicate:\s*!resolved/);
+});
+
+test('browser_status expõe saúde da bridge MCP/Chrome', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+
+  assert.match(source, /const buildBridgeHealth = \(client/);
+  assert.match(source, /command_channel_stuck/);
+  assert.match(source, /heartbeat_delayed/);
+  assert.match(source, /bridgeHealth/);
+  assert.match(source, /diagnostics/);
+});
+
 test('browser_status diagnostica e tenta self-heal sem depender do guard wrapper', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const statusBlock = source.match(

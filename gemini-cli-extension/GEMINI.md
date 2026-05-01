@@ -95,8 +95,8 @@ Operational guidance:
   often asks for status first, and that first status call should be enough to
   open the configured browser and, when an old Chrome/Edge extension build is
   connected, request the extension's own `RELOAD_SELF` flow. Inspect
-  `selfHeal.reloadAttempts`, `selfHeal.code`, and `connectedClients` before
-  asking the user to do anything manually.
+  `selfHeal.reloadAttempts`, `selfHeal.code`, `bridgeHealth`, and
+  `connectedClients` before asking the user to do anything manually.
 - Treat `gemini_browser_status.ready=false`, a non-null `blockingIssue`, or
   zero `connectedClients` as a blocker for browser-dependent work. Do not keep
   calling `gemini_download_chat`, vault repair, or export tools in a loop while
@@ -106,6 +106,14 @@ Operational guidance:
   `chrome://extensions`/`edge://extensions` card after the automatic self-heal
   fails or when the status says the loaded unpacked extension still points at an
   old/wrong `browser-extension` folder.
+- Bridge protocol v2 separates liveness from heavy inventory. The content
+  script sends lightweight `/bridge/heartbeat`, posts full conversation lists
+  through `/bridge/snapshot` only when needed, and prefers `/bridge/events`
+  (SSE) for MCP commands/progress. If SSE is unavailable, the old long-poll
+  `/bridge/command` path remains the fallback. Treat
+  `bridgeHealth.status="command_channel_stuck"` as a page/extension channel
+  problem: prefer `gemini_reload_gemini_tabs` or `gemini_browser_status`
+  self-heal before asking for manual Chrome extension reload.
 - On slow Windows machines, prefer background jobs over long synchronous tool
   loops. `gemini_reexport_chats` is the stable path for a known list of chatIds:
   it navigates and saves one chat at a time, writes an incremental JSON report,

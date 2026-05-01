@@ -262,9 +262,11 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   congelada, e isso já gerou ticket.
   (11) **Progress dock também aparece para exports do MCP**: quando a
   exportação é disparada pelo `gemini_export_recent_chats` ou
-  `gemini_export_notebook` (em vez do botão local), o MCP serializa o estado
-  do job no campo `jobProgress` do response do `/bridge/heartbeat`. O content
-  script consome esse snapshot em cada heartbeat (8s) e reaproveita o mesmo
+  `gemini_export_notebook` (em vez do botão local), o MCP envia o estado
+  do job como evento SSE `jobProgress` pelo `/bridge/events` quando o protocolo
+  v2 está ativo; se o canal de eventos não estiver conectado, mantém fallback
+  pelo campo `jobProgress` do response do `/bridge/heartbeat`. O content
+  script consome esse snapshot e reaproveita o mesmo
   dock visual, marcando `state.exportSource = 'mcp'`. Status terminais
   (`completed`, `completed_with_errors`, `failed`, `cancelled`) ficam
   disponíveis por até `TERMINAL_JOB_PROGRESS_TTL_MS` (30s) para garantir que
@@ -302,17 +304,24 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   auto-updatable.
 - `src/mcp-server.js` — servidor MCP local via `stdio`. No mesmo processo,
   ele também sobe um bridge HTTP local em `127.0.0.1:47283` para a extensão.
-  A extensão/content script faz heartbeat do estado da aba do Gemini e aceita
-  comandos internos do agente (`list-conversations`, `get-current-chat`,
-  `get-chat-by-id`, `open-chat`, `cache-status`, `clear-cache`, `snapshot`).
+  No protocolo v2, a extensão/content script envia `/bridge/heartbeat` leve
+  (liveness, versão/build, tab/window, página mínima e capacidades), abre
+  `/bridge/events` como SSE para comandos/progresso do MCP, e envia inventário
+  pesado por `/bridge/snapshot` só quando muda ou quando solicitado. O
+  long-poll antigo em `/bridge/command` continua como fallback se SSE cair.
+  Comandos internos do agente incluem `list-conversations`, `get-current-chat`,
+  `get-chat-by-id`, `open-chat`, `cache-status`, `clear-cache`, `snapshot`.
   Em páginas de caderno, a lista visual do modal continua focada no caderno,
-  mas o heartbeat/bridge envia inventário combinado: sidebar global
+  mas o snapshot/bridge envia inventário combinado: sidebar global
   (`source: "sidebar"`) + conversas do caderno (`source: "notebook"`). O
-  service worker informa `tabId`, `windowId` e `isActiveTab` a cada heartbeat;
+  service worker informa `tabId`, `windowId` e `isActiveTab` periodicamente;
   quando há várias abas Gemini vivas, o MCP prefere a aba ativa antes do
   fallback por heartbeat mais recente. O heartbeat também inclui
   `extensionVersion`, `protocolVersion` e `buildStamp` para verificar
-  rapidamente se a extensão recarregada é o build esperado.
+  rapidamente se a extensão recarregada é o build esperado. `gemini_browser_status`
+  e `/agent/clients?diagnostics=1` expõem `bridgeHealth` por cliente
+  (`healthy`, `degraded`, `stale`, `version_mismatch`,
+  `command_channel_stuck`) com ação recomendada antes de pedir reload manual.
   Antes de executar tools que dependem do navegador, o MCP passa por
   `ensureChromeExtensionReady()` em `src/chrome-extension-guard.mjs`: lê
   `bridge-version.json`, chama o comando interno `get-extension-info`, compara
@@ -381,9 +390,10 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   mesmo com cache velho. Quando já existe cache e mesmo assim o caller pede
   refresh, o MCP aplica um budget curto (default: 2500ms) e cai de volta para
   a lista já conhecida se a aba demorar demais para responder. No lado da
-  extensão, o long-poll de comandos do bridge usa retry curto após erro e é
-  rearmado depois de heartbeat bem-sucedido, reduzindo latência depois de
-  restart do MCP ou falha transitória no localhost. O processo MCP agora
+  extensão, o canal SSE de comandos é preferido; se ele cair, o long-poll de
+  comandos do bridge usa retry com backoff curto após erro e é rearmado depois
+  de heartbeat bem-sucedido, reduzindo latência depois de restart do MCP ou
+  falha transitória no localhost. O processo MCP agora
   encerra explicitamente quando o `stdin` do cliente fecha. Quando uma segunda
   aba/janela do Gemini CLI inicia outro MCP e encontra `EADDRINUSE` na porta
   `127.0.0.1:47283`, essa instância não deve logar erro nem morrer: ela entra

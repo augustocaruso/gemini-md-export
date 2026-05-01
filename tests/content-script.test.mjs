@@ -389,17 +389,29 @@ test('content script não contém fallback de captura visual', async () => {
 
 test('content script mantém caminhos frequentes leves', async () => {
   const source = await readFile(new URL('../src/userscript-shell.js', import.meta.url), 'utf8');
-  const bridgeSummary = source.match(
-    /const buildBridgeSummary = \(\) => \{[\s\S]*?\n  \};\n\n  \/\/ --- ação de exportar/,
+  const heartbeatPayload = source.match(
+    /const buildBridgeHeartbeatPayload = \(\) => \([\s\S]*?\n  \}\);\n\n  const buildBridgeSnapshotPayload/,
+  )?.[0];
+  const snapshotPayload = source.match(
+    /const buildBridgeSnapshotPayload = \(\) => \{[\s\S]*?\n  \};\n\n  \/\/ --- ação de exportar/,
   )?.[0];
 
-  assert.ok(bridgeSummary, 'buildBridgeSummary deve existir no shell');
+  assert.ok(heartbeatPayload, 'buildBridgeHeartbeatPayload deve existir no shell');
+  assert.ok(snapshotPayload, 'buildBridgeSnapshotPayload deve existir no shell');
   assert.doesNotMatch(
-    bridgeSummary,
+    heartbeatPayload,
     /scrapeTurns\(document\)/,
     'heartbeat não deve serializar Markdown da conversa inteira',
   );
-  assert.match(bridgeSummary, /conversationDomTurnCount\(document\)/);
+  assert.doesNotMatch(
+    heartbeatPayload,
+    /collectConversationLinkSnapshot\(\)/,
+    'heartbeat não deve coletar inventário completo de conversas',
+  );
+  assert.match(source, /const buildBridgePageSummary = \(\) => \(\{[\s\S]*conversationDomTurnCount\(document\)/);
+  assert.match(snapshotPayload, /collectConversationLinkSnapshot\(\)/);
+  assert.match(source, /new EventSource\(url\)/);
+  assert.match(source, /\/bridge\/snapshot/);
   assert.match(source, /const MIN_FAST_POLL_BACKOFF_MS = 250/);
   assert.match(source, /const INJECT_THROTTLE_MS = 250/);
 });

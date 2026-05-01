@@ -43,7 +43,11 @@ const DEFAULT_HOST = process.env.GEMINI_MCP_BRIDGE_HOST || '127.0.0.1';
 const DEFAULT_PORT = Number(process.env.GEMINI_MCP_BRIDGE_PORT || 47283);
 const DEFAULT_EXPORT_DIR = process.env.GEMINI_MCP_EXPORT_DIR || resolve(homedir(), 'Downloads');
 const CLIENT_STALE_MS = 45_000;
+const CLIENT_DEGRADED_HEARTBEAT_MS = Number(
+  process.env.GEMINI_MCP_CLIENT_DEGRADED_HEARTBEAT_MS || 20_000,
+);
 const LONG_POLL_TIMEOUT_MS = 25_000;
+const SSE_KEEPALIVE_MS = Number(process.env.GEMINI_MCP_SSE_KEEPALIVE_MS || 15_000);
 const COMMAND_TIMEOUT_MS = Number(process.env.GEMINI_MCP_COMMAND_TIMEOUT_MS || 180_000);
 const COMMAND_DISPATCH_TIMEOUT_MS = Number(
   process.env.GEMINI_MCP_COMMAND_DISPATCH_TIMEOUT_MS || 20_000,
@@ -437,6 +441,43 @@ const sendNoContent = (res) => {
   res.end();
 };
 
+const sseHeaders = (req) => ({
+  'content-type': 'text/event-stream; charset=utf-8',
+  'cache-control': 'no-store, no-transform',
+  connection: 'keep-alive',
+  'x-accel-buffering': 'no',
+  ...bridgeCorsHeaders(req),
+});
+
+const closeEventStream = (client) => {
+  if (!client?.eventStream) return;
+  try {
+    clearInterval(client.eventStream.keepAliveTimer);
+    client.eventStream.res.end();
+  } catch {
+    // ignore stale socket
+  }
+  client.eventStream = null;
+};
+
+const sendClientEvent = (client, event, payload = {}) => {
+  if (!client?.eventStream?.res || client.eventStream.res.destroyed) {
+    if (client) client.eventStream = null;
+    return false;
+  }
+  try {
+    client.eventSeq = (client.eventSeq || 0) + 1;
+    client.eventStream.res.write(`id: ${client.eventSeq}\n`);
+    client.eventStream.res.write(`event: ${event}\n`);
+    client.eventStream.res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    client.eventStream.lastSentAt = Date.now();
+    return true;
+  } catch {
+    closeEventStream(client);
+    return false;
+  }
+};
+
 const readBody = async (req) => {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
@@ -455,6 +496,8 @@ const getLiveClients = () => {
     .sort(
       (a, b) =>
         Number(b.isActiveTab === true) - Number(a.isActiveTab === true) ||
+        Number(!!b.eventStream?.res && !b.eventStream.res.destroyed) -
+          Number(!!a.eventStream?.res && !a.eventStream.res.destroyed) ||
         Number(!!b.pendingPoll) - Number(!!a.pendingPoll) ||
         b.lastSeenAt - a.lastSeenAt,
     );
@@ -463,6 +506,7 @@ const getLiveClients = () => {
 const removeClient = (clientId) => {
   const client = clients.get(clientId);
   if (!client) return;
+  closeEventStream(client);
   if (client.pendingPoll) {
     try {
       clearTimeout(client.pendingPoll.timer);
@@ -488,15 +532,28 @@ const dropClientsAfterExtensionReload = () => {
   }
 };
 
-const upsertClient = (payload) => {
+const upsertClient = (payload, meta = {}) => {
   const existing = clients.get(payload.clientId);
   const next = existing || {
     clientId: payload.clientId,
     queue: [],
     pendingPoll: null,
+    eventStream: null,
+    eventSeq: 0,
   };
 
-  next.lastSeenAt = Date.now();
+  const now = Date.now();
+  next.lastSeenAt = now;
+  if (meta.heartbeat === true) {
+    next.lastHeartbeatAt = now;
+    next.lastHeartbeatPayloadBytes = meta.payloadBytes ?? next.lastHeartbeatPayloadBytes ?? null;
+  }
+  next.capabilities = Array.isArray(payload.capabilities)
+    ? payload.capabilities
+    : next.capabilities || [];
+  next.snapshotDirty = payload.snapshotDirty === true;
+  next.snapshotHash = payload.snapshotHash || next.snapshotHash || null;
+  next.metrics = payload.metrics || next.metrics || null;
   next.tabId = payload.tabId ?? next.tabId ?? null;
   next.windowId = payload.windowId ?? next.windowId ?? null;
   next.isActiveTab = payload.isActiveTab ?? next.isActiveTab ?? null;
@@ -506,13 +563,56 @@ const upsertClient = (payload) => {
   next.buildStamp = payload.buildStamp || payload.page?.buildStamp || next.buildStamp || null;
   next.page = payload.page || next.page || null;
   next.commandPoll = payload.commandPoll || next.commandPoll || null;
-  next.conversations = Array.isArray(payload.conversations)
-    ? payload.conversations
-    : next.conversations || [];
+  if (Array.isArray(payload.conversations)) {
+    next.conversations = payload.conversations;
+    next.lastSnapshotAt = now;
+    next.lastSnapshotPayloadBytes = meta.payloadBytes ?? next.lastSnapshotPayloadBytes ?? null;
+  } else {
+    next.conversations = next.conversations || [];
+  }
+  if (Array.isArray(payload.modalConversations)) {
+    next.modalConversations = payload.modalConversations;
+  }
   next.summary = payload;
 
   clients.set(next.clientId, next);
   return next;
+};
+
+const upsertClientSnapshot = (payload, meta = {}) => {
+  const client = upsertClient(
+    {
+      clientId: payload.clientId,
+      tabId: payload.tabId,
+      windowId: payload.windowId,
+      isActiveTab: payload.isActiveTab,
+      extensionVersion: payload.extensionVersion,
+      protocolVersion: payload.protocolVersion,
+      buildStamp: payload.buildStamp,
+      page: payload.page,
+      conversations: payload.conversations,
+      modalConversations: payload.modalConversations,
+      snapshotHash: payload.snapshotHash,
+      capabilities: payload.capabilities,
+    },
+    {
+      ...meta,
+      heartbeat: false,
+    },
+  );
+  const now = Date.now();
+  client.lastSnapshotAt = now;
+  client.lastSnapshotPayloadBytes = meta.payloadBytes ?? null;
+  client.snapshotHash = payload.snapshotHash || client.snapshotHash || null;
+  client.snapshotDirty = false;
+  client.lastSnapshotSummary = {
+    observedAt: payload.observedAt || null,
+    conversationCount: Array.isArray(payload.conversations) ? payload.conversations.length : 0,
+    modalConversationCount: Array.isArray(payload.modalConversations)
+      ? payload.modalConversations.length
+      : 0,
+  };
+  return client;
 };
 
 const takeQueuedCommand = (client) => {
@@ -529,15 +629,24 @@ const takeQueuedCommand = (client) => {
   return command;
 };
 
-const flushQueuedCommand = (client) => {
-  if (!client?.pendingPoll || client.queue.length === 0) return false;
+const flushQueuedCommand = (client, { allowSse = true } = {}) => {
+  if (!client?.queue?.length) return null;
   const command = takeQueuedCommand(client);
-  if (!command) return false;
+  if (!command) return null;
+  if (allowSse && sendClientEvent(client, 'command', { command })) {
+    return 'sse';
+  }
+  if (!client.pendingPoll) {
+    client.queue.unshift(command);
+    const pending = pendingCommands.get(command.id);
+    if (pending) pending.dispatchedAt = null;
+    return null;
+  }
   const { res, timer } = client.pendingPoll;
   clearTimeout(timer);
   client.pendingPoll = null;
   sendJson(res, 200, { command });
-  return true;
+  return 'long-poll';
 };
 
 const removeQueuedCommand = (clientId, commandId) => {
@@ -825,6 +934,61 @@ const ensureBrowserExtensionReady = (args = {}, options = {}) =>
     },
   );
 
+const buildBridgeHealth = (client, now = Date.now()) => {
+  if (!client) {
+    return {
+      status: 'stale',
+      blockingIssue: 'no_client',
+      action: 'Abra uma aba do Gemini com a extensão ativa.',
+    };
+  }
+  const heartbeatAgeMs = client.lastHeartbeatAt ? now - client.lastHeartbeatAt : null;
+  const eventStreamConnected = !!client.eventStream?.res && !client.eventStream.res.destroyed;
+  const longPollConnected = !!client.pendingPoll;
+  const pagePolling = client.commandPoll?.polling ?? null;
+  const queuedCommands = client.queue?.length || 0;
+  const versionMatches = clientMatchesExpectedBrowserExtension(client);
+
+  let status = 'healthy';
+  let blockingIssue = null;
+  let action = 'ok';
+  if (!versionMatches) {
+    status = 'version_mismatch';
+    blockingIssue = 'extension_version_mismatch';
+    action = 'Rode gemini_browser_status para tentar recarregar a extensão automaticamente.';
+  } else if (heartbeatAgeMs === null || heartbeatAgeMs > CLIENT_STALE_MS) {
+    status = 'stale';
+    blockingIssue = 'stale_client';
+    action = 'Recarregue a aba do Gemini ou chame gemini_browser_status para reconectar.';
+  } else if (!eventStreamConnected && !longPollConnected && pagePolling !== true) {
+    status = 'command_channel_stuck';
+    blockingIssue = 'command_channel_stuck';
+    action = 'Use gemini_reload_gemini_tabs se a aba estiver aberta mas não aceitar comandos.';
+  } else if (heartbeatAgeMs > CLIENT_DEGRADED_HEARTBEAT_MS) {
+    status = 'degraded';
+    blockingIssue = 'heartbeat_delayed';
+    action = 'Aguarde alguns segundos; se persistir, rode gemini_browser_status.';
+  }
+
+  return {
+    status,
+    blockingIssue,
+    action,
+    heartbeatAgeMs,
+    staleAfterMs: CLIENT_STALE_MS,
+    eventStreamConnected,
+    longPollConnected,
+    pagePolling,
+    queuedCommands,
+    lastHeartbeatAt: client.lastHeartbeatAt ? new Date(client.lastHeartbeatAt).toISOString() : null,
+    lastSnapshotAt: client.lastSnapshotAt ? new Date(client.lastSnapshotAt).toISOString() : null,
+    lastHeartbeatPayloadBytes: client.lastHeartbeatPayloadBytes ?? null,
+    lastSnapshotPayloadBytes: client.lastSnapshotPayloadBytes ?? null,
+    capabilities: client.capabilities || [],
+    lastError: client.metrics?.lastError || null,
+  };
+};
+
 const summarizeClient = (client) => ({
   clientId: client.clientId,
   tabId: client.tabId ?? null,
@@ -835,6 +999,10 @@ const summarizeClient = (client) => ({
   buildStamp: client.buildStamp ?? client.page?.buildStamp ?? null,
   lastSeenAt: new Date(client.lastSeenAt).toISOString(),
   commandChannel: {
+    eventStreamConnected: !!client.eventStream?.res && !client.eventStream.res.destroyed,
+    eventStreamConnectedAt: client.eventStream?.connectedAt
+      ? new Date(client.eventStream.connectedAt).toISOString()
+      : null,
     pollConnected: !!client.pendingPoll,
     queuedCommands: client.queue?.length || 0,
     pagePolling: client.commandPoll?.polling ?? null,
@@ -843,6 +1011,7 @@ const summarizeClient = (client) => ({
     lastCommandReceivedAt: client.commandPoll?.lastCommandReceivedAt || null,
   },
   page: client.page || null,
+  bridgeHealth: buildBridgeHealth(client),
   listedConversationCount: client.conversations?.length || 0,
   sidebarConversationCount: recentConversationsForClient(client).length,
   notebookConversationCount: notebookConversationsForClient(client).length,
@@ -2050,6 +2219,13 @@ const directChatsExportScope = (job) => ({
   partialLimit: job.requested || job.inputCount || null,
 });
 
+const setClientJobProgressAndNotify = (client, payload) => {
+  setClientJobProgress(client, payload);
+  if (payload) {
+    sendClientEvent(client, 'jobProgress', payload);
+  }
+};
+
 const buildRecentChatsExportReport = (job, client, successes, failures) => ({
   job: {
     jobId: job.jobId,
@@ -2246,7 +2422,7 @@ const broadcastRecentChatsJobProgress = (job, client, patch = {}) => {
       label = 'MCP preparando exportação...';
     }
   }
-  setClientJobProgress(client, {
+  setClientJobProgressAndNotify(client, {
     source: 'mcp',
     kind: 'recent-chats-export',
     jobId: job.jobId,
@@ -2285,7 +2461,7 @@ const broadcastDirectChatsJobProgress = (job, client, patch = {}) => {
       label = 'MCP reexportando chats selecionados...';
     }
   }
-  setClientJobProgress(client, {
+  setClientJobProgressAndNotify(client, {
     source: 'mcp',
     kind: 'direct-chats-export',
     jobId: job.jobId,
@@ -2783,7 +2959,7 @@ const exportNotebookForClient = async (client, args = {}) => {
 
   const total = selected.length;
   const broadcast = (current, errorCount, label, status = 'running') => {
-    setClientJobProgress(client, {
+    setClientJobProgressAndNotify(client, {
       source: 'mcp',
       kind: 'notebook-export',
       status,
@@ -2969,6 +3145,11 @@ const rawTools = [
           description:
             'Tempo máximo para aguardar a extensão reconectar depois de um reload automático.',
         },
+        diagnostics: {
+          type: 'boolean',
+          description:
+            'Quando true, destaca latência, transportes e saúde da bridge MCP/Chrome por aba.',
+        },
       },
       additionalProperties: false,
     },
@@ -3044,6 +3225,7 @@ const rawTools = [
       }
 
       const matchingClients = liveClients.filter(clientMatchesExpectedBrowserExtension);
+      const summarizedClients = liveClients.map(summarizeClient);
       return toolTextResult({
         ready: matchingClients.length > 0,
         blockingIssue:
@@ -3054,7 +3236,12 @@ const rawTools = [
               : null,
         expectedChromeExtension: EXPECTED_CHROME_EXTENSION_INFO,
         matchingClientCount: matchingClients.length,
-        connectedClients: liveClients.map(summarizeClient),
+        connectedClients: summarizedClients,
+        bridgeHealth: summarizedClients.map((client) => ({
+          clientId: client.clientId,
+          tabId: client.tabId,
+          ...client.bridgeHealth,
+        })),
         selfHeal,
         browserWake: launchResult
           ? {
@@ -3875,9 +4062,20 @@ const bridgeServer = createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && url.pathname === '/agent/clients') {
+    const diagnostics = url.searchParams.get('diagnostics') === '1';
+    const connectedClients = getLiveClients().map(summarizeClient);
     sendAgentJson(res, 200, {
       expectedChromeExtension: EXPECTED_CHROME_EXTENSION_INFO,
-      connectedClients: getLiveClients().map(summarizeClient),
+      connectedClients,
+      ...(diagnostics
+        ? {
+            bridgeHealth: connectedClients.map((client) => ({
+              clientId: client.clientId,
+              tabId: client.tabId,
+              ...client.bridgeHealth,
+            })),
+          }
+        : {}),
     });
     return;
   }
@@ -4315,35 +4513,124 @@ const bridgeServer = createServer(async (req, res) => {
     return;
   }
 
-  if (req.method === 'POST' && url.pathname === '/bridge/heartbeat') {
+  if (req.method === 'GET' && url.pathname === '/bridge/events') {
     try {
-      const body = await readBody(req);
-      const payload = JSON.parse(body || '{}');
-      if (!payload.clientId) {
-        sendJson(res, 400, { error: 'clientId is required' });
+      requireAllowedBridgeOrigin(req);
+      const clientId = url.searchParams.get('clientId');
+      if (!clientId) {
+        sendBridgeJson(req, res, 400, { error: 'clientId is required' });
         return;
       }
 
-      const client = upsertClient(payload);
-      const deliveredToPoll = flushQueuedCommand(client);
-      const heartbeatCommand = deliveredToPoll ? null : takeQueuedCommand(client);
-      const jobProgress = buildJobProgressBroadcast(client);
-      sendJson(res, 200, {
+      const client = clients.get(clientId) || upsertClient({ clientId });
+      closeEventStream(client);
+      res.writeHead(200, sseHeaders(req));
+      res.write(': connected\n\n');
+
+      client.eventStream = {
+        res,
+        connectedAt: Date.now(),
+        lastSentAt: Date.now(),
+        keepAliveTimer: setInterval(() => {
+          sendClientEvent(client, 'ping', {
+            serverTime: new Date().toISOString(),
+          });
+        }, SSE_KEEPALIVE_MS),
+      };
+      client.lastSeenAt = Date.now();
+      sendClientEvent(client, 'hello', {
+        ok: true,
+        clientId,
+        serverTime: new Date().toISOString(),
+        protocolVersion: EXTENSION_PROTOCOL_VERSION,
+      });
+      flushQueuedCommand(client);
+      req.on('close', () => {
+        if (client.eventStream?.res === res) {
+          closeEventStream(client);
+        }
+      });
+    } catch (err) {
+      if (!res.headersSent) {
+        sendBridgeJson(req, res, err.statusCode || 400, {
+          ok: false,
+          error: err.message,
+        });
+      }
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/bridge/snapshot') {
+    try {
+      requireAllowedBridgeOrigin(req);
+      const body = await readBody(req);
+      const payload = JSON.parse(body || '{}');
+      if (!payload.clientId) {
+        sendBridgeJson(req, res, 400, { error: 'clientId is required' });
+        return;
+      }
+      const client = upsertClientSnapshot(payload, {
+        payloadBytes: Buffer.byteLength(body, 'utf8'),
+      });
+      flushQueuedCommand(client);
+      sendBridgeJson(req, res, 200, {
+        ok: true,
+        clientId: client.clientId,
+        serverTime: new Date().toISOString(),
+        snapshotHash: client.snapshotHash || null,
+        bridgeHealth: buildBridgeHealth(client),
+      });
+    } catch (err) {
+      sendBridgeJson(req, res, err.statusCode || 400, { error: err.message });
+    }
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/bridge/heartbeat') {
+    try {
+      requireAllowedBridgeOrigin(req);
+      const body = await readBody(req);
+      const payload = JSON.parse(body || '{}');
+      if (!payload.clientId) {
+        sendBridgeJson(req, res, 400, { error: 'clientId is required' });
+        return;
+      }
+
+      const client = upsertClient(payload, {
+        payloadBytes: Buffer.byteLength(body, 'utf8'),
+        heartbeat: true,
+      });
+      const commandDelivery = flushQueuedCommand(client);
+      const heartbeatCommand = commandDelivery ? null : takeQueuedCommand(client);
+      const eventStreamConnected = !!client.eventStream?.res && !client.eventStream.res.destroyed;
+      const snapshotRequested =
+        payload.snapshotDirty === true ||
+        !client.lastSnapshotAt ||
+        (!!payload.snapshotHash && payload.snapshotHash !== client.snapshotHash);
+      const jobProgress = eventStreamConnected ? null : buildJobProgressBroadcast(client);
+      sendBridgeJson(req, res, 200, {
         ok: true,
         clientId: client.clientId,
         serverTime: new Date().toISOString(),
         command: heartbeatCommand,
         commandDelivery: heartbeatCommand
           ? 'heartbeat'
-          : deliveredToPoll
-            ? 'long-poll'
+          : commandDelivery
+            ? commandDelivery
             : null,
-        commandPollRequired: !client.pendingPoll,
+        transport: {
+          eventsConnected: eventStreamConnected,
+          longPollConnected: !!client.pendingPoll,
+        },
+        commandPollRequired: !client.pendingPoll && !eventStreamConnected,
         queuedCommands: client.queue?.length || 0,
+        snapshotRequested,
+        bridgeHealth: buildBridgeHealth(client),
         jobProgress,
       });
     } catch (err) {
-      sendJson(res, 400, { error: err.message });
+      sendBridgeJson(req, res, err.statusCode || 400, { error: err.message });
     }
     return;
   }
@@ -4363,7 +4650,11 @@ const bridgeServer = createServer(async (req, res) => {
 
     client.lastSeenAt = Date.now();
 
-    if (flushQueuedCommand(client)) return;
+    const queuedCommand = takeQueuedCommand(client);
+    if (queuedCommand) {
+      sendJson(res, 200, { command: queuedCommand });
+      return;
+    }
 
     if (client.pendingPoll) {
       try {
@@ -4400,8 +4691,8 @@ const bridgeServer = createServer(async (req, res) => {
         return;
       }
 
-      resolveCommand(payload.commandId, payload.result || null);
-      sendJson(res, 200, { ok: true });
+      const resolved = resolveCommand(payload.commandId, payload.result || null);
+      sendJson(res, 200, { ok: true, duplicate: !resolved });
     } catch (err) {
       sendJson(res, 400, { error: err.message });
     }
