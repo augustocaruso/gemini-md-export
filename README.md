@@ -138,14 +138,15 @@ navegador, incluindo `gemini_browser_status`, `gemini_list_tabs` e
 `https://gemini.google.com/app` quando uma tool precisa de aba e não há nenhuma
 conectada. Ambos usam o mesmo arquivo de cooldown, então duas chamadas rápidas
 não devem abrir duas abas. Antes de abrir qualquer coisa, o hook consulta
-rapidamente `http://127.0.0.1:47283/agent/clients`; se já houver aba Gemini
-conectada, não abre nada, e se o bridge estiver inalcançável não faz launch
-cego.
+rapidamente `http://127.0.0.1:47283/agent/ready?wakeBrowser=false&selfHeal=false`;
+se já houver aba Gemini pronta, não abre nada, e se o bridge estiver
+inalcançável não faz launch cego. `/agent/clients` permanece como fallback de
+compatibilidade durante update e como endpoint de inspeção.
 
 Quando o bridge está ativo e sem clientes, o hook abre
 `https://gemini.google.com/app` por um PowerShell temporário oculto, usando
 `Start-Process -WindowStyle Minimized`, e tenta restaurar o foco da janela
-anterior. Depois espera uma aba Gemini conectar até
+anterior. Depois espera `/agent/ready` reportar `ready=true` até
 `GEMINI_MCP_HOOK_CONNECT_TIMEOUT_MS` (default 12000ms), sempre com hard exit
 menor que o timeout do Gemini CLI. O arquivo
 `hook-browser-launch.json` funciona como trava: duas chamadas rápidas não
@@ -153,8 +154,8 @@ devem abrir duas abas. Não há fallback por `cmd.exe /c start`; spawn direto qu
 pode focar janela só é permitido com
 `GEMINI_MCP_HOOK_ALLOW_FOCUSING_FALLBACK=true`. Quando o hook realmente abre,
 espera, pula por bridge morto ou encontra timeout, ele emite uma mensagem curta
-no JSON (`systemMessage`) para aparecer no terminal; quando já existe aba
-conectada, ele fica silencioso para não poluir chamadas normais.
+no JSON (`systemMessage`) para aparecer no terminal; quando já existe aba pronta,
+ele fica silencioso para não poluir chamadas normais.
 
 O MCP também deve ficar silencioso por padrão. Checagens internas de
 versão/protocolo, reload e wake do navegador só aparecem no terminal com
@@ -171,7 +172,7 @@ O argumento `--profile-directory` só é enviado quando
 `GEMINI_MCP_CHROME_PROFILE_DIRECTORY` é definido explicitamente. Para
 diagnosticar sem acionar nenhuma tool, rode
 `node scripts/hooks/gemini-md-export-hook.mjs diagnose`; ele imprime
-`/healthz`, `/agent/clients`, timeouts efetivos, plano de launch e os arquivos
+`/healthz`, `/agent/ready`, timeouts efetivos, plano de launch e os arquivos
 `hook-last-run.json`/`hook-browser-launch.json`. O prelaunch pode ser
 desativado com `GEMINI_MCP_HOOK_LAUNCH_BROWSER=false`; o timeout curto do
 bridge é `GEMINI_MCP_HOOK_BRIDGE_TIMEOUT_MS` (default 180ms).
@@ -275,11 +276,15 @@ auto-update com `EBUSY: resource busy or locked, rmdir ...`.
 Tools disponíveis:
 
 - `gemini_browser_status`
+- `gemini_browser_ready`
 - `gemini_list_tabs`
 - `gemini_claim_tab`
 - `gemini_release_tab`
 - `gemini_mcp_diagnose_processes`
 - `gemini_mcp_cleanup_stale_processes`
+- `gemini_diagnose_environment`
+- `gemini_flight_recorder`
+- `gemini_collect_support_bundle`
 - `gemini_get_export_dir`
 - `gemini_set_export_dir`
 - `gemini_list_recent_chats`
@@ -289,6 +294,7 @@ Tools disponíveis:
 - `gemini_download_notebook_chat`
 - `gemini_export_recent_chats`
 - `gemini_export_missing_chats`
+- `gemini_sync_vault`
 - `gemini_reexport_chats`
 - `gemini_export_job_status`
 - `gemini_export_job_cancel`
@@ -356,6 +362,14 @@ incluem `progressMessage`, `decisionSummary` e `nextAction`, com totais vistos
 no Gemini, já existentes no vault, baixados agora, warnings de mídia, falhas,
 caminho do relatório e comando pronto para retomar via `resumeReportFile`.
 
+Depois que o vault já foi sincronizado uma vez, use `gemini_sync_vault` para o
+fluxo incremental sem atrito. Ele lê/grava
+`.gemini-md-export/sync-state.json`, lista o Gemini Web do topo para baixo,
+para ao encontrar uma fronteira conhecida (`topChatId` anterior ou sequência de
+chats já presentes no vault) e baixa apenas conversas novas. Se a fronteira não
+for provada, o relatório marca o sync como parcial/inconclusivo e preserva o
+comando de retomada.
+
 Para evitar arquivos truncados, cada conversa é hidratada até o início antes da
 extração. Se a extensão não conseguir provar que chegou ao topo da conversa, o
 item falha no relatório em vez de salvar um Markdown incompleto.
@@ -392,7 +406,7 @@ npm run smoke:bridge
 
 Esse smoke sobe uma bridge isolada em uma porta temporária e testa
 `/healthz`, `/bridge/snapshot`, `/bridge/events`, `/bridge/heartbeat`,
-`/agent/clients`, `/agent/diagnostics` e o diagnóstico de processos. Para obter
+`/agent/ready`, `/agent/clients`, `/agent/diagnostics` e o diagnóstico de processos. Para obter
 JSON estruturado:
 
 ```bash
@@ -411,6 +425,7 @@ ele separa problema de infraestrutura local de problema da aba real do Gemini.
 Endpoints locais úteis para diagnóstico quando as tools ainda não carregaram:
 
 - `http://127.0.0.1:47283/healthz`
+- `http://127.0.0.1:47283/agent/ready`
 - `http://127.0.0.1:47283/agent/diagnostics`
 - `http://127.0.0.1:47283/agent/clients`
 - `http://127.0.0.1:47283/agent/recent-chats?limit=50&offset=0`

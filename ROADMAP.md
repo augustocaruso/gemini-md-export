@@ -424,13 +424,187 @@ Gemini abertas. Um agente pode listar/exportar a aba errada sem perceber.
 - Se a aba reivindicada fecha ou fica stale, a próxima tool deve retornar erro
   claro e pedir escolher outra aba, não cair silenciosamente em outra.
 
-## Proposta v0.4.4 — Observabilidade e recuperação assistida
+## Proposta v0.4.4 — Interação DOM mais rápida e previsível
 
-Status: proposta.
+Status: implementada em `0.4.6`.
+
+Objetivo: acelerar e endurecer o caminho crítico entre agente e aba Gemini, sem
+contar com cache como solução principal. Esta fase mira duas fontes de latência
+percebida: o handshake inicial Chrome/extensão/aba e o trabalho do content
+script dentro da página, como abrir sidebar, encontrar o scroller certo,
+carregar mais histórico, navegar por conversas, aguardar a SPA estabilizar e
+extrair Markdown sem disputar o DOM.
+
+### Problema
+
+O bridge/MCP aquecido responde em milissegundos, mas o primeiro contato com
+Chrome/extensão pode ficar lento quando o service worker MV3 precisa acordar,
+o content script precisa reconectar, a versão precisa ser validada ou um
+self-heal pós-update precisa recarregar a extensão. Depois disso, comandos que
+interagem com a página dependem do tempo do Angular/Gemini, de lazy-load do
+sidebar, de renderização parcial e de navegação SPA. Quando essa camada usa
+esperas fixas, múltiplas microchamadas ou escolhe o container de scroll errado,
+a experiência parece lenta mesmo com a bridge saudável.
+
+### Entregas
+
+- Handshake Chrome/extensão mais rápido:
+  - separar caminho frio, caminho quente e caminho pós-update nos status;
+  - criar uma checagem leve de readiness que valide bridge, extensão, aba,
+    versão/protocolo/build e canal de comando sem trazer snapshot grande;
+  - usar `/bridge/events` conectado como sinal forte de prontidão quando
+    disponível;
+  - evitar reload/self-heal quando o runtime já está compatível;
+  - demover clientes sem `tabId`, sem versão ou incompatíveis para diagnóstico
+    sem poluir seleção/ambiguidade de abas;
+  - expor métricas `bridgeReadyMs`, `extensionInfoMs`, `reloadMs`,
+    `firstHeartbeatMs`, `firstSnapshotMs` e `commandChannelReadyMs`.
+- Pré-aquecimento controlado:
+  - permitir warmup leve no primeiro status/hook antes de comandos pesados;
+  - não abrir ou focar navegador quando já houver aba conectada;
+  - respeitar cooldown para evitar várias tentativas simultâneas;
+  - registrar se a lentidão veio de acordar Chrome, acordar service worker,
+    recarregar extensão ou esperar heartbeat da aba.
+- Waiters por estado real:
+  - substituir sleeps fixos por predicados observáveis;
+  - esperar explicitamente sidebar aberto, lista crescida, spinner ausente,
+    URL estabilizada, assinatura de DOM nova e rows estáveis;
+  - retornar erro de fase quando o estado esperado não aparece.
+- Scroll adaptativo do histórico:
+  - ranquear candidatos de scroller por overflow real, presença de rows,
+    posição visual e crescimento após scroll;
+  - rolar em passos adaptativos em vez de repetir o mesmo movimento;
+  - parar cedo após ciclos sem crescimento;
+  - registrar quando o fim do histórico foi provado ou apenas inferido.
+- Operações DOM compostas por intenção:
+  - preferir comandos grandes dentro da aba, como "liste N", "carregue até N",
+    "abra e exporte estes ids";
+  - reduzir round-trips MCP/bridge durante uma mesma operação DOM;
+  - devolver relatório compacto com fases e decisões tomadas.
+- Fila serial por aba como contrato central:
+  - listar, scrollar, abrir chat, exportar e voltar passam por uma fila única;
+  - comandos concorrentes recebem `busy`/posição de fila quando seguro;
+  - cancelamento limpa a operação ativa sem deixar a aba em estado ambíguo.
+- Estabilização de lista e conversa:
+  - considerar sidebar pronto somente quando container, contagem de rows e
+    primeira/última conversa ficarem estáveis por alguns frames;
+  - expandir assinatura leve de DOM para navegação e listagem;
+  - manter a regra de integridade: URL nova com DOM antigo nunca libera export.
+- Menos layout thrash:
+  - separar fases de leitura e escrita no DOM;
+  - evitar loops que misturam `querySelectorAll`, `getBoundingClientRect`,
+    scroll e mutação no mesmo ciclo;
+  - usar snapshots de DOM em lote para decidir antes de tocar a página.
+- Navegação rápida quando segura:
+  - usar URL direta `/app/<chatId>` quando o `chatId` já é confiável;
+  - reservar clique em row para cadernos/notebooks ou casos sem id explícito;
+  - medir e reportar `directNavigation` versus `rowClickNavigation`.
+- Timeouts por fase:
+  - substituir timeout global por orçamentos de `openSidebar`, `findScroller`,
+    `loadMore`, `routeSettle`, `hydrateConversation`, `extractMarkdown` e
+    `returnToNotebook`;
+  - permitir retry local de fases idempotentes;
+  - retornar mensagens acionáveis em português simples.
+- Métricas de fase para performance real:
+  - expor tempos por fase em `snapshot`, status de job e relatório;
+  - incluir tentativas de scroll, crescimento observado, scroller escolhido,
+    motivo de parada e tempo até estabilidade;
+  - usar esses dados para decidir se futuras otimizações devem mexer no DOM,
+    no transporte da bridge ou no Gemini CLI.
+
+### Critérios de aceite
+
+- `gemini_list_recent_chats` com `refresh=true` deve carregar uma página nova
+  sem depender de sleeps fixos e deve explicar a fase exata quando falhar.
+- O primeiro status após Chrome já aberto deve conseguir diferenciar handshake
+  quente, handshake frio e self-heal pós-update, com tempos separados.
+- Quando a extensão já está compatível, o guard não deve gastar dezenas de
+  segundos tentando reload desnecessário.
+- Em histórico grande, o lazy-load deve crescer enquanto houver evidência de
+  novos itens e parar com motivo claro quando não houver.
+- Uma operação pesada por aba não deve ser interrompida por outra operação DOM
+  da mesma aba.
+- Export após navegação SPA continua protegido contra conteúdo trocado.
+- O relatório/status deve mostrar se a demora veio de sidebar, scroll,
+  navegação, hidratação ou extração.
+
+## Proposta v0.4.5 — Sincronização incremental do vault
+
+Status: implementada em `0.4.6`.
+
+Objetivo: transformar "sincronizar com o Gemini Web" em um fluxo sem atrito:
+quando o vault já estava 100% sincronizado e novas conversas foram criadas
+depois, o exporter deve identificar apenas as conversas novas, baixá-las e
+atualizar o estado local sem listar centenas de chats nem exigir decisão manual.
+
+### Problema
+
+Hoje o fluxo principal já sabe cruzar Gemini Web com vault, mas o usuário pensa
+em termos de produto: "atualize meu vault". Se cada sincronização precisar
+percorrer todo o histórico, listar conversas no chat ou perguntar o que baixar,
+o fluxo fica lento e inseguro. A sincronização precisa parar em uma fronteira
+conhecida, não em uma quantidade arbitrária.
+
+### Entregas
+
+- Estado local de sincronização:
+  - criar/usar arquivo como `.gemini-md-export/sync-state.json` no vault;
+  - guardar `lastFullSyncAt`, `lastSuccessfulSyncAt`, `topChatId`,
+    `boundaryChatIds`, versão/protocolo do exporter e último relatório;
+  - atualizar o estado apenas quando a sincronização terminar com fronteira
+    comprovada ou histórico completo verificado.
+- Índice local do vault:
+  - escanear arquivos existentes por nome, frontmatter e links Gemini;
+  - montar índice por `chatId` antes de baixar;
+  - tolerar arquivos movidos/renomeados sem criar duplicatas;
+  - preservar frontmatter/manual edits de notas já existentes.
+- Fronteira confiável:
+  - listar Gemini Web do topo para baixo;
+  - parar quando encontrar o `topChatId` anterior ou uma sequência suficiente
+    de conversas já conhecidas;
+  - se a fronteira não aparecer, continuar até provar fim do histórico ou
+    retornar estado "baixei novas, mas não provei sincronização completa".
+- Download incremental:
+  - colocar somente `chatId`s ausentes na fila;
+  - pular existentes silenciosamente;
+  - sobrescrever apenas quando o usuário pedir reexport;
+  - relatório incremental permite retomar sem baixar de novo o que já salvou.
+- UX de comando/progresso:
+  - criar tool/endpoint `gemini_sync_vault` ou consolidar semântica em
+    `gemini_export_missing_chats` com modo `sync`;
+  - mensagens orientadas ao usuário: "verificando desde a última
+    sincronização", "encontrei N conversas novas", "baixando N novas",
+    "vault atualizado";
+  - nunca despejar a lista inteira no chat;
+  - resumo final com novas baixadas, já existentes, falhas, warnings de mídia,
+    fronteira encontrada e caminho do relatório.
+- Retomada e consistência:
+  - se cair no meio, retomar pelo relatório anterior;
+  - não avançar `topChatId`/fronteira quando houve falha crítica;
+  - registrar quando o sync foi parcial, completo ou inconclusivo.
+- Preparação para CLI:
+  - a futura CLI deve expor isso como `gemini-md-export sync`;
+  - MCP, CLI e UI devem compartilhar a mesma semântica de sync incremental.
+
+### Critérios de aceite
+
+- Se o vault estava totalmente sincronizado e surgiram 7 conversas novas, o
+  usuário deve poder pedir "sincronizar" e obter apenas essas 7 conversas.
+- O fluxo não deve exigir que o agente liste centenas de conversas no chat.
+- O exporter deve provar que encontrou uma fronteira conhecida ou declarar que
+  a sincronização ficou parcial/inconclusiva.
+- Repetir o sync logo em seguida deve resultar em "nenhuma conversa nova" sem
+  percorrer o histórico inteiro.
+- Arquivos existentes no vault não devem ser sobrescritos sem pedido explícito.
+
+## Proposta v0.4.6 — Observabilidade e recuperação assistida
+
+Status: primeiro incremento implementado em `0.4.6`.
 
 Objetivo: reduzir o tempo entre "travou" e "sabemos onde travou". Esta fase não
 substitui as melhorias diretas da `v0.4.2` nem o roteamento confiável da
-`v0.4.3`; ela melhora diagnóstico, suporte, reprodução e retomada segura antes
+`v0.4.3`, nem a otimização DOM da `v0.4.4`, nem o sync incremental da
+`v0.4.5`; ela melhora diagnóstico, suporte, reprodução e retomada segura antes
 da migração CLI-first.
 
 ### Entregas
@@ -484,6 +658,36 @@ da migração CLI-first.
 - Safe mode deve sacrificar velocidade para reduzir timeouts em Windows lento.
 - Fault injection deve cobrir pelo menos uma falha de transporte, uma falha de
   DOM, uma falha de asset e uma falha de processo/porta.
+
+## v0.4.7 — Readiness semântica no hook do Gemini CLI
+
+Status: implementada em `0.4.7`.
+
+Objetivo: trocar a decisão "há clients conectados?" por "há uma aba Gemini
+realmente pronta para uso?", sem perder compatibilidade durante updates.
+
+### Entregas
+
+- O hook `BeforeTool` consulta primeiro
+  `/agent/ready?wakeBrowser=false&selfHeal=false`.
+- `/agent/clients` permanece como fallback para bridges antigos e endpoint de
+  inspeção manual.
+- O hook só pula launch quando `ready=true`; quando existe cliente conectado mas
+  não pronto por versão/protocolo/canal de comando, ele não abre uma aba extra e
+  deixa o MCP retornar o erro acionável.
+- Depois de abrir o navegador, o hook aguarda `/agent/ready` retornar
+  `ready=true`, não apenas qualquer heartbeat bruto.
+- `/agent/ready` passa a incluir `blockingIssue` para explicar o motivo de não
+  estar pronto (`no_connected_clients`, `extension_version_mismatch`,
+  `no_selectable_gemini_tab`, `command_channel_not_ready`).
+
+### Critérios de aceite
+
+- Uma aba Gemini pronta continua silenciosa e não dispara launch.
+- Sem aba conectada, o hook ainda abre `https://gemini.google.com/app` no
+  Windows pelo launcher minimizado.
+- Cliente conectado mas não pronto não gera aba duplicada.
+- Bridges antigos ainda funcionam via fallback para `/agent/clients`.
 
 ## Proposta v0.5.0 — CLI-first sobre a bridge local
 

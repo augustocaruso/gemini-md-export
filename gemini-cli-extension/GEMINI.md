@@ -13,8 +13,17 @@ Operational guidance:
   `offset` values, then continue from `pagination.nextOffset` until
   `pagination.reachedEnd` is true, `pagination.canLoadMore` is false, or a page
   returns no conversations.
+- When the user asks to sync an Obsidian vault that was already fully
+  synchronized before, prefer `gemini_sync_vault` with `vaultDir`. It scans the
+  vault, reads/writes `.gemini-md-export/sync-state.json`, lists Gemini Web from
+  the top, stops at the prior `topChatId` or a reliable sequence of already
+  known chats, and downloads only new/missing conversations. Poll
+  `gemini_export_job_status` until it finishes. Do not list the whole history
+  in chat. If `decisionSummary.sync.stateUpdated=false`, say whether the sync
+  was partial/inconclusive and resume from the report instead of starting over.
 - When the user asks to import/sync the whole Gemini chat history into an
-  Obsidian vault, the required workflow is a reconciliation, not a blind export:
+  Obsidian vault and no sync state exists yet, the required workflow is a
+  reconciliation, not a blind export:
   call `gemini_export_missing_chats` with `vaultDir` pointing at the vault/folder
   to scan. That job loads the entire reachable Gemini web sidebar, scans the
   vault recursively for raw Gemini Markdown exports (`chat_id`, `source:
@@ -131,9 +140,11 @@ Operational guidance:
   open the configured browser and, when an old Chrome/Edge extension build is
   connected, request the extension's own `RELOAD_SELF` flow. Inspect
   `selfHeal.reloadAttempts`, `selfHeal.code`, `extensionReadiness`,
-  `bridgeHealth`, and `connectedClients` before asking the user to do anything
-  manually. `extensionReadiness` separates service worker, content script,
-  Gemini tab, build stamp, reload outcome, and top-bar status.
+  `bridgeHealth`, `handshake`, and `connectedClients` before asking the user to
+  do anything manually. `extensionReadiness` separates service worker, content
+  script, Gemini tab, build stamp, reload outcome, and top-bar status. For a
+  fast non-invasive check, use `gemini_browser_ready`; it reports hot/cold/
+  post-update handshake timing without fetching a large snapshot.
 - Treat `gemini_browser_status.ready=false`, a non-null `blockingIssue`, or
   zero `connectedClients` as a blocker for browser-dependent work. Do not keep
   calling `gemini_download_chat`, vault repair, or export tools in a loop while
@@ -188,9 +199,10 @@ Operational guidance:
   gemini-md-export MCP tools only. It prelaunches the configured Chromium
   browser before browser-dependent exporter tools, including
   `gemini_browser_status`, but it must not run for unrelated tools. It first checks
-  `http://127.0.0.1:47283/agent/clients` with a very short timeout. If a Gemini
-  tab is already connected, it opens nothing. If no client is connected, it
-  opens `https://gemini.google.com/app` through a generated short PowerShell
+  `http://127.0.0.1:47283/agent/ready?wakeBrowser=false&selfHeal=false` with a
+  very short timeout, falling back to `/agent/clients` only for older bridges
+  during update. If a usable Gemini tab is already ready, it opens nothing. If no
+  client is connected, it opens `https://gemini.google.com/app` through a generated short PowerShell
   launcher that captures the current foreground window, starts the browser
   minimized, waits briefly, and tries to restore focus to the original terminal.
   If that immediate launch fails, direct browser spawn is allowed only when
@@ -199,9 +211,9 @@ Operational guidance:
   browser by default. Emit concise user-facing status through the hook JSON
   `systemMessage` when the hook launches, waits on an existing launch, skips
   because the bridge is unreachable, times out, or fails. Stay silent when a
-  Gemini tab is already connected.
-  After launching, the hook waits for `/agent/clients` to report a connected
-  Gemini tab before it returns, up to `GEMINI_MCP_HOOK_CONNECT_TIMEOUT_MS`
+  Gemini tab is already ready.
+  After launching, the hook waits for `/agent/ready` to report `ready=true`
+  before it returns, up to `GEMINI_MCP_HOOK_CONNECT_TIMEOUT_MS`
   (default 12000ms). The hook and MCP share `hook-browser-launch.json`, so a
   tool call should not open a second tab while a recent hook launch is still
   within cooldown. If the bridge is unreachable, the hook must not launch the
@@ -213,7 +225,7 @@ Operational guidance:
   `GEMINI_MCP_HOOK_STDIN_TIMEOUT_MS` (default 120ms) if the client keeps stdin
   open. For debugging, run
   `node scripts/hooks/gemini-md-export-hook.mjs diagnose`; it prints
-  `/healthz`, `/agent/clients`, effective timeouts, launch plan, and the paths
+  `/healthz`, `/agent/ready`, effective timeouts, launch plan, and the paths
   to `hook-last-run.json` and `hook-browser-launch.json`. The final hook envs
   are `GEMINI_MCP_HOOK_LAUNCH_BROWSER`,
   `GEMINI_MCP_HOOK_CONNECT_TIMEOUT_MS`,
@@ -241,7 +253,10 @@ Operational guidance:
 - Use `gemini_diagnose_environment` when you need one field report covering MCP
   version, extension version/protocol/build, configured browser, processes,
   port owner, export directory, recent jobs/reports, and the next recommended
-  action. Prefer this before asking the user to reinstall.
+  action. Prefer this before asking the user to reinstall. If the issue is slow
+  or intermittent, use `gemini_collect_support_bundle`; it writes a sanitized
+  JSON bundle with diagnostics and `gemini_flight_recorder` events, without chat
+  content by default.
 
 Available capabilities include:
 
@@ -249,7 +264,9 @@ Available capabilities include:
 - listing notebook chats
 - exporting the current chat
 - exporting the recent-chat history in a background batch job
+- incrementally syncing a vault with only new Gemini Web chats
 - reexporting an explicit list of chatIds in a background batch job
+- collecting sanitized diagnostics/support bundles
 - checking or cancelling a background export job
 - downloading a specific recent or notebook chat
 - manually reloading connected Gemini tabs when needed

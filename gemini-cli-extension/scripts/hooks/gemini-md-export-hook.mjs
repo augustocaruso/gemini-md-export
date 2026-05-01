@@ -63,6 +63,7 @@ let diagnosticState = {
 
 const BROWSER_DEPENDENT_EXPORTER_TOOLS = new Set([
   'gemini_browser_status',
+  'gemini_browser_ready',
   'gemini_list_tabs',
   'gemini_claim_tab',
   'gemini_list_recent_chats',
@@ -72,6 +73,7 @@ const BROWSER_DEPENDENT_EXPORTER_TOOLS = new Set([
   'gemini_download_notebook_chat',
   'gemini_export_recent_chats',
   'gemini_export_missing_chats',
+  'gemini_sync_vault',
   'gemini_reexport_chats',
   'gemini_export_notebook',
   'gemini_cache_status',
@@ -448,6 +450,188 @@ const queryConnectedBrowserClients = () =>
     req.end();
   });
 
+const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object || {}, key);
+
+const firstFiniteNumber = (...values) => {
+  for (const value of values) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return 0;
+};
+
+const inferBrowserReadyBlockingIssue = ({
+  connectedCount = 0,
+  matchingClientCount = 0,
+  selectableTabCount = 0,
+  commandReadyClientCount = 0,
+} = {}) => {
+  if (connectedCount === 0) return 'no_connected_clients';
+  if (matchingClientCount === 0) return 'extension_version_mismatch';
+  if (selectableTabCount === 0) return 'no_selectable_gemini_tab';
+  if (commandReadyClientCount === 0) return 'command_channel_not_ready';
+  return null;
+};
+
+const normalizeBrowserReadyResponse = (
+  parsed,
+  { statusCode = null, endpoint = '/agent/ready', fallbackFromReady = null } = {},
+) => {
+  const connectedClients = Array.isArray(parsed?.connectedClients) ? parsed.connectedClients : [];
+  const connectedCount = firstFiniteNumber(parsed?.connectedClientCount, connectedClients.length);
+  const selectableTabCount = firstFiniteNumber(parsed?.selectableTabCount, connectedCount);
+  const matchingClientCount = firstFiniteNumber(parsed?.matchingClientCount, connectedCount);
+  const commandReadyClientCount = firstFiniteNumber(
+    parsed?.commandReadyClientCount,
+    matchingClientCount,
+  );
+  const hasSemanticReady = hasOwn(parsed, 'ready') || hasOwn(parsed, 'ok');
+  const ready = hasSemanticReady
+    ? parsed?.ready === true ||
+      (parsed?.ready !== false &&
+        parsed?.ok === true &&
+        selectableTabCount > 0 &&
+        matchingClientCount > 0 &&
+        commandReadyClientCount > 0)
+    : connectedCount > 0;
+  const blockingIssue = ready
+    ? null
+    : parsed?.blockingIssue ||
+      inferBrowserReadyBlockingIssue({
+        connectedCount,
+        matchingClientCount,
+        selectableTabCount,
+        commandReadyClientCount,
+      });
+
+  return {
+    checked: true,
+    reachable: statusCode >= 200 && statusCode < 300,
+    statusCode,
+    endpoint,
+    ready,
+    connectedCount,
+    selectableTabCount,
+    matchingClientCount,
+    commandReadyClientCount,
+    blockingIssue,
+    mode: parsed?.mode || null,
+    fallbackFromReady,
+  };
+};
+
+const queryBrowserReadiness = () =>
+  new Promise((resolveResult) => {
+    if (isDisabled(process.env.GEMINI_MCP_HOOK_BRIDGE_CHECK)) {
+      resolveResult({
+        checked: false,
+        reachable: false,
+        ready: false,
+        connectedCount: null,
+        reason: 'disabled',
+      });
+      return;
+    }
+
+    const timeoutMs = parseNonNegativeInt(
+      process.env.GEMINI_MCP_HOOK_BRIDGE_TIMEOUT_MS,
+      DEFAULT_HOOK_BRIDGE_CHECK_TIMEOUT_MS,
+    );
+    const port = parseNonNegativeInt(process.env.GEMINI_MCP_BRIDGE_PORT, 47283);
+    let done = false;
+    const fallbackToClients = async (readyStatus) => {
+      if (done) return;
+      done = true;
+      const clientStatus = await queryConnectedBrowserClients();
+      resolveResult({
+        ...normalizeBrowserReadyResponse(
+          {
+            connectedClientCount: clientStatus.connectedCount,
+            connectedClients:
+              clientStatus.connectedCount > 0
+                ? Array.from({ length: clientStatus.connectedCount }, (_, index) => ({
+                    clientId: `compat-${index + 1}`,
+                  }))
+                : [],
+          },
+          {
+            statusCode: clientStatus.statusCode ?? null,
+            endpoint: '/agent/clients',
+            fallbackFromReady: readyStatus,
+          },
+        ),
+        checked: clientStatus.checked,
+        reachable: clientStatus.reachable,
+        reason: clientStatus.reason,
+      });
+    };
+    const finish = (result) => {
+      if (done) return;
+      done = true;
+      resolveResult({ checked: true, ...result });
+    };
+
+    const req = request(
+      {
+        host: '127.0.0.1',
+        port,
+        path: '/agent/ready?wakeBrowser=false&selfHeal=false',
+        method: 'GET',
+        timeout: timeoutMs,
+      },
+      (res) => {
+        let body = '';
+        res.setEncoding('utf-8');
+        res.on('data', (chunk) => {
+          body += chunk;
+          if (body.length > 65536) {
+            req.destroy(new Error('response too large'));
+          }
+        });
+        res.on('end', () => {
+          if (res.statusCode === 404) {
+            fallbackToClients({ checked: true, reachable: true, statusCode: res.statusCode });
+            return;
+          }
+          try {
+            const parsed = JSON.parse(body);
+            finish(normalizeBrowserReadyResponse(parsed, { statusCode: res.statusCode }));
+          } catch (err) {
+            finish({
+              reachable: false,
+              statusCode: res.statusCode,
+              ready: false,
+              connectedCount: null,
+              reason: `invalid-json: ${err.message}`,
+              endpoint: '/agent/ready',
+            });
+          }
+        });
+      },
+    );
+
+    req.on('timeout', () => {
+      req.destroy();
+      finish({
+        reachable: false,
+        ready: false,
+        connectedCount: null,
+        reason: 'timeout',
+        endpoint: '/agent/ready',
+      });
+    });
+    req.on('error', (err) => {
+      finish({
+        reachable: false,
+        ready: false,
+        connectedCount: null,
+        reason: err.message,
+        endpoint: '/agent/ready',
+      });
+    });
+    req.end();
+  });
+
 const queryBridgeHealth = () =>
   new Promise((resolveResult) => {
     const timeoutMs = parseNonNegativeInt(
@@ -578,8 +762,8 @@ const waitForConnectedBrowserClient = async () => {
   let lastStatus = null;
 
   while (Date.now() - startedAt <= timeoutMs) {
-    lastStatus = await queryConnectedBrowserClients();
-    if (lastStatus.connectedCount > 0) {
+    lastStatus = await queryBrowserReadiness();
+    if (lastStatus.ready) {
       return {
         connected: true,
         waitedMs: Date.now() - startedAt,
@@ -718,11 +902,20 @@ const prelaunchBrowserDetached = async (input) => {
   }
   recordStageDuration('cooldownLock', lockStartedAt);
 
-  const bridgeStatus = await withStageTiming('bridgeCheck', queryConnectedBrowserClients);
-  if (bridgeStatus.connectedCount > 0) {
+  const bridgeStatus = await withStageTiming('bridgeCheck', queryBrowserReadiness);
+  if (bridgeStatus.ready) {
     writeHookDiagnostic({
       stage: 'browser-prelaunch-skipped',
-      reason: 'already-connected',
+      reason: 'already-ready',
+      bridgeStatus,
+    });
+    return;
+  }
+
+  if ((bridgeStatus.connectedCount || 0) > 0 && bridgeStatus.blockingIssue !== 'no_connected_clients') {
+    writeHookDiagnostic({
+      stage: 'browser-prelaunch-skipped',
+      reason: 'connected-but-not-ready',
       bridgeStatus,
     });
     return;
@@ -1279,7 +1472,7 @@ const beforeTool = async (input) => {
 const diagnose = async () => {
   const [bridgeHealth, bridgeStatus, environmentDiagnostics] = await Promise.all([
     queryBridgeHealth(),
-    queryConnectedBrowserClients(),
+    queryBrowserReadiness(),
     queryEnvironmentDiagnostics(),
   ]);
   const launch = currentPlatform() === 'win32' ? buildWindowsBrowserStartCommand() : null;

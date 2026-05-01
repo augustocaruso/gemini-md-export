@@ -326,7 +326,10 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   e `/agent/clients?diagnostics=1` expõem `bridgeHealth` por cliente
   (`healthy`, `degraded`, `stale`, `version_mismatch`,
   `command_channel_stuck`) com ação recomendada antes de pedir reload manual.
-  `gemini_browser_status` também retorna `extensionReadiness`, separando
+  `gemini_browser_status` também retorna `extensionReadiness` e `handshake`,
+  separando handshake quente/frio/pós-update antes de culpar o DOM do Gemini.
+  Para checagem rápida sem snapshot grande, use `gemini_browser_ready`.
+  `gemini_browser_status` separa
   service worker (`GET_EXTENSION_INFO`/`source: "service-worker"`), content
   script conectado, aba Gemini, build stamp esperado/em execução, resultado do
   reload automático e diagnóstico do top-bar (`page.topBar`). Só pedir reload
@@ -386,12 +389,14 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   60000ms) para não abrir uma janela/diálogo novo a cada chamada de tool quando
   a extensão ainda não conectou. O hook `BeforeTool` faz o pré-aquecimento para
   tools do exporter que dependem do navegador no Windows: consulta rapidamente
-  `/agent/clients`; se já houver uma aba Gemini conectada, não abre nada. Se o
-  bridge estiver inalcançável, também não abre browser às cegas; registra
-  diagnóstico e deixa o MCP retornar erro acionável. Se o bridge está de pé e
-  sem clientes, abre `https://gemini.google.com/app` por um PowerShell
+  `/agent/ready?wakeBrowser=false&selfHeal=false`; se já houver uma aba Gemini
+  pronta, não abre nada. `/agent/clients` fica só como fallback de compatibilidade
+  em bridges antigos e inspeção manual. Se o bridge estiver inalcançável, também
+  não abre browser às cegas; registra diagnóstico e deixa o MCP retornar erro
+  acionável. Se o bridge está de pé e sem clientes, abre
+  `https://gemini.google.com/app` por um PowerShell
   temporário oculto com `Start-Process -WindowStyle Minimized`, tenta restaurar
-  o foco da janela anterior e aguarda conexão até
+  o foco da janela anterior e aguarda `/agent/ready` retornar `ready=true` até
   `GEMINI_MCP_HOOK_CONNECT_TIMEOUT_MS` (default 12000ms), com hard exit menor
   que o timeout de `hooks.json`. `hook-browser-launch.json` registra
   `launchId`, `status`, `expiresAt`, `toolName`, `sessionId`, `bridgeStatus`,
@@ -402,14 +407,14 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   `GEMINI_MCP_HOOK_ALLOW_FOCUSING_FALLBACK=true`. O hook deve emitir
   `systemMessage` em JSON quando houver ação ou problema útil ao usuário
   (launch, espera reaproveitada, bridge morto, timeout ou falha), e ficar
-  silencioso quando já houver aba conectada.
+  silencioso quando já houver aba pronta.
   O hook em si não deve fazer leitura síncrona de stdin nem `import()` dinâmico.
   `SessionStart` não deve ler stdin. Before/AfterTool leem stdin de forma
   assíncrona, tentam parsear assim que o JSON chega e falham aberto por timeout
   curto (`GEMINI_MCP_HOOK_STDIN_TIMEOUT_MS`, default 120ms) se o cliente
   mantiver o pipe aberto. O modo
   `node scripts/hooks/gemini-md-export-hook.mjs diagnose` deve continuar
-  disponível para imprimir estado, `/healthz`, `/agent/clients`, timeouts
+  disponível para imprimir estado, `/healthz`, `/agent/ready`, timeouts
   efetivos, plano de launch e caminhos de `hook-last-run.json`/
   `hook-browser-launch.json`. Esse prelaunch é controlado por
   `GEMINI_MCP_HOOK_LAUNCH_BROWSER` (default ligado),
@@ -471,7 +476,8 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   Use isso antes de sugerir reinstalação.
   O MCP também expõe tools para status, diretório de export, listagem de
   sidebar, listagem/export de cadernos, download individual, cache e navegação:
-  `gemini_browser_status`, `gemini_diagnose_environment`,
+  `gemini_browser_status`, `gemini_browser_ready`, `gemini_diagnose_environment`,
+  `gemini_flight_recorder`, `gemini_collect_support_bundle`,
   `gemini_mcp_diagnose_processes`,
   `gemini_mcp_cleanup_stale_processes`, `gemini_list_tabs`,
   `gemini_claim_tab`, `gemini_release_tab`, `gemini_get_export_dir`,
@@ -480,6 +486,7 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   `gemini_get_current_chat`, `gemini_download_chat`,
   `gemini_download_notebook_chat`, `gemini_export_notebook`,
   `gemini_export_recent_chats`, `gemini_export_missing_chats`,
+  `gemini_sync_vault`,
   `gemini_reexport_chats`, `gemini_export_job_status`,
   `gemini_export_job_cancel`, `gemini_cache_status`, `gemini_clear_cache`,
   `gemini_open_chat`, `gemini_reload_gemini_tabs` e `gemini_snapshot`.
@@ -501,7 +508,12 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   `reachedSidebarEnd=true`; `maxChats` só deve ser passado quando o usuário
   pedir export parcial. Esse job retorna só progresso, contagens, erros
   recentes e caminho do relatório para evitar timeout e excesso de contexto no
-  Gemini CLI. O MCP bloqueia dois jobs simultâneos de histórico recente na
+  Gemini CLI. Quando o vault já estava sincronizado e o usuário pedir sync
+  incremental, usar `gemini_sync_vault`: ele lê/grava
+  `.gemini-md-export/sync-state.json`, lista o Gemini Web do topo até uma
+  fronteira conhecida (`topChatId` ou sequência de chats já presentes no
+  vault) e baixa só conversas novas. Não listar o histórico inteiro no chat. O
+  MCP bloqueia dois jobs simultâneos de histórico recente na
   mesma aba; se já houver um rodando, consultar/cancelar o job existente antes
   de iniciar outro. Se um job longo for interrompido, o agente deve chamar
   `gemini_export_recent_chats` ou `gemini_export_missing_chats` novamente com

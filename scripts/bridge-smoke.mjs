@@ -73,7 +73,7 @@ const usage = () =>
     '  node scripts/bridge-smoke.mjs --bridge-url http://127.0.0.1:47283 [--json]',
     '',
     'O smoke isolado nao exige login no Gemini: ele cria um cliente sintetico',
-    'da extensao e valida healthz, snapshot, SSE events, clients, diagnostics e diagnostico.',
+    'da extensao e valida healthz, snapshot, SSE events, ready, clients, diagnostics e diagnostico.',
     '',
   ].join('\n');
 
@@ -288,6 +288,24 @@ const runSmoke = async (options) => {
         clientId: value.clientId,
         transport: value.transport,
         bridgeHealth: value.bridgeHealth,
+      };
+    });
+
+    await runCheck(checks, 'agent_ready', async () => {
+      const value = await requestJson(bridgeUrl, '/agent/ready', {
+        timeoutMs: options.timeoutMs,
+      });
+      if (value.ready !== true) {
+        throw new Error(`ready retornou ${value.ready} (${value.blockingIssue || 'sem motivo'})`);
+      }
+      return {
+        ready: value.ready,
+        mode: value.mode,
+        connectedClientCount: value.connectedClientCount,
+        selectableTabCount: value.selectableTabCount,
+        matchingClientCount: value.matchingClientCount,
+        commandReadyClientCount: value.commandReadyClientCount,
+        blockingIssue: value.blockingIssue,
       };
     });
 

@@ -70,9 +70,11 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.match(hooksConfig.hooks.AfterTool[0].matcher, /mcp_cleanup_stale_processes/);
   assert.notEqual(hooksConfig.hooks.BeforeTool[0].matcher, '*');
   assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /browser_status/);
+  assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /browser_ready/);
   assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /list_tabs/);
   assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /claim_tab/);
   assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /export_missing_chats/);
+  assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /sync_vault/);
   assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /mcp_\+gemini/);
   assert.doesNotMatch(hooksConfig.hooks.BeforeTool[0].matcher, /get_export_dir/);
   assert.doesNotMatch(hooksConfig.hooks.BeforeTool[0].matcher, /set_export_dir/);
@@ -133,6 +135,8 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.match(context, /ready=false/);
   assert.match(context, /blockingIssue/);
   assert.match(context, /selfHeal\.reloadAttempts/);
+  assert.match(context, /gemini_browser_ready/);
+  assert.match(context, /agent\/ready/);
   assert.match(context, /gemini_reload_gemini_tabs/);
   assert.match(context, /gemini_list_tabs/);
   assert.match(context, /gemini_claim_tab/);
@@ -142,7 +146,10 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.match(context, /Only ask for manual reload/);
   assert.match(context, /Do not keep\s+calling `gemini_download_chat`/);
   assert.match(context, /gemini_reexport_chats/);
+  assert.match(context, /gemini_sync_vault/);
   assert.match(context, /gemini_export_missing_chats/);
+  assert.match(context, /sync-state\.json/);
+  assert.match(context, /gemini_collect_support_bundle/);
   assert.match(context, /resumeReportFile/);
   assert.match(context, /skips chats already completed/);
   assert.match(context, /webConversationCount - existingVaultCount = missingCount/);

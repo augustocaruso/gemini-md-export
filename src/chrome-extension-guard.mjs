@@ -143,13 +143,20 @@ const formatMismatchError = (mismatch, { afterReload = false } = {}) => {
 };
 
 const probeExtensionInfo = async (deps, state) => {
+  const startedAt = Date.now();
+  state.metrics = state.metrics || {};
+  state.metrics.extensionInfoAttempts = (state.metrics.extensionInfoAttempts || 0) + 1;
   const client = selectClient(
     deps.getLiveClients(),
     state.preferredClientId,
     state.previousClient,
     deps.expected,
   );
-  if (!client) return null;
+  if (!client) {
+    state.metrics.extensionInfoMs =
+      (state.metrics.extensionInfoMs || 0) + Math.max(0, Date.now() - startedAt);
+    return null;
+  }
 
   try {
     const info = await deps.getChromeExtensionInfo(client);
@@ -187,6 +194,9 @@ const probeExtensionInfo = async (deps, state) => {
       };
     }
     return null;
+  } finally {
+    state.metrics.extensionInfoMs =
+      (state.metrics.extensionInfoMs || 0) + Math.max(0, Date.now() - startedAt);
   }
 };
 
@@ -221,7 +231,18 @@ export const ensureChromeExtensionReady = async (deps, options = {}) => {
     preferredClientId: options.clientId || options.preferredClientId || null,
     previousClient: null,
     lastProbeError: null,
+    metrics: {
+      totalMs: 0,
+      extensionInfoMs: 0,
+      extensionInfoAttempts: 0,
+      initialWaitMs: 0,
+      launchMs: 0,
+      launchWaitMs: 0,
+      reloadMs: 0,
+      reloadWaitMs: 0,
+    },
   };
+  const guardStartedAt = Date.now();
   const sleep = deps.sleep || sleepDefault;
   deps.sleep = sleep;
   const log = (event, data = {}) => {
@@ -244,18 +265,22 @@ export const ensureChromeExtensionReady = async (deps, options = {}) => {
     log('waiting-initial-client', {
       timeoutMs: config.initialConnectTimeoutMs,
     });
+    const initialWaitStartedAt = Date.now();
     probe = await waitForExtensionInfo(
       deps,
       state,
       config.initialConnectTimeoutMs,
       config.pollIntervalMs,
     );
+    state.metrics.initialWaitMs += Math.max(0, Date.now() - initialWaitStartedAt);
   }
 
   if (!probe && (options.allowLaunchChrome ?? config.launchIfClosed)) {
+    const launchStartedAt = Date.now();
     launchResult = await deps.launchChromeForGemini?.({
       profileDirectory: config.profileDirectory,
     });
+    state.metrics.launchMs += Math.max(0, Date.now() - launchStartedAt);
     launchedChrome = !!launchResult?.attempted;
     log('launch-attempted', {
       attempted: launchedChrome,
@@ -266,7 +291,9 @@ export const ensureChromeExtensionReady = async (deps, options = {}) => {
       reason: launchResult?.reason ?? null,
       error: launchResult?.error ?? null,
     });
+    const launchWaitStartedAt = Date.now();
     probe = await waitForExtensionInfo(deps, state, config.reloadTimeoutMs, config.pollIntervalMs);
+    state.metrics.launchWaitMs += Math.max(0, Date.now() - launchWaitStartedAt);
   }
 
   if (!probe) {
@@ -306,11 +333,13 @@ export const ensureChromeExtensionReady = async (deps, options = {}) => {
     });
 
     if (!mismatch) {
+      state.metrics.totalMs = Math.max(0, Date.now() - guardStartedAt);
       return {
         client: probe.client,
         info: probe.info,
         launchedChrome,
         reloadAttempts,
+        timings: { ...state.metrics },
       };
     }
 
@@ -325,12 +354,14 @@ export const ensureChromeExtensionReady = async (deps, options = {}) => {
       reason: mismatch.kind,
     });
 
+    const reloadStartedAt = Date.now();
     const reloadResult = await deps.reloadChromeExtension(probe.client, {
       reason: `${mismatch.kind}_mismatch`,
       expectedExtensionVersion: expected.extensionVersion,
       expectedProtocolVersion: expected.protocolVersion,
       expectedBuildStamp: expected.buildStamp || null,
     });
+    state.metrics.reloadMs += Math.max(0, Date.now() - reloadStartedAt);
 
     if (!reloadResult?.ok) {
       throw makeUserError(
@@ -344,6 +375,7 @@ export const ensureChromeExtensionReady = async (deps, options = {}) => {
     }
 
     await sleep(config.pollIntervalMs);
+    const reloadWaitStartedAt = Date.now();
     probe = await waitForMatchingExtensionInfo(
       deps,
       state,
@@ -351,6 +383,7 @@ export const ensureChromeExtensionReady = async (deps, options = {}) => {
       config.reloadTimeoutMs,
       config.pollIntervalMs,
     );
+    state.metrics.reloadWaitMs += Math.max(0, Date.now() - reloadWaitStartedAt);
     if (!probe) {
       throw makeUserError(
         'Pedi reload automático da extensão do Chrome, mas ela não voltou a conectar. Rode gemini_browser_status para ver os clientes atuais e tente gemini_reload_gemini_tabs se houver abas conectadas. Reload manual do card da extensão em chrome://extensions só deve ser necessário se houve mudança de permissões/manifest ou se o navegador está apontando para uma pasta antiga.',

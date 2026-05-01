@@ -86,6 +86,7 @@ test('export all incompleto vira aviso em vez de sucesso silencioso', () => {
   )?.[0];
   assert.ok(block, 'runRecentChatsExportJob deve existir');
   assert.match(block, /job\.truncated\s*=\s*job\.exportAll\s*\?\s*!job\.reachedEnd/);
+  assert.match(block, /job\.syncMode && job\.syncBoundary\?\.found === true/);
   assert.match(block, /Nao consegui confirmar que cheguei ao fim do historico do Gemini/);
   assert.match(block, /failures\.length > 0 \|\| job\.truncated \|\| job\.loadMoreTimedOut/);
   assert.match(block, /completed_with_errors/);
@@ -265,6 +266,34 @@ test('export missing cruza histórico completo com exports raw no vault', () => 
   assert.match(source, /resumeReportFile:\s*url\.searchParams\.get\('resumeReportFile'\)/);
   assert.match(source, /url\.searchParams\.get\('outputDir'\)[\s\S]*url\.searchParams\.get\('vaultDir'\)/);
   assert.match(source, /'gemini_export_missing_chats'/);
+});
+
+test('sync incremental do vault usa fronteira conhecida e estado local', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const toolBlock = source.match(
+    /name: 'gemini_sync_vault'[\s\S]*?\n  \{\n    name: 'gemini_reexport_chats'/,
+  )?.[0];
+  const jobBlock = source.match(
+    /const runRecentChatsExportJob = async[\s\S]*?\nconst startRecentChatsExportJob/,
+  )?.[0];
+  assert.ok(toolBlock, 'gemini_sync_vault deve existir');
+  assert.ok(jobBlock, 'runRecentChatsExportJob deve existir');
+  assert.match(source, /const resolveVaultSyncStateFile = \(vaultDir, syncStateFile = null\) =>/);
+  assert.match(source, /sync-state\.json/);
+  assert.match(source, /const findSyncBoundary = \(conversations = \[\]/);
+  assert.match(source, /known-vault-sequence/);
+  assert.match(source, /sync-state-boundary/);
+  assert.match(source, /loadRecentChatsUntilSyncBoundaryForClient/);
+  assert.match(source, /maybeUpdateSyncState/);
+  assert.match(jobBlock, /preloadedVaultScan/);
+  assert.match(jobBlock, /job\.syncBoundary = loadMore\.boundary/);
+  assert.match(jobBlock, /allConversations\.slice\(0, syncBoundaryIndex\)/);
+  assert.match(source, /workflow:\s*exportJobWorkflow\(job\)/);
+  assert.match(source, /vault-incremental-sync/);
+  assert.match(toolBlock, /syncMode:\s*true/);
+  assert.match(toolBlock, /exportMissingOnly:\s*true/);
+  assert.match(toolBlock, /knownBoundaryCount/);
+  assert.match(source, /url\.pathname === '\/agent\/sync-vault'/);
 });
 
 test('reexport de chatIds conhecidos roda como job em background', () => {

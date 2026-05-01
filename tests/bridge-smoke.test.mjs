@@ -7,7 +7,7 @@ import { resolve } from 'node:path';
 const ROOT = resolve(import.meta.dirname, '..');
 const SMOKE_SCRIPT = resolve(ROOT, 'scripts', 'bridge-smoke.mjs');
 
-test('bridge smoke valida healthz, snapshot, SSE, clients e diagnostico sem login', () => {
+test('bridge smoke valida healthz, snapshot, SSE, ready, clients e diagnostico sem login', () => {
   const output = execFileSync(process.execPath, [SMOKE_SCRIPT, '--spawn', '--json'], {
     cwd: ROOT,
     encoding: 'utf-8',
@@ -26,6 +26,7 @@ test('bridge smoke valida healthz, snapshot, SSE, clients e diagnostico sem logi
     'bridge_snapshot',
     'bridge_events_sse',
     'bridge_heartbeat',
+    'agent_ready',
     'agent_clients',
     'agent_diagnostics',
     'process_diagnostics',
@@ -35,6 +36,7 @@ test('bridge smoke valida healthz, snapshot, SSE, clients e diagnostico sem logi
     result.checks.find((check) => check.name === 'agent_clients').value.smokeClient.bridgeHealth.status,
     'healthy',
   );
+  assert.equal(result.checks.find((check) => check.name === 'agent_ready').value.ready, true);
   assert.equal(
     result.checks.find((check) => check.name === 'agent_diagnostics').value.status,
     'ready',

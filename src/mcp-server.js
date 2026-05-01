@@ -3,7 +3,16 @@
 import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { homedir } from 'node:os';
@@ -49,6 +58,17 @@ const PROCESS_SESSION_ID =
 const DEFAULT_HOST = process.env.GEMINI_MCP_BRIDGE_HOST || '127.0.0.1';
 const DEFAULT_PORT = Number(process.env.GEMINI_MCP_BRIDGE_PORT || 47283);
 const DEFAULT_EXPORT_DIR = process.env.GEMINI_MCP_EXPORT_DIR || resolve(homedir(), 'Downloads');
+const DIAGNOSTIC_DIR =
+  process.env.GEMINI_MCP_DIAGNOSTIC_DIR || resolve(homedir(), '.gemini-md-export');
+const FLIGHT_RECORDER_FILE = resolve(DIAGNOSTIC_DIR, 'flight-recorder.jsonl');
+const FLIGHT_RECORDER_MAX_BYTES = Math.max(
+  64 * 1024,
+  Math.min(20 * 1024 * 1024, Number(process.env.GEMINI_MCP_FLIGHT_RECORDER_MAX_BYTES || 2 * 1024 * 1024)),
+);
+const FLIGHT_RECORDER_MEMORY_LIMIT = Math.max(
+  20,
+  Math.min(1000, Number(process.env.GEMINI_MCP_FLIGHT_RECORDER_MEMORY_LIMIT || 200)),
+);
 const CLIENT_STALE_MS = 45_000;
 const TAB_CLAIM_DEFAULT_TTL_MS = Math.max(
   60_000,
@@ -262,6 +282,91 @@ const errorLog = (...args) => {
 
 const debugLog = (...args) => {
   if (process.env.GEMINI_MCP_DEBUG === 'true') writeLog(...args);
+};
+
+const flightEvents = [];
+const REDACTED_FLIGHT_KEYS = /content|contentBase64|markdown|body|html|prompt|response|raw|text/i;
+
+const sanitizeFlightValue = (value, depth = 0) => {
+  if (value === null || value === undefined) return value;
+  if (depth > 4) return '[truncated]';
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: value.message,
+      code: value.code || null,
+    };
+  }
+  if (Array.isArray(value)) {
+    return value.slice(0, 30).map((item) => sanitizeFlightValue(item, depth + 1));
+  }
+  if (typeof value === 'object') {
+    const output = {};
+    for (const [key, child] of Object.entries(value)) {
+      output[key] = REDACTED_FLIGHT_KEYS.test(key)
+        ? '[redacted]'
+        : sanitizeFlightValue(child, depth + 1);
+    }
+    return output;
+  }
+  if (typeof value === 'string') {
+    return value.length > 500 ? `${value.slice(0, 500)}...[truncated]` : value;
+  }
+  return value;
+};
+
+const rotateFlightRecorderIfNeeded = () => {
+  try {
+    if (!existsSync(FLIGHT_RECORDER_FILE)) return;
+    const stat = statSync(FLIGHT_RECORDER_FILE);
+    if (stat.size < FLIGHT_RECORDER_MAX_BYTES) return;
+    renameSync(FLIGHT_RECORDER_FILE, resolve(DIAGNOSTIC_DIR, 'flight-recorder.previous.jsonl'));
+  } catch {
+    // Flight recorder não deve derrubar o MCP.
+  }
+};
+
+const recordFlightEvent = (type, data = {}) => {
+  const event = {
+    ts: new Date().toISOString(),
+    type,
+    sessionId: PROCESS_SESSION_ID,
+    pid: process.pid,
+    data: sanitizeFlightValue(data),
+  };
+  flightEvents.push(event);
+  while (flightEvents.length > FLIGHT_RECORDER_MEMORY_LIMIT) flightEvents.shift();
+  try {
+    mkdirSync(DIAGNOSTIC_DIR, { recursive: true });
+    rotateFlightRecorderIfNeeded();
+    appendFileSync(FLIGHT_RECORDER_FILE, `${JSON.stringify(event)}\n`, 'utf-8');
+  } catch {
+    // Observabilidade é best-effort e nunca deve bloquear exportação.
+  }
+  return event;
+};
+
+const readFlightRecorderTail = (limit = 100) => {
+  const safeLimit = Math.max(1, Math.min(1000, Number(limit || 100)));
+  try {
+    if (!existsSync(FLIGHT_RECORDER_FILE)) return flightEvents.slice(-safeLimit);
+    const lines = readFileSync(FLIGHT_RECORDER_FILE, 'utf-8')
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .slice(-safeLimit);
+    return lines
+      .map((line) => {
+        try {
+          return JSON.parse(line);
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
+  } catch {
+    return flightEvents.slice(-safeLimit);
+  }
 };
 
 const settleBridgeStartup = (role, error = null) => {
@@ -1282,6 +1387,44 @@ const buildEnvironmentDiagnostics = async () => {
   };
 };
 
+const buildSupportBundle = async (args = {}) => {
+  const outputDir = args.outputDir ? resolveOutputDir(args.outputDir) : DIAGNOSTIC_DIR;
+  mkdirSync(outputDir, { recursive: true });
+  const diagnostics = await buildEnvironmentDiagnostics();
+  const flightRecorder = readFlightRecorderTail(args.flightLimit || 200);
+  const payload = {
+    generatedAt: new Date().toISOString(),
+    name: SERVER_NAME,
+    version: SERVER_VERSION,
+    protocolVersion: EXTENSION_PROTOCOL_VERSION,
+    privacy:
+      'Este bundle não inclui conteúdo de conversas por padrão; eventos do flight recorder são sanitizados.',
+    diagnostics,
+    flightRecorder: {
+      file: FLIGHT_RECORDER_FILE,
+      eventCount: flightRecorder.length,
+      events: flightRecorder,
+    },
+  };
+  const filename = `gemini-md-export-support-${timestampForFilename()}-${randomUUID().slice(0, 8)}.json`;
+  const filePath = resolve(outputDir, filename);
+  writeFileSync(filePath, `${JSON.stringify(payload, null, 2)}\n`, 'utf-8');
+  recordFlightEvent('support_bundle_created', {
+    filePath,
+    eventCount: flightRecorder.length,
+  });
+  return {
+    ok: true,
+    filePath,
+    filename,
+    outputDir,
+    eventCount: flightRecorder.length,
+    includesChatContent: false,
+    diagnosticsStatus: diagnostics.status,
+    nextAction: diagnostics.nextAction,
+  };
+};
+
 const isPidAlive = (pid) => {
   try {
     process.kill(pid, 0);
@@ -1895,6 +2038,16 @@ const upsertClient = (payload, meta = {}) => {
     eventStream: null,
     eventSeq: 0,
   };
+  if (!existing) {
+    recordFlightEvent('client_connected', {
+      clientId: payload.clientId,
+      tabId: payload.tabId ?? null,
+      windowId: payload.windowId ?? null,
+      extensionVersion: payload.extensionVersion || null,
+      protocolVersion: payload.protocolVersion ?? null,
+      buildStamp: payload.buildStamp || payload.page?.buildStamp || null,
+    });
+  }
 
   const now = Date.now();
   next.lastSeenAt = now;
@@ -2025,6 +2178,13 @@ const enqueueCommand = (clientId, type, args = {}, options = {}) => {
     args,
     createdAt: new Date().toISOString(),
   };
+  recordFlightEvent('command_enqueued', {
+    commandId: command.id,
+    clientId,
+    type,
+    timeoutMs: options.timeoutMs || COMMAND_TIMEOUT_MS,
+    dispatchTimeoutMs: options.dispatchTimeoutMs ?? COMMAND_DISPATCH_TIMEOUT_MS,
+  });
 
   return new Promise((resolve, reject) => {
     const timeoutMs = Number(options.timeoutMs || COMMAND_TIMEOUT_MS);
@@ -2049,6 +2209,12 @@ const enqueueCommand = (clientId, type, args = {}, options = {}) => {
       error.code = 'command_timeout';
       error.commandType = type;
       error.commandDispatched = !!pending.dispatchedAt;
+      recordFlightEvent('command_timeout', {
+        commandId: command.id,
+        clientId,
+        type,
+        dispatched: !!pending.dispatchedAt,
+      });
       reject(error);
     }, timeoutMs);
 
@@ -2065,6 +2231,11 @@ const enqueueCommand = (clientId, type, args = {}, options = {}) => {
         error.code = 'command_dispatch_timeout';
         error.commandType = type;
         error.commandDispatched = false;
+        recordFlightEvent('command_dispatch_timeout', {
+          commandId: command.id,
+          clientId,
+          type,
+        });
         reject(error);
       }, dispatchTimeoutMs);
     }
@@ -2081,6 +2252,12 @@ const resolveCommand = (commandId, result) => {
   clearTimeout(pending.timer);
   if (pending.dispatchTimer) clearTimeout(pending.dispatchTimer);
   pendingCommands.delete(commandId);
+  recordFlightEvent('command_resolved', {
+    commandId,
+    clientId: pending.clientId,
+    type: pending.type,
+    dispatched: !!pending.dispatchedAt,
+  });
   pending.resolve(result);
   return true;
 };
@@ -2100,8 +2277,8 @@ const requireClient = (selector = {}) => {
   cleanupStaleClients();
   cleanupExpiredTabClaims();
   const normalized = normalizeClientSelector(selector);
-  const liveClients = getLiveClients();
-  if (liveClients.length === 0) {
+  const selectableClients = getSelectableGeminiClients();
+  if (selectableClients.length === 0) {
     throw new Error('Nenhuma aba do Gemini conectada à extensão.');
   }
 
@@ -2115,7 +2292,7 @@ const requireClient = (selector = {}) => {
   }
 
   if (normalized.clientId) {
-    const client = liveClients.find((item) => item.clientId === normalized.clientId);
+    const client = selectableClients.find((item) => item.clientId === normalized.clientId);
     if (!client) {
       throw new Error(`Cliente ${normalized.clientId} não está ativo.`);
     }
@@ -2123,7 +2300,7 @@ const requireClient = (selector = {}) => {
   }
 
   if (normalized.tabId !== null) {
-    const client = liveClients.find((item) => Number(item.tabId) === normalized.tabId);
+    const client = selectableClients.find((item) => Number(item.tabId) === normalized.tabId);
     if (!client) {
       throw new Error(`Aba ${normalized.tabId} não está ativa.`);
     }
@@ -2134,11 +2311,11 @@ const requireClient = (selector = {}) => {
   const sessionClaimClient = liveClientForClaim(sessionClaim);
   if (sessionClaimClient) return sessionClaimClient;
 
-  if (liveClients.length === 1) {
-    return liveClients[0];
+  if (selectableClients.length === 1) {
+    return selectableClients[0];
   }
 
-  throw ambiguousTabsError(liveClients, normalized);
+  throw ambiguousTabsError(selectableClients, normalized);
 };
 
 const isNotebookClient = (client) =>
@@ -2167,7 +2344,7 @@ const requireNotebookClient = (selector = {}) => {
     return sessionClaimClient;
   }
 
-  const notebookClients = getLiveClients().filter(isNotebookClient);
+  const notebookClients = getSelectableGeminiClients().filter(isNotebookClient);
   if (notebookClients.length > 1) {
     throw ambiguousTabsError(notebookClients, normalized);
   }
@@ -2339,17 +2516,18 @@ const ensureBrowserExtensionReady = (args = {}, options = {}) =>
 const selectClaimableClient = async (args = {}) => {
   cleanupStaleClients();
   cleanupExpiredTabClaims();
-  let liveClients = getLiveClients();
+  let liveClients = getSelectableGeminiClients();
   const openIfMissing = args.openIfMissing !== false && args.wakeBrowser !== false;
 
   if (liveClients.length === 0 && openIfMissing) {
     await launchChromeForGemini({
       profileDirectory: CHROME_GUARD_CONFIG.profileDirectory,
     });
-    liveClients = await waitForLiveClients(
+    await waitForLiveClients(
       normalizeWaitMs(args.waitMs, BROWSER_STATUS_WAKE_WAIT_MS),
       CHROME_GUARD_CONFIG.pollIntervalMs || 500,
     );
+    liveClients = getSelectableGeminiClients();
   }
 
   if (Number.isInteger(Number(args.index))) {
@@ -2660,6 +2838,151 @@ const summarizeClient = (client) => ({
   notebookConversationCount: notebookConversationsForClient(client).length,
 });
 
+const commandChannelReadyForClient = (client) =>
+  !!client?.eventStream?.res && !client.eventStream.res.destroyed ||
+  !!client?.pendingPoll ||
+  client?.commandPoll?.polling === true;
+
+const browserReadyBlockingIssue = ({
+  allLiveClients = [],
+  selectableClients = [],
+  matchingClients = [],
+  commandReadyClients = [],
+} = {}) => {
+  if (allLiveClients.length === 0) return 'no_connected_clients';
+  if (matchingClients.length === 0) return 'extension_version_mismatch';
+  if (selectableClients.length === 0) return 'no_selectable_gemini_tab';
+  if (commandReadyClients.length === 0) return 'command_channel_not_ready';
+  return null;
+};
+
+const buildLightweightBrowserReady = async (args = {}) => {
+  const startedAt = Date.now();
+  cleanupStaleClients();
+  let selfHeal = {
+    attempted: false,
+    reason: args.selfHeal === true ? 'not-run' : 'disabled',
+  };
+  let launchResult = null;
+  let waitedMs = 0;
+
+  if (args.selfHeal === true) {
+    try {
+      const ready = await ensureBrowserExtensionReady(
+        {
+          clientId: args.clientId || null,
+        },
+        {
+          allowLaunchChrome: args.wakeBrowser !== false,
+          allowReload: args.allowReload !== false,
+          config: {
+            initialConnectTimeoutMs: normalizeWaitMs(args.initialWaitMs, 1000),
+            reloadTimeoutMs: normalizeReloadWaitMs(args.reloadWaitMs, 30_000),
+          },
+        },
+      );
+      selfHeal = {
+        attempted: true,
+        ok: true,
+        reloadAttempts: ready.reloadAttempts || 0,
+        launchedChrome: ready.launchedChrome === true,
+        timings: ready.timings || null,
+        client: summarizeClient(ready.client),
+        info: ready.info || null,
+      };
+    } catch (err) {
+      selfHeal = {
+        attempted: true,
+        ok: false,
+        error: err.message,
+        code: err.code || null,
+        data: err.data || null,
+      };
+    }
+  }
+
+  let allLiveClients = getLiveClients();
+  let selectableClients = getSelectableGeminiClients();
+  if (
+    selectableClients.length === 0 &&
+    args.wakeBrowser === true &&
+    CHROME_GUARD_CONFIG.launchIfClosed
+  ) {
+    launchResult = await launchChromeForGemini({
+      profileDirectory: CHROME_GUARD_CONFIG.profileDirectory,
+    });
+    const waitStartedAt = Date.now();
+    await waitForLiveClients(
+      normalizeWaitMs(args.waitMs, BROWSER_STATUS_WAKE_WAIT_MS),
+      CHROME_GUARD_CONFIG.pollIntervalMs || 500,
+    );
+    waitedMs = Math.max(0, Date.now() - waitStartedAt);
+    allLiveClients = getLiveClients();
+    selectableClients = getSelectableGeminiClients();
+  }
+
+  const matchingClients = allLiveClients.filter(clientMatchesExpectedBrowserExtension);
+  const commandReadyClients = matchingClients.filter(commandChannelReadyForClient);
+  const mode =
+    (selfHeal.reloadAttempts || 0) > 0
+      ? 'post-update'
+      : launchResult?.attempted || waitedMs > 0 || (selfHeal.timings?.initialWaitMs || 0) > 0
+        ? 'cold'
+        : 'hot';
+  const ready = selectableClients.length > 0 && commandReadyClients.length > 0;
+  const blockingIssue = ready
+    ? null
+    : browserReadyBlockingIssue({
+        allLiveClients,
+        selectableClients,
+        matchingClients,
+        commandReadyClients,
+      });
+  const summarizedClients = selectableClients.map(summarizeClient);
+  const summarizedMatchingClients = matchingClients.map(summarizeClient);
+  return {
+    ok: ready,
+    ready,
+    blockingIssue,
+    mode,
+    generatedAt: new Date().toISOString(),
+    expectedChromeExtension: EXPECTED_CHROME_EXTENSION_INFO,
+    sessionId: PROCESS_SESSION_ID,
+    connectedClientCount: allLiveClients.length,
+    selectableTabCount: selectableClients.length,
+    matchingClientCount: matchingClients.length,
+    commandReadyClientCount: commandReadyClients.length,
+    timings: {
+      totalMs: Math.max(0, Date.now() - startedAt),
+      bridgeReadyMs: 0,
+      extensionInfoMs: selfHeal.timings?.extensionInfoMs ?? 0,
+      reloadMs: selfHeal.timings?.reloadMs ?? 0,
+      firstHeartbeatMs: waitedMs || selfHeal.timings?.initialWaitMs || 0,
+      firstSnapshotMs: null,
+      commandChannelReadyMs: commandReadyClients.length > 0 ? 0 : null,
+      guard: selfHeal.timings || null,
+    },
+    clients: summarizedClients,
+    diagnosticClients: tabSelectionDiagnostics(allLiveClients, selectableClients),
+    extensionReadiness: buildExtensionReadiness({
+      connectedClients: allLiveClients.map(summarizeClient),
+      matchingClients: summarizedMatchingClients,
+      selfHeal,
+    }),
+    selfHeal,
+    browserWake: launchResult
+      ? {
+          ...launchResult,
+          waitedMs,
+          connectedAfterWake: allLiveClients.length,
+        }
+      : {
+          attempted: false,
+          reason: selectableClients.length > 0 ? 'already-connected' : 'wake-disabled',
+        },
+  };
+};
+
 const normalizeLimit = (value, fallback = 10, max = 100) => {
   const parsed = Number(value || fallback);
   const safeValue = Number.isFinite(parsed) ? parsed : fallback;
@@ -2688,6 +3011,37 @@ const clientMatchesExpectedBrowserExtension = (client) =>
   (!EXPECTED_CHROME_EXTENSION_INFO.buildStamp ||
     String(clientBuildStamp(client) || '') === EXPECTED_CHROME_EXTENSION_INFO.buildStamp);
 
+const clientHasConcreteTabIdentity = (client) =>
+  client?.tabId !== undefined && client?.tabId !== null;
+
+const clientIsSelectableGeminiTab = (client) =>
+  isLiveClient(client) &&
+  clientHasConcreteTabIdentity(client) &&
+  clientMatchesExpectedBrowserExtension(client);
+
+const getSelectableGeminiClients = () => {
+  const liveClients = getLiveClients();
+  const healthyTabs = liveClients.filter(clientIsSelectableGeminiTab);
+  if (healthyTabs.length > 0) return healthyTabs;
+  const matchingClients = liveClients.filter(clientMatchesExpectedBrowserExtension);
+  return matchingClients.length > 0 ? matchingClients : liveClients;
+};
+
+const tabSelectionDiagnostics = (liveClients, selectableClients) => {
+  const selectableIds = new Set(selectableClients.map((client) => client.clientId));
+  return liveClients
+    .filter((client) => !selectableIds.has(client.clientId))
+    .map((client) => ({
+      ...summarizeClient(client),
+      demotedFromTabSelection: true,
+      demotionReason: !clientHasConcreteTabIdentity(client)
+        ? 'missing-tab-id'
+        : !clientMatchesExpectedBrowserExtension(client)
+          ? 'version-or-build-mismatch'
+          : 'not-selected',
+    }));
+};
+
 const requireRecentChatsClient = (selector = {}) => {
   const normalized = normalizeClientSelector(selector);
   if (normalized.clientId || normalized.tabId !== null || normalized.claimId) {
@@ -2696,7 +3050,7 @@ const requireRecentChatsClient = (selector = {}) => {
 
   cleanupStaleClients();
   cleanupExpiredTabClaims();
-  const liveClients = getLiveClients();
+  const liveClients = getSelectableGeminiClients();
   if (liveClients.length === 0) {
     throw new Error('Nenhuma aba do Gemini conectada à extensão.');
   }
@@ -2925,6 +3279,179 @@ const summarizeVaultScan = (scan) =>
         truncated: scan.truncated,
       }
     : null;
+
+const SYNC_STATE_DIR = '.gemini-md-export';
+const SYNC_STATE_FILENAME = 'sync-state.json';
+const DEFAULT_SYNC_BOUNDARY_KNOWN_SEQUENCE = Math.max(
+  3,
+  Math.min(100, Number(process.env.GEMINI_MCP_SYNC_BOUNDARY_KNOWN_SEQUENCE || 25)),
+);
+
+const resolveVaultSyncStateFile = (vaultDir, syncStateFile = null) => {
+  if (syncStateFile) return resolveOutputDir(syncStateFile);
+  const rootDir = resolveOutputDir(vaultDir);
+  return resolve(rootDir, SYNC_STATE_DIR, SYNC_STATE_FILENAME);
+};
+
+const readVaultSyncState = (vaultDir, syncStateFile = null) => {
+  const filePath = resolveVaultSyncStateFile(vaultDir, syncStateFile);
+  try {
+    if (!existsSync(filePath)) {
+      return {
+        filePath,
+        exists: false,
+        state: null,
+      };
+    }
+    const state = readJsonFile(filePath);
+    return {
+      filePath,
+      exists: true,
+      state,
+    };
+  } catch (err) {
+    return {
+      filePath,
+      exists: false,
+      state: null,
+      error: err.message,
+    };
+  }
+};
+
+const writeVaultSyncState = (vaultDir, state, syncStateFile = null) => {
+  const filePath = resolveVaultSyncStateFile(vaultDir, syncStateFile);
+  mkdirSync(dirname(filePath), { recursive: true });
+  writeFileSync(filePath, `${JSON.stringify(state, null, 2)}\n`, 'utf-8');
+  return filePath;
+};
+
+const syncBoundaryChatIds = (state = {}) => {
+  const ids = new Set();
+  const add = (value) => {
+    const chatId = chatIdFromText(value);
+    if (chatId) ids.add(chatId);
+  };
+  add(state?.topChatId);
+  for (const chatId of Array.isArray(state?.boundaryChatIds) ? state.boundaryChatIds : []) add(chatId);
+  return ids;
+};
+
+const findSyncBoundary = (conversations = [], { vaultScan, syncState, knownSequenceCount } = {}) => {
+  const stateBoundaryIds = syncBoundaryChatIds(syncState);
+  const knownTarget = Math.max(1, Number(knownSequenceCount || DEFAULT_SYNC_BOUNDARY_KNOWN_SEQUENCE));
+  let knownRunStart = null;
+  let knownRunLength = 0;
+
+  for (let index = 0; index < conversations.length; index += 1) {
+    const chatId = normalizeConversationChatId(conversations[index]).toLowerCase();
+    if (!chatId) {
+      knownRunStart = null;
+      knownRunLength = 0;
+      continue;
+    }
+    if (stateBoundaryIds.has(chatId)) {
+      return {
+        found: true,
+        type: 'sync-state-boundary',
+        chatId,
+        index,
+        knownSequenceLength: knownRunLength,
+      };
+    }
+    if (vaultScan?.chatIds?.has(chatId)) {
+      if (knownRunStart === null) knownRunStart = index;
+      knownRunLength += 1;
+      if (knownRunLength >= knownTarget) {
+        return {
+          found: true,
+          type: 'known-vault-sequence',
+          chatId,
+          index: knownRunStart,
+          knownSequenceLength: knownRunLength,
+        };
+      }
+    } else {
+      knownRunStart = null;
+      knownRunLength = 0;
+    }
+  }
+
+  return {
+    found: false,
+    type: 'not-found',
+    chatId: null,
+    index: null,
+    knownSequenceLength: knownRunLength,
+  };
+};
+
+const loadRecentChatsUntilSyncBoundaryForClient = async (client, args = {}, { vaultScan, syncState } = {}) => {
+  let targetCount = Math.max(10, Math.min(200, Number(args.batchSize || 50)));
+  const maxRounds = Math.max(1, Math.min(500, Number(args.maxLoadMoreRounds || 200)));
+  const knownSequenceCount = Math.max(
+    1,
+    Math.min(100, Number(args.knownBoundaryCount || DEFAULT_SYNC_BOUNDARY_KNOWN_SEQUENCE)),
+  );
+  const loadTrace = [];
+  let boundary = { found: false, type: 'not-found' };
+  let reachedEnd = recentChatsReachedEndForClient(client);
+  let timedOut = false;
+  let roundsCompleted = 0;
+  let previousCount = recentConversationsForClient(client).length;
+
+  for (let round = 0; round < maxRounds; round += 1) {
+    if (args.shouldStop?.()) break;
+    const beforeCount = recentConversationsForClient(client).length;
+    const pageLimit = Math.min(100, targetCount);
+    const offset = Math.max(0, targetCount - pageLimit);
+    const startedAt = Date.now();
+    const page = await listRecentChatsForClient(client, {
+      ...args,
+      limit: pageLimit,
+      offset,
+      refresh: round === 0 ? args.refresh : false,
+    });
+    const conversations = recentConversationsForClient(client);
+    boundary = findSyncBoundary(conversations, {
+      vaultScan,
+      syncState,
+      knownSequenceCount,
+    });
+    reachedEnd = page.pagination?.reachedEnd === true || recentChatsReachedEndForClient(client);
+    timedOut = timedOut || page.loadMoreTimedOut === true || page.refreshTimedOut === true;
+    roundsCompleted += 1;
+    const afterCount = conversations.length;
+    const delta = Math.max(0, afterCount - beforeCount);
+    loadTrace.push({
+      round: round + 1,
+      beforeCount,
+      targetCount,
+      afterCount,
+      delta,
+      reachedEnd,
+      timedOut: page.loadMoreTimedOut === true || page.refreshTimedOut === true,
+      boundary,
+      elapsedMs: Date.now() - startedAt,
+    });
+
+    if (boundary.found || reachedEnd || timedOut) break;
+    if (afterCount <= previousCount && page.loadMoreLoadedAny !== true) break;
+    previousCount = afterCount;
+    targetCount = Math.min(MAX_RECENT_CHATS_LOAD_TARGET, targetCount + Math.max(10, Number(args.batchSize || 50)));
+    if (targetCount >= MAX_RECENT_CHATS_LOAD_TARGET && afterCount >= MAX_RECENT_CHATS_LOAD_TARGET) break;
+  }
+
+  return {
+    attempted: roundsCompleted > 0,
+    roundsCompleted,
+    reachedEnd,
+    timedOut,
+    loadTrace,
+    boundary,
+    conversations: recentConversationsForClient(client),
+  };
+};
 
 const normalizeReportPath = (filePath) => {
   if (!filePath) return null;
@@ -4352,6 +4879,10 @@ const summarizeExportJob = (job) => ({
   failureCount: job.failureCount,
   skippedCount: job.skippedCount || 0,
   exportMissingOnly: job.exportMissingOnly === true,
+  syncMode: job.syncMode === true,
+  syncStateFile: job.syncStateFile || null,
+  syncBoundary: job.syncBoundary || null,
+  syncStateUpdate: job.syncStateUpdate || null,
   existingScanDir: job.existingScanDir || null,
   vaultScan: job.vaultScan || null,
   webConversationCount: job.webConversationCount ?? null,
@@ -4411,7 +4942,9 @@ const findRunningBrowserExportJob = (clientId) =>
 const recentChatsExportScope = (job) => {
   const fullHistoryRequested = job.exportAll === true;
   const fullHistoryVerified =
-    fullHistoryRequested && job.reachedEnd === true && job.truncated !== true;
+    fullHistoryRequested &&
+    ((job.syncMode === true && job.syncBoundary?.found === true) ||
+      (job.reachedEnd === true && job.truncated !== true));
   return {
     scope: fullHistoryRequested ? 'all-history' : 'partial',
     fullHistoryRequested,
@@ -4471,6 +5004,7 @@ const downloadedThisRunCount = (job) =>
 
 const exportJobWorkflow = (job) => {
   if (job.type === 'direct-chats-export') return 'direct-reexport';
+  if (job.syncMode) return 'vault-incremental-sync';
   if (job.exportMissingOnly) return 'vault-reconciliation';
   return job.exportAll ? 'full-history-export' : 'partial-history-export';
 };
@@ -4497,6 +5031,12 @@ const exportJobProgressMessage = (job) => {
     return `Exportação concluída com ${errorCount} erro${errorCount === 1 ? '' : 's'}.`;
   }
   if (job.status === 'completed') {
+    if (job.syncMode) {
+      const downloaded = downloadedThisRunCount(job);
+      return downloaded > 0
+        ? `Vault atualizado. ${downloaded} conversa${downloaded === 1 ? '' : 's'} nova${downloaded === 1 ? '' : 's'} salva${downloaded === 1 ? '' : 's'}.`
+        : 'Vault já estava atualizado. Nenhuma conversa nova encontrada.';
+    }
     if (job.exportMissingOnly && fullHistoryVerified && (job.missingCount || 0) === 0) {
       return 'Histórico inteiro verificado. Nada faltava no vault.';
     }
@@ -4513,9 +5053,11 @@ const exportJobProgressMessage = (job) => {
     return 'Retomando do relatório anterior e listando histórico do Gemini...';
   }
   if (job.phase === 'loading-history') {
+    if (job.syncMode) return 'Verificando histórico desde a última sincronização...';
     return 'Listando histórico do Gemini...';
   }
   if (job.phase === 'scanning-vault') {
+    if (job.syncMode) return 'Lendo índice local do vault antes de sincronizar...';
     return 'Cruzando histórico do Gemini com o vault...';
   }
   if (job.phase === 'exporting' && job.current?.skippedExisting) {
@@ -4525,7 +5067,9 @@ const exportJobProgressMessage = (job) => {
   if (job.phase === 'exporting') {
     const title = job.current?.title || job.current?.chatId || '';
     const prefix = job.exportMissingOnly
-      ? 'Baixando somente o que falta no vault'
+      ? job.syncMode
+        ? 'Baixando conversas novas'
+        : 'Baixando somente o que falta no vault'
       : 'Exportando conversas do Gemini';
     const count =
       job.requested > 0
@@ -4614,6 +5158,14 @@ const exportJobDecisionSummary = (job) => {
       mediaWarnings,
       failed: job.failureCount || 0,
     },
+    sync: job.syncMode
+      ? {
+          stateFile: job.syncStateFile || null,
+          boundary: job.syncBoundary || null,
+          stateUpdated: job.syncStateUpdate?.updated === true,
+          stateUpdate: job.syncStateUpdate || null,
+        }
+      : null,
     reportFile: job.reportFile || null,
     resumeCommand: exportJobResumeCommand(job),
     nextAction: exportJobNextAction(job),
@@ -4654,6 +5206,11 @@ const buildRecentChatsExportReport = (job, client, successes, failures) => ({
   skippedCount: job.skippedCount || 0,
   skipExisting: job.skipExisting === true,
   exportMissingOnly: job.exportMissingOnly === true,
+  syncMode: job.syncMode === true,
+  syncStateFile: job.syncStateFile || null,
+  syncState: job.syncState || null,
+  syncBoundary: job.syncBoundary || null,
+  syncStateUpdate: job.syncStateUpdate || null,
   existingScanDir: job.existingScanDir || null,
   vaultScan: job.vaultScan || null,
   webConversationCount: job.webConversationCount ?? null,
@@ -4882,6 +5439,69 @@ const broadcastDirectChatsJobProgress = (job, client, patch = {}) => {
   });
 };
 
+const maybeUpdateSyncState = (job, client, failures = []) => {
+  if (!job.syncMode || !job.existingScanDir || !job.syncStateFile) return null;
+  const completeEnough =
+    job.status === 'completed' &&
+    failures.length === 0 &&
+    (job.syncBoundary?.found === true || (job.reachedEnd === true && job.truncated !== true));
+  const conversations = recentConversationsForClient(client);
+  const boundaryChatIds = conversations
+    .map((conversation) => normalizeConversationChatId(conversation).toLowerCase())
+    .filter(Boolean)
+    .slice(0, 50);
+  const topChatId = boundaryChatIds[0] || job.syncState?.topChatId || null;
+
+  if (!completeEnough || !topChatId) {
+    job.syncStateUpdate = {
+      updated: false,
+      reason: !topChatId
+        ? 'no-top-chat-id'
+        : failures.length > 0
+          ? 'failures-present'
+          : job.status !== 'completed'
+            ? `job-${job.status}`
+            : 'boundary-not-proven',
+      stateFile: job.syncStateFile,
+      boundary: job.syncBoundary || null,
+    };
+    return job.syncStateUpdate;
+  }
+
+  const now = new Date().toISOString();
+  const nextState = {
+    version: 1,
+    exporterVersion: SERVER_VERSION,
+    protocolVersion: EXTENSION_PROTOCOL_VERSION,
+    vaultDir: job.existingScanDir,
+    outputDir: job.outputDir,
+    lastSuccessfulSyncAt: now,
+    lastFullSyncAt:
+      job.reachedEnd === true && job.truncated !== true
+        ? now
+        : job.syncState?.lastFullSyncAt || null,
+    topChatId,
+    boundaryChatIds,
+    lastReportFile: job.reportFile || null,
+    lastJobId: job.jobId,
+    lastWebConversationCount: job.webConversationCount ?? null,
+    lastDownloadedCount: downloadedThisRunCount(job),
+    lastExistingVaultCount: job.existingVaultCount ?? null,
+    lastBoundary: job.syncBoundary || null,
+    updatedAt: now,
+  };
+  const stateFile = writeVaultSyncState(job.existingScanDir, nextState, job.syncStateFile);
+  job.syncState = nextState;
+  job.syncStateUpdate = {
+    updated: true,
+    stateFile,
+    topChatId,
+    boundaryChatIds: boundaryChatIds.slice(0, 10),
+    reason: job.syncBoundary?.found ? 'known-boundary-found' : 'full-history-verified',
+  };
+  return job.syncStateUpdate;
+};
+
 const runRecentChatsExportJob = async (job, client, args = {}) => {
   const successes = job.resume ? [...job.resume.previousSuccesses] : [];
   const failures = [];
@@ -4891,7 +5511,19 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
   job.skippedCount = Array.isArray(job.skippedExisting) ? job.skippedExisting.length : 0;
   job.resumedCompletedCount = resumedCompletedCount;
   job.completed = resumedCompletedCount;
+  let preloadedVaultScan = null;
   try {
+    if (job.syncMode) {
+      job.phase = 'scanning-vault';
+      touchExportJob(job);
+      persistRecentChatsExportReport(job, client, successes, failures);
+      broadcastRecentChatsJobProgress(job, client);
+      preloadedVaultScan = await measureJobTiming(job, 'scanVaultMs', async () =>
+        scanDownloadedGeminiExportsInVault(job.existingScanDir),
+      );
+      job.vaultScan = summarizeVaultScan(preloadedVaultScan);
+    }
+
     job.phase = 'loading-history';
     touchExportJob(job);
     persistRecentChatsExportReport(job, client, successes, failures);
@@ -4918,13 +5550,26 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
             recordJobTimingFrom(job, 'refreshSidebarMs', refreshStartedAt);
           }
         }
-        const loadMore = await loadAllRecentChatsForClient(client, {
-          ...args,
-          shouldStop: () => job.cancelRequested === true,
-        });
+        const loadMore = job.syncMode
+          ? await loadRecentChatsUntilSyncBoundaryForClient(
+              client,
+              {
+                ...args,
+                shouldStop: () => job.cancelRequested === true,
+              },
+              {
+                vaultScan: preloadedVaultScan,
+                syncState: job.syncState,
+              },
+            )
+          : await loadAllRecentChatsForClient(client, {
+              ...args,
+              shouldStop: () => job.cancelRequested === true,
+            });
         job.loadMoreRoundsCompleted = loadMore.roundsCompleted;
         job.loadMoreTimedOut = loadMore.timedOut === true;
         job.loadMoreTrace = Array.isArray(loadMore.loadTrace) ? loadMore.loadTrace : [];
+        if (job.syncMode) job.syncBoundary = loadMore.boundary || null;
         if (job.loadMoreTimedOut) recordJobCounter(job, 'browserTimeouts');
       } else {
         const targetCount = Math.min(MAX_RECENT_CHATS_LOAD_TARGET, job.startIndex - 1 + job.maxChats);
@@ -4943,12 +5588,21 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
       return;
     }
 
-    const conversations = recentConversationsForClient(client);
-    job.loadedCount = conversations.length;
+    const allConversations = recentConversationsForClient(client);
+    const syncBoundaryIndex =
+      job.syncMode && job.syncBoundary?.found === true
+        ? Math.max(0, Number(job.syncBoundary.index || 0))
+        : null;
+    const conversations =
+      syncBoundaryIndex === null ? allConversations : allConversations.slice(0, syncBoundaryIndex);
+    job.loadedCount = allConversations.length;
     job.reachedEnd = recentChatsReachedEndForClient(client);
     job.truncated = job.exportAll
       ? !job.reachedEnd
-      : !job.reachedEnd && conversations.length >= MAX_RECENT_CHATS_LOAD_TARGET;
+      : !job.reachedEnd && allConversations.length >= MAX_RECENT_CHATS_LOAD_TARGET;
+    if (job.syncMode && job.syncBoundary?.found === true) {
+      job.truncated = false;
+    }
     if (job.exportAll && job.truncated) {
       job.loadWarning =
         'Nao consegui confirmar que cheguei ao fim do historico do Gemini. Exportei as conversas carregadas, mas o lote pode estar incompleto.';
@@ -4982,9 +5636,11 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
       persistRecentChatsExportReport(job, client, successes, failures);
       broadcastRecentChatsJobProgress(job, client);
 
-      const vaultScan = await measureJobTiming(job, 'scanVaultMs', async () =>
-        scanDownloadedGeminiExportsInVault(job.existingScanDir),
-      );
+      const vaultScan =
+        preloadedVaultScan ||
+        (await measureJobTiming(job, 'scanVaultMs', async () =>
+          scanDownloadedGeminiExportsInVault(job.existingScanDir),
+        ));
       job.vaultScan = summarizeVaultScan(vaultScan);
 
       const missing = [];
@@ -5197,6 +5853,16 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
     job.current = null;
     job.finishedAt = new Date().toISOString();
     touchExportJob(job);
+    try {
+      maybeUpdateSyncState(job, client, failures);
+    } catch (err) {
+      job.syncStateUpdate = {
+        updated: false,
+        reason: 'write-failed',
+        error: err.message,
+        stateFile: job.syncStateFile || null,
+      };
+    }
     const finalReportStartedAt = Date.now();
     try {
       persistRecentChatsExportReport(job, client, successes, failures);
@@ -5231,11 +5897,14 @@ const startRecentChatsExportJob = (client, args = {}) => {
   const resume = resumeReportFile ? loadRecentChatsResumeCheckpoint(resumeReportFile) : null;
   const outputDir = resolveOutputDir(args.outputDir || resume?.previousOutputDir);
   const exportMissingOnly = args.exportMissingOnly === true;
+  const syncMode = args.syncMode === true;
   const existingScanDir =
     args.existingScanDir || args.vaultDir || (exportMissingOnly ? resume?.previousExistingScanDir : null);
   if (exportMissingOnly && !existingScanDir) {
     throw new Error('Informe vaultDir/existingScanDir ou resumeReportFile com existingScanDir para cruzar o histórico do Gemini com o vault.');
   }
+  const syncState =
+    syncMode && existingScanDir ? readVaultSyncState(existingScanDir, args.syncStateFile) : null;
   const hasExplicitMaxChats = args.maxChats !== undefined || args.limit !== undefined;
   const skipExisting =
     typeof args.skipExisting === 'boolean' ? args.skipExisting : !hasExplicitMaxChats;
@@ -5261,6 +5930,12 @@ const startRecentChatsExportJob = (client, args = {}) => {
     failureCount: 0,
     skippedCount: 0,
     exportMissingOnly,
+    syncMode,
+    syncStateFile: syncState?.filePath || null,
+    syncState: syncState?.state || null,
+    syncStateError: syncState?.error || null,
+    syncBoundary: null,
+    syncStateUpdate: null,
     existingScanDir: existingScanDir ? resolveOutputDir(existingScanDir) : null,
     vaultScan: null,
     webConversationCount: null,
@@ -5741,6 +6416,7 @@ const rawTools = [
             ok: true,
             reloadAttempts: ready.reloadAttempts || 0,
             launchedChrome: ready.launchedChrome === true,
+            timings: ready.timings || null,
             client: summarizeClient(ready.client),
             info: ready.info || null,
           };
@@ -5783,6 +6459,12 @@ const rawTools = [
         matchingClients: summarizedMatchingClients,
         selfHeal,
       });
+      const handshakeMode =
+        (selfHeal.reloadAttempts || 0) > 0
+          ? 'post-update'
+          : launchResult?.attempted || waitedMs > 0 || (selfHeal.timings?.initialWaitMs || 0) > 0
+            ? 'cold'
+            : 'hot';
       return toolTextResult({
         ready: matchingClients.length > 0,
         blockingIssue:
@@ -5797,6 +6479,15 @@ const rawTools = [
         connectedClients: summarizedClients,
         tabClaims: summarizeTabClaims(),
         extensionReadiness,
+        handshake: {
+          mode: handshakeMode,
+          timings: {
+            extensionInfoMs: selfHeal.timings?.extensionInfoMs ?? null,
+            reloadMs: selfHeal.timings?.reloadMs ?? null,
+            firstHeartbeatMs: waitedMs || selfHeal.timings?.initialWaitMs || null,
+            totalGuardMs: selfHeal.timings?.totalMs ?? null,
+          },
+        },
         manualReloadRequired: extensionReadiness.reload.manualReloadRequired,
         bridgeHealth: summarizedClients.map((client) => ({
           clientId: client.clientId,
@@ -5823,6 +6514,35 @@ const rawTools = [
     },
   },
   {
+    name: 'gemini_browser_ready',
+    description:
+      'Checagem leve de prontidão do bridge/extensão/aba, com tempos de handshake frio/quente, sem snapshot grande do Gemini.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        wakeBrowser: {
+          type: 'boolean',
+          description: 'Quando true, pode abrir uma aba Gemini se nenhuma estiver conectada.',
+        },
+        waitMs: {
+          type: 'number',
+          description: 'Tempo máximo para aguardar heartbeat após acordar o navegador.',
+        },
+        selfHeal: {
+          type: 'boolean',
+          description:
+            'Quando true, valida versão/protocolo/build e permite self-heal. Default: false para responder rápido.',
+        },
+        allowReload: {
+          type: 'boolean',
+          description: 'Permite reload automático quando selfHeal=true.',
+        },
+      },
+      additionalProperties: false,
+    },
+    call: async (args = {}) => toolTextResult(await buildLightweightBrowserReady(args)),
+  },
+  {
     name: 'gemini_list_tabs',
     description:
       'Lista abas Gemini conectadas, claims ativas e IDs para escolher uma aba antes de listar/exportar. Se nenhuma aba existir, abre uma aba Gemini por padrão.',
@@ -5843,24 +6563,30 @@ const rawTools = [
     call: async (args = {}) => {
       cleanupStaleClients();
       let launchResult = null;
-      let liveClients = getLiveClients();
+      let allLiveClients = getLiveClients();
+      let liveClients = getSelectableGeminiClients();
       if (liveClients.length === 0 && args.openIfMissing !== false) {
         launchResult = await launchChromeForGemini({
           profileDirectory: CHROME_GUARD_CONFIG.profileDirectory,
         });
-        liveClients = await waitForLiveClients(
+        await waitForLiveClients(
           normalizeWaitMs(args.waitMs, BROWSER_STATUS_WAKE_WAIT_MS),
           CHROME_GUARD_CONFIG.pollIntervalMs || 500,
         );
+        allLiveClients = getLiveClients();
+        liveClients = getSelectableGeminiClients();
       }
+      const diagnosticClients = tabSelectionDiagnostics(allLiveClients, liveClients);
       return toolTextResult({
         ok: true,
         sessionId: PROCESS_SESSION_ID,
         connectedTabCount: liveClients.length,
+        connectedClientCount: allLiveClients.length,
         tabs: liveClients.map((client, index) => ({
           index: index + 1,
           ...summarizeClient(client),
         })),
+        diagnosticClients,
         claims: summarizeTabClaims(),
         browserWake: launchResult
           ? {
@@ -6021,6 +6747,51 @@ const rawTools = [
       const result = await buildEnvironmentDiagnostics();
       return toolTextResult(result, { isError: !result.ok });
     },
+  },
+  {
+    name: 'gemini_flight_recorder',
+    description:
+      'Mostra os eventos operacionais recentes do flight recorder local, sem conteúdo de chats.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        limit: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 1000,
+          description: 'Quantidade de eventos recentes. Default: 100.',
+        },
+      },
+      additionalProperties: false,
+    },
+    call: async (args = {}) =>
+      toolTextResult({
+        ok: true,
+        file: FLIGHT_RECORDER_FILE,
+        events: readFlightRecorderTail(args.limit || 100),
+      }),
+  },
+  {
+    name: 'gemini_collect_support_bundle',
+    description:
+      'Gera um bundle JSON seguro de suporte com diagnóstico, processos, versões, jobs recentes e flight recorder sanitizado.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        outputDir: {
+          type: 'string',
+          description: 'Diretório onde salvar o bundle. Default: ~/.gemini-md-export.',
+        },
+        flightLimit: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 1000,
+          description: 'Quantidade de eventos do flight recorder a incluir. Default: 200.',
+        },
+      },
+      additionalProperties: false,
+    },
+    call: async (args = {}) => toolTextResult(await buildSupportBundle(args)),
   },
   {
     name: 'gemini_get_export_dir',
@@ -6413,6 +7184,76 @@ const rawTools = [
     },
   },
   {
+    name: 'gemini_sync_vault',
+    description:
+      'Sincroniza incrementalmente um vault já conectado ao Gemini Web: identifica conversas novas desde a última fronteira conhecida e baixa apenas o que falta.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ...clientSelectorProperties(),
+        vaultDir: {
+          type: 'string',
+          description: 'Pasta do vault a sincronizar. Obrigatório.',
+        },
+        outputDir: {
+          type: 'string',
+          description: 'Diretório onde salvar novas conversas. Default: vaultDir.',
+        },
+        syncStateFile: {
+          type: 'string',
+          description:
+            'Arquivo de estado incremental. Default: <vaultDir>/.gemini-md-export/sync-state.json.',
+        },
+        refresh: {
+          type: 'boolean',
+          description: 'Se true, força atualizar o sidebar antes de verificar novas conversas.',
+        },
+        batchSize: {
+          type: 'integer',
+          minimum: 10,
+          maximum: 200,
+          description: 'Quantidade alvo por rodada ao procurar a fronteira conhecida. Default: 50.',
+        },
+        knownBoundaryCount: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 100,
+          description:
+            'Quantidade consecutiva de chats já existentes no vault que prova a fronteira quando não há estado anterior. Default: 25.',
+        },
+        maxLoadMoreRounds: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 500,
+        },
+        resumeReportFile: {
+          type: 'string',
+          description: 'Relatório anterior de sync/export missing para retomar.',
+        },
+        reportFile: {
+          type: 'string',
+          description: 'Alias de resumeReportFile.',
+        },
+      },
+      required: ['vaultDir'],
+      additionalProperties: false,
+    },
+    call: async (args = {}) => {
+      const client = requireClient(args);
+      await ensureTabClaimForJob(client, args, 'GME Sync');
+      return toolTextResult(
+        startRecentChatsExportJob(client, {
+          ...args,
+          outputDir: args.outputDir || args.vaultDir,
+          existingScanDir: args.vaultDir,
+          exportMissingOnly: true,
+          syncMode: true,
+          skipExisting: true,
+        }),
+      );
+    },
+  },
+  {
     name: 'gemini_reexport_chats',
     description:
       'Inicia um job em background para reexportar uma lista explicita de chatIds do Gemini, salvando Markdown em disco e relatorio incremental sem bloquear o agente em dezenas de downloads.',
@@ -6472,13 +7313,13 @@ const rawTools = [
   {
     name: 'gemini_export_job_status',
     description:
-      'Consulta o andamento de um job de exportacao em lote iniciado por gemini_export_recent_chats, gemini_export_missing_chats ou gemini_reexport_chats.',
+      'Consulta o andamento de um job de exportacao/sync em lote iniciado por gemini_export_recent_chats, gemini_export_missing_chats, gemini_sync_vault ou gemini_reexport_chats.',
     inputSchema: {
       type: 'object',
       properties: {
         jobId: {
           type: 'string',
-          description: 'ID retornado por gemini_export_recent_chats, gemini_export_missing_chats ou gemini_reexport_chats.',
+          description: 'ID retornado por gemini_export_recent_chats, gemini_export_missing_chats, gemini_sync_vault ou gemini_reexport_chats.',
         },
       },
       required: ['jobId'],
@@ -6503,7 +7344,7 @@ const rawTools = [
       properties: {
         jobId: {
           type: 'string',
-          description: 'ID retornado por gemini_export_recent_chats, gemini_export_missing_chats ou gemini_reexport_chats.',
+          description: 'ID retornado por gemini_export_recent_chats, gemini_export_missing_chats, gemini_sync_vault ou gemini_reexport_chats.',
         },
       },
       required: ['jobId'],
@@ -6687,6 +7528,7 @@ const BROWSER_DEPENDENT_TOOL_NAMES = new Set([
   'gemini_download_notebook_chat',
   'gemini_export_recent_chats',
   'gemini_export_missing_chats',
+  'gemini_sync_vault',
   'gemini_reexport_chats',
   'gemini_export_notebook',
   'gemini_cache_status',
@@ -6700,6 +7542,8 @@ const LOCAL_PROXY_TOOL_NAMES = new Set([
   'gemini_mcp_diagnose_processes',
   'gemini_mcp_cleanup_stale_processes',
   'gemini_diagnose_environment',
+  'gemini_flight_recorder',
+  'gemini_collect_support_bundle',
 ]);
 
 const withChromeExtensionGuard = (tool) => ({
@@ -6720,14 +7564,27 @@ const toolByName = new Map(tools.map((tool) => [tool.name, tool]));
 
 const executeToolCall = async (name, args = {}) => {
   const tool = toolByName.get(name);
+  const startedAt = Date.now();
 
   if (!tool) {
+    recordFlightEvent('tool_call_unknown', { name });
     return toolTextResult({ error: `Tool desconhecida: ${name}` }, { isError: true });
   }
 
   try {
-    return await tool.call(args);
+    const result = await tool.call(args);
+    recordFlightEvent('tool_call_completed', {
+      name,
+      elapsedMs: Date.now() - startedAt,
+      isError: result?.isError === true,
+    });
+    return result;
   } catch (err) {
+    recordFlightEvent('tool_call_failed', {
+      name,
+      elapsedMs: Date.now() - startedAt,
+      error: err,
+    });
     return toolTextResult(
       {
         error: err.message,
@@ -6925,22 +7782,27 @@ const bridgeServer = createServer(async (req, res) => {
 
   if (req.method === 'GET' && url.pathname === '/agent/tabs') {
     try {
-      let liveClients = getLiveClients();
+      let allLiveClients = getLiveClients();
+      let liveClients = getSelectableGeminiClients();
       let launchResult = null;
       if (liveClients.length === 0 && parseOptionalBoolean(url.searchParams.get('openIfMissing')) !== false) {
         launchResult = await launchChromeForGemini({
           profileDirectory: CHROME_GUARD_CONFIG.profileDirectory,
         });
-        liveClients = await waitForLiveClients(
+        await waitForLiveClients(
           normalizeWaitMs(url.searchParams.get('waitMs'), BROWSER_STATUS_WAKE_WAIT_MS),
           CHROME_GUARD_CONFIG.pollIntervalMs || 500,
         );
+        allLiveClients = getLiveClients();
+        liveClients = getSelectableGeminiClients();
       }
       sendAgentJson(res, 200, {
         ok: true,
         sessionId: PROCESS_SESSION_ID,
         connectedTabCount: liveClients.length,
+        connectedClientCount: allLiveClients.length,
         connectedClients: liveClients.map(summarizeClient),
+        diagnosticClients: tabSelectionDiagnostics(allLiveClients, liveClients),
         tabClaims: summarizeTabClaims(),
         browserWake: launchResult || { attempted: false },
       });
@@ -6997,6 +7859,42 @@ const bridgeServer = createServer(async (req, res) => {
 
   if (req.method === 'GET' && url.pathname === '/agent/diagnostics') {
     sendAgentJson(res, 200, await buildEnvironmentDiagnostics());
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/agent/flight-recorder') {
+    sendAgentJson(res, 200, {
+      ok: true,
+      file: FLIGHT_RECORDER_FILE,
+      events: readFlightRecorderTail(url.searchParams.get('limit') || 100),
+    });
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/agent/support-bundle') {
+    sendAgentJson(
+      res,
+      200,
+      await buildSupportBundle({
+        outputDir: url.searchParams.get('outputDir') || undefined,
+        flightLimit: url.searchParams.get('flightLimit') || undefined,
+      }),
+    );
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/agent/ready') {
+    sendAgentJson(
+      res,
+      200,
+      await buildLightweightBrowserReady({
+        clientId: url.searchParams.get('clientId') || undefined,
+        wakeBrowser: parseOptionalBoolean(url.searchParams.get('wakeBrowser')),
+        waitMs: url.searchParams.get('waitMs') || undefined,
+        selfHeal: parseOptionalBoolean(url.searchParams.get('selfHeal')),
+        allowReload: parseOptionalBoolean(url.searchParams.get('allowReload')),
+      }),
+    );
     return;
   }
 
@@ -7161,6 +8059,36 @@ const bridgeServer = createServer(async (req, res) => {
           maxNoGrowthRounds: url.searchParams.get('maxNoGrowthRounds') || undefined,
           loadMoreBrowserRounds: url.searchParams.get('loadMoreBrowserRounds') || undefined,
           loadMoreBrowserTimeoutMs: url.searchParams.get('loadMoreBrowserTimeoutMs') || undefined,
+          skipExisting: true,
+        }),
+      );
+    } catch (err) {
+      sendAgentJson(res, 503, { error: err.message });
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/agent/sync-vault') {
+    try {
+      const selector = clientSelectorFromSearchParams(url.searchParams);
+      const client = requireClient(selector);
+      await ensureTabClaimForJob(client, selector, 'GME Sync');
+      sendAgentJson(
+        res,
+        202,
+        startRecentChatsExportJob(client, {
+          ...selector,
+          vaultDir: url.searchParams.get('vaultDir'),
+          existingScanDir: url.searchParams.get('vaultDir'),
+          outputDir: url.searchParams.get('outputDir') || url.searchParams.get('vaultDir') || undefined,
+          syncStateFile: url.searchParams.get('syncStateFile') || undefined,
+          resumeReportFile: url.searchParams.get('resumeReportFile') || url.searchParams.get('reportFile') || undefined,
+          exportMissingOnly: true,
+          syncMode: true,
+          refresh: parseOptionalBoolean(url.searchParams.get('refresh')),
+          batchSize: url.searchParams.get('batchSize') || undefined,
+          knownBoundaryCount: url.searchParams.get('knownBoundaryCount') || undefined,
+          maxLoadMoreRounds: url.searchParams.get('maxLoadMoreRounds') || undefined,
           skipExisting: true,
         }),
       );
@@ -7641,6 +8569,13 @@ bridgeServer.listen(cli.port, cli.host, () => {
   bridgeListening = true;
   settleBridgeStartup('primary');
   log(`bridge HTTP escutando em http://${cli.host}:${cli.port}`);
+  recordFlightEvent('bridge_started', {
+    role: bridgeRole,
+    host: cli.host,
+    port: cli.port,
+    version: SERVER_VERSION,
+    protocolVersion: EXTENSION_PROTOCOL_VERSION,
+  });
 });
 
 const shutdown = (reason, exitCode = 0) => {

@@ -285,7 +285,14 @@ test('BeforeTool abre Gemini pelo launcher PowerShell quando nao ha cliente cone
   const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-hook-test-'));
   const server = createServer((_req, res) => {
     res.setHeader('content-type', 'application/json');
-    res.end(JSON.stringify({ connectedClients: [] }));
+    res.end(JSON.stringify({
+      ready: false,
+      connectedClientCount: 0,
+      selectableTabCount: 0,
+      matchingClientCount: 0,
+      commandReadyClientCount: 0,
+      blockingIssue: 'no_connected_clients',
+    }));
   });
   const port = await listen(server);
 
@@ -371,8 +378,15 @@ test('BeforeTool espera a aba Gemini conectar depois de abrir pelo hook', async 
   const server = createServer((_req, res) => {
     requests += 1;
     res.setHeader('content-type', 'application/json');
-    const connectedClients = requests >= 2 ? [{ clientId: 'tab-1' }] : [];
-    res.end(JSON.stringify({ connectedClients }));
+    const ready = requests >= 2;
+    res.end(JSON.stringify({
+      ready,
+      connectedClientCount: ready ? 1 : 0,
+      selectableTabCount: ready ? 1 : 0,
+      matchingClientCount: ready ? 1 : 0,
+      commandReadyClientCount: ready ? 1 : 0,
+      blockingIssue: ready ? null : 'no_connected_clients',
+    }));
   });
   const port = await listen(server);
 
@@ -431,8 +445,15 @@ test('BeforeTool nao abre segunda aba durante launch em progresso', async () => 
   const server = createServer((_req, res) => {
     requests += 1;
     res.setHeader('content-type', 'application/json');
-    const connectedClients = requests >= 2 ? [{ clientId: 'tab-1' }] : [];
-    res.end(JSON.stringify({ connectedClients }));
+    const ready = requests >= 2;
+    res.end(JSON.stringify({
+      ready,
+      connectedClientCount: ready ? 1 : 0,
+      selectableTabCount: ready ? 1 : 0,
+      matchingClientCount: ready ? 1 : 0,
+      commandReadyClientCount: ready ? 1 : 0,
+      blockingIssue: ready ? null : 'no_connected_clients',
+    }));
   });
   const port = await listen(server);
 
@@ -505,7 +526,14 @@ test('BeforeTool timeout de conexao sai antes do hard exit da CLI', async () => 
   const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-hook-test-'));
   const server = createServer((_req, res) => {
     res.setHeader('content-type', 'application/json');
-    res.end(JSON.stringify({ connectedClients: [] }));
+    res.end(JSON.stringify({
+      ready: false,
+      connectedClientCount: 0,
+      selectableTabCount: 0,
+      matchingClientCount: 0,
+      commandReadyClientCount: 0,
+      blockingIssue: 'no_connected_clients',
+    }));
   });
   const port = await listen(server);
 
@@ -547,9 +575,17 @@ test('BeforeTool timeout de conexao sai antes do hard exit da CLI', async () => 
 
 test('BeforeTool nao abre nova aba quando Gemini ja esta conectado', async () => {
   const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-hook-test-'));
-  const server = createServer((_req, res) => {
+  const paths = [];
+  const server = createServer((req, res) => {
+    paths.push(req.url);
     res.setHeader('content-type', 'application/json');
-    res.end(JSON.stringify({ connectedClients: [{ clientId: 'tab-1' }] }));
+    res.end(JSON.stringify({
+      ready: true,
+      connectedClientCount: 1,
+      selectableTabCount: 1,
+      matchingClientCount: 1,
+      commandReadyClientCount: 1,
+    }));
   });
   const port = await listen(server);
 
@@ -574,6 +610,94 @@ test('BeforeTool nao abre nova aba quando Gemini ja esta conectado', async () =>
     assert.equal(output.decision, undefined);
     assert.equal(output.systemMessage, undefined);
     assert.equal(existsSync(resolve(tmpRoot, 'hook-browser-launch.json')), false);
+    assert.match(paths[0] || '', /\/agent\/ready/);
+  } finally {
+    await closeServer(server);
+    rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test('BeforeTool nao abre aba duplicada quando ha client conectado mas nao pronto', async () => {
+  const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-hook-test-'));
+  const server = createServer((_req, res) => {
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({
+      ready: false,
+      connectedClientCount: 1,
+      selectableTabCount: 1,
+      matchingClientCount: 0,
+      commandReadyClientCount: 0,
+      blockingIssue: 'extension_version_mismatch',
+    }));
+  });
+  const port = await listen(server);
+
+  try {
+    const output = await runHookAsync(
+      'before-tool',
+      {
+        hook_event_name: 'BeforeTool',
+        tool_name: 'mcp_gemini-md-export_gemini_list_recent_chats',
+        tool_input: {},
+      },
+      {
+        GEMINI_MCP_HOOK_PLATFORM: 'win32',
+        GEMINI_MCP_HOOK_DRY_RUN: 'true',
+        GEMINI_MCP_HOOK_STATE_DIR: tmpRoot,
+        GEMINI_MCP_BRIDGE_PORT: String(port),
+        GEMINI_MCP_BROWSER_LAUNCH_COOLDOWN_MS: '0',
+      },
+    );
+    const lastRun = JSON.parse(readFileSync(resolve(tmpRoot, 'hook-last-run.json'), 'utf-8'));
+
+    assert.equal(output.suppressOutput, true);
+    assert.equal(output.systemMessage, undefined);
+    assert.equal(existsSync(resolve(tmpRoot, 'hook-browser-launch.json')), false);
+    assert.equal(lastRun.reason, 'connected-but-not-ready');
+    assert.equal(lastRun.bridgeStatus.blockingIssue, 'extension_version_mismatch');
+  } finally {
+    await closeServer(server);
+    rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test('BeforeTool cai para /agent/clients quando bridge antigo nao tem /agent/ready', async () => {
+  const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-hook-test-'));
+  const paths = [];
+  const server = createServer((req, res) => {
+    paths.push(req.url);
+    res.setHeader('content-type', 'application/json');
+    if (req.url?.startsWith('/agent/ready')) {
+      res.statusCode = 404;
+      res.end(JSON.stringify({ error: 'not found' }));
+      return;
+    }
+    res.end(JSON.stringify({ connectedClients: [{ clientId: 'tab-legacy' }] }));
+  });
+  const port = await listen(server);
+
+  try {
+    const output = await runHookAsync(
+      'before-tool',
+      {
+        hook_event_name: 'BeforeTool',
+        tool_name: 'mcp_gemini-md-export_gemini_list_recent_chats',
+        tool_input: {},
+      },
+      {
+        GEMINI_MCP_HOOK_PLATFORM: 'win32',
+        GEMINI_MCP_HOOK_DRY_RUN: 'true',
+        GEMINI_MCP_HOOK_STATE_DIR: tmpRoot,
+        GEMINI_MCP_BRIDGE_PORT: String(port),
+        GEMINI_MCP_BROWSER_LAUNCH_COOLDOWN_MS: '0',
+      },
+    );
+
+    assert.equal(output.suppressOutput, true);
+    assert.equal(output.systemMessage, undefined);
+    assert.equal(existsSync(resolve(tmpRoot, 'hook-browser-launch.json')), false);
+    assert.equal(paths.some((path) => path?.startsWith('/agent/ready')), true);
+    assert.equal(paths.some((path) => path?.startsWith('/agent/clients')), true);
   } finally {
     await closeServer(server);
     rmSync(tmpRoot, { recursive: true, force: true });
@@ -675,6 +799,7 @@ test('BeforeTool considera browser_status como tool que acorda o navegador', () 
   assert.match(hookSource, /open-gemini-restore-focus\.ps1/);
   assert.match(hookSource, /SetForegroundWindow/);
   assert.match(hookSource, /waitForConnectedBrowserClient/);
+  assert.match(hookSource, /agent\/ready/);
   assert.match(hookSource, /agent\/clients/);
   assert.doesNotMatch(hookSource, /cmd\.exe/);
   assert.doesNotMatch(hookSource, /wscript\.exe/);

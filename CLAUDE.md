@@ -343,18 +343,20 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   `GEMINI_MCP_CHROME_RELOAD_TIMEOUT_MS` e
   `GEMINI_MCP_CHROME_MAX_RELOAD_ATTEMPTS`. O hook `BeforeTool` também faz
   pré-aquecimento para tools do exporter que dependem do navegador no Windows:
-  o hook JavaScript consulta rapidamente `/agent/clients`; se já houver uma aba
-  Gemini conectada, não abre nada. Se não houver cliente conectado, abre
-  `https://gemini.google.com/app` por spawn direto e cai para `cmd.exe /c start`
-  se o spawn direto falhar; sai imediatamente, sem PowerShell intermediário.
+  o hook JavaScript consulta rapidamente
+  `/agent/ready?wakeBrowser=false&selfHeal=false`; se já houver uma aba Gemini
+  pronta, não abre nada. `/agent/clients` fica como fallback de compatibilidade
+  e inspeção. Se não houver cliente conectado e o bridge estiver ativo, abre
+  `https://gemini.google.com/app` por um PowerShell temporário oculto com
+  `Start-Process -WindowStyle Minimized` e tenta restaurar o foco anterior.
   O hook em si não deve fazer
-  leitura síncrona de stdin, `import()` dinâmico, espera longa de navegador ou
-  trabalho bloqueante. `SessionStart` não deve ler stdin. Before/AfterTool leem
+  leitura síncrona de stdin, `import()` dinâmico ou trabalho bloqueante.
+  `SessionStart` não deve ler stdin. Before/AfterTool leem
   stdin de forma assíncrona, tentam parsear assim que o JSON chega e falham
   aberto por timeout curto (`GEMINI_MCP_HOOK_STDIN_TIMEOUT_MS`, default 120ms)
   se o cliente mantiver o pipe aberto. O modo
   `node scripts/hooks/gemini-md-export-hook.mjs diagnose` deve continuar
-  disponível para imprimir estado, `/agent/clients`, plano de launch e caminhos
+  disponível para imprimir estado, `/agent/ready`, plano de launch e caminhos
   de `hook-last-run.json`/`hook-browser-launch.json`. Esse prelaunch é
   controlado por `GEMINI_MCP_HOOK_LAUNCH_BROWSER` (default ligado),
   `GEMINI_MCP_HOOK_BRIDGE_TIMEOUT_MS` (default 180ms) e pelo mesmo cooldown.
@@ -362,6 +364,8 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   navegador quando não há clientes conectados e aguardar um curto período
   (`GEMINI_MCP_BROWSER_STATUS_WAKE_WAIT_MS`, default 8000ms), porque o Gemini
   CLI frequentemente consulta status antes de chamar uma tool de export.
+  `gemini_browser_ready` é a checagem leve para diferenciar handshake quente,
+  frio e pós-update sem buscar snapshot grande.
   `gemini_list_recent_chats` e `/agent/recent-chats` agora priorizam a lista
   trazida pelo heartbeat recente da extensão para responder rápido. Só
   mandam `list-conversations` para abrir/atualizar o sidebar quando o cache
@@ -383,11 +387,14 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   update, não tratar automaticamente como zumbi.
   O MCP também expõe tools para status, diretório de export, listagem de
   sidebar, listagem/export de cadernos, download individual, cache e navegação:
-  `gemini_browser_status`, `gemini_get_export_dir`, `gemini_set_export_dir`,
+  `gemini_browser_status`, `gemini_browser_ready`, `gemini_diagnose_environment`,
+  `gemini_flight_recorder`, `gemini_collect_support_bundle`,
+  `gemini_get_export_dir`, `gemini_set_export_dir`,
   `gemini_list_recent_chats`, `gemini_list_notebook_chats`,
   `gemini_get_current_chat`, `gemini_download_chat`,
   `gemini_download_notebook_chat`, `gemini_export_notebook`,
-  `gemini_export_recent_chats`, `gemini_export_job_status`,
+  `gemini_export_recent_chats`, `gemini_export_missing_chats`,
+  `gemini_sync_vault`, `gemini_export_job_status`,
   `gemini_export_job_cancel`, `gemini_cache_status`, `gemini_clear_cache`,
   `gemini_open_chat`, `gemini_reload_gemini_tabs` e `gemini_snapshot`.
   `gemini_list_recent_chats` é paginada: `limit` é tamanho de página
@@ -410,7 +417,10 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   recentes e caminho do relatório para evitar timeout e excesso de contexto no
   Gemini CLI. O MCP bloqueia dois jobs simultâneos de histórico recente na
   mesma aba; se já houver um rodando, consultar/cancelar o job existente antes
-  de iniciar outro.
+  de iniciar outro. Quando o vault já estava sincronizado e o usuário pedir
+  sync incremental, usar `gemini_sync_vault`: ele lê/grava
+  `.gemini-md-export/sync-state.json`, para ao encontrar uma fronteira
+  conhecida no Gemini Web e baixa só conversas novas.
   Downloads resolvem uma conversa por `index` 1-based,
   `chatId` ou, em cadernos, `title`; pedem o Markdown à extensão e gravam
   localmente no diretório padrão configurado, sobrescrevendo arquivos
@@ -426,13 +436,15 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   Para inspeção local quando a sessão do cliente AI ainda não carregou as
   tools MCP, o bridge expõe endpoints sem CORS aberto: `/agent/clients`,
   `/agent/recent-chats?limit=50&offset=0`,
-  `/agent/export-recent-chats`,
+  `/agent/export-recent-chats`, `/agent/export-missing-chats`,
+  `/agent/sync-vault`,
   `/agent/export-job-status?jobId=<id>`,
   `/agent/export-job-cancel?jobId=<id>`, `/agent/notebook-chats?limit=20`,
   `/agent/current-chat`, `/agent/download-chat?index=7`,
   `/agent/download-notebook-chat?index=1`, `/agent/export-notebook`,
   `/agent/export-dir`, `/agent/set-export-dir`, `/agent/cache-status`,
-  `/agent/clear-cache`, `/agent/open-chat` e `/agent/reload-tabs`.
+  `/agent/clear-cache`, `/agent/open-chat`, `/agent/reload-tabs`,
+  `/agent/ready`, `/agent/flight-recorder` e `/agent/support-bundle`.
 - `scripts/build.mjs` — gera `dist/gemini-export.user.js` concatenando o
   shell com o conteúdo de `extract.mjs` inlined, além de `dist/extension/*`
   para instalação como extensão desempacotada e `dist/gemini-cli-extension/*`
