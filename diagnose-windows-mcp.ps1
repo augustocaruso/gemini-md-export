@@ -102,6 +102,33 @@ function Test-Healthz {
   }
 }
 
+function Test-AgentDiagnostics {
+  param([int]$ListenPort)
+  $url = "http://127.0.0.1:$ListenPort/agent/diagnostics"
+  try {
+    $response = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 5
+    $json = $null
+    try {
+      $json = $response.Content | ConvertFrom-Json
+    } catch {
+      $json = $null
+    }
+    return [pscustomobject]@{
+      Ok = $true
+      StatusCode = $response.StatusCode
+      Body = $response.Content
+      Json = $json
+    }
+  } catch {
+    return [pscustomobject]@{
+      Ok = $false
+      StatusCode = $null
+      Body = $_.Exception.Message
+      Json = $null
+    }
+  }
+}
+
 function Join-CommandLine {
   param(
     [string]$Command,
@@ -160,6 +187,7 @@ $summary = [ordered]@{
   commandExists = $false
   serverScriptExists = $false
   healthzOk = $false
+  diagnosticsOk = $false
 }
 
 Write-Section "Gemini CLI config"
@@ -282,6 +310,29 @@ if ($health.Ok) {
   Write-Warn ("healthz failed: {0}" -f $health.Body)
 }
 
+Write-Section "Environment diagnostics"
+$diagnostics = Test-AgentDiagnostics -ListenPort $Port
+if ($diagnostics.Ok) {
+  $summary.diagnosticsOk = $true
+  Write-Ok ("diagnostics responded with HTTP {0}" -f $diagnostics.StatusCode)
+  if ($diagnostics.Json) {
+    Write-Info ("status: {0}" -f $diagnostics.Json.status)
+    if ($diagnostics.Json.nextAction) {
+      Write-Info ("nextAction: {0} - {1}" -f $diagnostics.Json.nextAction.code, $diagnostics.Json.nextAction.message)
+    }
+    if ($diagnostics.Json.extension) {
+      Write-Info ("extension clients: {0} connected, {1} matching" -f $diagnostics.Json.extension.connectedClientCount, $diagnostics.Json.extension.matchingClientCount)
+    }
+    if ($diagnostics.Json.export) {
+      Write-Info ("export dir: {0}" -f $diagnostics.Json.export.outputDir)
+    }
+  } else {
+    Write-Info ("body: {0}" -f $diagnostics.Body)
+  }
+} else {
+  Write-Warn ("diagnostics failed: {0}" -f $diagnostics.Body)
+}
+
 Write-Section "Manual start command"
 if ($command -and $serverScript) {
   Write-Host (Join-CommandLine -Command ($commandResolved ?? $command) -Args $serverArgs)
@@ -304,6 +355,8 @@ if (-not $summary.configFound) {
   Write-Fail "Port is occupied but healthz is not healthy. Likely stale/orphan MCP."
 } elseif (-not $summary.healthzOk) {
   Write-Warn "Extension looks installed, but the MCP is not running right now."
+} elseif (-not $summary.diagnosticsOk) {
+  Write-Warn "healthz works, but /agent/diagnostics failed. Use gemini_browser_status before reinstalling."
 } else {
   Write-Ok "Gemini CLI extension and bridge look healthy."
 }

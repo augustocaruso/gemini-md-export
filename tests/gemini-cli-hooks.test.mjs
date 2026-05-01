@@ -599,6 +599,7 @@ test('hook diagnose retorna estado e caminhos de depuracao', async () => {
     assert.equal(typeof output.timeouts.connectMs, 'number');
     assert.equal(typeof output.bridgeHealth.checked, 'boolean');
     assert.equal(typeof output.bridgeStatus.checked, 'boolean');
+    assert.equal(typeof output.environmentDiagnostics.checked, 'boolean');
   } finally {
     rmSync(tmpRoot, { recursive: true, force: true });
   }

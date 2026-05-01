@@ -103,12 +103,328 @@ sacrificar integridade.
   truncamento.
 - Falhas de mídia aparecem como warnings rastreáveis, não como travamento do job.
 
-## Backlog técnico
+## Proposta v0.3.1 — Hardening operacional e prova em campo
 
-- Considerar WebSocket somente se SSE + POST ainda deixar latência/ordering como
-  gargalo real.
-- Medir payload médio de heartbeat/snapshot em cenários com centenas de chats.
-- Adicionar smoke automatizado de `/bridge/events`, `/bridge/snapshot` e modo
-  proxy em porta alternativa.
-- Revisar instaladores para apontar o usuário ao diagnóstico novo antes de
-  sugerir reinstalação.
+Status: implementado na versão `0.3.1`.
+
+Objetivo: transformar os ganhos da `0.3.0` em confiança operacional,
+especialmente no Windows, sem adicionar comportamento grande novo.
+
+### Entregas
+
+- Criar smoke tests automatizados para o bridge:
+  - `/bridge/events`;
+  - `/bridge/snapshot`;
+  - `/healthz`;
+  - modo proxy quando a porta principal já está ocupada;
+  - porta alternativa em ambiente de teste.
+  - Primeiro incremento: `npm run smoke:bridge` sobe uma bridge isolada em
+    porta temporária e valida `/healthz`, `/bridge/snapshot`, `/bridge/events`,
+    `/bridge/heartbeat`, `/agent/clients` e diagnóstico de processos sem login
+    no Gemini Web.
+- Adicionar um comando/fluxo de diagnóstico de campo que reúna em uma saída:
+  - versão do MCP;
+  - versão/protocolo/build da extensão Chrome conectada;
+  - browser detectado;
+  - processos MCP/exporter ativos;
+  - porta `127.0.0.1:47283`;
+  - diretório de export configurado;
+  - último job e último relatório JSON, quando houver.
+  - Primeiro incremento: `gemini_diagnose_environment` e `/agent/diagnostics`
+    consolidam esses sinais e retornam `nextAction` acionável.
+- Revisar instaladores e scripts de recuperação para apontarem primeiro para:
+  - `gemini_browser_status`;
+  - `gemini_mcp_diagnose_processes`;
+  - `gemini_mcp_cleanup_stale_processes`;
+  - reload automático da extensão/abas quando suportado.
+- Criar checklist curto de validação no Windows:
+  - instalar/atualizar;
+  - abrir Gemini Web;
+  - listar 20 conversas;
+  - configurar vault;
+  - exportar missing em lote pequeno;
+  - retomar por `resumeReportFile`.
+
+### Critérios de aceite
+
+- O diagnóstico deve diferenciar claramente extensão antiga, MCP antigo,
+  bridge indisponível, Chrome sem aba Gemini e porta ocupada por outro app.
+- Os smoke tests devem rodar no CI ou em script local sem exigir login no
+  Gemini Web.
+- Um usuário no Windows deve receber uma próxima ação concreta antes de qualquer
+  pedido de reinstalação manual.
+
+## Proposta v0.3.2 — Medição e performance do export total
+
+Status: proposta.
+
+Objetivo: reduzir lentidão real do fluxo "importar todo o histórico" com
+medição, limites adaptativos e menos trabalho repetido.
+
+### Entregas
+
+- Instrumentar o relatório JSON do job com métricas por etapa:
+  - tempo de carregar sidebar;
+  - tempo de abrir conversa;
+  - tempo de hidratar DOM;
+  - tempo de extrair Markdown;
+  - tempo de salvar arquivo;
+  - tempo de baixar assets;
+  - retries/timeouts por conversa.
+- Medir tamanho médio e máximo dos payloads de heartbeat/snapshot em cenários
+  com centenas de conversas.
+- Ajustar o heartbeat para payload incremental quando fizer sentido:
+  - evitar reenviar inventário completo se nada mudou;
+  - manter snapshot completo disponível para recuperação;
+  - preservar compatibilidade com protocolo 2.
+- Melhorar política de concorrência de assets:
+  - limite global por job;
+  - backoff por host;
+  - cache por URL com TTL;
+  - falha de mídia sempre como warning rastreável, nunca como bloqueio do
+    Markdown principal.
+- Revisar o lazy-load adaptativo com métricas reais:
+  - crescer batch apenas quando houve avanço estável;
+  - reduzir agressivamente quando o DOM não cresce ou o comando expira;
+  - registrar no relatório quando o fim do histórico não foi provado.
+
+### Critérios de aceite
+
+- O relatório deve permitir identificar se o gargalo foi navegador, bridge,
+  assets, escrita em disco ou rolagem do Gemini.
+- Exportações retomadas não devem repetir trabalho já salvo, exceto quando o
+  usuário pedir reexport explícito.
+- Em rede ruim ou Gemini lento, o job deve degradar para mais warnings/retries,
+  não para travamento silencioso.
+
+## Proposta v0.4.0 — UX guiada para importação completa
+
+Status: proposta.
+
+Objetivo: fazer o fluxo que o usuário realmente quer ficar explícito para o
+agente e para a extensão: listar todo o Gemini Web, cruzar com o vault, baixar
+somente o que falta e retomar quando interromper.
+
+### Entregas
+
+- Tornar `gemini_export_missing_chats` o caminho recomendado para "importar
+  todo o histórico para o vault".
+- Adicionar mensagens de progresso mais humanas:
+  - "listando histórico do Gemini";
+  - "cruzando com o vault";
+  - "baixando somente o que falta";
+  - "retomando do relatório anterior";
+  - "histórico inteiro verificado" ou "não consegui confirmar o fim".
+- Adicionar resumo final orientado a decisão:
+  - total visto no Gemini Web;
+  - total já existente no vault;
+  - total baixado agora;
+  - total com warning de mídia;
+  - total falhado;
+  - caminho do relatório;
+  - comando exato para retomar.
+- Evitar listagens gigantes no chat:
+  - mostrar amostra curta;
+  - salvar lista completa no relatório;
+  - usar paginação só quando o usuário pedir inspeção.
+- Melhorar a UX da extensão Chrome quando o MCP estiver ausente:
+  - explicar em português simples que vai cair em Downloads;
+  - apontar como configurar destino;
+  - nunca esconder que assets podem ter ficado como placeholders.
+
+### Critérios de aceite
+
+- Quando o usuário pedir "importar todo o histórico", o agente não deve tentar
+  baixar tudo cegamente nem listar centenas de conversas no chat.
+- O fluxo padrão deve ser: inventário completo, cruzamento com vault, download
+  apenas dos faltantes, relatório incremental e retomada por `resumeReportFile`.
+- Ao final, o usuário deve saber se acabou de verdade ou se precisa retomar.
+
+## Proposta v0.4.1 — Resiliência da extensão Chrome
+
+Status: proposta.
+
+Objetivo: reduzir casos em que a extensão fica carregada, mas antiga, lenta ou
+sem responder ao MCP.
+
+### Entregas
+
+- Expor no diagnóstico a diferença entre:
+  - service worker vivo;
+  - content script injetado;
+  - aba Gemini conectada;
+  - build stamp esperado;
+  - build stamp em execução.
+- Tornar o reload automático mais visível no status:
+  - quando tentou;
+  - quando funcionou;
+  - quando o Chrome ainda manteve versão antiga;
+  - quando exige clique manual no card da extensão unpacked.
+- Adicionar timeout/recuperação para ping da extensão:
+  - retry curto;
+  - erro acionável;
+  - sugestão de reload somente depois da tentativa automática.
+- Melhorar diagnóstico do top-bar:
+  - separar ausência normal em home/settings de quebra real em conversa;
+  - incluir candidatos DOM quando a URL for conversa válida;
+  - manter o console silencioso fora de falha real.
+- Criar smoke manual documentado para DevTools:
+  - build stamp;
+  - `__geminiMdExportDebug.findTopBar()`;
+  - abertura do modal;
+  - seletor de pasta;
+  - save via bridge;
+  - fallback para Downloads.
+
+### Critérios de aceite
+
+- O agente deve tentar reload/self-heal antes de pedir ação manual ao usuário.
+- Se a extensão carregada for antiga, o erro deve dizer versão esperada, versão
+  em execução e qual passo falta.
+- Falhas de top-bar não devem impedir export via hotkey/API de debug quando o
+  content script está funcional.
+
+## Proposta v0.5.0 — CLI-first sobre a bridge local
+
+Status: proposta.
+
+Objetivo: tornar a CLI a interface operacional principal para agentes e
+usuários avançados, usando a bridge local existente como camada de integração
+com a extensão Chrome e o Gemini Web.
+
+### Arquitetura desejada
+
+```text
+Agente ou terminal humano
+  -> gemini-md-export CLI
+  -> bridge local HTTP/SSE
+  -> extensão Chrome
+  -> Gemini Web
+```
+
+O ponto central: a CLI é uma interface para a bridge. Ela não substitui a
+extensão nem o bridge local, porque o conteúdo ainda vem do DOM do Gemini Web
+logado no navegador. O que sai do caminho crítico é o MCP como superfície
+primária para jobs longos.
+
+### Entregas
+
+- Criar `bin/gemini-md-export` com subcomandos estáveis:
+  - `doctor`;
+  - `browser status`;
+  - `export recent`;
+  - `export missing`;
+  - `export resume`;
+  - `job status`;
+  - `job cancel`;
+  - `export-dir get/set`;
+  - `cleanup stale-processes`;
+  - `repair-vault`.
+- Saída humana por padrão, com TUI/progresso bonito quando o terminal for
+  interativo:
+  - painel de status do job;
+  - barras por fase;
+  - conversa atual;
+  - contadores de vistos/existentes/baixados/falhados;
+  - warnings de mídia;
+  - caminho do relatório;
+  - comando de retomada.
+- Modo `--plain` com texto estável, sem ANSI nem redesenho de terminal, para
+  agentes/LLMs lerem bem quando não precisarem de parsing rígido.
+- Bloco final `RESULT_JSON` curto em saídas humanas/plain, com campos
+  essenciais para automação:
+  - `status`;
+  - `jobId`;
+  - `reportFile`;
+  - `resumeCommand`;
+  - `webConversationCount`;
+  - `existingVaultCount`;
+  - `downloadedCount`;
+  - `warningCount`;
+  - `failedCount`;
+  - `fullHistoryVerified`.
+- `--json` para resultado final estruturado puro, sem texto humano.
+- `--jsonl` reservado para integrações que realmente precisam consumir
+  progresso evento a evento.
+- Exit codes estáveis:
+  - sucesso completo;
+  - sucesso com warnings;
+  - ação manual necessária;
+  - bridge indisponível;
+  - extensão antiga/incompatível;
+  - job falhou;
+  - uso inválido.
+- Jobs longos devem gravar relatório incremental com caminho explícito para
+  retomada. O progresso visual da TUI e o `RESULT_JSON` final vêm do mesmo
+  estado persistido pela bridge.
+- Atualizar `gemini-cli-extension/GEMINI.md`, comandos e skill para orientar:
+  - usar CLI para exportações longas;
+  - usar MCP apenas quando a tool nativa for indispensável ou legado;
+  - nunca despejar centenas de conversas no chat quando houver relatório.
+- Manter compatibilidade com o bridge atual, sem exigir login/API oficial do
+  Gemini.
+
+### Critérios de aceite
+
+- Um agente consegue executar "importar todo o histórico" somente com CLI +
+  skill/contexto, sem chamar tool MCP.
+- O mesmo comando pode ser copiado e rodado por um humano no terminal.
+- Em terminal interativo, o usuário vê uma UI de progresso legível dentro do
+  Gemini CLI.
+- Em execução por agente, `--plain` + `RESULT_JSON` final dá contexto humano e
+  contrato mínimo sem obrigar o LLM a interpretar TUI/ANSI.
+- A saída `--jsonl` continua disponível para automação que precise acompanhar
+  progresso sem timeout de tool call.
+- Retomada por relatório funciona igual ou melhor que no MCP.
+- Erros comuns geram mensagens e exit codes acionáveis, sem stack trace como
+  resposta principal.
+
+## Proposta v0.6.0 — MCP opcional/legado
+
+Status: proposta.
+
+Objetivo: reduzir o MCP a uma camada opcional de compatibilidade, mantendo a
+CLI como caminho recomendado para operações reais.
+
+### Entregas
+
+- Marcar no contexto do agente que jobs longos devem preferir CLI.
+- Manter MCP apenas para:
+  - compatibilidade com instalações antigas;
+  - discovery/status simples;
+  - ambientes onde o agente não tenha shell disponível.
+- Remover duplicação de lógica entre MCP e CLI:
+  - ambos chamam os mesmos helpers/core;
+  - nenhuma regra de exportação vive só no MCP.
+- Atualizar instaladores para instalar/validar CLI + extensão Chrome + bridge.
+- Criar aviso de depreciação suave para tools MCP de exportação longa, apontando
+  o comando CLI equivalente.
+
+### Critérios de aceite
+
+- O MCP pode ser desligado sem quebrar o fluxo principal CLI + bridge.
+- A documentação principal não apresenta MCP como caminho recomendado para
+  export total.
+- O usuário ainda consegue recuperar ambientes antigos sem reinstalação brusca.
+
+## Pesquisa futura — Transporte da bridge local
+
+Status: investigação condicionada.
+
+Objetivo: decidir com dados se o transporte atual da bridge local continua
+suficiente ou se WebSocket vale o custo.
+
+### Perguntas
+
+- A latência percebida vem do transporte da bridge, do DOM do Gemini, do
+  service worker MV3, da escrita em disco ou do download de assets?
+- Há perda de ordering/comandos duplicados com HTTP/SSE em jobs longos?
+- WebSocket melhoraria reconexão em service worker MV3 ou aumentaria
+  fragilidade por ciclo de vida do Chrome?
+
+### Critério de decisão
+
+Só migrar para WebSocket se os dados da `v0.3.2` mostrarem que o transporte é
+gargalo real ou fonte recorrente de ordering/timeout que HTTP/SSE não resolve
+com backoff, snapshot e comandos idempotentes. A decisão é independente da
+migração CLI-first: a CLI pode continuar usando a mesma bridge local.

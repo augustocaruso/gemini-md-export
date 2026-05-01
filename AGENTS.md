@@ -415,9 +415,25 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   cujo comando/caminho pareça `gemini-md-export` ou `mcp-server.js`, nunca o
   processo MCP atual nem o processo pai, e deve retornar exatamente os PIDs
   encerrados e se a sessão assumiu o bridge depois do cleanup.
+  O smoke local `node scripts/bridge-smoke.mjs --spawn --json` valida a
+  infraestrutura do bridge sem login no Gemini Web: sobe uma bridge isolada em
+  porta temporária e testa `/healthz`, `/bridge/snapshot`, `/bridge/events`,
+  `/bridge/heartbeat`, `/agent/clients`, `/agent/diagnostics` e
+  `gemini_mcp_diagnose_processes`.
+  Para testar a instância atual, use
+  `node scripts/bridge-smoke.mjs --bridge-url http://127.0.0.1:47283 --json`.
+  Se o smoke isolado passa, mas a extensão real segue lenta/instável, investigue
+  perfil do navegador, runtime da extensão Chrome, DOM do Gemini ou vault em vez
+  de culpar o protocolo local de imediato.
+  `gemini_diagnose_environment` e `/agent/diagnostics` produzem o relatório de
+  campo consolidado: versão do MCP, versão/protocolo/build esperados e
+  conectados da extensão, browser configurado, processos, dono da porta,
+  diretório de export, jobs/relatórios recentes e `nextAction` acionável.
+  Use isso antes de sugerir reinstalação.
   O MCP também expõe tools para status, diretório de export, listagem de
   sidebar, listagem/export de cadernos, download individual, cache e navegação:
-  `gemini_browser_status`, `gemini_mcp_diagnose_processes`,
+  `gemini_browser_status`, `gemini_diagnose_environment`,
+  `gemini_mcp_diagnose_processes`,
   `gemini_mcp_cleanup_stale_processes`, `gemini_get_export_dir`,
   `gemini_set_export_dir`,
   `gemini_list_recent_chats`, `gemini_list_notebook_chats`,
@@ -503,6 +519,7 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   pelo browser; chamadas locais sem `Origin` seguem úteis para debug.
   Para inspeção local quando a sessão do cliente AI ainda não carregou as
   tools MCP, o bridge expõe endpoints sem CORS aberto: `/agent/clients`,
+  `/agent/diagnostics`,
   `/agent/recent-chats?limit=50&offset=0`,
   `/agent/export-recent-chats`,
   `/agent/export-job-status?jobId=<id>`,

@@ -187,6 +187,20 @@ Operational guidance:
   bridge/extension startup errors, suspect an old extension version or stale
   `node.exe`.
 - The local bridge health check is `http://127.0.0.1:47283/healthz`.
+- For infrastructure-only validation that does not require Gemini login, use
+  `node scripts/bridge-smoke.mjs --spawn --json` from the extension root. It
+  starts an isolated bridge on a temporary port and validates `/healthz`,
+  `/bridge/snapshot`, `/bridge/events`, `/bridge/heartbeat`, `/agent/clients`,
+  `/agent/diagnostics`, and `gemini_mcp_diagnose_processes`. If the user is
+  debugging the currently running bridge, use
+  `node scripts/bridge-smoke.mjs --bridge-url http://127.0.0.1:47283 --json`.
+  A passing smoke means the local bridge protocol is healthy; remaining
+  failures are more likely browser profile, Chrome extension runtime, Gemini
+  DOM, or vault/export configuration.
+- Use `gemini_diagnose_environment` when you need one field report covering MCP
+  version, extension version/protocol/build, configured browser, processes,
+  port owner, export directory, recent jobs/reports, and the next recommended
+  action. Prefer this before asking the user to reinstall.
 
 Available capabilities include:
 

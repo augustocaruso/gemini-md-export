@@ -503,6 +503,70 @@ const queryBridgeHealth = () =>
     req.end();
   });
 
+const queryEnvironmentDiagnostics = () =>
+  new Promise((resolveResult) => {
+    const timeoutMs = parseNonNegativeInt(
+      process.env.GEMINI_MCP_HOOK_BRIDGE_TIMEOUT_MS,
+      DEFAULT_HOOK_BRIDGE_CHECK_TIMEOUT_MS,
+    );
+    const port = parseNonNegativeInt(process.env.GEMINI_MCP_BRIDGE_PORT, 47283);
+    let done = false;
+    const finish = (result) => {
+      if (done) return;
+      done = true;
+      resolveResult({ checked: true, ...result });
+    };
+
+    const req = request(
+      {
+        host: '127.0.0.1',
+        port,
+        path: '/agent/diagnostics',
+        method: 'GET',
+        timeout: timeoutMs,
+      },
+      (res) => {
+        let body = '';
+        res.setEncoding('utf-8');
+        res.on('data', (chunk) => {
+          body += chunk;
+          if (body.length > 262144) {
+            req.destroy(new Error('response too large'));
+          }
+        });
+        res.on('end', () => {
+          try {
+            const parsed = JSON.parse(body);
+            finish({
+              reachable: res.statusCode >= 200 && res.statusCode < 300,
+              statusCode: res.statusCode,
+              status: parsed.status || null,
+              nextAction: parsed.nextAction || null,
+              connectedClientCount: parsed.extension?.connectedClientCount ?? null,
+              matchingClientCount: parsed.extension?.matchingClientCount ?? null,
+              outputDir: parsed.export?.outputDir || null,
+            });
+          } catch (err) {
+            finish({
+              reachable: false,
+              statusCode: res.statusCode,
+              reason: `invalid-json: ${err.message}`,
+            });
+          }
+        });
+      },
+    );
+
+    req.on('timeout', () => {
+      req.destroy();
+      finish({ reachable: false, reason: 'timeout' });
+    });
+    req.on('error', (err) => {
+      finish({ reachable: false, reason: err.message });
+    });
+    req.end();
+  });
+
 const sleep = (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 
 const waitForConnectedBrowserClient = async () => {
@@ -1211,9 +1275,10 @@ const beforeTool = async (input) => {
 };
 
 const diagnose = async () => {
-  const [bridgeHealth, bridgeStatus] = await Promise.all([
+  const [bridgeHealth, bridgeStatus, environmentDiagnostics] = await Promise.all([
     queryBridgeHealth(),
     queryConnectedBrowserClients(),
+    queryEnvironmentDiagnostics(),
   ]);
   const launch = currentPlatform() === 'win32' ? buildWindowsBrowserStartCommand() : null;
   return {
@@ -1247,6 +1312,7 @@ const diagnose = async () => {
     },
     bridgeHealth,
     bridgeStatus,
+    environmentDiagnostics,
     lastRun: readJsonFile(hookLastRunPath()),
     lastBrowserLaunch: readJsonFile(hookStatePath()),
     launchPlan: launch

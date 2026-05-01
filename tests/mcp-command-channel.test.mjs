@@ -72,6 +72,9 @@ test('MCP expõe diagnóstico e cleanup controlado de processos sem guard de bro
 
   assert.match(source, /name: 'gemini_mcp_diagnose_processes'/);
   assert.match(source, /name: 'gemini_mcp_cleanup_stale_processes'/);
+  assert.match(source, /name: 'gemini_diagnose_environment'/);
+  assert.match(source, /url\.pathname === '\/agent\/diagnostics'/);
+  assert.match(source, /buildEnvironmentDiagnostics/);
   assert.match(source, /buildProcessDiagnostics/);
   assert.match(source, /cleanupStaleMcpProcesses/);
   assert.match(source, /confirm=true/);
@@ -79,8 +82,10 @@ test('MCP expõe diagnóstico e cleanup controlado de processos sem guard de bro
   assert.ok(localProxyBlock, 'lista de tools locais em proxy deve existir');
   assert.doesNotMatch(guardedBlock, /gemini_mcp_diagnose_processes/);
   assert.doesNotMatch(guardedBlock, /gemini_mcp_cleanup_stale_processes/);
+  assert.doesNotMatch(guardedBlock, /gemini_diagnose_environment/);
   assert.match(localProxyBlock, /gemini_mcp_diagnose_processes/);
   assert.match(localProxyBlock, /gemini_mcp_cleanup_stale_processes/);
+  assert.match(localProxyBlock, /gemini_diagnose_environment/);
 });
 
 test('bridge busca mídia sem depender de CORS da extensão Chrome', () => {

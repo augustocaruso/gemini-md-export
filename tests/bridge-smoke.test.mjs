@@ -1,0 +1,49 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+const ROOT = resolve(import.meta.dirname, '..');
+const SMOKE_SCRIPT = resolve(ROOT, 'scripts', 'bridge-smoke.mjs');
+
+test('bridge smoke valida healthz, snapshot, SSE, clients e diagnostico sem login', () => {
+  const output = execFileSync(process.execPath, [SMOKE_SCRIPT, '--spawn', '--json'], {
+    cwd: ROOT,
+    encoding: 'utf-8',
+    timeout: 20000,
+  });
+  const result = JSON.parse(output);
+  const checkNames = result.checks.map((check) => check.name);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.health.name, 'gemini-md-export');
+  assert.equal(result.health.bridgeRole, 'primary');
+  assert.equal(result.expected.protocolVersion, 2);
+  assert.deepEqual(checkNames, [
+    'healthz',
+    'agent_expected_extension',
+    'bridge_snapshot',
+    'bridge_events_sse',
+    'bridge_heartbeat',
+    'agent_clients',
+    'agent_diagnostics',
+    'process_diagnostics',
+  ]);
+  assert.equal(result.checks.every((check) => check.ok), true);
+  assert.equal(
+    result.checks.find((check) => check.name === 'agent_clients').value.smokeClient.bridgeHealth.status,
+    'healthy',
+  );
+  assert.equal(
+    result.checks.find((check) => check.name === 'agent_diagnostics').value.status,
+    'ready',
+  );
+});
+
+test('build publica bridge-smoke no bundle da extensao Gemini CLI', () => {
+  assert.equal(
+    existsSync(resolve(ROOT, 'dist', 'gemini-cli-extension', 'scripts', 'bridge-smoke.mjs')),
+    true,
+  );
+});

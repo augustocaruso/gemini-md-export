@@ -22,6 +22,7 @@ import {
   describeRecentBrowserLaunch,
   launchGeminiBrowser,
   readBrowserLaunchState,
+  resolveGeminiBrowserLaunchPlan,
   writeBrowserLaunchState,
 } from './browser-launch.mjs';
 import {
@@ -932,6 +933,172 @@ const buildProcessDiagnostics = async () => {
     processes,
     cleanupPlan,
     recommendedAction: recommendedRecoveryAction(mismatch, cleanupPlan),
+  };
+};
+
+const latestExportReportsInDirectory = (directory, limit = 5) => {
+  try {
+    return readdirSync(directory)
+      .filter((name) => /^gemini-md-export-.*\.json$/.test(name))
+      .map((name) => {
+        const filePath = resolve(directory, name);
+        const stat = statSync(filePath);
+        return {
+          filename: name,
+          filePath,
+          size: stat.size,
+          modifiedAt: stat.mtime.toISOString(),
+        };
+      })
+      .sort((a, b) => String(b.modifiedAt).localeCompare(String(a.modifiedAt)))
+      .slice(0, limit);
+  } catch (err) {
+    return {
+      error: err?.message || String(err),
+      reports: [],
+    };
+  }
+};
+
+const summarizeRecentExportJobs = (limit = 5) =>
+  [...exportJobs.values()]
+    .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))
+    .slice(0, limit)
+    .map(summarizeExportJob);
+
+const clientsFromPrimaryPayload = (payload) =>
+  Array.isArray(payload?.connectedClients) ? payload.connectedClients : [];
+
+const connectedClientsForDiagnostics = async () => {
+  cleanupStaleClients();
+  const localClients = getLiveClients().map(summarizeClient);
+  if (bridgeRole !== 'proxy') {
+    return {
+      source: 'local',
+      connectedClients: localClients,
+      primaryClientsFetch: { attempted: false },
+    };
+  }
+
+  const primaryClientsFetch = await primaryBridgeClients();
+  return {
+    source: primaryClientsFetch.ok ? 'primary-bridge' : 'local-proxy',
+    connectedClients: primaryClientsFetch.ok
+      ? clientsFromPrimaryPayload(primaryClientsFetch.payload)
+      : localClients,
+    primaryClientsFetch: {
+      attempted: true,
+      ok: primaryClientsFetch.ok,
+      status: primaryClientsFetch.status,
+      error: primaryClientsFetch.error || null,
+    },
+  };
+};
+
+const clientMatchesExpectedInfo = (client) =>
+  String(client?.extensionVersion || '') === EXPECTED_CHROME_EXTENSION_INFO.extensionVersion &&
+  Number(client?.protocolVersion) === Number(EXPECTED_CHROME_EXTENSION_INFO.protocolVersion) &&
+  (!EXPECTED_CHROME_EXTENSION_INFO.buildStamp ||
+    String(client?.buildStamp || client?.page?.buildStamp || '') ===
+      EXPECTED_CHROME_EXTENSION_INFO.buildStamp);
+
+const environmentNextAction = ({ processDiagnostics, clients, matchingClients }) => {
+  if (processDiagnostics?.problem) {
+    return {
+      code: 'process_or_port_problem',
+      message: processDiagnostics.recommendedAction,
+    };
+  }
+  if (!clients.length) {
+    return {
+      code: 'no_gemini_tab_connected',
+      message:
+        'Abra uma aba do Gemini Web ou rode gemini_browser_status para tentar acordar o navegador e reconectar a extensão.',
+    };
+  }
+  if (!matchingClients.length) {
+    return {
+      code: 'extension_version_mismatch',
+      message:
+        'A extensão Chrome conectada não bate com a versão/protocolo/build esperados. Rode gemini_browser_status para tentar self-heal antes de pedir reload manual.',
+    };
+  }
+  const unhealthy = matchingClients.find((client) => client.bridgeHealth?.blockingIssue);
+  if (unhealthy) {
+    return {
+      code: unhealthy.bridgeHealth.blockingIssue,
+      message: unhealthy.bridgeHealth.action || 'Rode gemini_browser_status para diagnóstico da aba.',
+    };
+  }
+  return {
+    code: 'ready',
+    message: 'Bridge, extensão e aba Gemini parecem prontos.',
+  };
+};
+
+const buildEnvironmentDiagnostics = async () => {
+  const [processDiagnostics, clientState] = await Promise.all([
+    buildProcessDiagnostics(),
+    connectedClientsForDiagnostics(),
+  ]);
+  const connectedClients = clientState.connectedClients || [];
+  const matchingClients = connectedClients.filter(clientMatchesExpectedInfo);
+  const outputDir = resolveOutputDir();
+  const latestReports = latestExportReportsInDirectory(outputDir);
+  const browserLaunchPlan = resolveGeminiBrowserLaunchPlan();
+  const nextAction = environmentNextAction({
+    processDiagnostics,
+    clients: connectedClients,
+    matchingClients,
+  });
+
+  return {
+    ok: nextAction.code === 'ready',
+    generatedAt: new Date().toISOString(),
+    status: nextAction.code,
+    nextAction,
+    bridge: {
+      host: cli.host,
+      port: cli.port,
+      url: primaryBridgeBaseUrl(),
+      role: bridgeRole,
+      listening: bridgeListening,
+      health: processDiagnostics.primaryBridge?.health || null,
+    },
+    mcp: {
+      name: SERVER_NAME,
+      version: SERVER_VERSION,
+      protocolVersion: EXTENSION_PROTOCOL_VERSION,
+      process: summarizeProcess(),
+    },
+    browser: {
+      launchIfClosed: CHROME_GUARD_CONFIG.launchIfClosed,
+      profileDirectory: CHROME_GUARD_CONFIG.profileDirectory,
+      configuredBrowser:
+        process.env.GEMINI_MCP_BROWSER || process.env.GME_BROWSER || browserLaunchPlan.browserKey,
+      launchPlan: browserLaunchPlan,
+      recentLaunch: describeRecentBrowserLaunch(readBrowserLaunchState(), {
+        cooldownMs: BROWSER_LAUNCH_COOLDOWN_MS,
+      }),
+    },
+    extension: {
+      expected: EXPECTED_CHROME_EXTENSION_INFO,
+      source: clientState.source,
+      primaryClientsFetch: clientState.primaryClientsFetch,
+      connectedClientCount: connectedClients.length,
+      matchingClientCount: matchingClients.length,
+      connectedClients,
+    },
+    export: {
+      outputDir,
+      defaultExportDir: DEFAULT_EXPORT_DIR,
+      runningJobCount: [...exportJobs.values()].filter((job) => !isTerminalExportJobStatus(job.status))
+        .length,
+      recentJobs: summarizeRecentExportJobs(5),
+      latestReports: Array.isArray(latestReports) ? latestReports : [],
+      latestReportError: Array.isArray(latestReports) ? null : latestReports.error,
+    },
+    processDiagnostics,
   };
 };
 
@@ -4308,6 +4475,20 @@ const rawTools = [
     },
   },
   {
+    name: 'gemini_diagnose_environment',
+    description:
+      'Diagnóstico consolidado de campo: bridge, extensão Chrome conectada, browser configurado, processos/porta, diretório de export, jobs e relatórios recentes.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+      additionalProperties: false,
+    },
+    call: async () => {
+      const result = await buildEnvironmentDiagnostics();
+      return toolTextResult(result, { isError: !result.ok });
+    },
+  },
+  {
     name: 'gemini_get_export_dir',
     description: 'Retorna o diretório local padrão usado pelo MCP para salvar exports.',
     inputSchema: {
@@ -4983,6 +5164,7 @@ const BROWSER_DEPENDENT_TOOL_NAMES = new Set([
 const LOCAL_PROXY_TOOL_NAMES = new Set([
   'gemini_mcp_diagnose_processes',
   'gemini_mcp_cleanup_stale_processes',
+  'gemini_diagnose_environment',
 ]);
 
 const withChromeExtensionGuard = (tool) => ({
@@ -5188,6 +5370,11 @@ const bridgeServer = createServer(async (req, res) => {
           }
         : {}),
     });
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/agent/diagnostics') {
+    sendAgentJson(res, 200, await buildEnvironmentDiagnostics());
     return;
   }
 

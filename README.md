@@ -330,9 +330,34 @@ proveniência no rodapé: uma seção de fontes Gemini com a união deduplicada 
 todos os links `https://gemini.google.com/app/<chatId>` que inspiraram aquela
 nota, sem trocar uma lista de múltiplos chats por apenas o último link.
 
+Para validar a infraestrutura local sem depender de login no Gemini Web, rode:
+
+```bash
+npm run smoke:bridge
+```
+
+Esse smoke sobe uma bridge isolada em uma porta temporária e testa
+`/healthz`, `/bridge/snapshot`, `/bridge/events`, `/bridge/heartbeat`,
+`/agent/clients`, `/agent/diagnostics` e o diagnóstico de processos. Para obter
+JSON estruturado:
+
+```bash
+node scripts/bridge-smoke.mjs --spawn --json
+```
+
+Se você já tem uma bridge rodando e quer testar a instância atual:
+
+```bash
+node scripts/bridge-smoke.mjs --bridge-url http://127.0.0.1:47283
+```
+
+Use esse smoke antes de culpar Chrome/Gemini quando a extensão parecer lenta:
+ele separa problema de infraestrutura local de problema da aba real do Gemini.
+
 Endpoints locais úteis para diagnóstico quando as tools ainda não carregaram:
 
 - `http://127.0.0.1:47283/healthz`
+- `http://127.0.0.1:47283/agent/diagnostics`
 - `http://127.0.0.1:47283/agent/clients`
 - `http://127.0.0.1:47283/agent/recent-chats?limit=50&offset=0`
 - `http://127.0.0.1:47283/agent/export-recent-chats`

@@ -24,3 +24,14 @@ test('Windows repair script is published as a standalone safe recovery path', ()
   assert.match(releaseBuilder, /repair-windows-gemini-extension\.ps1/);
   assert.match(workflow, /repair-windows-gemini-extension\.ps1/);
 });
+
+test('Windows diagnostics prefer consolidated environment report before reinstall', () => {
+  const diagnose = readFileSync(resolve(ROOT, 'diagnose-windows-mcp.ps1'), 'utf-8');
+  const installer = readFileSync(resolve(ROOT, 'scripts', 'install-windows.mjs'), 'utf-8');
+
+  assert.match(diagnose, /\/agent\/diagnostics/);
+  assert.match(diagnose, /Test-AgentDiagnostics/);
+  assert.match(diagnose, /gemini_browser_status before reinstalling/);
+  assert.match(installer, /\/agent\/diagnostics/);
+  assert.match(installer, /gemini_diagnose_environment/);
+});

@@ -243,6 +243,11 @@ if (existsSync(resolve(ROOT, 'gemini-cli-extension', 'scripts'))) {
     { recursive: true },
   );
 }
+mkdirSync(resolve(geminiCliExtensionDir, 'scripts'), { recursive: true });
+cpSync(
+  resolve(ROOT, 'scripts', 'bridge-smoke.mjs'),
+  resolve(geminiCliExtensionDir, 'scripts', 'bridge-smoke.mjs'),
+);
 cpSync(extensionDir, resolve(geminiCliExtensionDir, 'browser-extension'), {
   recursive: true,
 });
