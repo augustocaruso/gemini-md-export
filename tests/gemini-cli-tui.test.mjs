@@ -332,6 +332,8 @@ test('CLI chats count carrega ate o fim sem despejar lista no chat', async () =>
     });
 
     assert.equal(run.exitCode, 0);
+    assert.match(stdout.text(), /Bridge conectada/);
+    assert.match(stdout.text(), /Carregando historico do Gemini/);
     assert.match(stdout.text(), /Total confirmado: 203 chat\(s\)/);
     const resultLine = stdout
       .text()
@@ -347,6 +349,7 @@ test('CLI chats count carrega ate o fim sem despejar lista no chat', async () =>
     assert.equal(countRequest.searchParams.get('countOnly'), 'true');
     assert.equal(countRequest.searchParams.get('untilEnd'), 'true');
     assert.equal(countRequest.searchParams.get('limit'), '1');
+    assert.equal(countRequest.searchParams.get('loadMoreTimeoutMs'), '180000');
   });
 });
 
@@ -372,6 +375,7 @@ test('CLI chats count nao transforma contagem parcial em total', async () => {
         knownLoadedCount: 73,
         minimumKnownCount: 73,
         countWarning: 'Contagem parcial: nao informe como total.',
+        loadMoreError: 'Esta aba do Gemini ja esta ocupada com outro comando pesado.',
         pagination: {
           loadedCount: 73,
           reachedEnd: false,
@@ -392,6 +396,7 @@ test('CLI chats count nao transforma contagem parcial em total', async () => {
 
     assert.equal(run.exitCode, 1);
     assert.match(stdout.text(), /Contagem parcial: pelo menos 73 chat\(s\)/);
+    assert.match(stdout.text(), /aba do Gemini ja esta ocupada/);
     const resultLine = stdout
       .text()
       .split(/\r?\n/)
@@ -400,6 +405,7 @@ test('CLI chats count nao transforma contagem parcial em total', async () => {
     assert.equal(result.totalKnown, false);
     assert.equal(result.totalCount, null);
     assert.equal(result.minimumKnownCount, 73);
+    assert.match(result.loadMoreError, /ocupada/);
     assert.match(result.warning, /parcial/);
     assert.equal(stderr.text(), '');
   });

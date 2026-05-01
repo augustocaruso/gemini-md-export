@@ -120,6 +120,10 @@ Only report an exact total when `RESULT_JSON.totalKnown=true` or
 `RESULT_JSON.countIsTotal=true`. Otherwise say "pelo menos N" and explain that
 the end of the Gemini sidebar was not confirmed.
 
+If the CLI returns a partial count, stop there. Do not call `gemini_chats`,
+`gemini_ready`, or `gemini_tabs` as a fallback for the same count request; that
+adds noisy JSON tool cards and can contend with the same browser tab.
+
 Never summarize a `RESULT_JSON` as success when `status` is
 `completed_with_errors`, `failed`, or `cancelled`, or when
 `fullHistoryRequested` is true and `fullHistoryVerified` is false. Name failed

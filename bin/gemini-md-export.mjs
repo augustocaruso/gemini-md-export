@@ -16,6 +16,8 @@ const DEFAULT_BRIDGE_URL = 'http://127.0.0.1:47283';
 const DEFAULT_POLL_MS = 1200;
 const DEFAULT_READY_WAIT_MS = 12000;
 const DEFAULT_TIMEOUT_MS = 6 * 60 * 60 * 1000;
+const DEFAULT_COUNT_LOAD_MORE_TIMEOUT_MS = 180_000;
+const DEFAULT_COUNT_STATUS_INTERVAL_MS = 15_000;
 const DEFAULT_BROWSER_LAUNCH_LOCK_GRACE_MS = 2_000;
 const TERMINAL_STATUSES = new Set(['completed', 'completed_with_errors', 'failed', 'cancelled']);
 
@@ -804,6 +806,14 @@ const dim = (ui, text) => (wantsColor(ui) ? `${ANSI.dim}${text}${ANSI.reset}` : 
 
 const stripAnsi = (text) => String(text).replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
 
+const formatDuration = (ms) => {
+  const seconds = Math.max(1, Math.ceil((Number(ms) || 0) / 1000));
+  if (seconds < 90) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  return rest ? `${minutes}min ${rest}s` : `${minutes}min`;
+};
+
 const supportsTui = (stdout = process.stdout) => stdout.isTTY && process.env.TERM !== 'dumb';
 
 const selectFormat = (flags, stdout = process.stdout) => {
@@ -991,6 +1001,53 @@ const renderPlainProgress = (ui, job, previous = {}) => {
   const count = total > 0 ? `${Math.min(current, total)}/${total}` : `${job.loadedCount || 0} vistas`;
   ui.stdout.write(`[${new Date().toLocaleTimeString()}] ${job.status}/${job.phase}: ${count} - ${job.progressMessage || 'sincronizando'}\n`);
   return { key };
+};
+
+const withWaitStatus = async (
+  ui,
+  { message, intervalMessage, intervalMs = DEFAULT_COUNT_STATUS_INTERVAL_MS },
+  run,
+) => {
+  if (ui.format === 'json') return run();
+  if (ui.format === 'jsonl') {
+    ui.stdout.write(`${JSON.stringify({ type: 'status', message })}\n`);
+    return run();
+  }
+
+  const startedAt = Date.now();
+  let tick = 0;
+  const nextMessage = () =>
+    typeof intervalMessage === 'function' ? intervalMessage(Date.now() - startedAt) : message;
+  const renderWaitTui = () => {
+    renderTui(
+      ui,
+      {
+        status: 'running',
+        phase: 'loading-history',
+        requested: 0,
+        completed: 0,
+        progressMessage: tick === 0 ? message : nextMessage(),
+      },
+      tick,
+    );
+  };
+
+  if (ui.format === 'tui') renderWaitTui();
+  else ui.stdout.write(`${message}\n`);
+
+  const timer = setInterval(() => {
+    tick += 1;
+    if (ui.format === 'tui') renderWaitTui();
+    else ui.stdout.write(`${nextMessage()}\n`);
+  }, Math.max(1000, Number(intervalMs) || DEFAULT_COUNT_STATUS_INTERVAL_MS));
+  timer.unref?.();
+
+  try {
+    return await run();
+  } finally {
+    clearInterval(timer);
+    if (ui.format === 'tui') closeTui(ui);
+  }
 };
 
 const emitResult = (ui, job) => {
@@ -1453,6 +1510,8 @@ const summarizeChatsCountResult = (result = {}) => ({
   canLoadMore: result.pagination?.canLoadMore === true,
   loadMoreRoundsCompleted: result.loadMoreRoundsCompleted ?? null,
   loadMoreTimedOut: result.loadMoreTimedOut === true,
+  loadMoreError: result.loadMoreError || null,
+  refreshError: result.refreshError || null,
   warning: result.countWarning || null,
   answer: result.answer || null,
   nextAction: result.nextAction || null,
@@ -1469,26 +1528,50 @@ const runChats = async (parsed, streams = {}) => {
     ui.stdout.write(`Conectando na bridge ${normalizeBridgeUrl(parsed.flags.bridgeUrl)}...\n`);
   }
   await ensureBridgeAvailable(parsed.flags, ui);
+  if (ui.format !== 'json' && ui.format !== 'jsonl') {
+    ui.stdout.write('Bridge conectada. Verificando Gemini Web...\n');
+  }
   await ensureReady(parsed.flags.bridgeUrl, parsed.flags, ui);
-  const raw = await requestJson(
-    parsed.flags.bridgeUrl,
-    appendParams('/agent/recent-chats', {
-      limit: 1,
-      offset: 0,
-      countOnly: true,
-      untilEnd: true,
-      refresh: parsed.flags.refresh,
-      ...loadMoreParamsFromFlags(parsed.flags),
-      clientId: parsed.flags.clientId,
-      tabId: parsed.flags.tabId,
-      claimId: parsed.flags.claimId,
-    }),
-    { timeoutMs: Math.max(20_000, Number(parsed.flags.loadMoreTimeoutMs || DEFAULT_TIMEOUT_MS)) },
+  const countTimeoutMs = Math.max(
+    1000,
+    Number(parsed.flags.loadMoreTimeoutMs || DEFAULT_COUNT_LOAD_MORE_TIMEOUT_MS),
+  );
+  const statusIntervalMs = nonNegativeIntEnv(
+    process.env.GEMINI_MD_EXPORT_CLI_STATUS_INTERVAL_MS,
+    DEFAULT_COUNT_STATUS_INTERVAL_MS,
+    60_000,
+  );
+  const raw = await withWaitStatus(
+    ui,
+    {
+      message: `Carregando historico do Gemini ate confirmar o fim (limite ${formatDuration(countTimeoutMs)}).`,
+      intervalMs: statusIntervalMs,
+      intervalMessage: (elapsedMs) =>
+        `Ainda carregando historico... ${formatDuration(elapsedMs)} decorridos; nao vou abrir outra tool MCP como fallback.`,
+    },
+    () =>
+      requestJson(
+        parsed.flags.bridgeUrl,
+        appendParams('/agent/recent-chats', {
+          limit: 1,
+          offset: 0,
+          countOnly: true,
+          untilEnd: true,
+          refresh: parsed.flags.refresh,
+          ...loadMoreParamsFromFlags(parsed.flags),
+          loadMoreTimeoutMs: countTimeoutMs,
+          clientId: parsed.flags.clientId,
+          tabId: parsed.flags.tabId,
+          claimId: parsed.flags.claimId,
+        }),
+        { timeoutMs: countTimeoutMs + 15_000 },
+      ),
   );
   const result = summarizeChatsCountResult(raw);
+  const partialReason = result.loadMoreError || result.refreshError;
   const label = result.totalKnown
     ? `Total confirmado: ${result.totalCount} chat(s).`
-    : `Contagem parcial: pelo menos ${result.minimumKnownCount ?? result.knownLoadedCount ?? 0} chat(s).`;
+    : `Contagem parcial: pelo menos ${result.minimumKnownCount ?? result.knownLoadedCount ?? 0} chat(s).${partialReason ? ` Motivo: ${partialReason}` : ''}`;
   writeStructuredResult(ui, result, { label });
   return { exitCode: result.totalKnown ? EXIT.OK : EXIT.WARNINGS, result };
 };

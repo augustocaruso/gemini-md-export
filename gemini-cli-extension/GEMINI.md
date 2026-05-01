@@ -28,10 +28,10 @@ Default tool output is compact. Ask for `detail: "full"` only while debugging.
 - Multiple tabs, wrong tab, tab claim, reload Gemini tabs, or open-if-missing
   for small diagnostics: call `gemini_tabs`.
 - Small chat listing, current chat, open chat, one-off download, or an
-  explicitly partial count: call `gemini_chats`. For "quantos chats ao todo",
-  prefer the CLI `gemini-md-export chats count --plain`; never use
-  `loadedCount`, `knownLoadedCount`, or `count` as a total unless
-  `totalKnown=true`/`countIsTotal=true`.
+  explicitly partial page: call `gemini_chats`. For "quantos chats ao todo",
+  run the CLI `gemini-md-export chats count --plain` once. If it returns
+  `totalKnown=false`, stop and answer "pelo menos N"; do not call
+  `gemini_chats` as a fallback.
 - Recent export, full import, missing-chat import, incremental sync, reexport,
   or notebook export: run the bundled CLI directly first. Do not preflight with
   repeated `gemini_ready`/`gemini_tabs`; the CLI owns readiness, browser wake,
@@ -44,8 +44,7 @@ Default tool output is compact. Ask for `detail: "full"` only while debugging.
 
 ## Skills
 
-Use bundled Gemini CLI Agent Skills for detailed workflows instead of loading
-long playbooks into this context:
+Use bundled Agent Skills for detailed workflows:
 
 - `gemini-vault-sync`: full import, incremental sync, missing chats, resumed
   exports, and no giant chat lists in the conversation.
@@ -58,9 +57,8 @@ long playbooks into this context:
 
 ## Commands
 
-- `/sync`: sync the known vault with Gemini Web. With no argument, use the
-  vault path already present in the active/main GEMINI.md context. With an
-  argument, treat it as the vault path override.
+- `/sync`: sync the known vault with Gemini Web; an argument overrides the
+  vault path from context.
 - `/exporter:repair-vault`: audit and repair contaminated raw exports/wiki
   cases.
 
@@ -69,10 +67,8 @@ long playbooks into this context:
 The extension also ships `bin/gemini-md-export.mjs`, a terminal UI wrapper over
 the same local bridge used by MCP.
 
-- The CLI can start the local bridge in `bridge-only` mode when the bridge is
-  down; CLI-started bridges exit automatically after idle unless
-  `--no-exit-when-idle` is set. Use `--no-start-bridge` only for controlled
-  diagnostics.
+- The CLI can start the local bridge in `bridge-only` mode; CLI-started bridges
+  exit after idle unless `--no-exit-when-idle` is set.
 - The CLI owns browser wake for long jobs: it checks `/agent/ready` with
   `wakeBrowser=false`, opens Gemini Web in the configured Chromium browser when
   no tab is connected, then waits for the extension before starting the job.
@@ -85,8 +81,7 @@ the same local bridge used by MCP.
   `node "$env:USERPROFILE\.gemini\extensions\gemini-md-export\bin\gemini-md-export.mjs" sync <vaultDir> --tui`
 - For agent-readable execution, prefer `--plain`; it emits stable progress
   lines and a final `RESULT_JSON` block.
-- To discover the contract, run `gemini-md-export --help`,
-  `gemini-md-export sync --help`, or `gemini-md-export job status --help`.
+- To discover the contract, run `gemini-md-export --help`.
 - CLI subcommands include `browser status`, `tabs list/claim/release/reload`,
   `chats count`, `export recent`, `export missing`, `export resume`,
   `export reexport`, `export notebook`, `job status`, `job cancel`,
@@ -111,10 +106,12 @@ the same local bridge used by MCP.
   `completed_with_errors`, `failed`, or `cancelled`, or when
   `fullHistoryRequested=true` and `fullHistoryVerified=false`. Mention
   `failures`, `reportFile`, and the resume command/next action instead.
-- Never answer "N chats ao todo" from `gemini_chats` unless the response says
-  `totalKnown=true` or `countIsTotal=true`. If it says `countStatus:
-  "partial"`/`"incomplete"`, answer "pelo menos N" and explain that the end of
-  the sidebar was not confirmed.
+- Never answer "N chats ao todo" unless `totalKnown=true` or
+  `countIsTotal=true`; otherwise answer "pelo menos N" and say the sidebar end
+  was not confirmed.
+- After a partial CLI count, do not retry with `gemini_chats`,
+  `gemini_ready`, or `gemini_tabs`. That creates noisy JSON tool cards and can
+  lock the same Gemini tab. Report the partial count instead.
 - Do not ask for manual Chrome extension reload before trying
   `gemini_ready { "action": "status", "selfHeal": true, "allowReload": true }`,
   unless the loaded extension is too old to support self-heal.

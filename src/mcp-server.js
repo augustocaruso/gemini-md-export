@@ -4972,10 +4972,8 @@ const listRecentChatsForClient = async (client, args = {}) => {
       : {
           code: 'count_incomplete',
           message:
-            'A lista ainda nao chegou ao fim. Para contar de verdade, use a CLI: gemini-md-export chats count --plain. Se mesmo assim nao confirmar o fim, responda "pelo menos N", nunca "ao todo".',
-          command: {
-            text: 'gemini-md-export chats count --plain',
-          },
+            'A lista ainda nao chegou ao fim. Pare aqui: responda "pelo menos N" e explique que o fim do historico nao foi confirmado. Nao chame gemini_chats/gemini_ready/gemini_tabs como fallback, porque isso disputa a aba e polui a UI com JSON.',
+          command: null,
         },
   };
 };

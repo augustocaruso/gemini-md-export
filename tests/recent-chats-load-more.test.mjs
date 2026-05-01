@@ -114,12 +114,13 @@ test('listagem de chats expõe contagem parcial sem fingir total', () => {
   assert.match(block, /countStatus/);
   assert.match(block, /countIsTotal/);
   assert.match(block, /totalKnown/);
-  assert.match(block, /totalCount/);
-  assert.match(block, /minimumKnownCount/);
-  assert.match(block, /Nao informe esse numero como "ao todo"/);
-  assert.match(block, /gemini-md-export chats count --plain/);
-  assert.match(source, /action:\s*\{\s*type:\s*'string',\s*enum:\s*\['list', 'count'/);
-});
+	  assert.match(block, /totalCount/);
+	  assert.match(block, /minimumKnownCount/);
+	  assert.match(block, /Nao informe esse numero como "ao todo"/);
+	  assert.match(block, /Nao chame gemini_chats\/gemini_ready\/gemini_tabs como fallback/);
+	  assert.match(block, /command: null/);
+	  assert.match(source, /action:\s*\{\s*type:\s*'string',\s*enum:\s*\['list', 'count'/);
+	});
 
 test('export total registra métricas de performance no status e relatório', () => {
   const serverSource = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
