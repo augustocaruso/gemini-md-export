@@ -315,6 +315,7 @@
   const BRIDGE_PROTOCOL_CAPABILITIES = [
     'events-v1',
     'snapshot-v1',
+    'heartbeat-incremental-v1',
     'command-result-retry-v1',
   ];
   const BRIDGE_CLIENT_STALE_MS = 45000;
@@ -2654,13 +2655,25 @@
     const updatedTurns = turns.map((turn) => ({ ...turn }));
     const files = [];
     const failures = [];
+    const metrics = {
+      candidateCount: 0,
+      attemptedFetches: 0,
+      successfulFetches: 0,
+      failedFetches: 0,
+      timedOut: false,
+      elapsedMs: 0,
+      byKind: {},
+      byRole: {},
+    };
     let exportedTurnIndex = 0;
     const deadlineAt = Date.now() + MEDIA_EXPORT_TOTAL_BUDGET_MS;
+    const startedAt = Date.now();
     const scrollPosition = captureMediaScrollPosition();
 
     try {
       for (const node of nodes) {
         if (Date.now() >= deadlineAt) {
+          metrics.timedOut = true;
           warn('Tempo de importação de mídia esgotado; mantendo placeholders restantes.');
           break;
         }
@@ -2675,9 +2688,11 @@
         if (!turn) break;
 
         const candidates = collectMediaCandidatesForTurn(node);
+        metrics.candidateCount += candidates.length;
         let mediaIndex = 0;
         for (const candidate of candidates) {
           if (Date.now() >= deadlineAt) {
+            metrics.timedOut = true;
             warn('Tempo de importação de mídia esgotado; mantendo placeholders restantes.');
             break;
           }
@@ -2686,6 +2701,9 @@
           let source = candidate.source;
           try {
             let asset = null;
+            metrics.attemptedFetches += 1;
+            metrics.byKind[candidate.kind] = (metrics.byKind[candidate.kind] || 0) + 1;
+            metrics.byRole[role] = (metrics.byRole[role] || 0) + 1;
             if (candidate.kind === 'canvas') {
               asset = canvasToAsset(candidate.el);
             } else {
@@ -2734,8 +2752,10 @@
               contentBase64: asset.contentBase64,
               mimeType: asset.mimeType,
             });
+            metrics.successfulFetches += 1;
             turn.text = replaceFirst(turn.text, candidate.placeholder, markdownImage);
           } catch (err) {
+            metrics.failedFetches += 1;
             failures.push({
               turnIndex: exportedTurnIndex + 1,
               role,
@@ -2757,18 +2777,30 @@
       }
     } finally {
       await restoreMediaScrollPosition(scrollPosition);
+      metrics.elapsedMs = Date.now() - startedAt;
     }
 
     return {
       turns: updatedTurns,
       files,
       failures,
+      metrics,
     };
   };
 
   const buildExportPayload = async (doc, url, options = {}) => {
+    const startedAt = Date.now();
+    const timings = {
+      ...(options.metrics?.timings || {}),
+    };
+    const counters = {
+      ...(options.metrics?.counters || {}),
+    };
     const chatId = extractChatId(new URL(url).pathname);
+    const scrapeStartedAt = Date.now();
     const turns = options.turns || scrapeTurns(doc);
+    timings.extractMarkdownMs = Date.now() - scrapeStartedAt;
+    counters.turnCount = turns.length;
     if (!chatId) {
       throw new Error('Chat ID não encontrado para a conversa.');
     }
@@ -2784,22 +2816,39 @@
       model: scrapeModelFromDocument(doc),
     };
 
+    const fallbackStartedAt = Date.now();
     const fallbackContent = buildDocument({ meta, turns });
+    timings.buildFallbackMarkdownMs = Date.now() - fallbackStartedAt;
     if (state.progress) {
       updateExportProgress({ label: 'Baixando mídias da conversa...' });
     }
+    const mediaStartedAt = Date.now();
     const media = await collectMediaAssetsForExport(doc, chatId, turns);
+    timings.fetchAssetsMs = Date.now() - mediaStartedAt;
+    counters.mediaFileCount = media.files.length;
+    counters.mediaFailureCount = media.failures.length;
+    counters.mediaCandidateCount = media.metrics?.candidateCount || 0;
+    const buildStartedAt = Date.now();
+    const content = buildDocument({ meta, turns: media.turns });
+    timings.buildMarkdownMs = Date.now() - buildStartedAt;
+    timings.totalBrowserExportMs = Date.now() - startedAt;
 
     return {
       chatId,
       turns: media.turns,
       title: meta.title || chatId,
       filename: buildFilename(chatId),
-      content: buildDocument({ meta, turns: media.turns }),
+      content,
       fallbackContent,
       mediaFiles: media.files,
       mediaFailures: media.failures,
       hydration: options.hydration || null,
+      metrics: {
+        version: 1,
+        timings,
+        counters,
+        media: media.metrics || null,
+      },
     };
   };
 
@@ -3786,7 +3835,9 @@
   };
 
   const collectExportForCurrentConversation = async (options = {}) => {
+    const hydrationStartedAt = Date.now();
     const hydrated = await hydrateConversationToTop(document, window);
+    const hydrateDomMs = Date.now() - hydrationStartedAt;
     if (!hydrated.stats.reachedTop || hydrated.stats.timedOut) {
       throw new Error(
         `Nao consegui carregar o inicio da conversa com seguranca antes de exportar (scroller: ${hydrated.stats.matchedBy}, tentativas: ${hydrated.stats.attempts}). Recarregue a aba e tente novamente.`,
@@ -3794,6 +3845,13 @@
     }
     const payload = await buildExportPayload(document, location.href, {
       turns: hydrated.turns,
+      metrics: {
+        ...(options.metrics || {}),
+        timings: {
+          ...(options.metrics?.timings || {}),
+          hydrateDomMs,
+        },
+      },
       hydration: {
         ...hydrated.stats,
         navigation: options.navigation || null,
@@ -3823,12 +3881,19 @@
   };
 
   const collectExportForConversation = async (item, options = {}) => {
+    const navigationStartedAt = Date.now();
     const navigation = await navigateToConversation(item, options);
+    const openConversationMs = Date.now() - navigationStartedAt;
     return collectExportForCurrentConversation({
       expectedChatId: normalizeExpectedChatId(item),
       previousChatId: navigation?.previousChatId || '',
       previousSignature: navigation?.previousSignature || '',
       navigation: navigation || null,
+      metrics: {
+        timings: {
+          openConversationMs,
+        },
+      },
     });
   };
 

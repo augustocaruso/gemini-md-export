@@ -154,9 +154,9 @@ especialmente no Windows, sem adicionar comportamento grande novo.
 - Um usuário no Windows deve receber uma próxima ação concreta antes de qualquer
   pedido de reinstalação manual.
 
-## Proposta v0.3.2 — Medição e performance do export total
+## v0.3.2 — Medição e performance do export total
 
-Status: proposta.
+Status: implementada.
 
 Objetivo: reduzir lentidão real do fluxo "importar todo o histórico" com
 medição, limites adaptativos e menos trabalho repetido.
@@ -164,24 +164,27 @@ medição, limites adaptativos e menos trabalho repetido.
 ### Entregas
 
 - Instrumentar o relatório JSON do job com métricas por etapa:
-  - tempo de carregar sidebar;
-  - tempo de abrir conversa;
-  - tempo de hidratar DOM;
-  - tempo de extrair Markdown;
-  - tempo de salvar arquivo;
-  - tempo de baixar assets;
-  - retries/timeouts por conversa.
+  - tempo de carregar sidebar (`loadSidebarMs`);
+  - tempo de refresh do sidebar (`refreshSidebarMs`);
+  - tempo de cruzar vault (`scanVaultMs`);
+  - tempo total de exportação (`exportConversationsMs`);
+  - tempo de abrir conversa (`openConversationMs`);
+  - tempo de hidratar DOM (`hydrateDomMs`);
+  - tempo de extrair Markdown (`extractMarkdownMs`);
+  - tempo de salvar arquivo (`saveFilesMs`);
+  - tempo de baixar assets (`fetchAssetsMs`);
+  - retries/timeouts/warnings por conversa em `metrics.conversations`.
 - Medir tamanho médio e máximo dos payloads de heartbeat/snapshot em cenários
-  com centenas de conversas.
+  com centenas de conversas (`payloadMetrics` por cliente e por relatório).
 - Ajustar o heartbeat para payload incremental quando fizer sentido:
-  - evitar reenviar inventário completo se nada mudou;
-  - manter snapshot completo disponível para recuperação;
-  - preservar compatibilidade com protocolo 2.
+  - heartbeat leve com capability `heartbeat-incremental-v1`;
+  - inventário completo permanece em `/bridge/snapshot`;
+  - compatibilidade preservada no protocolo 2.
 - Melhorar política de concorrência de assets:
-  - limite global por job;
-  - backoff por host;
+  - limite global de fetches simultâneos no bridge;
+  - backoff por host após falhas repetidas;
   - cache por URL com TTL;
-  - falha de mídia sempre como warning rastreável, nunca como bloqueio do
+  - falha de mídia como warning rastreável no relatório, sem bloquear o
     Markdown principal.
 - Revisar o lazy-load adaptativo com métricas reais:
   - crescer batch apenas quando houve avanço estável;
@@ -283,6 +286,200 @@ sem responder ao MCP.
   em execução e qual passo falta.
 - Falhas de top-bar não devem impedir export via hotkey/API de debug quando o
   content script está funcional.
+
+## Proposta v0.4.2 — Estabilidade e performance direta da extensão
+
+Status: proposta.
+
+Objetivo: melhorar diretamente a experiência da extensão Chrome durante uso real
+no Gemini Web: menos travamentos, menos trabalho repetido no DOM, exportações
+mais previsíveis, feedback visual melhor e menor chance de o usuário cair em
+Downloads ou placeholders sem perceber.
+
+### Entregas
+
+- Reduzir custo dos observers no content script:
+  - auditar todos os `MutationObserver`;
+  - coalescer ticks com scheduler único;
+  - evitar reprocessar botão/top-bar/lista quando nada relevante mudou;
+  - registrar métricas leves de quantos ticks foram ignorados/processados.
+- Backpressure no canal bridge/extensão:
+  - impedir múltiplos comandos pesados simultâneos na mesma aba;
+  - rejeitar/adiar comando novo quando já houver export/listagem em andamento;
+  - mensagens claras: "já existe um job rodando" ou "aguardando a aba terminar".
+- Cache incremental do sidebar/modal:
+  - não reconstruir a lista inteira a cada heartbeat quando só chegaram poucos
+    itens;
+  - preservar seleção, filtro e scroll sem redesenho completo;
+  - manter deduplicação por `chatId`/URL/título com fonte (`sidebar`/`notebook`).
+- Virtualização simples da lista do modal:
+  - renderizar apenas a janela visível quando houver centenas de conversas;
+  - preservar navegação por teclado/seleção;
+  - evitar `innerHTML` gigante a cada atualização.
+- Safe mode operacional dentro da extensão:
+  - preset conservador acionável por job/tool;
+  - menor batch de lazy-load;
+  - menor concorrência de mídia;
+  - timeouts mais longos;
+  - menos reloads automáticos agressivos;
+  - label visível no progresso quando safe mode estiver ativo.
+- Fila de mídia mais robusta:
+  - prioridade para Markdown principal antes de assets;
+  - limite global de concorrência por job;
+  - cancelamento ao cancelar job;
+  - retries curtos e idempotentes;
+  - warnings rastreáveis sem segurar a conclusão do Markdown.
+- Progress dock orientado por fases reais:
+  - diferenciar listagem, cruzamento, navegação, hidratação, extração, mídia e
+    escrita;
+  - mostrar quando o job está retomando relatório anterior;
+  - indicar "histórico verificado" versus "fim não confirmado";
+  - evitar sensação de travamento em conversas longas.
+- Persistência melhor de destino e preferências:
+  - lembrar último vault/diretório escolhido por perfil;
+  - validar se o destino ainda existe antes de iniciar;
+  - quando cair para Downloads, mostrar aviso persistente e caminho esperado.
+
+### Critérios de aceite
+
+- Em histórico grande, abrir/filtrar/selecionar no modal não deve congelar a
+  página por redesenho completo da lista.
+- Um job em andamento deve impedir comandos concorrentes perigosos na mesma aba.
+- Assets lentos não podem atrasar a gravação do Markdown principal.
+- O usuário deve enxergar a fase real do trabalho e saber quando o export está
+  em safe mode, retomando relatório ou sem fim de histórico confirmado.
+
+## Proposta v0.4.3 — Afinidade confiável entre agente e aba Gemini
+
+Status: proposta.
+
+Objetivo: permitir várias instâncias de MCP/CLI/agente usando várias abas do
+Gemini Web de forma previsível, sem depender da aba ativa, do último heartbeat
+ou de escolha implícita da bridge.
+
+### Problema
+
+Hoje a bridge recebe heartbeats de várias abas Gemini e tende a preferir a aba
+ativa ou mais recente. Isso é aceitável para uso simples, mas vira bagunça
+quando há múltiplas sessões Gemini CLI, múltiplos agentes ou múltiplas abas
+Gemini abertas. Um agente pode listar/exportar a aba errada sem perceber.
+
+### Entregas
+
+- Modelo de identidade de aba:
+  - `clientId` estável por content script;
+  - `tabId`/`windowId` vindos do service worker quando disponíveis;
+  - URL, `chatId`, notebook/project id, título e `isActiveTab`;
+  - `lastSeenAt`, `lastHeartbeatAt`, `buildStamp` e saúde do canal.
+- Modelo de sessão/claim:
+  - cada MCP/CLI/agente recebe ou informa um `sessionId`;
+  - uma sessão pode fazer claim de uma aba Gemini específica;
+  - a claim tem TTL/lease renovável;
+  - job em execução mantém a claim até terminar/cancelar;
+  - claims expiradas são liberadas automaticamente.
+- Roteamento explícito:
+  - tools e endpoints aceitam `clientId`, `tabId` ou `claimId`;
+  - se a sessão já tem claim, ela vence fallback por aba ativa;
+  - se não há claim e existem várias abas candidatas, retornar erro
+    acionável pedindo escolher/listar abas em vez de adivinhar;
+  - fallback por aba ativa só é permitido quando há uma única candidata ou
+    quando o caller pede explicitamente.
+- Novas capacidades operacionais:
+  - listar abas Gemini conectadas com estado/URL/chat atual;
+  - reivindicar aba por `clientId`/`tabId`/chat atual;
+  - liberar claim;
+  - mostrar claim atual;
+  - trocar claim de sessão com confirmação quando houver job em andamento.
+- Indicador visual na aba reivindicada:
+  - overlay/borda discreta dentro do Gemini Web quando a aba está em uso por
+    uma sessão do exporter;
+  - texto curto: "Gemini Export ativo nesta aba";
+  - cor/label diferente por sessão quando houver múltiplas claims;
+  - não interferir com clique, scroll, top-bar nem layout do Gemini;
+  - desaparecer quando a claim expirar/liberar.
+- Integração com jobs:
+  - `gemini_export_recent_chats`, `gemini_export_missing_chats`,
+    `gemini_reexport_chats` e notebook exports prendem a aba por claim;
+  - status do job mostra `clientId`, `tabId`, `claimId` e sessão dona;
+  - cancelamento libera a claim;
+  - retomada por relatório tenta voltar para a mesma aba, mas pede escolha se
+    ela não estiver conectada.
+- Preparação para CLI:
+  - CLI futura deve poder usar `--tab`, `--claim`, `tabs list`, `tabs claim`,
+    `tabs release`;
+  - MCP continua usando o mesmo modelo, sem lógica paralela.
+
+### Critérios de aceite
+
+- Com duas abas Gemini abertas, o agente não deve exportar nada sem saber qual
+  aba está usando.
+- Duas sessões diferentes devem conseguir usar duas abas diferentes ao mesmo
+  tempo sem roubar comandos uma da outra.
+- Uma sessão com claim não deve ser redirecionada para a aba ativa por engano.
+- O usuário deve conseguir ver visualmente qual aba está "presa" ao exporter.
+- Se a aba reivindicada fecha ou fica stale, a próxima tool deve retornar erro
+  claro e pedir escolher outra aba, não cair silenciosamente em outra.
+
+## Proposta v0.4.4 — Observabilidade e recuperação assistida
+
+Status: proposta.
+
+Objetivo: reduzir o tempo entre "travou" e "sabemos onde travou". Esta fase não
+substitui as melhorias diretas da `v0.4.2` nem o roteamento confiável da
+`v0.4.3`; ela melhora diagnóstico, suporte, reprodução e retomada segura antes
+da migração CLI-first.
+
+### Entregas
+
+- Flight recorder local:
+  - log circular JSONL com eventos operacionais recentes;
+  - sem conteúdo dos chats por padrão;
+  - eventos de bridge start/stop, modo proxy, reload de extensão, heartbeat
+    atrasado, comando enviado, timeout, queda de SSE/long-poll, mudança de fase
+    de job, warning de asset e falha de escrita;
+  - limite de tamanho e rotação para não crescer sem controle.
+- Support bundle seguro:
+  - script/comando que gera um `.zip` ou pasta de diagnóstico;
+  - inclui `/agent/diagnostics`, `/healthz`, versão/protocolo/build, processos,
+    dono da porta, config relevante sem segredos, últimos eventos do flight
+    recorder e último relatório de job;
+  - exclui Markdown/conteúdo dos chats por padrão;
+  - só inclui raw exports quando o usuário pedir explicitamente.
+- Safe mode para máquinas lentas/instáveis:
+  - preset conservador para Windows ou PCs ruins;
+  - batches menores;
+  - concorrência de assets menor;
+  - timeouts maiores;
+  - menos tentativas agressivas de reload;
+  - mensagens de progresso mais explícitas;
+  - retomada por relatório sempre orientada.
+- Journal granular de job:
+  - registrar por conversa as fases `queued`, `opened`, `hydrated`,
+    `extracted`, `media`, `saved`, `verified`, `failed`;
+  - permitir identificar com precisão onde caiu;
+  - evitar trabalho repetido quando uma etapa já foi comprovadamente concluída.
+- Testes de fault injection:
+  - extensão desconecta no meio do job;
+  - service worker para de responder;
+  - `/bridge/events` cai e precisa voltar por heartbeat/long-poll;
+  - asset timeout;
+  - URL nova com DOM antigo;
+  - porta ocupada;
+  - primário antigo/incompatível;
+  - scroll do Gemini não cresce.
+- Fixtures reais sanitizadas:
+  - snapshots de DOM do Gemini para sidebar, top-bar, conversa e notebook;
+  - sem dados pessoais;
+  - usadas para proteger scraping/injeção contra mudanças silenciosas do Gemini.
+
+### Critérios de aceite
+
+- Ao receber um relato "ficou lento/travou", o agente deve conseguir pedir um
+  bundle seguro e dizer a fase provável da falha sem acesso ao PC.
+- O bundle não deve vazar conteúdo de chats por padrão.
+- Safe mode deve sacrificar velocidade para reduzir timeouts em Windows lento.
+- Fault injection deve cobrir pelo menos uma falha de transporte, uma falha de
+  DOM, uma falha de asset e uma falha de processo/porta.
 
 ## Proposta v0.5.0 — CLI-first sobre a bridge local
 

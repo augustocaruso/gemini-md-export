@@ -101,6 +101,36 @@ test('job status diferencia lote parcial de historico inteiro verificado', () =>
   assert.match(source, /loadMoreTrace/);
 });
 
+test('export total registra métricas de performance no status e relatório', () => {
+  const serverSource = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const contentSource = readFileSync(resolve(ROOT, 'src', 'userscript-shell.js'), 'utf-8');
+  const jobBlock = serverSource.match(
+    /const runRecentChatsExportJob = async[\s\S]*?\nconst startRecentChatsExportJob/,
+  )?.[0];
+  assert.ok(jobBlock, 'runRecentChatsExportJob deve existir');
+  assert.match(serverSource, /const createExportJobMetrics = \(\) =>/);
+  assert.match(serverSource, /summarizeExportJobMetrics/);
+  assert.match(serverSource, /measureJobTiming\(job, 'loadSidebarMs'/);
+  assert.match(serverSource, /recordJobTimingFrom\(job, 'refreshSidebarMs'/);
+  assert.match(serverSource, /recordJobTimingFrom\(job, 'exportConversationsMs'/);
+  assert.match(serverSource, /recordJobTimingFrom\(job, 'writeReportMs'/);
+  assert.match(serverSource, /scanVaultMs/);
+  assert.match(serverSource, /phaseTimings/);
+  assert.match(serverSource, /payloads:\s*summarizePayloadMetrics\(client\)/);
+  assert.match(serverSource, /lazyLoad:\s*summarizeLoadMoreMetrics/);
+  assert.match(serverSource, /assets:\s*\{/);
+  assert.match(jobBlock, /startConversationMetric/);
+  assert.match(jobBlock, /finishConversationMetric/);
+  assert.match(jobBlock, /mediaWarnings/);
+  assert.match(jobBlock, /assetTimeouts/);
+  assert.match(jobBlock, /result\.metrics/);
+  assert.match(contentSource, /openConversationMs/);
+  assert.match(contentSource, /hydrateDomMs/);
+  assert.match(contentSource, /extractMarkdownMs/);
+  assert.match(contentSource, /fetchAssetsMs/);
+  assert.match(contentSource, /mediaCandidateCount/);
+});
+
 test('export recent chats expõe knobs de diagnóstico para lazy-load lento', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const block = source.match(

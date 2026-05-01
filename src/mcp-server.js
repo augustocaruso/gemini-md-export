@@ -72,6 +72,29 @@ const BRIDGE_ASSET_FETCH_CACHE_MAX_ENTRIES = Math.max(
   0,
   Math.min(1000, Number(process.env.GEMINI_MCP_ASSET_FETCH_CACHE_MAX_ENTRIES || 300)),
 );
+const BRIDGE_ASSET_FETCH_MAX_IN_FLIGHT = Math.max(
+  1,
+  Math.min(20, Number(process.env.GEMINI_MCP_ASSET_FETCH_MAX_IN_FLIGHT || 4)),
+);
+const BRIDGE_ASSET_FETCH_CACHE_TTL_MS = Math.max(
+  0,
+  Math.min(
+    24 * 60 * 60_000,
+    Number(process.env.GEMINI_MCP_ASSET_FETCH_CACHE_TTL_MS || 30 * 60_000),
+  ),
+);
+const BRIDGE_ASSET_HOST_BACKOFF_FAILURE_THRESHOLD = Math.max(
+  1,
+  Math.min(20, Number(process.env.GEMINI_MCP_ASSET_HOST_BACKOFF_FAILURE_THRESHOLD || 3)),
+);
+const BRIDGE_ASSET_HOST_BACKOFF_BASE_MS = Math.max(
+  100,
+  Math.min(60_000, Number(process.env.GEMINI_MCP_ASSET_HOST_BACKOFF_BASE_MS || 2000)),
+);
+const BRIDGE_ASSET_HOST_BACKOFF_MAX_MS = Math.max(
+  BRIDGE_ASSET_HOST_BACKOFF_BASE_MS,
+  Math.min(10 * 60_000, Number(process.env.GEMINI_MCP_ASSET_HOST_BACKOFF_MAX_MS || 30_000)),
+);
 const ALLOWED_BRIDGE_ORIGIN = 'https://gemini.google.com';
 const RECENT_CHATS_CACHE_MAX_AGE_MS = Number(
   process.env.GEMINI_MCP_RECENT_CHATS_CACHE_MAX_AGE_MS || DEFAULT_RECENT_CHATS_CACHE_MAX_AGE_MS,
@@ -1092,6 +1115,7 @@ const buildEnvironmentDiagnostics = async () => {
     export: {
       outputDir,
       defaultExportDir: DEFAULT_EXPORT_DIR,
+      bridgeAssetFetch: snapshotBridgeAssetMetrics(),
       runningJobCount: [...exportJobs.values()].filter((job) => !isTerminalExportJobStatus(job.status))
         .length,
       recentJobs: summarizeRecentExportJobs(5),
@@ -1493,6 +1517,51 @@ const dropClientsAfterExtensionReload = () => {
   }
 };
 
+const emptyPayloadMetric = () => ({
+  count: 0,
+  totalBytes: 0,
+  lastBytes: null,
+  maxBytes: 0,
+  lastAt: null,
+});
+
+const recordPayloadMetric = (client, kind, bytes) => {
+  const size = Number(bytes);
+  if (!Number.isFinite(size) || size < 0) return;
+  client.payloadMetrics = client.payloadMetrics || {};
+  const metric = client.payloadMetrics[kind] || emptyPayloadMetric();
+  metric.count += 1;
+  metric.totalBytes += size;
+  metric.lastBytes = size;
+  metric.maxBytes = Math.max(metric.maxBytes || 0, size);
+  metric.lastAt = new Date().toISOString();
+  client.payloadMetrics[kind] = metric;
+};
+
+const summarizePayloadMetric = (metric) => {
+  if (!metric || metric.count <= 0) {
+    return {
+      count: 0,
+      lastBytes: null,
+      avgBytes: null,
+      maxBytes: 0,
+      lastAt: null,
+    };
+  }
+  return {
+    count: metric.count,
+    lastBytes: metric.lastBytes ?? null,
+    avgBytes: Math.round(metric.totalBytes / metric.count),
+    maxBytes: metric.maxBytes || 0,
+    lastAt: metric.lastAt || null,
+  };
+};
+
+const summarizePayloadMetrics = (client) => ({
+  heartbeat: summarizePayloadMetric(client?.payloadMetrics?.heartbeat),
+  snapshot: summarizePayloadMetric(client?.payloadMetrics?.snapshot),
+});
+
 const upsertClient = (payload, meta = {}) => {
   const existing = clients.get(payload.clientId);
   const next = existing || {
@@ -1508,6 +1577,7 @@ const upsertClient = (payload, meta = {}) => {
   if (meta.heartbeat === true) {
     next.lastHeartbeatAt = now;
     next.lastHeartbeatPayloadBytes = meta.payloadBytes ?? next.lastHeartbeatPayloadBytes ?? null;
+    recordPayloadMetric(next, 'heartbeat', meta.payloadBytes);
   }
   next.capabilities = Array.isArray(payload.capabilities)
     ? payload.capabilities
@@ -1564,6 +1634,7 @@ const upsertClientSnapshot = (payload, meta = {}) => {
   const now = Date.now();
   client.lastSnapshotAt = now;
   client.lastSnapshotPayloadBytes = meta.payloadBytes ?? null;
+  recordPayloadMetric(client, 'snapshot', meta.payloadBytes);
   client.snapshotHash = payload.snapshotHash || client.snapshotHash || null;
   client.snapshotDirty = false;
   client.lastSnapshotSummary = {
@@ -1945,6 +2016,7 @@ const buildBridgeHealth = (client, now = Date.now()) => {
     lastSnapshotAt: client.lastSnapshotAt ? new Date(client.lastSnapshotAt).toISOString() : null,
     lastHeartbeatPayloadBytes: client.lastHeartbeatPayloadBytes ?? null,
     lastSnapshotPayloadBytes: client.lastSnapshotPayloadBytes ?? null,
+    payloadMetrics: summarizePayloadMetrics(client),
     capabilities: client.capabilities || [],
     lastError: client.metrics?.lastError || null,
   };
@@ -1973,6 +2045,7 @@ const summarizeClient = (client) => ({
   },
   page: client.page || null,
   bridgeHealth: buildBridgeHealth(client),
+  payloadMetrics: summarizePayloadMetrics(client),
   listedConversationCount: client.conversations?.length || 0,
   sidebarConversationCount: recentConversationsForClient(client).length,
   notebookConversationCount: notebookConversationsForClient(client).length,
@@ -2414,6 +2487,146 @@ const isPrivateNetworkHostname = (hostname) => {
 
 const bridgeAssetCache = new Map();
 const bridgeAssetInFlight = new Map();
+const bridgeAssetHostBackoff = new Map();
+const bridgeAssetFetchQueue = [];
+let bridgeAssetActiveFetches = 0;
+const bridgeAssetMetrics = {
+  requests: 0,
+  fetched: 0,
+  queued: 0,
+  cacheHits: 0,
+  cacheExpired: 0,
+  inFlightDeduped: 0,
+  failures: 0,
+  backoffHits: 0,
+  bytesFetched: 0,
+  byHost: new Map(),
+};
+
+const bridgeAssetHostMetric = (host) => {
+  const key = host || 'unknown';
+  const metric =
+    bridgeAssetMetrics.byHost.get(key) ||
+    {
+      requests: 0,
+      fetched: 0,
+      queued: 0,
+      cacheHits: 0,
+      cacheExpired: 0,
+      inFlightDeduped: 0,
+      failures: 0,
+      backoffHits: 0,
+      bytesFetched: 0,
+      lastError: null,
+      backoffUntil: null,
+    };
+  bridgeAssetMetrics.byHost.set(key, metric);
+  return metric;
+};
+
+const recordBridgeAssetMetric = (host, kind, details = {}) => {
+  if (bridgeAssetMetrics[kind] !== undefined) {
+    bridgeAssetMetrics[kind] += details.delta ?? 1;
+  }
+  const hostMetric = bridgeAssetHostMetric(host);
+  if (hostMetric[kind] !== undefined) {
+    hostMetric[kind] += details.delta ?? 1;
+  }
+  if (details.bytes) {
+    bridgeAssetMetrics.bytesFetched += details.bytes;
+    hostMetric.bytesFetched += details.bytes;
+  }
+  if (details.error) {
+    hostMetric.lastError = details.error;
+  }
+  if (details.backoffUntil) {
+    hostMetric.backoffUntil = details.backoffUntil;
+  }
+};
+
+const topBridgeAssetHosts = () =>
+  Array.from(bridgeAssetMetrics.byHost.entries())
+    .map(([host, metric]) => ({ host, ...metric }))
+    .sort(
+      (a, b) =>
+        b.requests - a.requests ||
+        b.failures - a.failures ||
+        b.bytesFetched - a.bytesFetched,
+    )
+    .slice(0, 20);
+
+const snapshotBridgeAssetMetrics = () => ({
+  requests: bridgeAssetMetrics.requests,
+  fetched: bridgeAssetMetrics.fetched,
+  queued: bridgeAssetMetrics.queued,
+  cacheHits: bridgeAssetMetrics.cacheHits,
+  cacheExpired: bridgeAssetMetrics.cacheExpired,
+  inFlightDeduped: bridgeAssetMetrics.inFlightDeduped,
+  failures: bridgeAssetMetrics.failures,
+  backoffHits: bridgeAssetMetrics.backoffHits,
+  bytesFetched: bridgeAssetMetrics.bytesFetched,
+  cacheEntries: bridgeAssetCache.size,
+  inFlight: bridgeAssetInFlight.size,
+  maxInFlight: BRIDGE_ASSET_FETCH_MAX_IN_FLIGHT,
+  activeFetches: bridgeAssetActiveFetches,
+  queuedFetches: bridgeAssetFetchQueue.length,
+  topHosts: topBridgeAssetHosts(),
+});
+
+const diffBridgeAssetMetrics = (baseline = {}) => {
+  const current = snapshotBridgeAssetMetrics();
+  const fields = [
+    'requests',
+    'fetched',
+    'queued',
+    'cacheHits',
+    'cacheExpired',
+    'inFlightDeduped',
+    'failures',
+    'backoffHits',
+    'bytesFetched',
+  ];
+  const delta = {};
+  for (const field of fields) {
+    delta[field] = Math.max(0, (current[field] || 0) - (baseline[field] || 0));
+  }
+  return {
+    ...delta,
+    cacheEntries: current.cacheEntries,
+    inFlight: current.inFlight,
+    activeFetches: bridgeAssetActiveFetches,
+    queuedFetches: bridgeAssetFetchQueue.length,
+    topHosts: current.topHosts,
+  };
+};
+
+const runNextBridgeAssetFetch = () => {
+  if (bridgeAssetActiveFetches >= BRIDGE_ASSET_FETCH_MAX_IN_FLIGHT) return;
+  const next = bridgeAssetFetchQueue.shift();
+  if (!next) return;
+  bridgeAssetActiveFetches += 1;
+  next();
+};
+
+const withBridgeAssetFetchSlot = (host, fn) =>
+  new Promise((resolvePromise, reject) => {
+    const run = () => {
+      Promise.resolve()
+        .then(fn)
+        .then(resolvePromise, reject)
+        .finally(() => {
+          bridgeAssetActiveFetches = Math.max(0, bridgeAssetActiveFetches - 1);
+          runNextBridgeAssetFetch();
+        });
+    };
+    if (bridgeAssetActiveFetches < BRIDGE_ASSET_FETCH_MAX_IN_FLIGHT) {
+      bridgeAssetActiveFetches += 1;
+      run();
+      return;
+    }
+    recordBridgeAssetMetric(host, 'queued');
+    bridgeAssetFetchQueue.push(run);
+  });
 
 const rememberBridgeAsset = (key, value) => {
   if (BRIDGE_ASSET_FETCH_CACHE_MAX_ENTRIES <= 0) return;
@@ -2421,10 +2634,64 @@ const rememberBridgeAsset = (key, value) => {
   bridgeAssetCache.set(key, {
     ...value,
     cachedAt: new Date().toISOString(),
+    cachedAtMs: Date.now(),
   });
   while (bridgeAssetCache.size > BRIDGE_ASSET_FETCH_CACHE_MAX_ENTRIES) {
     bridgeAssetCache.delete(bridgeAssetCache.keys().next().value);
   }
+};
+
+const readBridgeAssetCache = (cacheKey, host) => {
+  const cached = bridgeAssetCache.get(cacheKey);
+  if (!cached) return null;
+  const cachedAtMs = Number(cached.cachedAtMs || Date.parse(cached.cachedAt || ''));
+  const ageMs = Number.isFinite(cachedAtMs) ? Date.now() - cachedAtMs : Infinity;
+  if (BRIDGE_ASSET_FETCH_CACHE_TTL_MS > 0 && ageMs > BRIDGE_ASSET_FETCH_CACHE_TTL_MS) {
+    bridgeAssetCache.delete(cacheKey);
+    recordBridgeAssetMetric(host, 'cacheExpired');
+    return null;
+  }
+  bridgeAssetCache.delete(cacheKey);
+  bridgeAssetCache.set(cacheKey, cached);
+  recordBridgeAssetMetric(host, 'cacheHits');
+  return {
+    ...cached,
+    cacheHit: true,
+    inFlightDeduped: false,
+    cacheAgeMs: Number.isFinite(ageMs) ? Math.max(0, ageMs) : null,
+  };
+};
+
+const assertBridgeAssetHostNotBackedOff = (host) => {
+  const state = bridgeAssetHostBackoff.get(host);
+  if (!state?.untilMs || Date.now() >= state.untilMs) return;
+  const until = new Date(state.untilMs).toISOString();
+  recordBridgeAssetMetric(host, 'backoffHits', { backoffUntil: until });
+  throw new Error(`Host de mídia temporariamente em backoff até ${until}.`);
+};
+
+const recordBridgeAssetHostSuccess = (host) => {
+  bridgeAssetHostBackoff.delete(host);
+};
+
+const recordBridgeAssetHostFailure = (host, error) => {
+  const previous = bridgeAssetHostBackoff.get(host) || { failures: 0, untilMs: 0 };
+  const failures = previous.failures + 1;
+  let untilMs = previous.untilMs || 0;
+  if (failures >= BRIDGE_ASSET_HOST_BACKOFF_FAILURE_THRESHOLD) {
+    const exponent = failures - BRIDGE_ASSET_HOST_BACKOFF_FAILURE_THRESHOLD;
+    const waitMs = Math.min(
+      BRIDGE_ASSET_HOST_BACKOFF_MAX_MS,
+      BRIDGE_ASSET_HOST_BACKOFF_BASE_MS * 2 ** Math.min(8, exponent),
+    );
+    untilMs = Date.now() + waitMs;
+  }
+  const backoffUntil = untilMs ? new Date(untilMs).toISOString() : null;
+  bridgeAssetHostBackoff.set(host, { failures, untilMs, lastError: error });
+  recordBridgeAssetMetric(host, 'failures', {
+    error,
+    backoffUntil,
+  });
 };
 
 const fetchAssetForBridge = async (source) => {
@@ -2437,18 +2704,16 @@ const fetchAssetForBridge = async (source) => {
   }
 
   const cacheKey = url.href;
-  const cached = bridgeAssetCache.get(cacheKey);
+  const host = url.hostname.toLowerCase();
+  recordBridgeAssetMetric(host, 'requests');
+  assertBridgeAssetHostNotBackedOff(host);
+  const cached = readBridgeAssetCache(cacheKey, host);
   if (cached) {
-    bridgeAssetCache.delete(cacheKey);
-    bridgeAssetCache.set(cacheKey, cached);
-    return {
-      ...cached,
-      cacheHit: true,
-      inFlightDeduped: false,
-    };
+    return cached;
   }
   if (bridgeAssetInFlight.has(cacheKey)) {
     const result = await bridgeAssetInFlight.get(cacheKey);
+    recordBridgeAssetMetric(host, 'inFlightDeduped');
     return {
       ...result,
       cacheHit: false,
@@ -2458,7 +2723,7 @@ const fetchAssetForBridge = async (source) => {
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), BRIDGE_ASSET_FETCH_TIMEOUT_MS);
-  const fetchPromise = (async () => {
+  const fetchPromise = withBridgeAssetFetchSlot(host, async () => {
     const response = await fetch(url.href, {
       headers: {
         Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
@@ -2491,13 +2756,18 @@ const fetchAssetForBridge = async (source) => {
       cacheHit: false,
       inFlightDeduped: false,
     };
-  })();
+  });
 
   bridgeAssetInFlight.set(cacheKey, fetchPromise);
   try {
     const result = await fetchPromise;
+    recordBridgeAssetHostSuccess(host);
+    recordBridgeAssetMetric(host, 'fetched', { bytes: result.bytes || 0 });
     rememberBridgeAsset(cacheKey, result);
     return result;
+  } catch (err) {
+    recordBridgeAssetHostFailure(host, err?.message || String(err));
+    throw err;
   } finally {
     clearTimeout(timer);
     bridgeAssetInFlight.delete(cacheKey);
@@ -2842,11 +3112,13 @@ const resolveNotebookConversationRequest = (client, args = {}) => {
 };
 
 const downloadConversationItemForClient = async (client, conversation, args = {}) => {
+  const commandStartedAt = Date.now();
   const result = await enqueueCommand(client.clientId, 'get-chat-by-id', {
     item: conversation,
     returnToOriginal: args.returnToOriginal !== false,
     notebookReturnMode: args.notebookReturnMode || null,
   });
+  const browserCommandMs = Date.now() - commandStartedAt;
 
   if (!result?.ok) {
     throw new Error(result?.error || 'Falha ao exportar conversa no browser.');
@@ -2865,7 +3137,31 @@ const downloadConversationItemForClient = async (client, conversation, args = {}
     );
   }
 
+  const saveStartedAt = Date.now();
   const saved = writeExportPayloadBundle(result.payload, { outputDir: args.outputDir });
+  const saveFilesMs = Date.now() - saveStartedAt;
+  const savedMediaBytes = Array.isArray(saved.mediaFiles)
+    ? saved.mediaFiles.reduce((sum, file) => sum + Number(file.bytes || 0), 0)
+    : 0;
+  const payloadMetrics = result.payload?.metrics || {};
+  const metrics = {
+    version: 1,
+    timings: {
+      browserCommandMs,
+      saveFilesMs,
+      ...(payloadMetrics.timings || {}),
+    },
+    counters: {
+      ...(payloadMetrics.counters || {}),
+      mediaFileCount: saved.mediaFileCount || 0,
+      mediaFailureCount: saved.mediaFailureCount || 0,
+      savedBytes: saved.bytes || 0,
+      savedMediaBytes,
+    },
+    hydration: result.payload?.hydration || null,
+    navigation: result.payload?.hydration?.navigation || null,
+    media: payloadMetrics.media || null,
+  };
   return {
     client: summarizeClient(client),
     conversation: result.conversation || conversation,
@@ -2875,6 +3171,7 @@ const downloadConversationItemForClient = async (client, conversation, args = {}
     hydration: result.payload?.hydration || null,
     returnedToOriginal: result.returnedToOriginal ?? null,
     returnError: result.returnError || null,
+    metrics,
     ...saved,
   };
 };
@@ -3242,6 +3539,173 @@ const listRecentChatsForClient = async (client, args = {}) => {
   };
 };
 
+const emptyTimingBucket = () => ({
+  count: 0,
+  totalMs: 0,
+  minMs: null,
+  maxMs: 0,
+  lastMs: null,
+});
+
+const createExportJobMetrics = () => ({
+  version: 1,
+  timings: {},
+  counters: {
+    mediaFiles: 0,
+    mediaWarnings: 0,
+    skippedExisting: 0,
+    browserTimeouts: 0,
+    assetTimeouts: 0,
+    failedConversations: 0,
+    savedBytes: 0,
+  },
+  conversations: [],
+  assetBaseline: snapshotBridgeAssetMetrics(),
+});
+
+const ensureExportJobMetrics = (job) => {
+  job.metrics = job.metrics || createExportJobMetrics();
+  job.metrics.timings = job.metrics.timings || {};
+  job.metrics.counters = job.metrics.counters || {};
+  job.metrics.conversations = job.metrics.conversations || [];
+  job.metrics.assetBaseline = job.metrics.assetBaseline || snapshotBridgeAssetMetrics();
+  return job.metrics;
+};
+
+const recordJobTiming = (job, name, elapsedMs) => {
+  const elapsed = Math.max(0, Math.round(Number(elapsedMs) || 0));
+  const metrics = ensureExportJobMetrics(job);
+  const bucket = metrics.timings[name] || emptyTimingBucket();
+  bucket.count += 1;
+  bucket.totalMs += elapsed;
+  bucket.minMs = bucket.minMs === null ? elapsed : Math.min(bucket.minMs, elapsed);
+  bucket.maxMs = Math.max(bucket.maxMs || 0, elapsed);
+  bucket.lastMs = elapsed;
+  metrics.timings[name] = bucket;
+  return elapsed;
+};
+
+const recordJobTimingFrom = (job, name, startedAt) =>
+  recordJobTiming(job, name, Date.now() - startedAt);
+
+const measureJobTiming = async (job, name, fn) => {
+  const startedAt = Date.now();
+  try {
+    return await fn();
+  } finally {
+    recordJobTimingFrom(job, name, startedAt);
+  }
+};
+
+const recordJobCounter = (job, name, delta = 1) => {
+  const metrics = ensureExportJobMetrics(job);
+  metrics.counters[name] = (metrics.counters[name] || 0) + delta;
+};
+
+const summarizeTimingBucket = (bucket) => {
+  if (!bucket || bucket.count <= 0) {
+    return {
+      count: 0,
+      totalMs: 0,
+      avgMs: null,
+      minMs: null,
+      maxMs: 0,
+      lastMs: null,
+    };
+  }
+  return {
+    count: bucket.count,
+    totalMs: bucket.totalMs,
+    avgMs: Math.round(bucket.totalMs / bucket.count),
+    minMs: bucket.minMs,
+    maxMs: bucket.maxMs,
+    lastMs: bucket.lastMs,
+  };
+};
+
+const summarizeTimingBuckets = (timings = {}) =>
+  Object.fromEntries(
+    Object.entries(timings).map(([name, bucket]) => [name, summarizeTimingBucket(bucket)]),
+  );
+
+const summarizeLoadMoreMetrics = (trace = []) => {
+  const rounds = Array.isArray(trace) ? trace : [];
+  const elapsed = rounds.map((item) => Number(item.elapsedMs || 0)).filter((item) => item >= 0);
+  const deltas = rounds.map((item) => Number(item.delta || 0)).filter((item) => item >= 0);
+  const totalElapsedMs = elapsed.reduce((sum, item) => sum + item, 0);
+  const totalDelta = deltas.reduce((sum, item) => sum + item, 0);
+  const last = rounds[rounds.length - 1] || null;
+  return {
+    rounds: rounds.length,
+    totalElapsedMs,
+    avgRoundMs: rounds.length ? Math.round(totalElapsedMs / rounds.length) : null,
+    maxRoundMs: elapsed.length ? Math.max(...elapsed) : 0,
+    totalDelta,
+    avgDelta: rounds.length ? Math.round(totalDelta / rounds.length) : null,
+    timedOutRounds: rounds.filter((item) => item.timedOut === true).length,
+    noGrowthRounds: rounds.filter((item) => item.grew === false).length,
+    finalNoGrowthRounds: last?.noGrowthRounds ?? null,
+    finalBatchSize: last?.batchSize ?? null,
+    reachedEnd: last?.reachedEnd ?? null,
+    finalAfterCount: last?.afterCount ?? null,
+  };
+};
+
+const startConversationMetric = (job, item) => ({
+  index: item.index ?? null,
+  chatId: item.chatId || null,
+  title: item.title || null,
+  startedAt: new Date().toISOString(),
+  startedMs: Date.now(),
+  timings: {},
+  counters: {},
+});
+
+const finishConversationMetric = (job, metric, status, patch = {}) => {
+  const metrics = ensureExportJobMetrics(job);
+  const finishedAtMs = Date.now();
+  const item = {
+    ...metric,
+    ...patch,
+    status,
+    finishedAt: new Date(finishedAtMs).toISOString(),
+    elapsedMs: Math.max(0, finishedAtMs - (metric.startedMs || finishedAtMs)),
+  };
+  delete item.startedMs;
+  metrics.conversations.push(item);
+  if (metrics.conversations.length > 1000) metrics.conversations.shift();
+  return item;
+};
+
+const browserTimeoutCountFromConversationMetrics = (metrics = {}) =>
+  metrics.hydration?.timedOut === true ? 1 : 0;
+
+const assetTimeoutCountFromConversationMetrics = (metrics = {}) =>
+  metrics.media?.timedOut === true ? 1 : 0;
+
+const summarizeExportJobMetrics = (job, client, { includeConversations = false } = {}) => {
+  const metrics = job.metrics || createExportJobMetrics();
+  const conversations = Array.isArray(metrics.conversations) ? metrics.conversations : [];
+  const assetDelta = diffBridgeAssetMetrics(metrics.assetBaseline);
+  return {
+    version: metrics.version || 1,
+    phaseTimings: summarizeTimingBuckets(metrics.timings),
+    counters: {
+      ...metrics.counters,
+      conversationTimings: conversations.length,
+    },
+    payloads: summarizePayloadMetrics(client),
+    assets: {
+      bridge: assetDelta,
+      mediaFiles: metrics.counters?.mediaFiles || 0,
+      mediaWarnings: metrics.counters?.mediaWarnings || 0,
+    },
+    lazyLoad: summarizeLoadMoreMetrics(job.loadMoreTrace),
+    recentConversations: conversations.slice(-20),
+    ...(includeConversations ? { conversations } : {}),
+  };
+};
+
 const summarizeExportJob = (job) => ({
   jobId: job.jobId,
   type: job.type,
@@ -3298,6 +3762,7 @@ const summarizeExportJob = (job) => ({
   loadMoreRoundsCompleted: job.loadMoreRoundsCompleted || 0,
   loadMoreTimedOut: job.loadMoreTimedOut === true,
   loadMoreTrace: Array.isArray(job.loadMoreTrace) ? job.loadMoreTrace.slice(-20) : [],
+  metrics: summarizeExportJobMetrics(job, clients.get(job.clientId)),
   recentSuccesses: job.recentSuccesses.slice(-10),
   recentSkipped: Array.isArray(job.recentSkipped) ? job.recentSkipped.slice(-10) : [],
   failures: job.failures.slice(-20),
@@ -3381,6 +3846,7 @@ const buildRecentChatsExportReport = (job, client, successes, failures) => ({
   loadMoreRoundsCompleted: job.loadMoreRoundsCompleted || 0,
   loadMoreTimedOut: job.loadMoreTimedOut === true,
   loadMoreTrace: Array.isArray(job.loadMoreTrace) ? job.loadMoreTrace : [],
+  metrics: summarizeExportJobMetrics(job, client, { includeConversations: true }),
   current: job.current || null,
   successes,
   skippedExisting: Array.isArray(job.skippedExisting) ? job.skippedExisting : [],
@@ -3499,6 +3965,7 @@ const buildDirectChatsExportReport = (job, client, successes, failures) => ({
   successCount: successes.length,
   failureCount: failures.length,
   delayMs: job.delayMs,
+  metrics: summarizeExportJobMetrics(job, client, { includeConversations: true }),
   current: job.current || null,
   items: job.items.map((item, index) => ({
     index: index + 1,
@@ -3629,39 +4096,45 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
     persistRecentChatsExportReport(job, client, successes, failures);
     broadcastRecentChatsJobProgress(job, client);
 
-    if (job.exportAll) {
-      const refreshPlan = buildRecentChatsRefreshPlan(client, args, {
-        maxAgeMs: RECENT_CHATS_CACHE_MAX_AGE_MS,
-      });
-      if (refreshPlan.shouldRefresh) {
-        try {
-          const refreshPromise = refreshClientConversations(client, { ensureSidebar: true });
-          const refresh = refreshPlan.preferFastRefresh
-            ? await withTimeout(refreshPromise, RECENT_CHATS_REFRESH_BUDGET_MS)
-            : await refreshPromise;
-          if (refresh?.snapshot) {
-            client.lastSnapshot = refresh.snapshot;
+    await measureJobTiming(job, 'loadSidebarMs', async () => {
+      if (job.exportAll) {
+        const refreshPlan = buildRecentChatsRefreshPlan(client, args, {
+          maxAgeMs: RECENT_CHATS_CACHE_MAX_AGE_MS,
+        });
+        if (refreshPlan.shouldRefresh) {
+          const refreshStartedAt = Date.now();
+          try {
+            const refreshPromise = refreshClientConversations(client, { ensureSidebar: true });
+            const refresh = refreshPlan.preferFastRefresh
+              ? await withTimeout(refreshPromise, RECENT_CHATS_REFRESH_BUDGET_MS)
+              : await refreshPromise;
+            if (refresh?.snapshot) {
+              client.lastSnapshot = refresh.snapshot;
+            }
+          } catch (err) {
+            job.refreshError = err.message;
+          } finally {
+            recordJobTimingFrom(job, 'refreshSidebarMs', refreshStartedAt);
           }
-        } catch (err) {
-          job.refreshError = err.message;
         }
+        const loadMore = await loadAllRecentChatsForClient(client, {
+          ...args,
+          shouldStop: () => job.cancelRequested === true,
+        });
+        job.loadMoreRoundsCompleted = loadMore.roundsCompleted;
+        job.loadMoreTimedOut = loadMore.timedOut === true;
+        job.loadMoreTrace = Array.isArray(loadMore.loadTrace) ? loadMore.loadTrace : [];
+        if (job.loadMoreTimedOut) recordJobCounter(job, 'browserTimeouts');
+      } else {
+        const targetCount = Math.min(MAX_RECENT_CHATS_LOAD_TARGET, job.startIndex - 1 + job.maxChats);
+        await listRecentChatsForClient(client, {
+          ...args,
+          limit: 1,
+          offset: Math.max(0, targetCount - 1),
+          refresh: args.refresh,
+        });
       }
-      const loadMore = await loadAllRecentChatsForClient(client, {
-        ...args,
-        shouldStop: () => job.cancelRequested === true,
-      });
-      job.loadMoreRoundsCompleted = loadMore.roundsCompleted;
-      job.loadMoreTimedOut = loadMore.timedOut === true;
-      job.loadMoreTrace = Array.isArray(loadMore.loadTrace) ? loadMore.loadTrace : [];
-    } else {
-      const targetCount = Math.min(MAX_RECENT_CHATS_LOAD_TARGET, job.startIndex - 1 + job.maxChats);
-      await listRecentChatsForClient(client, {
-        ...args,
-        limit: 1,
-        offset: Math.max(0, targetCount - 1),
-        refresh: args.refresh,
-      });
-    }
+    });
 
     if (job.cancelRequested) {
       job.status = 'cancelled';
@@ -3708,7 +4181,9 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
       persistRecentChatsExportReport(job, client, successes, failures);
       broadcastRecentChatsJobProgress(job, client);
 
-      const vaultScan = scanDownloadedGeminiExportsInVault(job.existingScanDir);
+      const vaultScan = await measureJobTiming(job, 'scanVaultMs', async () =>
+        scanDownloadedGeminiExportsInVault(job.existingScanDir),
+      );
       job.vaultScan = summarizeVaultScan(vaultScan);
 
       const missing = [];
@@ -3771,6 +4246,7 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
     persistRecentChatsExportReport(job, client, successes, failures);
     broadcastRecentChatsJobProgress(job, client);
 
+    const exportingStartedAt = Date.now();
     for (let i = 0; i < selected.length; i += 1) {
       if (job.cancelRequested) {
         job.status = 'cancelled';
@@ -3784,6 +4260,11 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
         title: conversation.title || null,
         chatId: conversation.chatId || conversation.id || null,
       };
+      const itemMetric = startConversationMetric(job, {
+        index,
+        chatId: job.current.chatId,
+        title: job.current.title,
+      });
       touchExportJob(job);
       broadcastRecentChatsJobProgress(job, client);
 
@@ -3811,6 +4292,14 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
             job.recentSkipped.push(skipped);
             job.recentSkipped = job.recentSkipped.slice(-10);
             job.skippedCount = job.skippedExisting.length;
+            recordJobCounter(job, 'skippedExisting');
+            finishConversationMetric(job, itemMetric, 'skipped_existing', {
+              chatId: existing.chatId,
+              filename: existing.filename,
+              filePath: existing.filePath,
+              bytes: existing.bytes,
+              reason: 'existing-file',
+            });
             continue;
           }
         }
@@ -3831,11 +4320,32 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
           mediaFailureCount: result.mediaFailureCount || 0,
           turns: result.turns,
           overwritten: result.overwritten,
+          metrics: result.metrics || null,
         };
         successes.push(success);
         job.recentSuccesses.push(success);
         job.recentSuccesses = job.recentSuccesses.slice(-10);
         job.successCount = successes.length;
+        recordJobCounter(job, 'mediaFiles', result.mediaFileCount || 0);
+        recordJobCounter(job, 'mediaWarnings', result.mediaFailureCount || 0);
+        recordJobCounter(
+          job,
+          'savedBytes',
+          (result.bytes || 0) + (result.metrics?.counters?.savedMediaBytes || 0),
+        );
+        recordJobCounter(job, 'browserTimeouts', browserTimeoutCountFromConversationMetrics(result.metrics));
+        recordJobCounter(job, 'assetTimeouts', assetTimeoutCountFromConversationMetrics(result.metrics));
+        finishConversationMetric(job, itemMetric, 'success', {
+          chatId: result.chatId,
+          filename: result.filename,
+          filePath: result.filePath,
+          bytes: result.bytes,
+          timings: result.metrics?.timings || {},
+          counters: result.metrics?.counters || {},
+          hydration: result.metrics?.hydration || null,
+          navigation: result.metrics?.navigation || null,
+          media: result.metrics?.media || null,
+        });
       } catch (err) {
         const failure = {
           index,
@@ -3847,6 +4357,13 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
         job.failures.push(failure);
         job.failures = job.failures.slice(-20);
         job.failureCount = failures.length;
+        recordJobCounter(job, 'failedConversations');
+        if (/timeout|tempo esgotado/i.test(err.message)) {
+          recordJobCounter(job, 'browserTimeouts');
+        }
+        finishConversationMetric(job, itemMetric, 'failed', {
+          error: err.message,
+        });
       } finally {
         job.completed = resumedCompletedCount + i + 1;
         touchExportJob(job);
@@ -3854,6 +4371,7 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
         broadcastRecentChatsJobProgress(job, client);
       }
     }
+    recordJobTimingFrom(job, 'exportConversationsMs', exportingStartedAt);
 
     if (!job.cancelRequested) {
       job.phase = 'writing-report';
@@ -3878,10 +4396,23 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
     job.current = null;
     job.finishedAt = new Date().toISOString();
     touchExportJob(job);
+    const finalReportStartedAt = Date.now();
     try {
       persistRecentChatsExportReport(job, client, successes, failures);
     } catch {
       // Status em memória permanece disponível mesmo se o relatório final falhar.
+    } finally {
+      recordJobTimingFrom(job, 'writeReportMs', finalReportStartedAt);
+      try {
+        if (job.reportFile) {
+          overwriteExportReport(
+            job.reportFile,
+            buildRecentChatsExportReport(job, client, successes, failures),
+          );
+        }
+      } catch {
+        // A primeira escrita já deixou o status principal; esta só atualiza a métrica final.
+      }
     }
     broadcastRecentChatsJobProgress(job, client);
   }
@@ -3951,6 +4482,7 @@ const startRecentChatsExportJob = (client, args = {}) => {
     loadMoreRoundsCompleted: 0,
     loadMoreTimedOut: false,
     loadMoreTrace: [],
+    metrics: createExportJobMetrics(),
     recentSuccesses: resume?.previousSuccesses?.slice(-10) || [],
     recentSkipped: resume?.previousSkipped?.slice(-10) || [],
     skippedExisting: resume?.previousSkipped ? [...resume.previousSkipped] : [],
@@ -3970,6 +4502,7 @@ const runDirectChatsExportJob = async (job, client, args = {}) => {
     persistDirectChatsExportReport(job, client, successes, failures);
     broadcastDirectChatsJobProgress(job, client);
 
+    const exportingStartedAt = Date.now();
     for (let i = 0; i < job.items.length; i += 1) {
       if (job.cancelRequested) {
         job.status = 'cancelled';
@@ -3985,6 +4518,11 @@ const runDirectChatsExportJob = async (job, client, args = {}) => {
         chatId: conversation.chatId,
         sourcePath: conversation.request?.sourcePath || null,
       };
+      const itemMetric = startConversationMetric(job, {
+        index,
+        chatId: conversation.chatId,
+        title: conversation.title || null,
+      });
       touchExportJob(job);
       broadcastDirectChatsJobProgress(job, client);
 
@@ -4006,11 +4544,33 @@ const runDirectChatsExportJob = async (job, client, args = {}) => {
           turns: result.turns,
           overwritten: result.overwritten,
           sourcePath: conversation.request?.sourcePath || null,
+          metrics: result.metrics || null,
         };
         successes.push(success);
         job.recentSuccesses.push(success);
         job.recentSuccesses = job.recentSuccesses.slice(-10);
         job.successCount = successes.length;
+        recordJobCounter(job, 'mediaFiles', result.mediaFileCount || 0);
+        recordJobCounter(job, 'mediaWarnings', result.mediaFailureCount || 0);
+        recordJobCounter(
+          job,
+          'savedBytes',
+          (result.bytes || 0) + (result.metrics?.counters?.savedMediaBytes || 0),
+        );
+        recordJobCounter(job, 'browserTimeouts', browserTimeoutCountFromConversationMetrics(result.metrics));
+        recordJobCounter(job, 'assetTimeouts', assetTimeoutCountFromConversationMetrics(result.metrics));
+        finishConversationMetric(job, itemMetric, 'success', {
+          chatId: result.chatId,
+          filename: result.filename,
+          filePath: result.filePath,
+          bytes: result.bytes,
+          sourcePath: conversation.request?.sourcePath || null,
+          timings: result.metrics?.timings || {},
+          counters: result.metrics?.counters || {},
+          hydration: result.metrics?.hydration || null,
+          navigation: result.metrics?.navigation || null,
+          media: result.metrics?.media || null,
+        });
       } catch (err) {
         const failure = {
           index,
@@ -4023,6 +4583,14 @@ const runDirectChatsExportJob = async (job, client, args = {}) => {
         job.failures.push(failure);
         job.failures = job.failures.slice(-20);
         job.failureCount = failures.length;
+        recordJobCounter(job, 'failedConversations');
+        if (/timeout|tempo esgotado/i.test(err.message)) {
+          recordJobCounter(job, 'browserTimeouts');
+        }
+        finishConversationMetric(job, itemMetric, 'failed', {
+          sourcePath: conversation.request?.sourcePath || null,
+          error: err.message,
+        });
       } finally {
         job.completed = i + 1;
         touchExportJob(job);
@@ -4034,6 +4602,7 @@ const runDirectChatsExportJob = async (job, client, args = {}) => {
         await sleep(job.delayMs);
       }
     }
+    recordJobTimingFrom(job, 'exportConversationsMs', exportingStartedAt);
 
     if (!job.cancelRequested) {
       job.phase = 'writing-report';
@@ -4055,10 +4624,23 @@ const runDirectChatsExportJob = async (job, client, args = {}) => {
     job.current = null;
     job.finishedAt = new Date().toISOString();
     touchExportJob(job);
+    const finalReportStartedAt = Date.now();
     try {
       persistDirectChatsExportReport(job, client, successes, failures);
     } catch {
       // Status em memória permanece disponível mesmo se o relatório final falhar.
+    } finally {
+      recordJobTimingFrom(job, 'writeReportMs', finalReportStartedAt);
+      try {
+        if (job.reportFile) {
+          overwriteExportReport(
+            job.reportFile,
+            buildDirectChatsExportReport(job, client, successes, failures),
+          );
+        }
+      } catch {
+        // A primeira escrita já deixou o status principal; esta só atualiza a métrica final.
+      }
     }
     broadcastDirectChatsJobProgress(job, client);
   }
@@ -4101,6 +4683,7 @@ const startDirectChatsExportJob = (client, args = {}) => {
     reportFilename: null,
     error: null,
     delayMs,
+    metrics: createExportJobMetrics(),
     recentSuccesses: [],
     failures: [],
   };
@@ -5342,6 +5925,7 @@ const bridgeServer = createServer(async (req, res) => {
       cwd: processInfo.cwd,
       argv: processInfo.argv,
       process: processInfo,
+      bridgeAssetFetch: snapshotBridgeAssetMetrics(),
       clients: getLiveClients().length,
     });
     return;
@@ -5360,6 +5944,7 @@ const bridgeServer = createServer(async (req, res) => {
         process: summarizeProcess(),
       },
       connectedClients,
+      bridgeAssetFetch: snapshotBridgeAssetMetrics(),
       ...(diagnostics
         ? {
             bridgeHealth: connectedClients.map((client) => ({

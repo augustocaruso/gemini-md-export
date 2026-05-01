@@ -49,6 +49,15 @@ Operational guidance:
   restart it with `resumeReportFile` pointing to the report JSON; the MCP keeps
   writing to the same report, skips prior successes/skips, and retries prior
   failures.
+- When a long export is slow or unstable, inspect `metrics` in
+  `gemini_export_job_status` or in the report JSON before guessing. The report
+  includes phase timings (`loadSidebarMs`, `scanVaultMs`,
+  `exportConversationsMs`, `writeReportMs`), per-chat timings
+  (`openConversationMs`, `hydrateDomMs`, `extractMarkdownMs`, `fetchAssetsMs`,
+  `saveFilesMs`), heartbeat/snapshot payload sizes, lazy-load rounds, and bridge
+  asset counters (cache hits, deduped in-flight requests, host backoff, media
+  warnings). Use those fields to say whether the bottleneck was the Gemini page,
+  local bridge, media download, disk/vault write, or sidebar scrolling.
 - When summarizing an export job, distinguish "100% of the requested partial
   batch" from "100% of the user's full Gemini history". Only call the full
   history complete when `fullHistoryRequested=true`, `fullHistoryVerified=true`,

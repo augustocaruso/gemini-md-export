@@ -18,6 +18,7 @@ test('MCP não espera timeout longo quando comando não é entregue à aba', () 
 
 test('MCP protocolo v2 usa SSE para comandos e snapshot separado', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const contentSource = readFileSync(resolve(ROOT, 'src', 'userscript-shell.js'), 'utf-8');
   const bridgeVersion = JSON.parse(readFileSync(resolve(ROOT, 'bridge-version.json'), 'utf-8'));
 
   assert.equal(bridgeVersion.protocolVersion, 2);
@@ -27,8 +28,17 @@ test('MCP protocolo v2 usa SSE para comandos e snapshot separado', () => {
   assert.match(source, /url\.pathname === '\/bridge\/snapshot'/);
   assert.match(source, /upsertClientSnapshot/);
   assert.match(source, /snapshotRequested/);
+  assert.match(source, /recordPayloadMetric\(next, 'heartbeat'/);
+  assert.match(source, /recordPayloadMetric\(client, 'snapshot'/);
+  assert.match(source, /summarizePayloadMetrics/);
   assert.match(source, /commandDelivery:\s*heartbeatCommand/);
   assert.match(source, /duplicate:\s*!resolved/);
+  assert.match(contentSource, /heartbeat-incremental-v1/);
+  assert.match(contentSource, /const buildBridgeHeartbeatPayload = \(\) => \(\{/);
+  assert.doesNotMatch(
+    contentSource.match(/const buildBridgeHeartbeatPayload = \(\) => \(\{[\s\S]*?\n  \}\);/)?.[0] || '',
+    /conversations:/,
+  );
 });
 
 test('browser_status expõe saúde da bridge MCP/Chrome', () => {
@@ -98,10 +108,17 @@ test('bridge busca mídia sem depender de CORS da extensão Chrome', () => {
   assert.match(serverSource, /isPrivateNetworkHostname/);
   assert.match(serverSource, /BRIDGE_ASSET_FETCH_MAX_BYTES/);
   assert.match(serverSource, /BRIDGE_ASSET_FETCH_CACHE_MAX_ENTRIES/);
+  assert.match(serverSource, /BRIDGE_ASSET_FETCH_CACHE_TTL_MS/);
+  assert.match(serverSource, /BRIDGE_ASSET_FETCH_MAX_IN_FLIGHT/);
+  assert.match(serverSource, /BRIDGE_ASSET_HOST_BACKOFF_FAILURE_THRESHOLD/);
   assert.match(serverSource, /const bridgeAssetCache = new Map\(\)/);
   assert.match(serverSource, /const bridgeAssetInFlight = new Map\(\)/);
+  assert.match(serverSource, /const bridgeAssetHostBackoff = new Map\(\)/);
+  assert.match(serverSource, /const withBridgeAssetFetchSlot = \(host, fn\) =>/);
+  assert.match(serverSource, /snapshotBridgeAssetMetrics/);
   assert.match(serverSource, /cacheHit/);
   assert.match(serverSource, /inFlightDeduped/);
+  assert.match(serverSource, /backoffHits/);
   assert.match(contentSource, /const fetchImageAssetViaBridge = async \(source\) =>/);
   assert.match(contentSource, /\/bridge\/fetch-asset/);
   assert.match(contentSource, /shouldFetchViaBridgeFirst/);

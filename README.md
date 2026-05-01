@@ -291,6 +291,12 @@ ou `gemini_export_missing_chats` for interrompido, rode a mesma tool com
 arquivo, pula chatIds já concluídos ou já encontrados no vault e retenta apenas
 os itens faltantes/falhos. O lazy-load do histórico usa batches adaptativos e o
 bridge de mídia mantém cache por URL para reduzir downloads repetidos de assets.
+O relatório também inclui `metrics`: tempos por fase (`loadSidebarMs`,
+`refreshSidebarMs`, `scanVaultMs`, `exportConversationsMs`, `writeReportMs`),
+métricas por conversa (`openConversationMs`, `hydrateDomMs`,
+`extractMarkdownMs`, `fetchAssetsMs`, `saveFilesMs`), payload médio/máximo de
+heartbeat/snapshot e contadores de assets/cache/backoff. Use esses campos para
+separar gargalo de Gemini lento, bridge, mídia externa, disco ou vault.
 
 Para importar/exportar o histórico inteiro, use `gemini_export_recent_chats`.
 Ela inicia um job em background, percorre o sidebar carregável, grava os

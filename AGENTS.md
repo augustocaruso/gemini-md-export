@@ -318,7 +318,11 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   quando há várias abas Gemini vivas, o MCP prefere a aba ativa antes do
   fallback por heartbeat mais recente. O heartbeat também inclui
   `extensionVersion`, `protocolVersion` e `buildStamp` para verificar
-  rapidamente se a extensão recarregada é o build esperado. `gemini_browser_status`
+  rapidamente se a extensão recarregada é o build esperado. O MCP acumula
+  métricas de payload por cliente (`payloadMetrics.heartbeat` e
+  `payloadMetrics.snapshot`, com count/last/avg/max bytes) em
+  `bridgeHealth`, `/agent/clients` e nos relatórios de job para descobrir
+  quando inventário grande ou heartbeat pesado virou gargalo. `gemini_browser_status`
   e `/agent/clients?diagnostics=1` expõem `bridgeHealth` por cliente
   (`healthy`, `degraded`, `stale`, `version_mismatch`,
   `command_channel_stuck`) com ação recomendada antes de pedir reload manual.
@@ -470,9 +474,15 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   concluídos/saltados, preserva `webConversationCount`, `existingVaultCount` e
   `missingCount` no relatório, e retenta apenas itens faltantes ou falhos. O
   lazy-load do histórico usa batch adaptativo por padrão (`adaptiveLoad=true`);
-  só desligue isso para diagnóstico. O bridge de assets mantém cache em memória
-  por URL e deduplica fetches simultâneos, então falha de mídia deve ficar como
-  warning rastreável e não travar o job principal.
+  só desligue isso para diagnóstico. O relatório JSON inclui `metrics` com
+  `phaseTimings` (`loadSidebarMs`, `refreshSidebarMs`, `scanVaultMs`,
+  `exportConversationsMs`, `writeReportMs`), `lazyLoad`, `payloads`, `assets`
+  e métricas por conversa (`openConversationMs`, `hydrateDomMs`,
+  `extractMarkdownMs`, `fetchAssetsMs`, `saveFilesMs`). Use esses campos antes
+  de culpar MCP/Chrome/Gemini de forma genérica. O bridge de assets mantém
+  cache em memória por URL com TTL, limita concorrência global, deduplica
+  fetches simultâneos e aplica backoff por host com falha repetida; falha de
+  mídia deve ficar como warning rastreável e não travar o job principal.
   Integridade vence velocidade: antes de exportar uma conversa depois de
   navegação SPA, o content script compara uma assinatura leve dos turns do DOM
   anterior com a página atual. URL nova com DOM antigo não libera export; o item
@@ -793,11 +803,10 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
    hidratação para diagnóstico. O MCP aguarda comandos por 180s por padrão, mas
    a hidratação deve parar antes quando o topo estabiliza.
    Performance do export total: `gemini_export_recent_chats` carrega o sidebar
-   em rodadas sem devolver a lista inteira a cada `load-more-conversations`
-   (`includeConversations=false`, `includeSnapshot=false`) e só coleta a lista
-   completa no fim. Durante o batch, não retornar para a conversa original
-   entre cada item; isso evitaria duas navegações por chat e degrada muito
-   centenas de exports.
+   em rodadas adaptativas e registra `loadMoreTrace`/`metrics.lazyLoad` para
+   mostrar crescimento, timeouts, batch size e rodadas sem avanço. Durante o
+   batch, não retornar para a conversa original entre cada item; isso evitaria
+   duas navegações por chat e degrada muito centenas de exports.
 9. **Chat ID da URL ≠ chat ID do gemini-webapi**: a URL pública usa um ID
    hexadecimal em `/app/<hex>` (normalmente 16+ chars; o scraper aceita 12+
    para tolerar variações); o `gemini-webapi` usa formato `c_<alfanum>`.
