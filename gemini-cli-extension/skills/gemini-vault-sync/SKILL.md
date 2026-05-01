@@ -25,6 +25,9 @@ It talks directly to the local bridge, shows progress in the terminal, and
 finishes with a machine-readable result.
 If the bridge is down, the CLI can start it in `bridge-only` mode before
 calling `/agent/*`.
+Do not run repeated `gemini_ready` or `gemini_tabs` calls before the CLI. They
+pollute the user-visible transcript with JSON and duplicate readiness work the
+CLI already performs.
 Use `export missing <vaultDir>` for explicit missing-only imports, `sync
 <vaultDir>` for incremental vault sync, and `export resume <reportFile>` when a
 previous report should be resumed.
@@ -47,6 +50,14 @@ final JSON only or `--jsonl` when another program needs progress events.
 Use `--help` on the CLI or subcommand when you need the exact flags, output
 formats, examples, or exit codes.
 
+If the CLI reports multiple Gemini tabs, stay in CLI mode:
+
+```bash
+node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" tabs list --plain
+node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" tabs claim --index 1 --plain
+node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" sync "/path/to/vault" --claim-id "<claimId>" --plain
+```
+
 Do not inject a long-running CLI command with custom-command `!{...}` because
 that copies all output into the prompt. Ask the agent to run the CLI through
 the shell tool instead.
@@ -67,7 +78,8 @@ If you accidentally call `gemini_export` for `sync`, `missing`, `recent`,
 Do not poll `gemini_job` unless a CLI/bridge response has already returned a
 real `jobId`.
 
-Use `gemini_tabs` before the CLI when tab identity is ambiguous, and
+Use CLI `tabs list/claim` before the CLI sync/export when tab identity is
+ambiguous. Use `gemini_tabs` only when shell access is unavailable. Use
 `gemini_support` when the bridge/extension is slow, stale, or disconnected.
 Use `detail: "full"` only for root-cause debugging.
 
@@ -93,3 +105,8 @@ Report only:
 
 Do not paste full conversation inventories unless the user explicitly asks for
 a small page of results.
+
+Never summarize a `RESULT_JSON` as success when `status` is
+`completed_with_errors`, `failed`, or `cancelled`, or when
+`fullHistoryRequested` is true and `fullHistoryVerified` is false. Name failed
+chats from `failures`, include the report path, and give the resume/next action.

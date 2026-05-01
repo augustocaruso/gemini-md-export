@@ -473,6 +473,7 @@
     isLoadingMore: false,
     loadMoreFailures: 0,
     lastLoadMoreTrace: [],
+    listLoadStatus: 'idle',
     filterQuery: '',
     reachedSidebarEnd: false,
     sidebarConversationCache: new Map(),
@@ -1435,6 +1436,11 @@
         ? 'Fim das conversas carregadas no caderno.'
         : 'Fim do histórico carregado no sidebar.';
     }
+    if (state.listLoadStatus === 'inconclusive' || state.loadMoreFailures > 0) {
+      return kind === 'notebook'
+        ? 'Não carregou mais agora; ainda não confirmei o fim do caderno.'
+        : 'Não carregou mais agora; ainda não confirmei o fim do histórico.';
+    }
     return kind === 'notebook'
       ? 'Role até o fim ou use "Puxar mais conversas".'
       : 'Role até o fim ou use "Puxar mais histórico".';
@@ -1447,8 +1453,13 @@
 
   const listEndStatusText = () =>
     currentListKind() === 'notebook'
-      ? 'Chegou no fim do caderno — não há mais conversas pra carregar.'
-      : 'Chegou no fim do histórico carregado. Se ainda faltar conversa antiga, role o sidebar do Gemini manualmente pra forçar mais carregamento.';
+      ? 'Fim do caderno confirmado: não há mais conversas pra carregar.'
+      : 'Fim do histórico confirmado no sidebar.';
+
+  const listInconclusiveStatusText = () =>
+    currentListKind() === 'notebook'
+      ? 'Não consegui confirmar o fim do caderno. Use "Puxar mais conversas" novamente.'
+      : 'Não consegui confirmar o fim do histórico. Use "Puxar mais histórico" novamente.';
 
   const hasConversationNode = (node) => {
     if (!(node instanceof Element)) return false;
@@ -1710,6 +1721,8 @@
       return false;
     }
     state.isLoadingMore = true;
+    state.listLoadStatus = 'loading';
+    updateModalState();
     const trace = [];
     try {
       let loaded = false;
@@ -1771,6 +1784,11 @@
       if (loaded) {
         state.reachedSidebarEnd = false;
       }
+      state.listLoadStatus = loaded
+        ? 'loaded'
+        : state.reachedSidebarEnd
+          ? 'end-confirmed'
+          : 'inconclusive';
       refreshConversationState();
       updateModalState();
       state.lastLoadMoreTrace = trace;
@@ -3483,6 +3501,7 @@
       if (command.args?.resetReachedEnd === true) {
         state.reachedSidebarEnd = false;
         state.loadMoreFailures = 0;
+        state.listLoadStatus = 'idle';
       }
 
       const untilEnd = command.args?.untilEnd === true;
@@ -3491,6 +3510,10 @@
         : Math.max(1, Math.min(20000, Number(command.args?.targetCount || 10)));
       const attempts = Math.max(1, Math.min(5, Number(command.args?.attempts || 2)));
       const maxRounds = Math.max(1, Math.min(20, Number(command.args?.maxRounds || 6)));
+      const endFailureThreshold = Math.max(
+        3,
+        Math.min(20, Number(command.args?.endFailureThreshold || loadOptions.endFailureThreshold || 3)),
+      );
       const timeoutMs = Math.max(
         500,
         Math.min(30_000, Number(command.args?.timeoutMs || (command.args?.fastMode ? 3500 : 8000))),
@@ -3501,6 +3524,7 @@
       let timedOut = false;
       let roundsCompleted = 0;
       let previousCount = before;
+      let noGrowthRounds = 0;
       const loadTrace = [];
 
       for (let round = 0; round < maxRounds; round += 1) {
@@ -3525,19 +3549,25 @@
         roundsCompleted += 1;
         const afterCount = collectBridgeConversationLinks().length;
         const delta = Math.max(0, afterCount - previousCount);
-        loadedAny = loadedAny || afterCount > previousCount;
+        const grew = afterCount > previousCount;
+        loadedAny = loadedAny || grew;
+        noGrowthRounds = grew ? 0 : noGrowthRounds + 1;
         loadTrace.push({
           round: round + 1,
           beforeCount: previousCount,
           afterCount,
           delta,
           loaded,
+          grew,
           timedOut: roundTimedOut,
           reachedEnd: state.reachedSidebarEnd,
+          noGrowthRounds,
           attempts: Array.isArray(state.lastLoadMoreTrace) ? state.lastLoadMoreTrace : [],
         });
-        if (afterCount <= previousCount) break;
-        if (!loaded) break;
+        if (state.reachedSidebarEnd) break;
+        if (roundTimedOut) break;
+        if ((afterCount <= previousCount || !loaded) && !untilEnd) break;
+        if ((afterCount <= previousCount || !loaded) && noGrowthRounds >= endFailureThreshold) break;
         await sleep(loadOptions.retryPauseMs);
         previousCount = afterCount;
       }
@@ -4488,6 +4518,8 @@
         ? 'is-loading'
         : state.reachedSidebarEnd
           ? 'is-end'
+          : state.listLoadStatus === 'inconclusive' || state.loadMoreFailures > 0
+            ? 'is-inconclusive'
           : 'is-idle'
     }`;
     setHtml(endEl, `
@@ -5618,6 +5650,9 @@
         #${MODAL_ID} .gm-list-end.is-end {
           color: var(--gm-success);
         }
+        #${MODAL_ID} .gm-list-end.is-inconclusive {
+          color: var(--gm-text);
+        }
         #${MODAL_ID} .gm-progress-area {
           display: flex;
           flex-direction: column;
@@ -5771,13 +5806,17 @@
       if (action === 'refresh-list') {
         state.loadMoreFailures = 0;
         state.reachedSidebarEnd = false;
+        state.listLoadStatus = 'idle';
         const loaded = await loadMoreConversations(
           isNotebookPage() ? NOTEBOOK_LOAD_MORE_ATTEMPTS : SIDEBAR_LOAD_MORE_ATTEMPTS,
         );
         if (!loaded) {
           refreshConversationState();
           updateModalState();
-          showToast(listEndStatusText(), 'info');
+          showToast(
+            state.reachedSidebarEnd ? listEndStatusText() : listInconclusiveStatusText(),
+            'info',
+          );
         }
         return;
       }
@@ -5906,6 +5945,7 @@
   const openExportModal = async () => {
     state.loadMoreFailures = 0;
     state.reachedSidebarEnd = false;
+    state.listLoadStatus = 'idle';
     if (!isNotebookPage()) {
       await ensureSidebarOpen();
     }
@@ -7001,6 +7041,7 @@
       loadMoreConversations: () => {
         state.loadMoreFailures = 0;
         state.reachedSidebarEnd = false;
+        state.listLoadStatus = 'idle';
         return loadMoreConversations(
           isNotebookPage() ? NOTEBOOK_LOAD_MORE_ATTEMPTS : SIDEBAR_LOAD_MORE_ATTEMPTS,
         );

@@ -151,7 +151,15 @@ const RECENT_CHATS_LOAD_MORE_BROWSER_TIMEOUT_MS = Number(
   process.env.GEMINI_MCP_RECENT_CHATS_LOAD_MORE_BROWSER_TIMEOUT_MS || 3500,
 );
 const RECENT_CHATS_EXPORT_ALL_LOAD_MORE_BROWSER_TIMEOUT_MS = Number(
-  process.env.GEMINI_MCP_RECENT_CHATS_EXPORT_ALL_LOAD_MORE_BROWSER_TIMEOUT_MS || 12_000,
+  process.env.GEMINI_MCP_RECENT_CHATS_EXPORT_ALL_LOAD_MORE_BROWSER_TIMEOUT_MS || 30_000,
+);
+const RECENT_CHATS_TRANSIENT_BUSY_RETRY_LIMIT = Math.max(
+  1,
+  Math.min(10, Number(process.env.GEMINI_MCP_RECENT_CHATS_BUSY_RETRY_LIMIT || 5)),
+);
+const RECENT_CHATS_TRANSIENT_BUSY_RETRY_BASE_MS = Math.max(
+  100,
+  Math.min(10_000, Number(process.env.GEMINI_MCP_RECENT_CHATS_BUSY_RETRY_BASE_MS || 600)),
 );
 const DIRECT_REEXPORT_MAX_ITEMS = Math.max(
   1,
@@ -2137,7 +2145,7 @@ const removeTabClaim = (claimId) => {
 
 const ambiguousTabsError = (liveClients, selector = {}) => {
   const error = new Error(
-    'Há várias abas do Gemini conectadas. Use gemini_tabs { action: "list" } e depois informe clientId, tabId ou claimId antes de listar/exportar.',
+    'Há várias abas do Gemini conectadas. Pela CLI, rode `gemini-md-export tabs list --plain` e depois `gemini-md-export tabs claim --index <n> --plain`; em MCP, use gemini_tabs { action: "list" }.',
   );
   error.code = 'ambiguous_gemini_tabs';
   error.data = {
@@ -3517,9 +3525,30 @@ const findSyncBoundary = (conversations = [], { vaultScan, syncState, knownSeque
 const loadRecentChatsUntilSyncBoundaryForClient = async (client, args = {}, { vaultScan, syncState } = {}) => {
   let targetCount = Math.max(10, Math.min(200, Number(args.batchSize || 50)));
   const maxRounds = Math.max(1, Math.min(500, Number(args.maxLoadMoreRounds || 200)));
+  const attempts = Math.max(1, Math.min(5, Number(args.loadMoreAttempts || 3)));
   const knownSequenceCount = Math.max(
     1,
     Math.min(100, Number(args.knownBoundaryCount || DEFAULT_SYNC_BOUNDARY_KNOWN_SEQUENCE)),
+  );
+  const maxNoGrowthRounds = Math.max(1, Math.min(20, Number(args.maxNoGrowthRounds || 8)));
+  const browserMaxRounds = Math.max(
+    1,
+    Math.min(20, Number(args.loadMoreBrowserRounds || args.browserMaxRounds || 12)),
+  );
+  const browserTimeoutMs = Math.max(
+    500,
+    Math.min(
+      30_000,
+      Number(
+        args.loadMoreBrowserTimeoutMs ||
+          args.loadMoreTimeoutMs ||
+          RECENT_CHATS_EXPORT_ALL_LOAD_MORE_BROWSER_TIMEOUT_MS,
+      ),
+    ),
+  );
+  const commandTimeoutMs = Math.max(
+    browserTimeoutMs + 1500,
+    Number(args.loadMoreCommandTimeoutMs || args.loadMoreTimeoutMs || COMMAND_TIMEOUT_MS),
   );
   const loadTrace = [];
   let boundary = { found: false, type: 'not-found' };
@@ -3527,45 +3556,80 @@ const loadRecentChatsUntilSyncBoundaryForClient = async (client, args = {}, { va
   let timedOut = false;
   let roundsCompleted = 0;
   let previousCount = recentConversationsForClient(client).length;
+  let noGrowthRounds = 0;
 
   for (let round = 0; round < maxRounds; round += 1) {
     if (args.shouldStop?.()) break;
     const beforeCount = recentConversationsForClient(client).length;
-    const pageLimit = Math.min(100, targetCount);
-    const offset = Math.max(0, targetCount - pageLimit);
     const startedAt = Date.now();
-    const page = await listRecentChatsForClient(client, {
-      ...args,
-      limit: pageLimit,
-      offset,
-      refresh: round === 0 ? args.refresh : false,
-    });
+    const result = await enqueueCommand(
+      client.clientId,
+      'load-more-conversations',
+      {
+        ensureSidebar: true,
+        attempts,
+        targetCount,
+        fastMode: true,
+        untilEnd: args.untilEndInBrowser !== false,
+        ignoreFailureCap: true,
+        endFailureThreshold: maxNoGrowthRounds,
+        resetReachedEnd: round === 0 && args.trustCachedReachedEnd !== true,
+        maxRounds: browserMaxRounds,
+        timeoutMs: browserTimeoutMs,
+        includeConversations: true,
+        includeModalConversations: false,
+        includeSnapshot: false,
+      },
+      { timeoutMs: commandTimeoutMs },
+    );
+
+    if (!result?.ok) {
+      throw new Error(result?.error || 'Falha ao puxar histórico até a fronteira do sync.');
+    }
+
+    if (Array.isArray(result.conversations)) {
+      client.conversations = result.conversations;
+    }
+    if (result.snapshot) {
+      client.lastSnapshot = result.snapshot;
+    }
+
     const conversations = recentConversationsForClient(client);
     boundary = findSyncBoundary(conversations, {
       vaultScan,
       syncState,
       knownSequenceCount,
     });
-    reachedEnd = page.pagination?.reachedEnd === true || recentChatsReachedEndForClient(client);
-    timedOut = timedOut || page.loadMoreTimedOut === true || page.refreshTimedOut === true;
+    reachedEnd = result.reachedEnd === true || recentChatsReachedEndForClient(client);
+    timedOut = timedOut || result.timedOut === true;
     roundsCompleted += 1;
-    const afterCount = conversations.length;
+    const afterCount = Math.max(conversations.length, Number(result.afterCount || 0));
     const delta = Math.max(0, afterCount - beforeCount);
+    const grew = result.loadedAny === true || afterCount > previousCount;
+    noGrowthRounds = grew ? 0 : noGrowthRounds + 1;
     loadTrace.push({
       round: round + 1,
       beforeCount,
       targetCount,
       afterCount,
       delta,
+      loadedAny: result.loadedAny === true,
+      grew,
       reachedEnd,
-      timedOut: page.loadMoreTimedOut === true || page.refreshTimedOut === true,
+      timedOut: result.timedOut === true,
+      noGrowthRounds,
+      browserTimeoutMs,
+      browserMaxRounds,
+      commandTimeoutMs,
+      attempts,
       boundary,
+      browserTrace: Array.isArray(result.loadTrace) ? result.loadTrace : [],
       elapsedMs: Date.now() - startedAt,
     });
 
-    if (boundary.found || reachedEnd || timedOut) break;
-    if (afterCount <= previousCount && page.loadMoreLoadedAny !== true) break;
-    previousCount = afterCount;
+    if (boundary.found || reachedEnd) break;
+    if (!grew && noGrowthRounds >= maxNoGrowthRounds) break;
+    if (afterCount > previousCount) previousCount = afterCount;
     targetCount = Math.min(MAX_RECENT_CHATS_LOAD_TARGET, targetCount + Math.max(10, Number(args.batchSize || 50)));
     if (targetCount >= MAX_RECENT_CHATS_LOAD_TARGET && afterCount >= MAX_RECENT_CHATS_LOAD_TARGET) break;
   }
@@ -3575,6 +3639,7 @@ const loadRecentChatsUntilSyncBoundaryForClient = async (client, args = {}, { va
     roundsCompleted,
     reachedEnd,
     timedOut,
+    noGrowthRounds,
     loadTrace,
     boundary,
     conversations: recentConversationsForClient(client),
@@ -4397,7 +4462,10 @@ const downloadConversationItemForClient = async (client, conversation, args = {}
   const browserCommandMs = Date.now() - commandStartedAt;
 
   if (!result?.ok) {
-    throw new Error(result?.error || 'Falha ao exportar conversa no browser.');
+    const error = new Error(result?.error || 'Falha ao exportar conversa no browser.');
+    error.code = result?.code || null;
+    error.data = result || null;
+    throw error;
   }
 
   const expectedChatId = normalizeConversationChatId(conversation);
@@ -4450,6 +4518,39 @@ const downloadConversationItemForClient = async (client, conversation, args = {}
     metrics,
     ...saved,
   };
+};
+
+const isTransientTabBusyError = (err) =>
+  err?.code === 'tab_operation_in_progress' ||
+  err?.data?.code === 'tab_operation_in_progress' ||
+  /tab_operation_in_progress|aba do Gemini já está ocupada|outro comando pesado|tab operation/i.test(
+    String(err?.message || ''),
+  );
+
+const downloadConversationItemWithRetry = async (job, client, conversation, args = {}) => {
+  let lastError = null;
+  for (let attempt = 1; attempt <= RECENT_CHATS_TRANSIENT_BUSY_RETRY_LIMIT; attempt += 1) {
+    try {
+      return await downloadConversationItemForClient(client, conversation, args);
+    } catch (err) {
+      lastError = err;
+      if (!isTransientTabBusyError(err) || attempt >= RECENT_CHATS_TRANSIENT_BUSY_RETRY_LIMIT) {
+        throw err;
+      }
+      const retryDelayMs = RECENT_CHATS_TRANSIENT_BUSY_RETRY_BASE_MS * attempt;
+      job.current = {
+        ...(job.current || {}),
+        retrying: true,
+        retryAttempt: attempt,
+        retryDelayMs,
+        retryReason: 'tab_operation_in_progress',
+      };
+      touchExportJob(job);
+      broadcastRecentChatsJobProgress(job, client);
+      await sleep(retryDelayMs);
+    }
+  }
+  throw lastError || new Error('Falha ao exportar conversa no browser.');
 };
 
 const downloadChatForClient = async (client, args = {}) => {
@@ -5695,8 +5796,10 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
               ...args,
               shouldStop: () => job.cancelRequested === true,
             });
+        const loadMoreResolved =
+          loadMore.reachedEnd === true || (job.syncMode && loadMore.boundary?.found === true);
         job.loadMoreRoundsCompleted = loadMore.roundsCompleted;
-        job.loadMoreTimedOut = loadMore.timedOut === true;
+        job.loadMoreTimedOut = loadMore.timedOut === true && !loadMoreResolved;
         job.loadMoreTrace = Array.isArray(loadMore.loadTrace) ? loadMore.loadTrace : [];
         if (job.syncMode) job.syncBoundary = loadMore.boundary || null;
         if (job.loadMoreTimedOut) recordJobCounter(job, 'browserTimeouts');
@@ -5890,7 +5993,7 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
           }
         }
 
-        const result = await downloadConversationItemForClient(client, conversation, {
+        const result = await downloadConversationItemWithRetry(job, client, conversation, {
           ...args,
           outputDir: job.outputDir,
           returnToOriginal: false,
@@ -7207,7 +7310,13 @@ const legacyRawTools = [
           minimum: 500,
           maximum: 30000,
           description:
-            'Diagnóstico: tempo máximo dentro da aba para cada rodada de lazy-load. Default: 12000.',
+            'Diagnóstico: tempo máximo dentro da aba para cada rodada de lazy-load. Default: 30000.',
+        },
+        loadMoreTimeoutMs: {
+          type: 'integer',
+          minimum: 1000,
+          description:
+            'Diagnóstico: timeout total do comando de lazy-load. Default: timeout de comando MCP.',
         },
       },
       additionalProperties: false,
@@ -7295,7 +7404,13 @@ const legacyRawTools = [
           minimum: 500,
           maximum: 30000,
           description:
-            'Diagnóstico: tempo máximo dentro da aba para cada rodada de lazy-load. Default: 12000.',
+            'Diagnóstico: tempo máximo dentro da aba para cada rodada de lazy-load. Default: 30000.',
+        },
+        loadMoreTimeoutMs: {
+          type: 'integer',
+          minimum: 1000,
+          description:
+            'Diagnóstico: timeout total do comando de lazy-load. Default: timeout de comando MCP.',
         },
       },
       additionalProperties: false,
@@ -7356,6 +7471,30 @@ const legacyRawTools = [
           type: 'integer',
           minimum: 1,
           maximum: 500,
+        },
+        loadMoreAttempts: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 5,
+        },
+        maxNoGrowthRounds: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 20,
+        },
+        loadMoreBrowserRounds: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 20,
+        },
+        loadMoreBrowserTimeoutMs: {
+          type: 'integer',
+          minimum: 500,
+          maximum: 30000,
+        },
+        loadMoreTimeoutMs: {
+          type: 'integer',
+          minimum: 1000,
         },
         resumeReportFile: {
           type: 'string',
@@ -8080,6 +8219,12 @@ const buildCliExportCommand = (action, args = {}) => {
   addCliFlag(commandArgs, '--known-boundary-count', args.knownBoundaryCount);
   addCliFlag(commandArgs, '--max-chats', args.maxChats || args.limit);
   addCliFlag(commandArgs, '--batch-size', args.batchSize);
+  addCliFlag(commandArgs, '--max-load-more-rounds', args.maxLoadMoreRounds);
+  addCliFlag(commandArgs, '--load-more-attempts', args.loadMoreAttempts);
+  addCliFlag(commandArgs, '--max-no-growth-rounds', args.maxNoGrowthRounds);
+  addCliFlag(commandArgs, '--load-more-browser-rounds', args.loadMoreBrowserRounds);
+  addCliFlag(commandArgs, '--load-more-browser-timeout-ms', args.loadMoreBrowserTimeoutMs);
+  addCliFlag(commandArgs, '--load-more-timeout-ms', args.loadMoreTimeoutMs);
   addCliFlag(commandArgs, '--start-index', args.startIndex);
   addCliFlag(commandArgs, '--delay-ms', args.delayMs);
   if (args.refresh === true) commandArgs.push('--refresh');
@@ -8101,10 +8246,6 @@ const buildCliExportCommand = (action, args = {}) => {
 
 const cliFirstExportResult = (action, args = {}) => {
   const cliCommand = buildCliExportCommand(action, args);
-  const readyCheck = {
-    tool: 'gemini_ready',
-    arguments: { action: 'status', selfHeal: true, allowReload: true },
-  };
   return {
     ok: false,
     status: 'cli_required',
@@ -8121,9 +8262,8 @@ const cliFirstExportResult = (action, args = {}) => {
       message:
         cliCommand.missingArguments.length > 0
           ? `Preencha ${cliCommand.missingArguments.join(', ')} e rode o comando CLI retornado.`
-          : 'Rode o comando CLI retornado diretamente no shell; use a linha RESULT_JSON final para resumir.',
+          : 'Rode o comando CLI retornado diretamente no shell, sem repetir gemini_ready/gemini_tabs antes; a CLI faz readiness, tabs e progresso.',
       command: cliCommand,
-      optionalReadyCheck: readyCheck,
     },
     help: {
       command: process.execPath,
@@ -8271,6 +8411,12 @@ const rawTools = [
         refresh: { type: 'boolean' },
         skipExisting: { type: 'boolean' },
         knownBoundaryCount: { type: 'integer', minimum: 1, maximum: 100 },
+        maxLoadMoreRounds: { type: 'integer', minimum: 1, maximum: 500 },
+        loadMoreAttempts: { type: 'integer', minimum: 1, maximum: 5 },
+        maxNoGrowthRounds: { type: 'integer', minimum: 1, maximum: 20 },
+        loadMoreBrowserRounds: { type: 'integer', minimum: 1, maximum: 20 },
+        loadMoreBrowserTimeoutMs: { type: 'integer', minimum: 500, maximum: 30000 },
+        loadMoreTimeoutMs: { type: 'integer', minimum: 1000 },
         chatId: { type: 'string' },
         chatIds: { type: 'array', maxItems: 500, items: { type: 'string' } },
         items: { type: 'array', maxItems: 500, items: { type: 'object', additionalProperties: true } },
@@ -8632,6 +8778,39 @@ const bridgeServer = createServer(async (req, res) => {
 
   if (req.method === 'GET' && url.pathname === '/agent/tabs') {
     try {
+      const action = url.searchParams.get('action') || 'list';
+      const args = {
+        ...clientSelectorFromSearchParams(url.searchParams),
+        index: url.searchParams.get('index') || undefined,
+        chatId: url.searchParams.get('chatId') || undefined,
+        claimId: url.searchParams.get('claimId') || undefined,
+        sessionId: url.searchParams.get('sessionId') || undefined,
+        label: url.searchParams.get('label') || undefined,
+        color: url.searchParams.get('color') || undefined,
+        ttlMs: url.searchParams.get('ttlMs') || undefined,
+        force: parseOptionalBoolean(url.searchParams.get('force')),
+        openIfMissing: parseOptionalBoolean(url.searchParams.get('openIfMissing')),
+        waitMs: url.searchParams.get('waitMs') || undefined,
+        allowReload: parseOptionalBoolean(url.searchParams.get('allowReload')),
+        delayMs: url.searchParams.get('delayMs') || undefined,
+      };
+      if (action === 'claim') {
+        const client = await selectClaimableClient(args);
+        sendAgentJson(res, 200, await claimTabForClient(client, args));
+        return;
+      }
+      if (action === 'release') {
+        sendAgentJson(res, 200, await releaseTabClaim(args));
+        return;
+      }
+      if (action === 'reload') {
+        sendAgentJson(res, 200, await reloadGeminiTabs(args));
+        return;
+      }
+      if (action !== 'list') {
+        sendAgentJson(res, 400, { ok: false, error: `Ação de tabs desconhecida: ${action}` });
+        return;
+      }
       let allLiveClients = getLiveClients();
       let liveClients = getSelectableGeminiClients();
       let launchResult = null;
@@ -8648,11 +8827,17 @@ const bridgeServer = createServer(async (req, res) => {
       }
       sendAgentJson(res, 200, {
         ok: true,
+        action: 'list',
         sessionId: PROCESS_SESSION_ID,
         connectedTabCount: liveClients.length,
         connectedClientCount: allLiveClients.length,
+        tabs: liveClients.map((client, index) => ({
+          index: index + 1,
+          ...summarizeClient(client),
+        })),
         connectedClients: liveClients.map(summarizeClient),
         diagnosticClients: tabSelectionDiagnostics(allLiveClients, liveClients),
+        claims: summarizeTabClaims(),
         tabClaims: summarizeTabClaims(),
         browserWake: launchResult || { attempted: false },
       });
@@ -8899,6 +9084,7 @@ const bridgeServer = createServer(async (req, res) => {
           maxNoGrowthRounds: url.searchParams.get('maxNoGrowthRounds') || undefined,
           loadMoreBrowserRounds: url.searchParams.get('loadMoreBrowserRounds') || undefined,
           loadMoreBrowserTimeoutMs: url.searchParams.get('loadMoreBrowserTimeoutMs') || undefined,
+          loadMoreTimeoutMs: url.searchParams.get('loadMoreTimeoutMs') || undefined,
           skipExisting: parseOptionalBoolean(url.searchParams.get('skipExisting')),
         }),
       );
@@ -8935,6 +9121,7 @@ const bridgeServer = createServer(async (req, res) => {
           maxNoGrowthRounds: url.searchParams.get('maxNoGrowthRounds') || undefined,
           loadMoreBrowserRounds: url.searchParams.get('loadMoreBrowserRounds') || undefined,
           loadMoreBrowserTimeoutMs: url.searchParams.get('loadMoreBrowserTimeoutMs') || undefined,
+          loadMoreTimeoutMs: url.searchParams.get('loadMoreTimeoutMs') || undefined,
           skipExisting: true,
         }),
       );
@@ -8965,6 +9152,11 @@ const bridgeServer = createServer(async (req, res) => {
           batchSize: url.searchParams.get('batchSize') || undefined,
           knownBoundaryCount: url.searchParams.get('knownBoundaryCount') || undefined,
           maxLoadMoreRounds: url.searchParams.get('maxLoadMoreRounds') || undefined,
+          loadMoreAttempts: url.searchParams.get('loadMoreAttempts') || undefined,
+          maxNoGrowthRounds: url.searchParams.get('maxNoGrowthRounds') || undefined,
+          loadMoreBrowserRounds: url.searchParams.get('loadMoreBrowserRounds') || undefined,
+          loadMoreBrowserTimeoutMs: url.searchParams.get('loadMoreBrowserTimeoutMs') || undefined,
+          loadMoreTimeoutMs: url.searchParams.get('loadMoreTimeoutMs') || undefined,
           skipExisting: true,
         }),
       );

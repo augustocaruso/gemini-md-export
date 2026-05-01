@@ -475,6 +475,11 @@ test('content script reporta diagnóstico de scroll ao puxar histórico', async 
   assert.match(source, /endFailureThreshold:\s*command\.args\?\.endFailureThreshold/);
   assert.match(source, /command\.args\?\.resetReachedEnd === true/);
   assert.match(source, /state\.reachedSidebarEnd = false/);
+  assert.match(source, /listLoadStatus:\s*'idle'/);
+  assert.match(source, /ainda não confirmei o fim do histórico/);
+  assert.match(source, /Fim do histórico confirmado no sidebar/);
+  assert.match(source, /noGrowthRounds/);
+  assert.match(source, /state\.listLoadStatus === 'inconclusive'/);
 });
 
 test('content script explica fallback para Downloads e warnings de mídia', async () => {

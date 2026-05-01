@@ -24,13 +24,15 @@ Default tool output is compact. Ask for `detail: "full"` only while debugging.
 
 ## Router
 
-- Browser/extension health: call `gemini_ready`.
-- Multiple tabs, wrong tab, tab claim, reload Gemini tabs, or open-if-missing:
-  call `gemini_tabs`.
+- Browser/extension health for small diagnostics only: call `gemini_ready`.
+- Multiple tabs, wrong tab, tab claim, reload Gemini tabs, or open-if-missing
+  for small diagnostics: call `gemini_tabs`.
 - Small chat listing, current chat, open chat, or one-off download:
   call `gemini_chats`.
 - Recent export, full import, missing-chat import, incremental sync, reexport,
-  or notebook export: run the bundled CLI directly. If `gemini_export` is
+  or notebook export: run the bundled CLI directly first. Do not preflight with
+  repeated `gemini_ready`/`gemini_tabs`; the CLI owns readiness, browser wake,
+  tab selection flags, progress, and final `RESULT_JSON`. If `gemini_export` is
   called, treat `code: "use_cli"` as an instruction to run its returned command.
 - Background progress/cancel: call `gemini_job`.
 - Export directory and extension cache: call `gemini_config`.
@@ -80,10 +82,10 @@ the same local bridge used by MCP.
   lines and a final `RESULT_JSON` block.
 - To discover the contract, run `gemini-md-export --help`,
   `gemini-md-export sync --help`, or `gemini-md-export job status --help`.
-- CLI subcommands include `browser status`, `export recent`, `export missing`,
-  `export resume`, `export reexport`, `export notebook`, `job status`,
-  `job cancel`, `export-dir get/set`, `cleanup stale-processes`, and
-  `repair-vault`.
+- CLI subcommands include `browser status`, `tabs list/claim/release/reload`,
+  `export recent`, `export missing`, `export resume`, `export reexport`,
+  `export notebook`, `job status`, `job cancel`, `export-dir get/set`,
+  `cleanup stale-processes`, and `repair-vault`.
 - For automation, use `--json` for final JSON only or `--jsonl` for progress
   events.
 - Do not use custom-command shell injection for long sync jobs; it injects the
@@ -96,6 +98,14 @@ the same local bridge used by MCP.
   "missing chats", use the CLI wrapper for long jobs. MCP `gemini_export`
   should return `code: "use_cli"` with the exact command instead of starting a
   hidden long-running job.
+- Do not call `gemini_ready`/`gemini_tabs` repeatedly before long exports. If
+  multiple tabs block the CLI, use `gemini-md-export tabs list --plain` and
+  `gemini-md-export tabs claim --index <n> --plain`, then rerun sync/export with
+  `--claim-id <claimId>`.
+- Never report success when CLI `RESULT_JSON.status` is
+  `completed_with_errors`, `failed`, or `cancelled`, or when
+  `fullHistoryRequested=true` and `fullHistoryVerified=false`. Mention
+  `failures`, `reportFile`, and the resume command/next action instead.
 - Do not ask for manual Chrome extension reload before trying
   `gemini_ready { "action": "status", "selfHeal": true, "allowReload": true }`,
   unless the loaded extension is too old to support self-heal.

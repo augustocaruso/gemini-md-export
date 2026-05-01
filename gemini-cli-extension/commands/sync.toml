@@ -18,6 +18,8 @@ Contrato:
 - Preferencia: use o binario CLI da extensao, porque ele mostra progresso no
   terminal, consegue iniciar a bridge em modo `bridge-only` quando ela esta
   fora, e evita polling MCP no chat.
+- Nao rode uma sequencia de `gemini_ready`/`gemini_tabs` antes da CLI. Isso
+  polui a UI com JSON e duplica o readiness que a CLI ja faz.
 - Se o usuario pediu visualmente uma UI/barra de progresso, execute o CLI com
   `--tui` via shell interativo/pty quando disponivel:
   macOS/Linux:
@@ -32,6 +34,10 @@ Contrato:
 - Para descobrir flags/contrato antes de rodar, chame
   `node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" sync --help`
   (ou o caminho equivalente no Windows).
+- Se a CLI disser que ha varias abas Gemini, resolva ainda pela CLI:
+  `node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" tabs list --plain`
+  e depois `tabs claim --index <n> --plain`; repita o sync com
+  `--claim-id <claimId>`.
 - Se voce chamar `gemini_export` por engano, ele deve responder
   `code: "use_cli"` com o comando exato. Rode esse comando no shell; nao espere
   que o MCP inicie um job longo escondido.
@@ -51,4 +57,7 @@ Contrato:
   - falhas ou warnings de midia;
   - caminho do relatorio;
   - proxima acao somente se houver falha, sync parcial ou retomada pendente.
+- Nunca diga "sucesso" se o `RESULT_JSON` trouxer `status` diferente de
+  `completed`, ou se `fullHistoryRequested=true` e `fullHistoryVerified=false`.
+  Informe as falhas listadas em `failures` e o caminho do relatorio.
 """

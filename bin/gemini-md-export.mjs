@@ -80,6 +80,9 @@ const commonOptionHelp = () => [
   '  --bridge-keep-alive-ms <ms> Quanto a bridge iniciada pela CLI fica viva sem uso.',
   '  --no-exit-when-idle     Bridge iniciada pela CLI nao encerra sozinha por idle.',
   '  --ready-wait-ms <ms>     Quanto esperar a aba/extensao ficar pronta.',
+  '  --client-id <id>         Escolhe uma aba Gemini pelo clientId.',
+  '  --tab-id <id>            Escolhe uma aba Gemini pelo tabId do navegador.',
+  '  --claim-id <id>          Usa uma claim criada por gemini-md-export tabs claim.',
   '  --no-wake                Nao tentar acordar o navegador.',
   '  --no-self-heal           Nao tentar auto-recuperacao da extensao.',
   '  --no-reload              Nao pedir reload automatico da extensao.',
@@ -98,6 +101,12 @@ const jobOptionHelp = () => [
   '  --start-index <n>            Primeira posicao para export notebook/recent.',
   '  --chat-id <id>               Chat ID para export reexport; pode repetir.',
   '  --delay-ms <ms>              Pausa entre chats no reexport.',
+  '  --max-load-more-rounds <n>   Rodadas maximas para puxar historico.',
+  '  --load-more-attempts <n>     Tentativas de scroll por rodada.',
+  '  --max-no-growth-rounds <n>   Rodadas sem crescimento antes de desistir.',
+  '  --load-more-browser-rounds <n> Rodadas internas no navegador por comando.',
+  '  --load-more-browser-timeout-ms <ms> Timeout do carregamento no navegador.',
+  '  --load-more-timeout-ms <ms>  Timeout total do comando de carregamento.',
   '  --refresh                    Forca refresh/carregamento.',
   '  --no-refresh                 Usa cache quando possivel.',
   '  --poll-ms <ms>               Intervalo de polling. Default: 1200.',
@@ -117,6 +126,7 @@ const usage = () =>
     '  sync [vaultDir]       Sincroniza o vault com conversas novas/faltantes.',
     '  doctor                Verifica bridge, extensao Chrome e aba Gemini.',
     '  browser status        Mostra prontidao da bridge/extensao/abas.',
+    '  tabs list|claim       Lista/reivindica abas Gemini pela CLI.',
     '  export recent         Exporta historico recente carregavel.',
     '  export missing        Exporta apenas chats ausentes no vault.',
     '  export resume         Retoma export por relatorio incremental.',
@@ -133,12 +143,14 @@ const usage = () =>
     '  gemini-md-export sync "/path/to/vault" --tui',
     '  gemini-md-export sync "/path/to/vault" --plain',
     '  gemini-md-export doctor --plain',
+    '  gemini-md-export tabs list --plain',
     '  gemini-md-export export missing "/path/to/vault" --plain',
     '  gemini-md-export job status job-123 --json',
     '',
     'Dentro do Gemini CLI:',
     '  - Use TUI se o shell interativo/node-pty estiver ativo.',
-    '  - Use --plain quando o agente precisar ler a saida sem ANSI.',
+    '  - Para export/sync, rode a CLI direto; evite despejar gemini_ready/gemini_tabs no chat.',
+    '  - Use --plain quando o agente precisar ler a saida sem ANSI e resumir pelo RESULT_JSON.',
     '',
     ...outputModeHelp(),
     '',
@@ -216,6 +228,37 @@ const browserHelp = () =>
     ...outputModeHelp(),
     '',
     ...commonOptionHelp(),
+  ].join('\n');
+
+const tabsHelp = () =>
+  [
+    'gemini-md-export tabs',
+    '',
+    'Uso:',
+    '  gemini-md-export tabs list [opcoes]',
+    '  gemini-md-export tabs claim [--index <n>|--client-id <id>|--tab-id <id>] [opcoes]',
+    '  gemini-md-export tabs release [--claim-id <id>] [opcoes]',
+    '  gemini-md-export tabs reload [--claim-id <id>|--client-id <id>|--tab-id <id>] [opcoes]',
+    '',
+    'Lista e reivindica abas Gemini sem chamar tools MCP ruidosas no chat.',
+    '',
+    'Opcoes:',
+    '  --index <n>             Indice 1-based mostrado por tabs list.',
+    '  --label <text>          Rótulo curto do Tab Group/badge.',
+    '  --color <name>          Cor do Tab Group quando suportado.',
+    '  --ttl-ms <ms>           Tempo da claim. Default: 45 minutos.',
+    '  --force                 Troca uma claim existente quando necessario.',
+    '  --open-if-missing       Abre Gemini se nenhuma aba estiver conectada.',
+    '  --no-open-if-missing    Nao abre Gemini automaticamente.',
+    '',
+    ...outputModeHelp(),
+    '',
+    ...commonOptionHelp(),
+    '',
+    'Exemplos:',
+    '  gemini-md-export tabs list --plain',
+    '  gemini-md-export tabs claim --index 1 --plain',
+    '  gemini-md-export sync "/path/to/vault" --claim-id <claimId> --plain',
   ].join('\n');
 
 const exportHelp = () =>
@@ -432,6 +475,7 @@ const helpForParsed = (parsed) => {
   if (command === 'sync') return syncHelp();
   if (command === 'doctor') return doctorHelp();
   if (command === 'browser') return browserHelp();
+  if (command === 'tabs') return tabsHelp();
   if (command === 'export' && subcommand === 'recent') return exportRecentHelp();
   if (command === 'export' && subcommand === 'missing') return exportMissingHelp();
   if (command === 'export' && subcommand === 'resume') return exportResumeHelp();
@@ -497,6 +541,13 @@ const parseArgs = (argv) => {
     else if (arg === '--known-boundary-count') out.flags.knownBoundaryCount = Number(value());
     else if (arg === '--max-chats' || arg === '--limit') out.flags.maxChats = Number(value());
     else if (arg === '--batch-size') out.flags.batchSize = Number(value());
+    else if (arg === '--max-load-more-rounds') out.flags.maxLoadMoreRounds = Number(value());
+    else if (arg === '--load-more-attempts') out.flags.loadMoreAttempts = Number(value());
+    else if (arg === '--max-no-growth-rounds') out.flags.maxNoGrowthRounds = Number(value());
+    else if (arg === '--load-more-browser-rounds') out.flags.loadMoreBrowserRounds = Number(value());
+    else if (arg === '--load-more-browser-timeout-ms')
+      out.flags.loadMoreBrowserTimeoutMs = Number(value());
+    else if (arg === '--load-more-timeout-ms') out.flags.loadMoreTimeoutMs = Number(value());
     else if (arg === '--refresh') out.flags.refresh = true;
     else if (arg === '--no-refresh') out.flags.refresh = false;
     else if (arg === '--poll-ms') out.flags.pollMs = Math.max(250, Number(value()) || DEFAULT_POLL_MS);
@@ -509,6 +560,12 @@ const parseArgs = (argv) => {
     else if (arg === '--client-id') out.flags.clientId = value();
     else if (arg === '--tab-id') out.flags.tabId = value();
     else if (arg === '--claim-id') out.flags.claimId = value();
+    else if (arg === '--index') out.flags.index = Number(value());
+    else if (arg === '--label') out.flags.label = value();
+    else if (arg === '--color') out.flags.colorName = value();
+    else if (arg === '--ttl-ms') out.flags.ttlMs = Number(value());
+    else if (arg === '--open-if-missing') out.flags.openIfMissing = true;
+    else if (arg === '--no-open-if-missing') out.flags.openIfMissing = false;
     else if (arg === '--start-index') out.flags.startIndex = Number(value());
     else if (arg === '--chat-id') out.flags.chatIds.push(value());
     else if (arg === '--delay-ms') out.flags.delayMs = Number(value());
@@ -566,6 +623,15 @@ const appendParams = (path, params = {}) => {
   const suffix = query.toString();
   return suffix ? `${path}?${suffix}` : path;
 };
+
+const loadMoreParamsFromFlags = (flags = {}) => ({
+  maxLoadMoreRounds: flags.maxLoadMoreRounds,
+  loadMoreAttempts: flags.loadMoreAttempts,
+  maxNoGrowthRounds: flags.maxNoGrowthRounds,
+  loadMoreBrowserRounds: flags.loadMoreBrowserRounds,
+  loadMoreBrowserTimeoutMs: flags.loadMoreBrowserTimeoutMs,
+  loadMoreTimeoutMs: flags.loadMoreTimeoutMs,
+});
 
 const requestJson = async (bridgeUrl, path, { timeoutMs = 15000, method = 'GET' } = {}) => {
   const controller = new AbortController();
@@ -772,6 +838,11 @@ const summarizeForResultJson = (job = {}) => {
         fullHistoryVerified: decision.fullHistoryVerified === true,
         fullHistoryRequested: decision.fullHistoryRequested === true,
       };
+  const failures = Array.isArray(job.failures)
+    ? job.failures
+    : Array.isArray(job.recentErrors)
+      ? job.recentErrors
+      : [];
   return {
     ok: job.status === 'completed',
     status: job.status || null,
@@ -786,6 +857,15 @@ const summarizeForResultJson = (job = {}) => {
     skippedCount: totals.skipped,
     warningCount: totals.warnings,
     failedCount: totals.failed,
+    failures: failures.slice(-10).map((failure) => ({
+      index: failure.index ?? null,
+      chatId: failure.chatId || failure.id || null,
+      title: failure.title || null,
+      error: failure.error || failure.message || null,
+    })),
+    loadWarning: job.loadWarning || null,
+    loadMoreTimedOut: job.loadMoreTimedOut === true,
+    loadMoreRoundsCompleted: job.loadMoreRoundsCompleted ?? null,
     fullHistoryVerified: scope.fullHistoryVerified,
     fullHistoryRequested: scope.fullHistoryRequested,
     nextAction: decision.nextAction || job.nextAction || null,
@@ -869,6 +949,19 @@ const emitResult = (ui, job) => {
   if (ui.format === 'json') {
     ui.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   } else if (ui.format !== 'jsonl') {
+    if (result.fullHistoryRequested && !result.fullHistoryVerified) {
+      ui.stdout.write(
+        `ATENCAO: o fim do historico nao foi confirmado; vistas=${result.webConversationCount ?? '-'}.\n`,
+      );
+    }
+    if (result.failures.length > 0) {
+      ui.stdout.write('Falhas registradas:\n');
+      for (const failure of result.failures.slice(0, 5)) {
+        ui.stdout.write(
+          `- ${failure.chatId || `#${failure.index ?? '?'}`}: ${failure.title || 'sem titulo'} - ${failure.error || 'erro sem detalhe'}\n`,
+        );
+      }
+    }
     ui.stdout.write(`RESULT_JSON ${JSON.stringify(result)}\n`);
   }
   return result;
@@ -1022,6 +1115,7 @@ const startSyncJob = async (bridgeUrl, flags) =>
       resumeReportFile: flags.resumeReportFile,
       syncStateFile: flags.syncStateFile,
       knownBoundaryCount: flags.knownBoundaryCount,
+      ...loadMoreParamsFromFlags(flags),
       clientId: flags.clientId,
       tabId: flags.tabId,
       claimId: flags.claimId,
@@ -1036,6 +1130,7 @@ const startExportJob = async (bridgeUrl, kind, flags) => {
     maxChats: flags.maxChats,
     limit: flags.maxChats,
     batchSize: flags.batchSize,
+    ...loadMoreParamsFromFlags(flags),
     refresh: flags.refresh,
     startIndex: flags.startIndex,
     delayMs: flags.delayMs,
@@ -1213,6 +1308,86 @@ const runBrowser = async (parsed, streams = {}) => {
   return { exitCode: result.ok ? EXIT.OK : EXIT.EXTENSION_UNREADY, result };
 };
 
+const compactTabForCli = (client = {}, index = null) => ({
+  index: client.index ?? index,
+  clientId: client.clientId || null,
+  tabId: client.tabId ?? null,
+  windowId: client.windowId ?? null,
+  isActiveTab: client.isActiveTab === true,
+  url: client.page?.url || client.url || null,
+  title: client.page?.title || client.title || null,
+  chatId: client.page?.chatId || client.chatId || null,
+  routeKind: client.page?.kind || client.routeKind || null,
+  listedConversationCount:
+    client.listedConversationCount ??
+    client.page?.listedConversationCount ??
+    client.sidebarConversationCount ??
+    null,
+});
+
+const summarizeTabsCliResult = (action, result = {}) => {
+  const tabs = Array.isArray(result.tabs)
+    ? result.tabs
+    : Array.isArray(result.connectedClients)
+      ? result.connectedClients
+      : [];
+  return {
+    ok: result.ok !== false,
+    action,
+    connectedTabCount: result.connectedTabCount ?? tabs.length,
+    connectedClientCount: result.connectedClientCount ?? tabs.length,
+    tabs: tabs.map((tab, index) => compactTabForCli(tab, index + 1)),
+    claim: result.claim || result.claimed || null,
+    released: result.released || null,
+    reloaded: result.reloaded ?? null,
+    browserWake: result.browserWake || null,
+    error: result.error || null,
+    nextAction:
+      action === 'list' && tabs.length > 1
+        ? 'Rode gemini-md-export tabs claim --index <n> --plain e reutilize o claimId no sync/export.'
+        : action === 'list' && tabs.length === 1
+          ? 'Rode gemini-md-export tabs claim --index 1 --plain ou passe --client-id diretamente.'
+          : null,
+  };
+};
+
+const runTabs = async (parsed, streams = {}) => {
+  const action = parsed.positionals[0] || 'list';
+  if (!['list', 'claim', 'release', 'reload'].includes(action)) {
+    throw usageError('Uso: gemini-md-export tabs list|claim|release|reload.');
+  }
+  const ui = makeUi(parsed.flags, streams);
+  await ensureBridgeAvailable(parsed.flags, ui);
+  const result = await requestJson(
+    parsed.flags.bridgeUrl,
+    appendParams('/agent/tabs', {
+      action,
+      clientId: parsed.flags.clientId,
+      tabId: parsed.flags.tabId,
+      claimId: parsed.flags.claimId,
+      index: parsed.flags.index,
+      label: parsed.flags.label,
+      color: parsed.flags.colorName,
+      ttlMs: parsed.flags.ttlMs,
+      force: parsed.flags.force,
+      openIfMissing: parsed.flags.openIfMissing,
+      waitMs: parsed.flags.waitMs,
+      allowReload: parsed.flags.allowReload,
+      delayMs: parsed.flags.delayMs,
+    }),
+    { timeoutMs: action === 'reload' ? 30000 : 20000 },
+  );
+  const summary = summarizeTabsCliResult(action, result);
+  const label =
+    action === 'list'
+      ? `${summary.connectedTabCount} aba(s) Gemini conectada(s).`
+      : summary.ok
+        ? `tabs ${action}: ok`
+        : `tabs ${action}: falhou`;
+  writeStructuredResult(ui, summary, { label });
+  return { exitCode: summary.ok ? EXIT.OK : EXIT.EXTENSION_UNREADY, result: summary };
+};
+
 const runExport = async (parsed, streams = {}) => {
   const subcommand = parsed.positionals[0];
   const flags = { ...parsed.flags };
@@ -1360,6 +1535,7 @@ export const main = async (argv = process.argv.slice(2), streams = {}) => {
   if (parsed.command === 'sync') return runSync(parsed, streams);
   if (parsed.command === 'doctor') return runDoctor(parsed, streams);
   if (parsed.command === 'browser') return runBrowser(parsed, streams);
+  if (parsed.command === 'tabs') return runTabs(parsed, streams);
   if (parsed.command === 'export') return runExport(parsed, streams);
   if (parsed.command === 'job') return runJob(parsed, streams);
   if (parsed.command === 'export-dir') return runExportDir(parsed, streams);

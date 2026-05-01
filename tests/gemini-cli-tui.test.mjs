@@ -111,6 +111,43 @@ const completedJob = {
   },
 };
 
+const completedWithErrorsJob = {
+  ...runningJob,
+  status: 'completed_with_errors',
+  phase: 'done',
+  requested: 33,
+  completed: 33,
+  loadedCount: 33,
+  successCount: 32,
+  failureCount: 1,
+  progressMessage: 'Não consegui confirmar o fim do histórico.',
+  loadMoreTimedOut: true,
+  loadMoreRoundsCompleted: 1,
+  failures: [
+    {
+      index: 24,
+      chatId: '3c1d9107303b754e',
+      title: 'SurrealDB Roadmap',
+      error: 'Esta aba do Gemini já está ocupada com outro comando pesado.',
+    },
+  ],
+  decisionSummary: {
+    fullHistoryRequested: true,
+    fullHistoryVerified: false,
+    reportFile: '/tmp/gme-report.json',
+    nextAction: { code: 'resume_available', message: 'Retome pelo relatório.', command: null },
+    totals: {
+      geminiWebSeen: 33,
+      existingInVault: 0,
+      missingInVault: 1,
+      downloadedNow: 32,
+      skipped: 0,
+      mediaWarnings: 0,
+      failed: 1,
+    },
+  },
+};
+
 const mockSyncServer = ({ completedImmediately = false } = {}) => {
   let statusCalls = 0;
   return (req, res, url) => {
@@ -195,6 +232,58 @@ test('CLI expõe ajuda contextual para comandos e subcomandos', async () => {
   assert.equal((await main(['export', 'reexport', '--help'], { stdout: reexportStdout })).exitCode, 0);
   assert.match(reexportStdout.text(), /gemini-md-export export reexport/);
   assert.match(reexportStdout.text(), /--chat-id/);
+
+  const tabsStdout = captureStream();
+  assert.equal((await main(['tabs', '--help'], { stdout: tabsStdout })).exitCode, 0);
+  assert.match(tabsStdout.text(), /gemini-md-export tabs/);
+  assert.match(tabsStdout.text(), /tabs claim/);
+});
+
+test('CLI tabs list usa endpoint proprio sem preflight gemini_ready', async () => {
+  await withServer((req, res, url) => {
+    if (url.pathname === '/agent/tabs') {
+      sendJson(res, 200, {
+        ok: true,
+        action: 'list',
+        connectedTabCount: 1,
+        connectedClientCount: 1,
+        tabs: [
+          {
+            index: 1,
+            clientId: 'client-1',
+            tabId: 123,
+            page: {
+              url: 'https://gemini.google.com/app/abc123abc123',
+              title: 'Chat - Gemini',
+              chatId: 'abc123abc123',
+              kind: 'chat',
+              listedConversationCount: 42,
+            },
+          },
+        ],
+      });
+      return;
+    }
+    sendJson(res, 404, { error: `not found: ${url.pathname}` });
+  }, async (bridgeUrl, requests) => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+    const run = await main(['tabs', 'list', '--bridge-url', bridgeUrl, '--plain'], {
+      stdout,
+      stderr,
+    });
+    assert.equal(run.exitCode, 0);
+    assert.match(stdout.text(), /1 aba\(s\) Gemini conectada\(s\)/);
+    const resultLine = stdout
+      .text()
+      .split(/\r?\n/)
+      .find((line) => line.startsWith('RESULT_JSON '));
+    const result = JSON.parse(resultLine.replace('RESULT_JSON ', ''));
+    assert.equal(result.tabs[0].clientId, 'client-1');
+    assert.equal(result.tabs[0].listedConversationCount, 42);
+    assert.equal(stderr.text(), '');
+    assert.equal(requests.some((item) => item.pathname === '/agent/ready'), false);
+  });
 });
 
 test('CLI sync --plain emite progresso estavel e RESULT_JSON final', async () => {
@@ -224,6 +313,48 @@ test('CLI sync --plain emite progresso estavel e RESULT_JSON final', async () =>
     const syncRequest = requests.find((item) => item.pathname === '/agent/sync-vault');
     assert.equal(syncRequest.searchParams.get('vaultDir'), '/vault/Gemini');
     assert.equal(syncRequest.searchParams.get('outputDir'), '/vault/Gemini');
+  });
+});
+
+test('CLI sync --plain destaca historico incompleto e falhas no RESULT_JSON', async () => {
+  await withServer((req, res, url) => {
+    if (url.pathname === '/agent/ready') {
+      sendJson(res, 200, {
+        ready: true,
+        mode: 'hot',
+        connectedClientCount: 1,
+        selectableTabCount: 1,
+        commandReadyClientCount: 1,
+      });
+      return;
+    }
+    if (url.pathname === '/agent/sync-vault') {
+      sendJson(res, 202, completedWithErrorsJob);
+      return;
+    }
+    sendJson(res, 404, { error: `not found: ${url.pathname}` });
+  }, async (bridgeUrl) => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+    const run = await main(
+      ['sync', '/vault/Gemini', '--bridge-url', bridgeUrl, '--plain', '--poll-ms', '10'],
+      { stdout, stderr },
+    );
+    assert.equal(run.exitCode, 1);
+
+    assert.match(stdout.text(), /ATENCAO: o fim do historico nao foi confirmado/);
+    assert.match(stdout.text(), /Falhas registradas:/);
+    assert.match(stdout.text(), /3c1d9107303b754e/);
+    const resultLine = stdout
+      .text()
+      .split(/\r?\n/)
+      .find((line) => line.startsWith('RESULT_JSON '));
+    const result = JSON.parse(resultLine.replace('RESULT_JSON ', ''));
+    assert.equal(result.status, 'completed_with_errors');
+    assert.equal(result.fullHistoryVerified, false);
+    assert.equal(result.failures[0].chatId, '3c1d9107303b754e');
+    assert.equal(result.loadMoreTimedOut, true);
+    assert.equal(stderr.text(), '');
   });
 });
 

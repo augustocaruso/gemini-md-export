@@ -71,6 +71,7 @@ test('export all mantém lista acumulada do browser a cada rodada', () => {
   assert.match(block, /ignoreFailureCap:\s*true/);
   assert.match(block, /resetReachedEnd:\s*round === 0/);
   assert.match(block, /loadMoreBrowserRounds/);
+  assert.match(block, /RECENT_CHATS_EXPORT_ALL_LOAD_MORE_BROWSER_TIMEOUT_MS/);
   assert.match(block, /let adaptiveBatchSize = batchSize/);
   assert.match(block, /adaptiveLoad = args\.adaptiveLoad !== false/);
   assert.match(block, /targetCount = previousCount \+ adaptiveBatchSize/);
@@ -86,6 +87,8 @@ test('export all incompleto vira aviso em vez de sucesso silencioso', () => {
   )?.[0];
   assert.ok(block, 'runRecentChatsExportJob deve existir');
   assert.match(block, /job\.truncated\s*=\s*job\.exportAll\s*\?\s*!job\.reachedEnd/);
+  assert.match(block, /loadMoreResolved/);
+  assert.match(block, /job\.loadMoreTimedOut = loadMore\.timedOut === true && !loadMoreResolved/);
   assert.match(block, /job\.syncMode && job\.syncBoundary\?\.found === true/);
   assert.match(block, /Nao consegui confirmar que cheguei ao fim do historico do Gemini/);
   assert.match(block, /failures\.length > 0 \|\| job\.truncated \|\| job\.loadMoreTimedOut/);
@@ -179,6 +182,7 @@ test('export recent chats expõe knobs de diagnóstico para lazy-load lento', ()
     'maxNoGrowthRounds',
     'loadMoreBrowserRounds',
     'loadMoreBrowserTimeoutMs',
+    'loadMoreTimeoutMs',
     'skipExisting',
     'adaptiveLoad',
   ]) {
@@ -191,6 +195,7 @@ test('export recent chats expõe knobs de diagnóstico para lazy-load lento', ()
     'maxNoGrowthRounds',
     'loadMoreBrowserRounds',
     'loadMoreBrowserTimeoutMs',
+    'loadMoreTimeoutMs',
   ]) {
     assert.match(source, new RegExp(`${field}: url\\.searchParams\\.get\\('${field}'\\)`));
   }
@@ -284,6 +289,10 @@ test('sync incremental do vault usa fronteira conhecida e estado local', () => {
   assert.match(source, /known-vault-sequence/);
   assert.match(source, /sync-state-boundary/);
   assert.match(source, /loadRecentChatsUntilSyncBoundaryForClient/);
+  assert.match(source, /untilEnd:\s*args\.untilEndInBrowser !== false/);
+  assert.match(source, /maxNoGrowthRounds/);
+  assert.match(source, /browserTrace:\s*Array\.isArray\(result\.loadTrace\)/);
+  assert.match(source, /if \(!grew && noGrowthRounds >= maxNoGrowthRounds\) break/);
   assert.match(source, /maybeUpdateSyncState/);
   assert.match(jobBlock, /preloadedVaultScan/);
   assert.match(jobBlock, /job\.syncBoundary = loadMore\.boundary/);
@@ -294,6 +303,19 @@ test('sync incremental do vault usa fronteira conhecida e estado local', () => {
   assert.match(toolBlock, /exportMissingOnly:\s*true/);
   assert.match(toolBlock, /knownBoundaryCount/);
   assert.match(source, /url\.pathname === '\/agent\/sync-vault'/);
+});
+
+test('export recente faz retry para aba ocupada antes de registrar falha', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const jobBlock = source.match(
+    /const runRecentChatsExportJob = async[\s\S]*?\nconst startRecentChatsExportJob/,
+  )?.[0];
+  assert.ok(jobBlock, 'runRecentChatsExportJob deve existir');
+  assert.match(source, /const isTransientTabBusyError = \(err\) =>/);
+  assert.match(source, /tab_operation_in_progress/);
+  assert.match(source, /const downloadConversationItemWithRetry = async/);
+  assert.match(source, /RECENT_CHATS_TRANSIENT_BUSY_RETRY_LIMIT/);
+  assert.match(jobBlock, /downloadConversationItemWithRetry\(job, client, conversation/);
 });
 
 test('reexport de chatIds conhecidos roda como job em background', () => {
