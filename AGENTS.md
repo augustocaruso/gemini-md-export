@@ -479,7 +479,13 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   `exportConversationsMs`, `writeReportMs`), `lazyLoad`, `payloads`, `assets`
   e métricas por conversa (`openConversationMs`, `hydrateDomMs`,
   `extractMarkdownMs`, `fetchAssetsMs`, `saveFilesMs`). Use esses campos antes
-  de culpar MCP/Chrome/Gemini de forma genérica. O bridge de assets mantém
+  de culpar MCP/Chrome/Gemini de forma genérica. O status e o relatório também
+  expõem `progressMessage`, `decisionSummary` e `nextAction`: para
+  "importar todo o histórico para o vault", o agente deve resumir
+  `geminiWebSeen`, `existingInVault`, `missingInVault`, `downloadedNow`,
+  `mediaWarnings`, `failed`, `reportFile`, `fullHistoryVerified` e o comando
+  exato `nextAction.command.text` quando houver retomada. Não despejar listas
+  grandes de conversas no chat; a lista completa fica no relatório. O bridge de assets mantém
   cache em memória por URL com TTL, limita concorrência global, deduplica
   fetches simultâneos e aplica backoff por host com falha repetida; falha de
   mídia deve ficar como warning rastreável e não travar o job principal.

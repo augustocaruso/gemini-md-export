@@ -131,6 +131,40 @@ test('export total registra métricas de performance no status e relatório', ()
   assert.match(contentSource, /mediaCandidateCount/);
 });
 
+test('export missing oferece UX guiada para importação completa do vault', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const jobBlock = source.match(
+    /const exportJobProgressMessage = \(job\) =>[\s\S]*?\nconst exportJobNextAction/,
+  )?.[0];
+  const summaryBlock = source.match(
+    /const exportJobDecisionSummary = \(job\) =>[\s\S]*?\nconst setClientJobProgressAndNotify/,
+  )?.[0];
+  const toolBlock = source.match(
+    /name: 'gemini_export_missing_chats'[\s\S]*?\n  \{\n    name: 'gemini_reexport_chats'/,
+  )?.[0];
+  assert.ok(jobBlock, 'mensagens humanas do job devem existir');
+  assert.ok(summaryBlock, 'decisionSummary deve existir');
+  assert.ok(toolBlock, 'gemini_export_missing_chats deve existir');
+  assert.match(jobBlock, /Listando histórico do Gemini/);
+  assert.match(jobBlock, /Cruzando histórico do Gemini com o vault/);
+  assert.match(jobBlock, /Baixando somente o que falta no vault/);
+  assert.match(jobBlock, /Retomando do relatório anterior/);
+  assert.match(jobBlock, /Histórico inteiro verificado/);
+  assert.match(jobBlock, /Não consegui confirmar o fim do histórico/);
+  assert.match(summaryBlock, /workflow:\s*exportJobWorkflow\(job\)/);
+  assert.match(summaryBlock, /geminiWebSeen/);
+  assert.match(summaryBlock, /existingInVault/);
+  assert.match(summaryBlock, /missingInVault/);
+  assert.match(summaryBlock, /downloadedNow/);
+  assert.match(summaryBlock, /mediaWarnings/);
+  assert.match(summaryBlock, /resumeCommand/);
+  assert.match(source, /exportJobResumeCommand/);
+  assert.match(source, /gemini_export_missing_chats/);
+  assert.match(source, /nextAction:\s*exportJobNextAction\(job\)/);
+  assert.match(toolBlock, /outputDir:\s*args\.outputDir \|\| args\.vaultDir/);
+  assert.match(toolBlock, /exportMissingOnly:\s*true/);
+});
+
 test('export recent chats expõe knobs de diagnóstico para lazy-load lento', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const block = source.match(

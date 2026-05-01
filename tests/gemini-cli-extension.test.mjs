@@ -143,6 +143,10 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.match(context, /webConversationCount`, `existingVaultCount`, and `missingCount/);
   assert.match(context, /assets\/<chatId>\/\.\.\.` stay\s+inside the vault/);
   assert.match(context, /Do not emulate this by\s+listing pages in chat/);
+  assert.match(context, /progressMessage/);
+  assert.match(context, /decisionSummary/);
+  assert.match(context, /nextAction/);
+  assert.match(context, /nextAction\.command\.text/);
 });
 
 test('auditor coleta todos os links Gemini de origem em nota wiki consolidada', () => {

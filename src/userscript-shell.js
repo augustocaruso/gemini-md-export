@@ -3959,7 +3959,7 @@
         if (!state.bridgeSaveFallbackNotified) {
           state.bridgeSaveFallbackNotified = true;
           showToast(
-            'Não consegui gravar na pasta que você escolheu. Caindo para a pasta Downloads do navegador até o MCP voltar.',
+            'Não consegui gravar na pasta escolhida. Vou cair em Downloads; mídias que não baixarem ficam avisadas no Markdown.',
             'error',
           );
         }
@@ -3980,7 +3980,7 @@
         if (!state.browserDownloadFallbackNotified) {
           state.browserDownloadFallbackNotified = true;
           showToast(
-            'MCP local fora do ar. Vou usar o download padrão do navegador — se já existir um arquivo com o mesmo nome, pode ficar a versão antiga.',
+            'MCP local fora do ar. Vou usar Downloads do navegador. Para salvar direto no vault, reabra o Gemini CLI/MCP e clique em Alterar.',
             'error',
           );
         }
@@ -4675,7 +4675,7 @@
       } else if (isExtensionContext) {
         dirEl.textContent = 'Downloads (fallback padrão)';
         dirEl.title =
-          'Clique em Alterar para escolher outra pasta via MCP local. Sem pasta escolhida, o fallback é a pasta padrão de downloads.';
+          'Clique em Alterar para escolher uma pasta via MCP local. Sem MCP, cai em Downloads; mídias que falharem ficam como aviso no Markdown.';
       } else if (supportsDirectoryPicker()) {
         dirEl.textContent = state.directoryHandle
           ? state.directoryHandle.name

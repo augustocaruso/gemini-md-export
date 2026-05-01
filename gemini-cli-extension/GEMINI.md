@@ -58,6 +58,13 @@ Operational guidance:
   asset counters (cache hits, deduped in-flight requests, host backoff, media
   warnings). Use those fields to say whether the bottleneck was the Gemini page,
   local bridge, media download, disk/vault write, or sidebar scrolling.
+- When reporting the result of `gemini_export_missing_chats` or
+  `gemini_export_recent_chats`, use `progressMessage`, `decisionSummary`, and
+  `nextAction` from the tool response. Do not dump long conversation lists into
+  the chat. A good user-facing summary says: Gemini Web seen count, already in
+  vault count, missing/downloaded count, media warning count, failure count,
+  whether the full history was verified, report path, and the exact
+  `nextAction.command.text` to resume when it is present.
 - When summarizing an export job, distinguish "100% of the requested partial
   batch" from "100% of the user's full Gemini history". Only call the full
   history complete when `fullHistoryRequested=true`, `fullHistoryVerified=true`,

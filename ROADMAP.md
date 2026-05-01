@@ -200,9 +200,9 @@ medição, limites adaptativos e menos trabalho repetido.
 - Em rede ruim ou Gemini lento, o job deve degradar para mais warnings/retries,
   não para travamento silencioso.
 
-## Proposta v0.4.0 — UX guiada para importação completa
+## v0.4.0 — UX guiada para importação completa
 
-Status: proposta.
+Status: implementada.
 
 Objetivo: fazer o fluxo que o usuário realmente quer ficar explícito para o
 agente e para a extensão: listar todo o Gemini Web, cruzar com o vault, baixar
@@ -219,13 +219,13 @@ somente o que falta e retomar quando interromper.
   - "retomando do relatório anterior";
   - "histórico inteiro verificado" ou "não consegui confirmar o fim".
 - Adicionar resumo final orientado a decisão:
-  - total visto no Gemini Web;
-  - total já existente no vault;
-  - total baixado agora;
-  - total com warning de mídia;
-  - total falhado;
-  - caminho do relatório;
-  - comando exato para retomar.
+  - `decisionSummary.totals.geminiWebSeen`;
+  - `decisionSummary.totals.existingInVault`;
+  - `decisionSummary.totals.downloadedNow`;
+  - `decisionSummary.totals.mediaWarnings`;
+  - `decisionSummary.totals.failed`;
+  - `decisionSummary.reportFile`;
+  - `decisionSummary.resumeCommand`.
 - Evitar listagens gigantes no chat:
   - mostrar amostra curta;
   - salvar lista completa no relatório;

@@ -3763,6 +3763,9 @@ const summarizeExportJob = (job) => ({
   loadMoreTimedOut: job.loadMoreTimedOut === true,
   loadMoreTrace: Array.isArray(job.loadMoreTrace) ? job.loadMoreTrace.slice(-20) : [],
   metrics: summarizeExportJobMetrics(job, clients.get(job.clientId)),
+  progressMessage: exportJobProgressMessage(job),
+  decisionSummary: exportJobDecisionSummary(job),
+  nextAction: exportJobNextAction(job),
   recentSuccesses: job.recentSuccesses.slice(-10),
   recentSkipped: Array.isArray(job.recentSkipped) ? job.recentSkipped.slice(-10) : [],
   failures: job.failures.slice(-20),
@@ -3801,6 +3804,200 @@ const directChatsExportScope = (job) => ({
   fullHistoryVerified: false,
   partialLimit: job.requested || job.inputCount || null,
 });
+
+const shellQuoteJson = (value) => JSON.stringify(value);
+
+const exportJobResumeCommand = (job) => {
+  if (!job?.reportFile) return null;
+  const tool = job.exportMissingOnly ? 'gemini_export_missing_chats' : 'gemini_export_recent_chats';
+  const args = {
+    resumeReportFile: job.reportFile,
+  };
+  if (job.exportMissingOnly && job.existingScanDir) {
+    args.vaultDir = job.existingScanDir;
+  }
+  if (job.outputDir && (!job.exportMissingOnly || job.outputDir !== job.existingScanDir)) {
+    args.outputDir = job.outputDir;
+  }
+  return {
+    tool,
+    args,
+    text: `${tool}(${shellQuoteJson(args)})`,
+  };
+};
+
+const exportJobPollCommand = (job) => ({
+  tool: 'gemini_export_job_status',
+  args: { jobId: job.jobId },
+  text: `gemini_export_job_status(${shellQuoteJson({ jobId: job.jobId })})`,
+});
+
+const exportJobCancelCommand = (job) => ({
+  tool: 'gemini_export_job_cancel',
+  args: { jobId: job.jobId },
+  text: `gemini_export_job_cancel(${shellQuoteJson({ jobId: job.jobId })})`,
+});
+
+const mediaWarningCountForJob = (job) =>
+  Number(job.metrics?.counters?.mediaWarnings || 0) ||
+  (Array.isArray(job.recentSuccesses)
+    ? job.recentSuccesses.reduce((sum, item) => sum + Number(item.mediaFailureCount || 0), 0)
+    : 0);
+
+const downloadedThisRunCount = (job) =>
+  Math.max(0, Number(job.successCount || 0) - Number(job.resume?.previousSuccessCount || 0));
+
+const exportJobWorkflow = (job) => {
+  if (job.type === 'direct-chats-export') return 'direct-reexport';
+  if (job.exportMissingOnly) return 'vault-reconciliation';
+  return job.exportAll ? 'full-history-export' : 'partial-history-export';
+};
+
+const exportJobProgressMessage = (job) => {
+  const errorCount = job.failureCount || 0;
+  const fullHistoryVerified =
+    job.type === 'recent-chats-export' && recentChatsExportScope(job).fullHistoryVerified;
+  const mediaWarnings = mediaWarningCountForJob(job);
+
+  if (job.status === 'cancel_requested') {
+    return 'Cancelamento solicitado. Vou parar antes da próxima conversa.';
+  }
+  if (job.status === 'cancelled') {
+    return 'Exportação cancelada. O relatório já permite retomar depois.';
+  }
+  if (job.status === 'failed') {
+    return 'Exportação falhou. Use o relatório para retomar quando o problema for resolvido.';
+  }
+  if (job.status === 'completed_with_errors') {
+    if (job.loadWarning || job.truncated || job.loadMoreTimedOut || job.vaultScan?.truncated) {
+      return 'Não consegui confirmar o fim do histórico. O relatório mostra o que foi salvo e como retomar.';
+    }
+    return `Exportação concluída com ${errorCount} erro${errorCount === 1 ? '' : 's'}.`;
+  }
+  if (job.status === 'completed') {
+    if (job.exportMissingOnly && fullHistoryVerified && (job.missingCount || 0) === 0) {
+      return 'Histórico inteiro verificado. Nada faltava no vault.';
+    }
+    if (fullHistoryVerified) {
+      const suffix =
+        mediaWarnings > 0
+          ? ` ${mediaWarnings} mídia${mediaWarnings === 1 ? '' : 's'} ficaram com warning.`
+          : '';
+      return `Histórico inteiro verificado.${suffix}`;
+    }
+    return 'Exportação concluída.';
+  }
+  if (job.resume && job.phase === 'loading-history') {
+    return 'Retomando do relatório anterior e listando histórico do Gemini...';
+  }
+  if (job.phase === 'loading-history') {
+    return 'Listando histórico do Gemini...';
+  }
+  if (job.phase === 'scanning-vault') {
+    return 'Cruzando histórico do Gemini com o vault...';
+  }
+  if (job.phase === 'exporting' && job.current?.skippedExisting) {
+    const title = job.current.title || job.current.chatId || 'conversa já salva';
+    return `Pulando conversa já salva: ${title}`;
+  }
+  if (job.phase === 'exporting') {
+    const title = job.current?.title || job.current?.chatId || '';
+    const prefix = job.exportMissingOnly
+      ? 'Baixando somente o que falta no vault'
+      : 'Exportando conversas do Gemini';
+    const count =
+      job.requested > 0
+        ? ` (${Math.min(job.completed + 1, job.requested)}/${job.requested})`
+        : '';
+    return `${prefix}${count}${title ? `: ${title}` : '...'}`;
+  }
+  if (job.phase === 'writing-report') {
+    return 'Gravando relatório final...';
+  }
+  return 'Preparando exportação...';
+};
+
+const exportJobNextAction = (job) => {
+  const resumeCommand = exportJobResumeCommand(job);
+  if (!isTerminalExportJobStatus(job.status)) {
+    return {
+      code: 'poll_status',
+      message: 'Acompanhe o job sem listar conversas no chat.',
+      command: exportJobPollCommand(job),
+      cancelCommand: exportJobCancelCommand(job),
+    };
+  }
+  if (job.status === 'completed') {
+    return {
+      code: 'done',
+      message: job.exportMissingOnly
+        ? 'Importação do histórico para o vault concluída.'
+        : 'Exportação concluída.',
+      command: null,
+    };
+  }
+  if (resumeCommand) {
+    return {
+      code: 'resume_available',
+      message: 'Retome pelo relatório incremental em vez de começar do zero.',
+      command: resumeCommand,
+    };
+  }
+  return {
+    code: 'inspect_report',
+    message: 'Consulte o relatório e corrija o erro antes de tentar novamente.',
+    command: null,
+  };
+};
+
+const exportJobDecisionSummary = (job) => {
+  const scope =
+    job.type === 'recent-chats-export'
+      ? recentChatsExportScope(job)
+      : directChatsExportScope(job);
+  const terminal = isTerminalExportJobStatus(job.status);
+  const mediaWarnings = mediaWarningCountForJob(job);
+  const warnings = [];
+  if (job.loadWarning) warnings.push(job.loadWarning);
+  if (job.refreshError) warnings.push(`Falha ao atualizar o sidebar: ${job.refreshError}`);
+  if (job.vaultScan?.truncated) {
+    warnings.push('O scan do vault foi truncado; alguns exports existentes podem não ter sido considerados.');
+  }
+  if (mediaWarnings > 0) {
+    warnings.push(
+      `${mediaWarnings} mídia${mediaWarnings === 1 ? '' : 's'} ficaram com warning no Markdown.`,
+    );
+  }
+  if (job.failureCount > 0) {
+    warnings.push(`${job.failureCount} conversa${job.failureCount === 1 ? '' : 's'} falharam.`);
+  }
+
+  return {
+    workflow: exportJobWorkflow(job),
+    headline: exportJobProgressMessage(job),
+    terminal,
+    fullHistoryRequested: scope.fullHistoryRequested,
+    fullHistoryVerified: scope.fullHistoryVerified,
+    shouldResume:
+      terminal &&
+      job.status !== 'completed' &&
+      !!job.reportFile,
+    totals: {
+      geminiWebSeen: job.webConversationCount ?? job.loadedCount ?? null,
+      existingInVault: job.exportMissingOnly ? job.existingVaultCount ?? 0 : null,
+      missingInVault: job.exportMissingOnly ? job.missingCount ?? null : null,
+      downloadedNow: downloadedThisRunCount(job),
+      downloadedInReport: job.successCount || 0,
+      skipped: job.skippedCount || 0,
+      mediaWarnings,
+      failed: job.failureCount || 0,
+    },
+    reportFile: job.reportFile || null,
+    resumeCommand: exportJobResumeCommand(job),
+    nextAction: exportJobNextAction(job),
+    warnings,
+  };
+};
 
 const setClientJobProgressAndNotify = (client, payload) => {
   setClientJobProgress(client, payload);
@@ -3847,6 +4044,9 @@ const buildRecentChatsExportReport = (job, client, successes, failures) => ({
   loadMoreTimedOut: job.loadMoreTimedOut === true,
   loadMoreTrace: Array.isArray(job.loadMoreTrace) ? job.loadMoreTrace : [],
   metrics: summarizeExportJobMetrics(job, client, { includeConversations: true }),
+  progressMessage: exportJobProgressMessage(job),
+  decisionSummary: exportJobDecisionSummary(job),
+  nextAction: exportJobNextAction(job),
   current: job.current || null,
   successes,
   skippedExisting: Array.isArray(job.skippedExisting) ? job.skippedExisting : [],
@@ -3966,6 +4166,9 @@ const buildDirectChatsExportReport = (job, client, successes, failures) => ({
   failureCount: failures.length,
   delayMs: job.delayMs,
   metrics: summarizeExportJobMetrics(job, client, { includeConversations: true }),
+  progressMessage: exportJobProgressMessage(job),
+  decisionSummary: exportJobDecisionSummary(job),
+  nextAction: exportJobNextAction(job),
   current: job.current || null,
   items: job.items.map((item, index) => ({
     index: index + 1,
@@ -4001,31 +4204,7 @@ const broadcastRecentChatsJobProgress = (job, client, patch = {}) => {
   const phase = patch.phase ?? job.phase ?? null;
   let label = patch.label;
   if (!label) {
-    if (status === 'cancelled') {
-      label = 'Exportação cancelada.';
-    } else if (status === 'completed') {
-      label = 'Exportação concluída.';
-    } else if (status === 'completed_with_errors') {
-      label = `Exportação concluída com ${errorCount} erro${errorCount === 1 ? '' : 's'}.`;
-    } else if (status === 'failed') {
-      label = 'Exportação falhou.';
-    } else if (phase === 'loading-history') {
-      label = 'MCP carregando histórico do sidebar...';
-    } else if (phase === 'scanning-vault') {
-      label = 'MCP cruzando histórico do Gemini com o vault...';
-    } else if (phase === 'exporting' && job.current?.skippedExisting) {
-      const indexLabel = job.current.index ? ` (${job.current.index})` : '';
-      label = `MCP pulando${indexLabel}: ${job.current.title || job.current.chatId}`;
-    } else if (phase === 'exporting' && job.current?.title) {
-      const indexLabel = job.current.index ? ` (${job.current.index})` : '';
-      label = `MCP exportando${indexLabel}: ${job.current.title}`;
-    } else if (phase === 'exporting') {
-      label = 'MCP exportando conversas...';
-    } else if (phase === 'writing-report') {
-      label = 'MCP gravando relatório...';
-    } else {
-      label = 'MCP preparando exportação...';
-    }
+    label = exportJobProgressMessage({ ...job, status, phase, failureCount: errorCount });
   }
   setClientJobProgressAndNotify(client, {
     source: 'mcp',
@@ -5367,7 +5546,7 @@ const rawTools = [
   {
     name: 'gemini_export_missing_chats',
     description:
-      'Inicia um job em background que carrega todo o histórico recente do Gemini web, cruza os chatIds com exports raw já presentes no vault, e baixa apenas as conversas faltantes.',
+      'Fluxo recomendado para importar todo o histórico para um vault: carrega o Gemini Web, cruza com exports raw já presentes no vault e baixa apenas as conversas faltantes em job de background.',
     inputSchema: {
       type: 'object',
       properties: {

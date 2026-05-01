@@ -308,6 +308,13 @@ pesado acontece no MCP e o relatório parcial preserva o que já foi feito.
 Quando `maxChats` é omitido, o job tenta carregar até o fim real do sidebar,
 usando o mesmo caminho de lazy-load do modal.
 
+Para importar o histórico inteiro para um vault, prefira
+`gemini_export_missing_chats`: ele lista o Gemini Web, cruza com os exports raw
+já existentes no vault e baixa somente o que falta. O status e o relatório
+incluem `progressMessage`, `decisionSummary` e `nextAction`, com totais vistos
+no Gemini, já existentes no vault, baixados agora, warnings de mídia, falhas,
+caminho do relatório e comando pronto para retomar via `resumeReportFile`.
+
 Para evitar arquivos truncados, cada conversa é hidratada até o início antes da
 extração. Se a extensão não conseguir provar que chegou ao topo da conversa, o
 item falha no relatório em vez de salvar um Markdown incompleto.

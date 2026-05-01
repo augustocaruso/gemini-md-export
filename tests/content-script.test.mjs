@@ -433,6 +433,14 @@ test('content script reporta diagnóstico de scroll ao puxar histórico', async 
   assert.match(source, /state\.reachedSidebarEnd = false/);
 });
 
+test('content script explica fallback para Downloads e warnings de mídia', async () => {
+  const source = await readFile(new URL('../src/userscript-shell.js', import.meta.url), 'utf8');
+  assert.match(source, /Vou cair em Downloads/);
+  assert.match(source, /mídias que não baixarem ficam avisadas no Markdown/);
+  assert.match(source, /Para salvar direto no vault, reabra o Gemini CLI\/MCP e clique em Alterar/);
+  assert.match(source, /Sem MCP, cai em Downloads; mídias que falharem ficam como aviso no Markdown/);
+});
+
 test('exportPayload baixa blob sem preparar a imagem antes', { timeout: 5000 }, async () => {
   const { dom, runtimeErrors } = createGeminiMediaDom(`
     <model-response>
