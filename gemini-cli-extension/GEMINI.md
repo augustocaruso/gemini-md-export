@@ -102,6 +102,9 @@ the same local bridge used by MCP.
   multiple tabs block the CLI, use `gemini-md-export tabs list --plain` and
   `gemini-md-export tabs claim --index <n> --plain`, then rerun sync/export with
   `--claim-id <claimId>`.
+- If a CLI command reports multiple Gemini tabs, keep using CLI tab commands.
+  Do not switch to `gemini_tabs`; the user explicitly wants to avoid MCP JSON
+  cards.
 - Never report success when CLI `RESULT_JSON.status` is
   `completed_with_errors`, `failed`, or `cancelled`, or when
   `fullHistoryRequested=true` and `fullHistoryVerified=false`. Mention

@@ -94,6 +94,7 @@ test('MCP implementa afinidade confiável por claim de aba', () => {
   assert.match(source, /diagnosticClients/);
   assert.match(source, /demotedFromTabSelection/);
   assert.match(source, /ambiguous_gemini_tabs/);
+  assert.doesNotMatch(source, /em MCP, use gemini_tabs/);
   assert.match(source, /tabClaims = new Map/);
   assert.match(source, /sessionClaims = new Map/);
   assert.match(source, /allowLaunchChrome:\s*args\.openIfMissing !== false/);

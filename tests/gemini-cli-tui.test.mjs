@@ -348,6 +348,7 @@ test('CLI chats count carrega ate o fim sem despejar lista no chat', async () =>
     const countRequest = requests.find((item) => item.pathname === '/agent/recent-chats');
     assert.equal(countRequest.searchParams.get('countOnly'), 'true');
     assert.equal(countRequest.searchParams.get('untilEnd'), 'true');
+    assert.equal(countRequest.searchParams.get('preferActive'), 'true');
     assert.equal(countRequest.searchParams.get('limit'), '1');
     assert.equal(countRequest.searchParams.get('loadMoreTimeoutMs'), '180000');
   });
@@ -532,6 +533,7 @@ test('CLI sync acorda Gemini Web pela propria CLI antes de exportar', async () =
 
           assert.equal(run.exitCode, 0);
           assert.match(stdout.text(), /Abrindo Gemini Web em background/);
+          assert.match(stdout.text(), /Aguardando a extensao conectar \(1s\)/);
           assert.match(stdout.text(), /RESULT_JSON /);
           assert.equal(stderr.text(), '');
 

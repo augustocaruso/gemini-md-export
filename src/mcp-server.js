@@ -1914,6 +1914,7 @@ const clientSelectorFromSearchParams = (searchParams) => ({
   tabId: searchParams.get('tabId') || undefined,
   claimId: searchParams.get('claimId') || undefined,
   sessionId: searchParams.get('sessionId') || undefined,
+  preferActive: parseOptionalBoolean(searchParams.get('preferActive')),
 });
 
 const getLiveClients = () => {
@@ -2145,7 +2146,7 @@ const removeTabClaim = (claimId) => {
 
 const ambiguousTabsError = (liveClients, selector = {}) => {
   const error = new Error(
-    'Há várias abas do Gemini conectadas. Pela CLI, rode `gemini-md-export tabs list --plain` e depois `gemini-md-export tabs claim --index <n> --plain`; em MCP, use gemini_tabs { action: "list" }.',
+    'Há várias abas do Gemini conectadas. Pela CLI, rode `gemini-md-export tabs list --plain` e depois `gemini-md-export tabs claim --index <n> --plain`. Nao chame gemini_tabs como fallback se a meta era evitar JSON na tela.',
   );
   error.code = 'ambiguous_gemini_tabs';
   error.data = {
@@ -3194,6 +3195,11 @@ const requireRecentChatsClient = (selector = {}) => {
   const sessionClaim = claimForSession(normalized.sessionId);
   const sessionClaimClient = liveClientForClaim(sessionClaim);
   if (sessionClaimClient) return sessionClaimClient;
+
+  if (selector.preferActive === true) {
+    const activeClients = liveClients.filter((client) => client.isActiveTab === true);
+    if (activeClients.length === 1) return activeClients[0];
+  }
 
   if (liveClients.length > 1) {
     throw ambiguousTabsError(liveClients, normalized);

@@ -14,7 +14,7 @@ import {
 
 const DEFAULT_BRIDGE_URL = 'http://127.0.0.1:47283';
 const DEFAULT_POLL_MS = 1200;
-const DEFAULT_READY_WAIT_MS = 12000;
+const DEFAULT_READY_WAIT_MS = 30_000;
 const DEFAULT_TIMEOUT_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_COUNT_LOAD_MORE_TIMEOUT_MS = 180_000;
 const DEFAULT_COUNT_STATUS_INTERVAL_MS = 15_000;
@@ -1180,6 +1180,9 @@ const readyWithCliWake = async (bridgeUrl, flags, ui) => {
   if (ready.ready !== true) {
     cliBrowserWake = await wakeBrowserFromCli(flags, ui, ready);
     if (flags.readyWaitMs > 0) {
+      if (ui.format !== 'json' && ui.format !== 'jsonl') {
+        ui.stdout.write(`Aguardando a extensao conectar (${formatDuration(flags.readyWaitMs)})...\n`);
+      }
       ready = await requestReadyStatus(bridgeUrl, flags, { waitMs: flags.readyWaitMs });
     }
   }
@@ -1557,6 +1560,7 @@ const runChats = async (parsed, streams = {}) => {
           offset: 0,
           countOnly: true,
           untilEnd: true,
+          preferActive: true,
           refresh: parsed.flags.refresh,
           ...loadMoreParamsFromFlags(parsed.flags),
           loadMoreTimeoutMs: countTimeoutMs,
