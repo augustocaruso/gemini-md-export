@@ -132,9 +132,9 @@ própria extensão recarrega as abas do Gemini em seguida. O reload manual do
 card em `chrome://extensions`/`edge://extensions` continua sendo o fallback
 para a primeira migração, mudança de permissões/manifest ou perfil errado.
 Na extensão do Gemini CLI, o hook `BeforeTool` continua sendo o primeiro a
-acordar o navegador no Windows, apenas para tools que realmente dependem do
-navegador, incluindo `gemini_browser_status`, `gemini_list_tabs` e
-`gemini_claim_tab`. O MCP também tem fallback guardado para abrir
+acordar o navegador no Windows, apenas para ações que realmente dependem do
+navegador dentro de `gemini_ready`, `gemini_tabs`, `gemini_chats`,
+`gemini_export`, `gemini_config` e `gemini_support`. O MCP também tem fallback guardado para abrir
 `https://gemini.google.com/app` quando uma tool precisa de aba e não há nenhuma
 conectada. Ambos usam o mesmo arquivo de cooldown, então duas chamadas rápidas
 não devem abrir duas abas. Antes de abrir qualquer coisa, o hook consulta
@@ -161,7 +161,7 @@ O MCP também deve ficar silencioso por padrão. Checagens internas de
 versão/protocolo, reload e wake do navegador só aparecem no terminal com
 `GEMINI_MCP_DEBUG=true` ou `GEMINI_MCP_LOG_LEVEL=info`; no uso normal, as
 tools retornam JSON compacto e diagnóstico detalhado fica nos status/relatórios.
-`gemini_browser_status` inclui `extensionReadiness`, separando service worker,
+`gemini_ready { action: "status" }` inclui `extensionReadiness`, separando service worker,
 content script, aba Gemini, build stamp esperado/em execução, resultado do
 reload automático e diagnóstico do top-bar. Só peça reload manual do card da
 extensão unpacked quando `extensionReadiness.reload.manualReloadRequired=true`
@@ -185,7 +185,7 @@ __geminiMdExportDebug.findTopBar()
 __geminiMdExportDebug.openExportModal()
 ```
 
-Confira se `buildStamp` bate com o esperado em `gemini_browser_status`, se
+Confira se `buildStamp` bate com o esperado em `gemini_ready { action: "status" }`, se
 `findTopBar().matchedBy` não é `null` numa conversa e se o modal consegue
 trocar destino/salvar via bridge. Se o MCP estiver ausente, o fallback esperado
 é Downloads com aviso em português no modal/toast.
@@ -256,57 +256,50 @@ não tenta disputar essa porta nem deve mostrar erro de bridge ocupado: ela
 permanece como servidor MCP por `stdio` e encaminha as tools para a instância
 primária que já está conectada à extensão do navegador.
 
-Quando a porta está ocupada, `gemini_browser_status` diferencia modo proxy
+Quando a porta está ocupada, `gemini_ready { action: "status" }` diferencia modo proxy
 saudável de primário antigo/travado ou porta usada por outro serviço. O
 diagnóstico inclui PID, versão, protocolo e dono provável da porta quando o
 sistema permite descobrir isso.
 
 Para ambientes com processos antigos acumulados, use
-`gemini_mcp_diagnose_processes` antes de qualquer orientação manual. Se ele
+`gemini_support { action: "processes" }` antes de qualquer orientação manual. Se ele
 identificar um primário antigo/travado reconhecido como exporter,
-`gemini_mcp_cleanup_stale_processes` faz dry-run por padrão e só encerra o alvo
-com `confirm=true`; ele nunca encerra o processo MCP atual nem processo fora do
-escopo `gemini-md-export`/`mcp-server.js`.
+`gemini_support { action: "cleanup_processes" }` faz dry-run por padrão e só
+encerra o alvo com `confirm=true`; ele nunca encerra o processo MCP atual nem
+processo fora do escopo `gemini-md-export`/`mcp-server.js`.
 
 O manifesto da extensão Gemini CLI não define `cwd` dentro de
 `~/.gemini/extensions/gemini-md-export`. Isso é intencional: no Windows, um MCP
 rodando com diretório de trabalho dentro da pasta da extensão pode travar o
 auto-update com `EBUSY: resource busy or locked, rmdir ...`.
 
-Tools disponíveis:
+Tools públicas disponíveis desde `v0.5.0`:
 
-- `gemini_browser_status`
-- `gemini_browser_ready`
-- `gemini_list_tabs`
-- `gemini_claim_tab`
-- `gemini_release_tab`
-- `gemini_mcp_diagnose_processes`
-- `gemini_mcp_cleanup_stale_processes`
-- `gemini_diagnose_environment`
-- `gemini_flight_recorder`
-- `gemini_collect_support_bundle`
-- `gemini_get_export_dir`
-- `gemini_set_export_dir`
-- `gemini_list_recent_chats`
-- `gemini_list_notebook_chats`
-- `gemini_get_current_chat`
-- `gemini_download_chat`
-- `gemini_download_notebook_chat`
-- `gemini_export_recent_chats`
-- `gemini_export_missing_chats`
-- `gemini_sync_vault`
-- `gemini_reexport_chats`
-- `gemini_export_job_status`
-- `gemini_export_job_cancel`
-- `gemini_export_notebook`
-- `gemini_cache_status`
-- `gemini_clear_cache`
-- `gemini_open_chat`
-- `gemini_reload_gemini_tabs`
-- `gemini_snapshot`
+- `gemini_ready`
+- `gemini_tabs`
+- `gemini_chats`
+- `gemini_export`
+- `gemini_job`
+- `gemini_config`
+- `gemini_support`
 
-Quando houver mais de uma aba Gemini conectada, chame `gemini_list_tabs` e
-depois `gemini_claim_tab` com `clientId`, `tabId` ou `index`. A claim prende a
+Chamadas diretas aos nomes antigos retornam `code: "tool_renamed"` com o
+comando novo exato em `replacement`.
+
+A extensão Gemini CLI também empacota Agent Skills em
+`skills/<nome>/SKILL.md`. O `GEMINI.md` do bundle fica curto e roteia para:
+
+- `gemini-vault-sync` para importação completa, missing chats, sync
+  incremental e retomada;
+- `gemini-vault-repair` para raw exports contaminados e notas wiki;
+- `gemini-mcp-diagnostics` para bridge lento/instável, versão stale e conflitos
+  de processo;
+- `gemini-tabs-and-browser` para múltiplas abas, claim visual e abertura
+  confiável do Gemini Web.
+
+Quando houver mais de uma aba Gemini conectada, chame
+`gemini_tabs { action: "list" }` e depois
+`gemini_tabs { action: "claim" }` com `clientId`, `tabId` ou `index`. A claim prende a
 sessão MCP/CLI naquela aba; sem claim ou seletor explícito, tools de listagem e
 export retornam `ambiguous_gemini_tabs` em vez de escolher a aba ativa por
 acidente. O indicador visual usa Tab Group nativo do Chrome/Edge quando
@@ -314,7 +307,7 @@ possível, não overlay dentro da página Gemini. Se a aba já estiver em um gru
 do usuário, a extensão preserva esse grupo e usa badge/prefixo de título como
 fallback.
 
-Para listas grandes, `gemini_list_recent_chats` é paginada. Use `limit` como
+Para listas pequenas, `gemini_chats { action: "list" }` é paginada. Use `limit` como
 tamanho da página e avance com `offset` (`0`, `50`, `100`...). O MCP carrega
 mais histórico conforme necessário e retorna `pagination` com `nextOffset`,
 `loadedCount`, `reachedEnd` e `canLoadMore`. Evite pedir centenas de conversas
@@ -322,8 +315,9 @@ em uma única resposta do Gemini CLI; peça páginas de 25-50 itens e continue a
 `reachedEnd=true` ou uma página vazia. A listagem paginada tem teto defensivo de
 1000 conversas por sessão.
 
-Exports longos gravam relatório JSON incremental. Se `gemini_export_recent_chats`
-ou `gemini_export_missing_chats` for interrompido, rode a mesma tool com
+Exports longos gravam relatório JSON incremental. Se
+`gemini_export { action: "recent" }` ou `gemini_export { action: "missing" }`
+for interrompido, rode a mesma tool com
 `resumeReportFile` apontando para esse relatório. O MCP reutiliza o mesmo
 arquivo, pula chatIds já concluídos ou já encontrados no vault e retenta apenas
 os itens faltantes/falhos. O lazy-load do histórico usa batches adaptativos e o
@@ -345,30 +339,45 @@ sessão/agente e aba. Comandos pesados vindos do MCP usam backpressure por aba
 aba já estiver carregando histórico, navegando ou exportando, comandos
 concorrentes retornam `busy=true` em vez de disputar o mesmo DOM.
 
-Para importar/exportar o histórico inteiro, use `gemini_export_recent_chats`.
+Para importar/exportar o histórico inteiro, use
+`gemini_export { action: "recent" }`.
 Ela inicia um job em background, percorre o sidebar carregável, grava os
 Markdown no diretório configurado e mantém um relatório JSON incremental;
-acompanhe com `gemini_export_job_status` pelo `jobId` e cancele com
-`gemini_export_job_cancel` se necessário. Esse é o fluxo recomendado para
+acompanhe com `gemini_job { action: "status" }` pelo `jobId` e cancele com
+`gemini_job { action: "cancel" }` se necessário. Esse é o fluxo recomendado para
 centenas de conversas, porque a resposta do Gemini CLI fica pequena, o trabalho
 pesado acontece no MCP e o relatório parcial preserva o que já foi feito.
 Quando `maxChats` é omitido, o job tenta carregar até o fim real do sidebar,
 usando o mesmo caminho de lazy-load do modal.
 
 Para importar o histórico inteiro para um vault, prefira
-`gemini_export_missing_chats`: ele lista o Gemini Web, cruza com os exports raw
+`gemini_export { action: "missing" }`: ele lista o Gemini Web, cruza com os exports raw
 já existentes no vault e baixa somente o que falta. O status e o relatório
 incluem `progressMessage`, `decisionSummary` e `nextAction`, com totais vistos
 no Gemini, já existentes no vault, baixados agora, warnings de mídia, falhas,
 caminho do relatório e comando pronto para retomar via `resumeReportFile`.
 
-Depois que o vault já foi sincronizado uma vez, use `gemini_sync_vault` para o
+Depois que o vault já foi sincronizado uma vez, use
+`gemini_export { action: "sync" }` para o
 fluxo incremental sem atrito. Ele lê/grava
 `.gemini-md-export/sync-state.json`, lista o Gemini Web do topo para baixo,
 para ao encontrar uma fronteira conhecida (`topChatId` anterior ou sequência de
 chats já presentes no vault) e baixa apenas conversas novas. Se a fronteira não
 for provada, o relatório marca o sync como parcial/inconclusivo e preserva o
 comando de retomada.
+
+No Gemini CLI, o atalho humano é:
+
+```text
+/sync
+```
+
+Sem argumento, o comando usa o vault já conhecido pelo contexto/GEMINI.md
+principal da sessão. Para sobrescrever o destino pontualmente:
+
+```text
+/sync /caminho/do/vault
+```
 
 Para evitar arquivos truncados, cada conversa é hidratada até o início antes da
 extração. Se a extensão não conseguir provar que chegou ao topo da conversa, o

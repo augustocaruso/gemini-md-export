@@ -22,6 +22,13 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   const browserManifestPath = resolve(extensionDir, 'browser-extension', 'manifest.json');
   const hooksConfigPath = resolve(extensionDir, 'hooks', 'hooks.json');
   const repairAgentPath = resolve(extensionDir, 'agents', 'gemini-vault-repair.md');
+  const skillNames = [
+    'gemini-vault-sync',
+    'gemini-vault-repair',
+    'gemini-mcp-diagnostics',
+    'gemini-tabs-and-browser',
+  ];
+  const syncCommandPath = resolve(extensionDir, 'commands', 'sync.toml');
   const repairCommandPath = resolve(extensionDir, 'commands', 'exporter', 'repair-vault.toml');
   const repairAuditScriptPath = resolve(extensionDir, 'scripts', 'vault-repair-audit.mjs');
   const repairScriptPath = resolve(extensionDir, 'scripts', 'vault-repair.mjs');
@@ -41,7 +48,14 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.equal(existsSync(bridgeVersionPath), true);
   assert.equal(existsSync(browserManifestPath), true);
   assert.equal(existsSync(hooksConfigPath), true);
+  for (const skillName of skillNames) {
+    assert.equal(existsSync(resolve(extensionDir, 'skills', skillName, 'SKILL.md')), true);
+    const skill = readFileSync(resolve(extensionDir, 'skills', skillName, 'SKILL.md'), 'utf-8');
+    assert.match(skill, /^---\nname: /);
+    assert.match(skill, /^description: /m);
+  }
   assert.equal(existsSync(repairAgentPath), true);
+  assert.equal(existsSync(syncCommandPath), true);
   assert.equal(existsSync(repairCommandPath), true);
   assert.equal(existsSync(repairAuditScriptPath), true);
   assert.equal(existsSync(repairScriptPath), true);
@@ -66,23 +80,18 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.ok(Array.isArray(hooksConfig.hooks?.AfterTool));
   assert.ok(Array.isArray(hooksConfig.hooks?.BeforeTool));
   assert.equal(hooksConfig.hooks?.SessionStart, undefined);
-  assert.match(hooksConfig.hooks.AfterTool[0].matcher, /mcp_diagnose_processes/);
-  assert.match(hooksConfig.hooks.AfterTool[0].matcher, /mcp_cleanup_stale_processes/);
+  assert.match(hooksConfig.hooks.AfterTool[0].matcher, /ready/);
+  assert.match(hooksConfig.hooks.AfterTool[0].matcher, /support/);
   assert.notEqual(hooksConfig.hooks.BeforeTool[0].matcher, '*');
-  assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /browser_status/);
-  assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /browser_ready/);
-  assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /list_tabs/);
-  assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /claim_tab/);
-  assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /export_missing_chats/);
-  assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /sync_vault/);
+  assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /ready/);
+  assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /tabs/);
+  assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /chats/);
+  assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /export/);
   assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /mcp_\+gemini/);
-  assert.doesNotMatch(hooksConfig.hooks.BeforeTool[0].matcher, /get_export_dir/);
-  assert.doesNotMatch(hooksConfig.hooks.BeforeTool[0].matcher, /set_export_dir/);
+  assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /config/);
+  assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /support/);
+  assert.doesNotMatch(hooksConfig.hooks.BeforeTool[0].matcher, /browser_status/);
   assert.doesNotMatch(hooksConfig.hooks.BeforeTool[0].matcher, /export_job_status/);
-  assert.doesNotMatch(hooksConfig.hooks.BeforeTool[0].matcher, /export_job_cancel/);
-  assert.doesNotMatch(hooksConfig.hooks.BeforeTool[0].matcher, /mcp_diagnose_processes/);
-  assert.doesNotMatch(hooksConfig.hooks.BeforeTool[0].matcher, /mcp_cleanup_stale_processes/);
-  assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /reexport/);
   assert.equal(hooksConfig.hooks.BeforeTool[0].hooks[0].timeout, 20000);
   const scopeGuard = hooksConfig.hooks.BeforeTool.find(
     (entry) => entry.hooks?.[0]?.name === 'gemini-md-export-scope-guard',
@@ -95,9 +104,10 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   const repairAgent = readFileSync(repairAgentPath, 'utf-8');
   assert.match(repairAgent, /^---\nname: gemini-vault-repair/m);
   assert.match(repairAgent, /^model: gemini-3-flash-preview$/m);
-  assert.match(repairAgent, /mcp_gemini-md-export_gemini_download_chat/);
-  assert.match(repairAgent, /mcp_gemini-md-export_gemini_reexport_chats/);
-  assert.match(repairAgent, /mcp_gemini-md-export_gemini_export_job_status/);
+  assert.match(repairAgent, /mcp_gemini-md-export_gemini_ready/);
+  assert.match(repairAgent, /mcp_gemini-md-export_gemini_chats/);
+  assert.match(repairAgent, /mcp_gemini-md-export_gemini_export/);
+  assert.match(repairAgent, /mcp_gemini-md-export_gemini_job/);
   assert.match(repairAgent, /vault-repair\.mjs/);
   assert.match(repairAgent, /vault-repair-audit\.mjs/);
   assert.match(repairAgent, /Continue only when the tool\s+returns `ready=true`/);
@@ -113,6 +123,15 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.match(repairAgent, /deduplicated union of every/);
   assert.match(repairAgent, /wikiFooterMissingSourceLinks/);
   assert.match(repairAgent, /requiredFinalGeminiSourceLinks/);
+
+  const syncCommand = readFileSync(syncCommandPath, 'utf-8');
+  assert.match(syncCommand, /gemini-vault-sync/);
+  assert.match(syncCommand, /gemini_export/);
+  assert.match(syncCommand, /action: "sync"/);
+  assert.match(syncCommand, /vault correto ja conhecido/);
+  assert.match(syncCommand, /Nao pergunte pelo caminho apenas porque/);
+  assert.match(syncCommand, /gemini_job/);
+  assert.match(syncCommand, /nao liste todo o historico/i);
 
   const repairCommand = readFileSync(repairCommandPath, 'utf-8');
   assert.match(repairCommand, /gemini-vault-repair/);
@@ -132,34 +151,27 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.equal(typeof bridgeVersion.protocolVersion, 'number');
 
   const context = readFileSync(contextPath, 'utf-8');
-  assert.match(context, /ready=false/);
-  assert.match(context, /blockingIssue/);
-  assert.match(context, /selfHeal\.reloadAttempts/);
-  assert.match(context, /gemini_browser_ready/);
-  assert.match(context, /agent\/ready/);
-  assert.match(context, /gemini_reload_gemini_tabs/);
-  assert.match(context, /gemini_list_tabs/);
-  assert.match(context, /gemini_claim_tab/);
-  assert.match(context, /ambiguous_gemini_tabs/);
-  assert.match(context, /gemini_mcp_diagnose_processes/);
-  assert.match(context, /gemini_mcp_cleanup_stale_processes/);
-  assert.match(context, /Only ask for manual reload/);
-  assert.match(context, /Do not keep\s+calling `gemini_download_chat`/);
-  assert.match(context, /gemini_reexport_chats/);
-  assert.match(context, /gemini_sync_vault/);
-  assert.match(context, /gemini_export_missing_chats/);
-  assert.match(context, /sync-state\.json/);
-  assert.match(context, /gemini_collect_support_bundle/);
-  assert.match(context, /resumeReportFile/);
-  assert.match(context, /skips chats already completed/);
-  assert.match(context, /webConversationCount - existingVaultCount = missingCount/);
-  assert.match(context, /webConversationCount`, `existingVaultCount`, and `missingCount/);
-  assert.match(context, /assets\/<chatId>\/\.\.\.` stay\s+inside the vault/);
-  assert.match(context, /Do not emulate this by\s+listing pages in chat/);
-  assert.match(context, /progressMessage/);
-  assert.match(context, /decisionSummary/);
-  assert.match(context, /nextAction/);
-  assert.match(context, /nextAction\.command\.text/);
+  assert.equal(context.length < 7000, true);
+  assert.match(context, /Only these MCP tools are public/);
+  for (const toolName of [
+    'gemini_ready',
+    'gemini_tabs',
+    'gemini_chats',
+    'gemini_export',
+    'gemini_job',
+    'gemini_config',
+    'gemini_support',
+  ]) {
+    assert.match(context, new RegExp(toolName));
+  }
+  assert.match(context, /gemini-vault-sync/);
+  assert.match(context, /gemini-vault-repair/);
+  assert.match(context, /gemini-mcp-diagnostics/);
+  assert.match(context, /gemini-tabs-and-browser/);
+  assert.match(context, /detail: "full"/);
+  assert.match(context, /code: "tool_renamed"/);
+  assert.doesNotMatch(context, /gemini_export_recent_chats/);
+  assert.doesNotMatch(context, /gemini_download_chat/);
 });
 
 test('auditor coleta todos os links Gemini de origem em nota wiki consolidada', () => {
@@ -348,7 +360,7 @@ test('repair runner compara somente corpo e preserva YAML original ao reparar ra
 
         const payload = await readRequestJson(req);
         const args = payload.arguments || {};
-        if (payload.name === 'gemini_reexport_chats') {
+        if (payload.name === 'gemini_export' && args.action === 'reexport') {
           mkdirSync(args.outputDir, { recursive: true });
           const successes = args.items.map((item, index) => {
             const filePath = resolve(args.outputDir, `${item.chatId}.md`);
@@ -418,7 +430,7 @@ test('repair runner compara somente corpo e preserva YAML original ao reparar ra
           return;
         }
 
-        if (payload.name === 'gemini_export_job_status') {
+        if (payload.name === 'gemini_job' && args.action === 'status') {
           const job = jobs.get(args.jobId);
           sendToolResult(res, {
             jobId: args.jobId,

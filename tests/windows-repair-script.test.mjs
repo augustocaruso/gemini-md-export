@@ -31,7 +31,7 @@ test('Windows diagnostics prefer consolidated environment report before reinstal
 
   assert.match(diagnose, /\/agent\/diagnostics/);
   assert.match(diagnose, /Test-AgentDiagnostics/);
-  assert.match(diagnose, /gemini_browser_status before reinstalling/);
+  assert.match(diagnose, /gemini_ready \{ action: 'status' \} before reinstalling/);
   assert.match(installer, /\/agent\/diagnostics/);
-  assert.match(installer, /gemini_diagnose_environment/);
+  assert.match(installer, /gemini_support \{ action: "diagnose" \}/);
 });

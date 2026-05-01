@@ -9,13 +9,12 @@ tools:
   - glob
   - search_file_content
   - run_shell_command
-  - mcp_gemini-md-export_gemini_browser_status
-  - mcp_gemini-md-export_gemini_download_chat
-  - mcp_gemini-md-export_gemini_reexport_chats
-  - mcp_gemini-md-export_gemini_export_job_status
-  - mcp_gemini-md-export_gemini_export_job_cancel
-  - mcp_gemini-md-export_gemini_get_export_dir
-  - mcp_gemini-md-export_gemini_open_chat
+  - mcp_gemini-md-export_gemini_ready
+  - mcp_gemini-md-export_gemini_chats
+  - mcp_gemini-md-export_gemini_export
+  - mcp_gemini-md-export_gemini_job
+  - mcp_gemini-md-export_gemini_config
+  - mcp_gemini-md-export_gemini_support
 temperature: 0.1
 max_turns: 28
 timeout_mins: 30
@@ -91,7 +90,7 @@ Useful modes:
 - `--path <file.md>` limits the run to explicit note paths.
 
 The runner performs the scanner pass, browser/MCP preflight, direct
-`gemini_reexport_chats` job, staged validation, backups, raw-note repair, wiki
+`gemini_export { action: "reexport" }` job, staged validation, backups, raw-note repair, wiki
 case creation, and final report. Raw-note comparison is body-only: YAML
 frontmatter differences such as tags, aliases, status, title, model, or
 `exported_at` must not count as content divergence. When a raw export is
@@ -132,8 +131,9 @@ Gemini link/re-export. Do not manually scan hundreds of full files in chat.
 The scanner is not enough. The authoritative check is:
 
 1. Take the note's `chat_id` or `/app/<chatId>` URL.
-2. Re-export that exact chat with `mcp_gemini-md-export_gemini_reexport_chats`
-   for queued work, or `mcp_gemini-md-export_gemini_download_chat` for a
+2. Re-export that exact chat with `mcp_gemini-md-export_gemini_export`
+   using `action: "reexport"` for queued work, or
+   `mcp_gemini-md-export_gemini_chats` using `action: "download"` for a
    single spot-check.
 3. Compare the staged export against the original note body, ignoring YAML-only
    differences.
@@ -263,7 +263,8 @@ regenerated from the corrected source.
 
 ## Repair Flow
 
-1. Confirm browser/MCP health with `mcp_gemini-md-export_gemini_browser_status`.
+1. Confirm browser/MCP health with `mcp_gemini-md-export_gemini_ready`
+   using `action: "status"`.
    This is a hard preflight, not a courtesy check. The status tool self-heals by
    default: it can request browser-extension reload when version/build are
    stale. Continue only when the tool returns `ready=true`, at least one
@@ -301,16 +302,18 @@ regenerated from the corrected source.
      `requiredFinalGeminiSourceLinks` so later rewrite/consolidation steps can
      append every source chat link at the end of the final wiki note.
    - If it is a raw export, prefer one background job for the raw-export queue:
-     call `mcp_gemini-md-export_gemini_reexport_chats` with:
+     call `mcp_gemini-md-export_gemini_export` with:
+     - `action` = `reexport`;
      - `items` carrying `chatId`, `title`, and `sourcePath`;
      - `outputDir` = staging directory.
-     Poll `mcp_gemini-md-export_gemini_export_job_status` by `jobId` until the
+     Poll `mcp_gemini-md-export_gemini_job` with `action: "status"` by `jobId` until the
      job reaches `completed`, `completed_with_errors`, `failed`, or
      `cancelled`. This is the default path for Windows and for more than three
      raw exports because it avoids dozens of long synchronous tool calls.
-   - Only use `mcp_gemini-md-export_gemini_download_chat` for a single
-     spot-check or fallback when `gemini_reexport_chats` is unavailable. If you
+   - Only use `mcp_gemini-md-export_gemini_chats` with `action: "download"`
+     for a single spot-check or fallback when reexport is unavailable. If you
      do call it, pass:
+     - `action` = `download`;
      - `chatId`;
      - `outputDir` = staging directory;
      - `returnToOriginal=false`.
@@ -366,7 +369,7 @@ Stop and ask for direction when:
 
 - no vault/folder path is available;
 - MCP/browser status shows extension version mismatch or unreachable browser;
-- `mcp_gemini-md-export_gemini_browser_status` returns `ready=false`,
+- `mcp_gemini-md-export_gemini_ready` returns `ready=false`,
   `blockingIssue`, no `connectedClients`, or a tool error;
 - a suspect note has wiki signals and replacing it would destroy user work;
 - re-exported chatId does not match the expected chatId;
@@ -378,11 +381,11 @@ Stop and ask for direction when:
 ## Performance Rules
 
 - Do not list hundreds of chats in Gemini CLI.
-- Do not ask for `gemini_list_recent_chats` unless you need a small smoke test.
-- Prefer `gemini_reexport_chats` for known suspect chatIds; it runs as a
+- Do not ask for `gemini_chats { action: "list" }` unless you need a small smoke test.
+- Prefer `gemini_export { action: "reexport" }` for known suspect chatIds; it runs as a
   background job, writes a report, and is safer on slow Windows browsers than
-  repeated `gemini_download_chat` calls.
-- `gemini_download_chat` by direct `chatId` is still valid for one-off checks;
+  repeated `gemini_chats { action: "download" }` calls.
+- `gemini_chats { action: "download" }` by direct `chatId` is still valid for one-off checks;
   this extension supports navigating by direct Gemini URL when the chat is not
   loaded in the sidebar.
 - Process in small batches or a single background job and report progress by

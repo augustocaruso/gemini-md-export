@@ -61,6 +61,24 @@ test('browser_status expõe saúde da bridge MCP/Chrome', () => {
   assert.match(source, /diagnostics/);
 });
 
+test('MCP v0.5 lista somente as 7 tools públicas de domínio', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const publicToolsBlock = source.match(/const rawTools = \[([\s\S]*?)\n\];\n\nconst tools = rawTools;/)?.[1];
+  assert.ok(publicToolsBlock, 'bloco de tools públicas deve existir');
+  const names = Array.from(publicToolsBlock.matchAll(/name: '([^']+)'/g), (match) => match[1]);
+  assert.deepEqual(names, [
+    'gemini_ready',
+    'gemini_tabs',
+    'gemini_chats',
+    'gemini_export',
+    'gemini_job',
+    'gemini_config',
+    'gemini_support',
+  ]);
+  assert.match(source, /code: 'tool_renamed'/);
+  assert.match(source, /legacyToolReplacement/);
+});
+
 test('MCP implementa afinidade confiável por claim de aba', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const contentSource = readFileSync(resolve(ROOT, 'src', 'userscript-shell.js'), 'utf-8');
@@ -94,7 +112,7 @@ test('browser_status diagnostica e tenta self-heal sem depender do guard wrapper
     /name: 'gemini_browser_status'[\s\S]*?\n  \{\n    name: 'gemini_mcp_diagnose_processes'/,
   )?.[0];
   const guardedBlock = source.match(
-    /const BROWSER_DEPENDENT_TOOL_NAMES = new Set\(\[[\s\S]*?\]\);/,
+    /const LEGACY_BROWSER_DEPENDENT_TOOL_NAMES = new Set\(\[[\s\S]*?\]\);/,
   )?.[0];
   assert.ok(statusBlock, 'gemini_browser_status deve existir');
   assert.ok(guardedBlock, 'lista de tools com guard deve existir');
@@ -113,10 +131,10 @@ test('browser_status diagnostica e tenta self-heal sem depender do guard wrapper
 test('MCP expõe diagnóstico e cleanup controlado de processos sem guard de browser', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const guardedBlock = source.match(
-    /const BROWSER_DEPENDENT_TOOL_NAMES = new Set\(\[[\s\S]*?\]\);/,
+    /const LEGACY_BROWSER_DEPENDENT_TOOL_NAMES = new Set\(\[[\s\S]*?\]\);/,
   )?.[0];
   const localProxyBlock = source.match(
-    /const LOCAL_PROXY_TOOL_NAMES = new Set\(\[[\s\S]*?\]\);/,
+    /const LOCAL_PROXY_SUPPORT_ACTIONS = new Set\(\[[\s\S]*?\]\);/,
   )?.[0];
 
   assert.match(source, /name: 'gemini_mcp_diagnose_processes'/);
@@ -138,10 +156,10 @@ test('MCP expõe diagnóstico e cleanup controlado de processos sem guard de bro
   assert.doesNotMatch(guardedBlock, /gemini_mcp_diagnose_processes/);
   assert.doesNotMatch(guardedBlock, /gemini_mcp_cleanup_stale_processes/);
   assert.doesNotMatch(guardedBlock, /gemini_diagnose_environment/);
-  assert.match(localProxyBlock, /gemini_mcp_diagnose_processes/);
-  assert.match(localProxyBlock, /gemini_mcp_cleanup_stale_processes/);
-  assert.match(localProxyBlock, /gemini_diagnose_environment/);
-  assert.match(localProxyBlock, /gemini_collect_support_bundle/);
+  assert.match(localProxyBlock, /processes/);
+  assert.match(localProxyBlock, /cleanup_processes/);
+  assert.match(localProxyBlock, /diagnose/);
+  assert.match(localProxyBlock, /bundle/);
 });
 
 test('bridge busca mídia sem depender de CORS da extensão Chrome', () => {

@@ -136,7 +136,7 @@ test('SessionStart injeta contexto curto do exporter', () => {
 test('AfterTool avisa quando mediaFailureCount e maior que zero', () => {
   const output = runHook('after-tool', {
     hook_event_name: 'AfterTool',
-    tool_name: 'mcp_gemini-md-export_gemini_download_chat',
+    tool_name: 'mcp_gemini-md-export_gemini_chats',
     tool_response: {
       structuredContent: {
         filename: 'abc.md',
@@ -152,7 +152,7 @@ test('AfterTool avisa quando mediaFailureCount e maior que zero', () => {
 test('AfterTool avisa quando ha warning de midia e nenhum arquivo salvo', () => {
   const output = runHook('after-tool', {
     hook_event_name: 'AfterTool',
-    tool_name: 'mcp_gemini-md-export_gemini_download_chat',
+    tool_name: 'mcp_gemini-md-export_gemini_chats',
     tool_response: {
       content: [
         {
@@ -174,7 +174,7 @@ test('AfterTool avisa quando ha warning de midia e nenhum arquivo salvo', () => 
 test('AfterTool fica silencioso quando midia foi salva corretamente', () => {
   const output = runHook('after-tool', {
     hook_event_name: 'AfterTool',
-    tool_name: 'mcp_gemini-md-export_gemini_download_chat',
+    tool_name: 'mcp_gemini-md-export_gemini_chats',
     tool_response: {
       structuredContent: {
         filename: 'abc.md',
@@ -216,13 +216,13 @@ test('hooks.json aplica guardrail em ferramentas que podem editar', () => {
     assert.equal(matcher.test(toolName), true, toolName);
   }
   assert.equal(matcher.test('read_file'), false);
-  assert.equal(matcher.test('mcp_gemini-md-export_gemini_browser_status'), false);
+  assert.equal(matcher.test('mcp_gemini-md-export_gemini_ready'), false);
 });
 
 test('BeforeTool falha aberto para chamada normal', () => {
   const output = runHook('before-tool', {
     hook_event_name: 'BeforeTool',
-    tool_name: 'mcp_gemini-md-export_gemini_browser_status',
+    tool_name: 'mcp_gemini-md-export_gemini_ready',
     tool_input: {},
   });
 
@@ -235,7 +235,7 @@ test('BeforeTool permite desativar prelaunch do navegador para tools do exporter
     'before-tool',
     {
       hook_event_name: 'BeforeTool',
-      tool_name: 'mcp_gemini-md-export_gemini_list_recent_chats',
+      tool_name: 'mcp_gemini-md-export_gemini_chats',
       tool_input: {},
     },
     {
@@ -262,7 +262,7 @@ test('BeforeTool respeita cooldown sem abrir nem esperar navegador', () => {
       'before-tool',
       {
         hook_event_name: 'BeforeTool',
-        tool_name: 'mcp_gemini-md-export_gemini_list_recent_chats',
+        tool_name: 'mcp_gemini-md-export_gemini_chats',
         tool_input: {},
       },
       {
@@ -301,7 +301,7 @@ test('BeforeTool abre Gemini pelo launcher PowerShell quando nao ha cliente cone
       'before-tool',
       {
         hook_event_name: 'BeforeTool',
-        tool_name: 'mcp_gemini-md-export_gemini_browser_status',
+        tool_name: 'mcp_gemini-md-export_gemini_ready',
         tool_input: {},
       },
       {
@@ -349,7 +349,7 @@ test('BeforeTool normaliza prefixo MCP com underscores duplos', async () => {
       'before-tool',
       {
         hook_event_name: 'BeforeTool',
-        tool_name: 'mcp__gemini_md_export__gemini_browser_status',
+        tool_name: 'mcp__gemini_md_export__gemini_ready',
         tool_input: {},
       },
       {
@@ -395,7 +395,7 @@ test('BeforeTool espera a aba Gemini conectar depois de abrir pelo hook', async 
       'before-tool',
       {
         hook_event_name: 'BeforeTool',
-        tool_name: 'mcp_gemini-md-export_gemini_browser_status',
+        tool_name: 'mcp_gemini-md-export_gemini_ready',
         tool_input: {},
       },
       {
@@ -463,7 +463,7 @@ test('BeforeTool nao abre segunda aba durante launch em progresso', async () => 
       {
         hook_event_name: 'BeforeTool',
         session_id: 'session-a',
-        tool_name: 'mcp_gemini-md-export_gemini_list_recent_chats',
+        tool_name: 'mcp_gemini-md-export_gemini_chats',
         tool_input: {},
       },
       {
@@ -498,7 +498,7 @@ test('BeforeTool nao abre browser as cegas quando bridge esta inalcançavel', as
       {
         hook_event_name: 'BeforeTool',
         session_id: 'session-a',
-        tool_name: 'mcp_gemini-md-export_gemini_browser_status',
+        tool_name: 'mcp_gemini-md-export_gemini_ready',
         tool_input: {},
       },
       {
@@ -543,7 +543,7 @@ test('BeforeTool timeout de conexao sai antes do hard exit da CLI', async () => 
       'before-tool',
       {
         hook_event_name: 'BeforeTool',
-        tool_name: 'mcp_gemini-md-export_gemini_browser_status',
+        tool_name: 'mcp_gemini-md-export_gemini_ready',
         tool_input: {},
       },
       {
@@ -594,7 +594,7 @@ test('BeforeTool nao abre nova aba quando Gemini ja esta conectado', async () =>
       'before-tool',
       {
         hook_event_name: 'BeforeTool',
-        tool_name: 'mcp_gemini-md-export_gemini_list_recent_chats',
+        tool_name: 'mcp_gemini-md-export_gemini_chats',
         tool_input: {},
       },
       {
@@ -637,7 +637,7 @@ test('BeforeTool nao abre aba duplicada quando ha client conectado mas nao pront
       'before-tool',
       {
         hook_event_name: 'BeforeTool',
-        tool_name: 'mcp_gemini-md-export_gemini_list_recent_chats',
+        tool_name: 'mcp_gemini-md-export_gemini_chats',
         tool_input: {},
       },
       {
@@ -681,7 +681,7 @@ test('BeforeTool cai para /agent/clients quando bridge antigo nao tem /agent/rea
       'before-tool',
       {
         hook_event_name: 'BeforeTool',
-        tool_name: 'mcp_gemini-md-export_gemini_list_recent_chats',
+        tool_name: 'mcp_gemini-md-export_gemini_chats',
         tool_input: {},
       },
       {
@@ -713,7 +713,7 @@ test('BeforeTool nao trava se o Gemini CLI deixar stdin aberto', async () => {
       'before-tool',
       {
         hook_event_name: 'BeforeTool',
-        tool_name: 'mcp_gemini-md-export_gemini_browser_status',
+        tool_name: 'mcp_gemini-md-export_gemini_ready',
         tool_input: {},
       },
       {
@@ -727,7 +727,7 @@ test('BeforeTool nao trava se o Gemini CLI deixar stdin aberto', async () => {
     assert.equal(output.decision, undefined);
     assert.equal(Date.now() - startedAt < 1000, true);
     assert.equal(lastRun.stdinStatus, 'ok');
-    assert.equal(lastRun.toolName, 'mcp_gemini-md-export_gemini_browser_status');
+    assert.equal(lastRun.toolName, 'mcp_gemini-md-export_gemini_ready');
   } finally {
     rmSync(tmpRoot, { recursive: true, force: true });
   }
@@ -792,10 +792,10 @@ test('hook emite JSON valido mesmo com stdin invalido', () => {
   assert.doesNotThrow(() => JSON.parse(result.stdout), result.stdout);
 });
 
-test('BeforeTool considera browser_status como tool que acorda o navegador', () => {
+test('BeforeTool considera gemini_ready como tool que acorda o navegador', () => {
   const hookSource = readFileSync(hookPath, 'utf-8');
 
-  assert.match(hookSource, /gemini_browser_status/);
+  assert.match(hookSource, /gemini_ready/);
   assert.match(hookSource, /open-gemini-restore-focus\.ps1/);
   assert.match(hookSource, /SetForegroundWindow/);
   assert.match(hookSource, /waitForConnectedBrowserClient/);

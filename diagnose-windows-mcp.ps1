@@ -356,7 +356,7 @@ if (-not $summary.configFound) {
 } elseif (-not $summary.healthzOk) {
   Write-Warn "Extension looks installed, but the MCP is not running right now."
 } elseif (-not $summary.diagnosticsOk) {
-  Write-Warn "healthz works, but /agent/diagnostics failed. Use gemini_browser_status before reinstalling."
+  Write-Warn "healthz works, but /agent/diagnostics failed. Use gemini_ready { action: 'status' } before reinstalling."
 } else {
   Write-Ok "Gemini CLI extension and bridge look healthy."
 }

@@ -261,7 +261,7 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   hidratação: o usuário fica olhando 30s+ pra uma barra que aparenta
   congelada, e isso já gerou ticket.
   (11) **Progress dock também aparece para exports do MCP**: quando a
-  exportação é disparada pelo `gemini_export_recent_chats` ou
+  exportação é disparada pelo `gemini_export { action: "recent" }` ou
   `gemini_export_notebook` (em vez do botão local), o MCP envia o estado
   do job como evento SSE `jobProgress` pelo `/bridge/events` quando o protocolo
   v2 está ativo; se o canal de eventos não estiver conectado, mantém fallback
@@ -322,14 +322,14 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   métricas de payload por cliente (`payloadMetrics.heartbeat` e
   `payloadMetrics.snapshot`, com count/last/avg/max bytes) em
   `bridgeHealth`, `/agent/clients` e nos relatórios de job para descobrir
-  quando inventário grande ou heartbeat pesado virou gargalo. `gemini_browser_status`
+  quando inventário grande ou heartbeat pesado virou gargalo. `gemini_ready { action: "status" }`
   e `/agent/clients?diagnostics=1` expõem `bridgeHealth` por cliente
   (`healthy`, `degraded`, `stale`, `version_mismatch`,
   `command_channel_stuck`) com ação recomendada antes de pedir reload manual.
-  `gemini_browser_status` também retorna `extensionReadiness` e `handshake`,
+  `gemini_ready { action: "status" }` também retorna `extensionReadiness` e `handshake`,
   separando handshake quente/frio/pós-update antes de culpar o DOM do Gemini.
-  Para checagem rápida sem snapshot grande, use `gemini_browser_ready`.
-  `gemini_browser_status` separa
+  Para checagem rápida sem snapshot grande, use `gemini_ready { action: "check" }`.
+  `gemini_ready { action: "status" }` separa
   service worker (`GET_EXTENSION_INFO`/`source: "service-worker"`), content
   script conectado, aba Gemini, build stamp esperado/em execução, resultado do
   reload automático e diagnóstico do top-bar (`page.topBar`). Só pedir reload
@@ -338,7 +338,7 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   pasta/perfil antigo depois do self-heal. Falha de top-bar não bloqueia
   export por hotkey/API de debug se o content script está vivo.
   O content script anuncia `tab-claim-v1`: o MCP pode reivindicar uma aba via
-  `gemini_claim_tab` e liberar via `gemini_release_tab`; heartbeats/snapshots
+  `gemini_tabs { action: "claim" }` e liberar via `gemini_tabs { action: "release" }`; heartbeats/snapshots
   carregam `tabClaim`, e `requireClient` prefere `claimId`/`tabId`/`clientId`
   explícitos ou a claim da sessão antes de qualquer fallback. Se houver várias
   abas Gemini candidatas e nenhuma claim/seleção explícita, tools
@@ -348,7 +348,7 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   um Tab Group com label/cor; se a aba já estiver em grupo do usuário ou a API
   não existir, cai para badge/prefixo de título. **Não implementar isso como
   overlay/borda dentro da página Gemini**: o pedido é sinalizar a aba do
-  navegador, não o DOM do app. `gemini_list_tabs` e `gemini_claim_tab` podem
+  navegador, não o DOM do app. `gemini_tabs { action: "list" }` e `gemini_tabs { action: "claim" }` podem
   abrir `https://gemini.google.com/app` automaticamente quando não houver aba
   conectada, respeitando cooldown compartilhado de launch para não duplicar
   janelas.
@@ -422,11 +422,11 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   `GEMINI_MCP_HOOK_CONNECT_TIMEOUT_MS`,
   `GEMINI_MCP_HOOK_ALLOW_FOCUSING_FALLBACK` e
   `GEMINI_MCP_BROWSER`.
-  `gemini_browser_status` também passa por esse `BeforeTool`, porque o Gemini
+  `gemini_ready { action: "status" }` também passa por esse `BeforeTool`, porque o Gemini
   CLI frequentemente consulta status antes de chamar uma tool de export; essa
   primeira chamada deve ser suficiente para acordar o navegador quando o bridge
   está ativo e sem clientes.
-  `gemini_list_recent_chats` e `/agent/recent-chats` agora priorizam a lista
+  `gemini_chats { action: "list" }` e `/agent/recent-chats` agora priorizam a lista
   trazida pelo heartbeat recente da extensão para responder rápido. Só
   mandam `list-conversations` para abrir/atualizar o sidebar quando o cache
   estiver vazio/velho (default: >10s) ou quando o caller pedir
@@ -445,7 +445,7 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   via `/agent/mcp-tool-call`. O objetivo é permitir múltiplos terminais Gemini
   sem mensagens de bridge/extensão desconectada. `/healthz` do bridge primário
   expõe `pid`, `ppid`, `protocolVersion`, `startedAt`, `uptimeMs`, `cwd`,
-  `argv` resumido e `bridgeRole`; em modo proxy, `gemini_browser_status`
+  `argv` resumido e `bridgeRole`; em modo proxy, `gemini_ready { action: "status" }`
   também tenta identificar o dono da porta (`Get-NetTCPConnection` no Windows,
   `lsof` no macOS/Linux) e retorna `mcp.proxyState`, `primaryBridge.process` e
   `primaryBridge.portOwner`. `proxy_healthy` não é erro. Se o proxy falhar por
@@ -453,9 +453,10 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   a mensagem acionável deve citar PID/versão/caminho quando disponíveis e pedir
   para fechar/reiniciar a sessão antiga; não trate automaticamente como zumbi e
   não recomende matar processos sem diagnóstico. Para recuperação controlada,
-  o agente deve chamar `gemini_mcp_diagnose_processes` antes de sugerir restart
-  manual. Se houver alvo seguro, `gemini_mcp_cleanup_stale_processes` faz dry-run
-  por padrão e só encerra com `confirm=true`; ele só pode considerar processos
+  o agente deve chamar `gemini_support { action: "processes" }` antes de sugerir
+  restart manual. Se houver alvo seguro,
+  `gemini_support { action: "cleanup_processes" }` faz dry-run por padrão e só
+  encerra com `confirm=true`; ele só pode considerar processos
   cujo comando/caminho pareça `gemini-md-export` ou `mcp-server.js`, nunca o
   processo MCP atual nem o processo pai, e deve retornar exatamente os PIDs
   encerrados e se a sessão assumiu o bridge depois do cleanup.
@@ -463,34 +464,24 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   infraestrutura do bridge sem login no Gemini Web: sobe uma bridge isolada em
   porta temporária e testa `/healthz`, `/bridge/snapshot`, `/bridge/events`,
   `/bridge/heartbeat`, `/agent/clients`, `/agent/diagnostics` e
-  `gemini_mcp_diagnose_processes`.
+  `gemini_support { action: "processes" }`.
   Para testar a instância atual, use
   `node scripts/bridge-smoke.mjs --bridge-url http://127.0.0.1:47283 --json`.
   Se o smoke isolado passa, mas a extensão real segue lenta/instável, investigue
   perfil do navegador, runtime da extensão Chrome, DOM do Gemini ou vault em vez
   de culpar o protocolo local de imediato.
-  `gemini_diagnose_environment` e `/agent/diagnostics` produzem o relatório de
+  `gemini_support { action: "diagnose" }` e `/agent/diagnostics` produzem o relatório de
   campo consolidado: versão do MCP, versão/protocolo/build esperados e
   conectados da extensão, browser configurado, processos, dono da porta,
   diretório de export, jobs/relatórios recentes e `nextAction` acionável.
   Use isso antes de sugerir reinstalação.
-  O MCP também expõe tools para status, diretório de export, listagem de
-  sidebar, listagem/export de cadernos, download individual, cache e navegação:
-  `gemini_browser_status`, `gemini_browser_ready`, `gemini_diagnose_environment`,
-  `gemini_flight_recorder`, `gemini_collect_support_bundle`,
-  `gemini_mcp_diagnose_processes`,
-  `gemini_mcp_cleanup_stale_processes`, `gemini_list_tabs`,
-  `gemini_claim_tab`, `gemini_release_tab`, `gemini_get_export_dir`,
-  `gemini_set_export_dir`,
-  `gemini_list_recent_chats`, `gemini_list_notebook_chats`,
-  `gemini_get_current_chat`, `gemini_download_chat`,
-  `gemini_download_notebook_chat`, `gemini_export_notebook`,
-  `gemini_export_recent_chats`, `gemini_export_missing_chats`,
-  `gemini_sync_vault`,
-  `gemini_reexport_chats`, `gemini_export_job_status`,
-  `gemini_export_job_cancel`, `gemini_cache_status`, `gemini_clear_cache`,
-  `gemini_open_chat`, `gemini_reload_gemini_tabs` e `gemini_snapshot`.
-  `gemini_list_recent_chats` é paginada: `limit` é tamanho de página
+  O MCP público expõe apenas 7 tools de domínio:
+  `gemini_ready`, `gemini_tabs`, `gemini_chats`, `gemini_export`,
+  `gemini_job`, `gemini_config` e `gemini_support`. Nomes antigos não entram
+  mais em `tools/list`; chamada direta retorna `code: "tool_renamed"` com o
+  replacement exato. Use `detail: "full"` só para diagnóstico; o padrão deve
+  ser compacto.
+  `gemini_chats { action: "list" }` é paginada: `limit` é tamanho de página
   (recomendado 25-50 para listas grandes) e `offset` pula itens já vistos
   (`0`, `50`, `100`...). Para centenas de conversas, o agente deve avançar
   por páginas usando `pagination.nextOffset` e parar quando
@@ -499,25 +490,28 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   necessário, com teto defensivo de 1000 conversas carregáveis para não
   travar o navegador nem estourar contexto na listagem paginada.
   Para o pedido de usuário "importar/exportar todo o histórico", não listar
-  centenas de conversas no chat: usar `gemini_export_recent_chats`, que inicia
+  centenas de conversas no chat: usar `gemini_export { action: "recent" }`, que inicia
   um job em background no próprio MCP, percorre o sidebar carregável, grava os
   `.md` localmente e mantém um relatório JSON incremental; acompanhar com
-  `gemini_export_job_status` pelo `jobId` e cancelar com
-  `gemini_export_job_cancel` quando o usuário pedir. Quando `maxChats` é
+  `gemini_job { action: "status" }` pelo `jobId` e cancelar com
+  `gemini_job { action: "cancel" }` quando o usuário pedir. Quando `maxChats` é
   omitido, o job usa o mesmo caminho de lazy-load do modal e tenta carregar até
   `reachedSidebarEnd=true`; `maxChats` só deve ser passado quando o usuário
   pedir export parcial. Esse job retorna só progresso, contagens, erros
   recentes e caminho do relatório para evitar timeout e excesso de contexto no
   Gemini CLI. Quando o vault já estava sincronizado e o usuário pedir sync
-  incremental, usar `gemini_sync_vault`: ele lê/grava
+  incremental, usar `gemini_export { action: "sync" }`: ele lê/grava
   `.gemini-md-export/sync-state.json`, lista o Gemini Web do topo até uma
   fronteira conhecida (`topChatId` ou sequência de chats já presentes no
   vault) e baixa só conversas novas. Não listar o histórico inteiro no chat. O
+  comando Gemini CLI `/sync` é o atalho humano para esse fluxo: sem argumento,
+  usa o vault já conhecido pelo contexto/GEMINI.md principal; com argumento,
+  usa esse caminho como override de `vaultDir`/`outputDir`.
   MCP bloqueia dois jobs simultâneos de histórico recente na
   mesma aba; se já houver um rodando, consultar/cancelar o job existente antes
   de iniciar outro. Se um job longo for interrompido, o agente deve chamar
-  `gemini_export_recent_chats` ou `gemini_export_missing_chats` novamente com
-  `resumeReportFile` apontando para o JSON incremental anterior, em vez de
+  `gemini_export { action: "recent" }` ou `gemini_export { action: "missing" }`
+  novamente com `resumeReportFile` apontando para o JSON incremental anterior, em vez de
   reiniciar do zero. O resume reaproveita o mesmo relatório, pula chatIds já
   concluídos/saltados, preserva `webConversationCount`, `existingVaultCount` e
   `missingCount` no relatório, e retenta apenas itens faltantes ou falhos. O
@@ -774,10 +768,10 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
    listar as conversas que o Gemini já carregou na barra lateral. O shell
    tenta abrir o sidebar, observar novas conversas e acionar lazy-load, mas
    chats muito antigos ainda dependem do histórico realmente existir no DOM.
-   A tool `gemini_download_chat` usa o mesmo inventário do sidebar: por
+   A tool `gemini_chats { action: "download" }` usa o mesmo inventário do sidebar: por
    `index`, a posição é 1-based na lista recente carregada; por `chatId`,
    o chat também precisa estar nessa lista.
-   Já a tool `gemini_list_recent_chats` não fica mais limitada ao inventário
+   Já a tool `gemini_chats { action: "list" }` não fica mais limitada ao inventário
    inicial: se o agente pedir, por exemplo, `limit=50&offset=100` e o sidebar
    tiver só 13 carregadas, o MCP manda a aba puxar mais histórico em rodadas
    até alcançar `offset + limit` ou `reachedSidebarEnd=true`, e devolve só a
@@ -788,11 +782,11 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
    lista. Para centenas de conversas, nunca pedir "todas" em uma chamada:
    iterar páginas de 25-50 itens usando `pagination.nextOffset`.
    Para exportar/importar o histórico inteiro, o fluxo preferido é
-   `gemini_export_recent_chats`: ele roda em background, continua exportando
+   `gemini_export { action: "recent" }`: ele roda em background, continua exportando
    enquanto o MCP estiver vivo e deve ser acompanhado com
-   `gemini_export_job_status`. O relatório JSON é atualizado durante o job,
+   `gemini_job { action: "status" }`. O relatório JSON é atualizado durante o job,
    então uma interrupção ainda deixa rastro do que já foi salvo; se o usuário
-   pedir para parar, usar `gemini_export_job_cancel`, que para antes da próxima
+   pedir para parar, usar `gemini_job { action: "cancel" }`, que para antes da próxima
    conversa e preserva os arquivos já gravados. Sem `maxChats`, esse job não
    usa o teto de paginação de 1000: continua mandando a aba puxar mais histórico
    em lotes até o próprio Gemini sinalizar fim do sidebar, igual ao modal. Isso
@@ -800,7 +794,7 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
    centenas de conversas são hidratadas, navegadas e gravadas.
    Em páginas de caderno, não trocar `collectBridgeConversationLinks()` por
    `collectConversationLinks()`: a primeira combina sidebar + caderno para o
-   MCP, enquanto a segunda é a lista visual do modal. Se `gemini_list_recent_chats`
+   MCP, enquanto a segunda é a lista visual do modal. Se `gemini_chats { action: "list" }`
    parar de ver conversas fora do caderno, primeiro conferir no resultado da
    tool `refreshed`, `refreshError`, `snapshot.sidebarOpen`,
    `snapshot.bridgeConversationCount` e `client.buildStamp`.
@@ -857,7 +851,7 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
    truncado. `__geminiMdExportDebug.hydrateCurrentConversation()` expõe essa
    hidratação para diagnóstico. O MCP aguarda comandos por 180s por padrão, mas
    a hidratação deve parar antes quando o topo estabiliza.
-   Performance do export total: `gemini_export_recent_chats` carrega o sidebar
+   Performance do export total: `gemini_export { action: "recent" }` carrega o sidebar
    em rodadas adaptativas e registra `loadMoreTrace`/`metrics.lazyLoad` para
    mostrar crescimento, timeouts, batch size e rodadas sem avanço. Durante o
    batch, não retornar para a conversa original entre cada item; isso evitaria

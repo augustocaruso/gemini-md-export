@@ -216,20 +216,42 @@ test('segunda instância MCP não emite erro quando o bridge já está em uso e 
     method: 'tools/list',
     params: {},
   });
-  assert.ok(
-    listedTools.result.tools.some((tool) => tool.name === 'gemini_mcp_diagnose_processes'),
+  assert.deepEqual(
+    listedTools.result.tools.map((tool) => tool.name),
+    [
+      'gemini_ready',
+      'gemini_tabs',
+      'gemini_chats',
+      'gemini_export',
+      'gemini_job',
+      'gemini_config',
+      'gemini_support',
+    ],
   );
-  assert.ok(
-    listedTools.result.tools.some((tool) => tool.name === 'gemini_mcp_cleanup_stale_processes'),
-  );
+
+  const legacyCall = await secondary.callRpc({
+    jsonrpc: '2.0',
+    id: 22,
+    method: 'tools/call',
+    params: {
+      name: 'gemini_list_recent_chats',
+      arguments: { limit: 20 },
+    },
+  });
+  assert.equal(legacyCall.result.isError, true);
+  assert.equal(legacyCall.result.structuredContent.code, 'tool_renamed');
+  assert.deepEqual(legacyCall.result.structuredContent.replacement, {
+    tool: 'gemini_chats',
+    arguments: { action: 'list', source: 'recent', limit: 20 },
+  });
 
   const processDiagnosis = await secondary.callRpc({
     jsonrpc: '2.0',
     id: 21,
     method: 'tools/call',
     params: {
-      name: 'gemini_mcp_diagnose_processes',
-      arguments: {},
+      name: 'gemini_support',
+      arguments: { action: 'processes', detail: 'full' },
     },
   });
   assert.equal(processDiagnosis.result.isError, false);
@@ -242,8 +264,9 @@ test('segunda instância MCP não emite erro quando o bridge já está em uso e 
     id: 2,
     method: 'tools/call',
     params: {
-      name: 'gemini_set_export_dir',
+      name: 'gemini_config',
       arguments: {
+        action: 'set_export_dir',
         outputDir,
       },
     },
@@ -273,8 +296,8 @@ test('cleanup exige alvo seguro e promove a segunda instância após encerrar pr
     id: 1,
     method: 'tools/call',
     params: {
-      name: 'gemini_mcp_diagnose_processes',
-      arguments: {},
+      name: 'gemini_support',
+      arguments: { action: 'processes', detail: 'full' },
     },
   });
 
@@ -292,8 +315,8 @@ test('cleanup exige alvo seguro e promove a segunda instância após encerrar pr
     id: 2,
     method: 'tools/call',
     params: {
-      name: 'gemini_mcp_cleanup_stale_processes',
-      arguments: {},
+      name: 'gemini_support',
+      arguments: { action: 'cleanup_processes', detail: 'full' },
     },
   });
 
@@ -307,8 +330,10 @@ test('cleanup exige alvo seguro e promove a segunda instância após encerrar pr
     id: 3,
     method: 'tools/call',
     params: {
-      name: 'gemini_mcp_cleanup_stale_processes',
+      name: 'gemini_support',
       arguments: {
+        action: 'cleanup_processes',
+        detail: 'full',
         confirm: true,
         waitMs: 1500,
       },
@@ -373,24 +398,25 @@ test('segunda instância MCP diagnostica bridge primário com versão antiga', a
     id: 1,
     method: 'tools/call',
     params: {
-      name: 'gemini_browser_status',
-      arguments: {},
+      name: 'gemini_ready',
+      arguments: { action: 'status' },
     },
   });
 
   assert.equal(status.result.isError, true);
-  assert.equal(status.result.structuredContent.problem.code, 'primary_bridge_version_mismatch');
-  assert.equal(status.result.structuredContent.problem.mismatch.actualVersion, '0.0.1');
-  assert.equal(status.result.structuredContent.problem.mismatch.process.pid, 12345);
-  assert.equal(status.result.structuredContent.primaryBridge.process.pid, 12345);
+  assert.equal(status.result.structuredContent.code, 'primary_bridge_version_mismatch');
+  assert.equal(status.result.structuredContent.data.mismatch.actualVersion, '0.0.1');
+  assert.equal(status.result.structuredContent.data.mismatch.process.pid, 12345);
+  assert.equal(status.result.structuredContent.data.primaryBridge.process.pid, 12345);
 
   const setDir = await secondary.callRpc({
     jsonrpc: '2.0',
     id: 2,
     method: 'tools/call',
     params: {
-      name: 'gemini_set_export_dir',
+      name: 'gemini_config',
       arguments: {
+        action: 'set_export_dir',
         outputDir,
       },
     },
@@ -442,17 +468,17 @@ test('segunda instância MCP diagnostica bridge primário com protocolo antigo',
     id: 1,
     method: 'tools/call',
     params: {
-      name: 'gemini_browser_status',
-      arguments: {},
+      name: 'gemini_ready',
+      arguments: { action: 'status' },
     },
   });
 
   assert.equal(status.result.isError, true);
-  assert.equal(status.result.structuredContent.mcp.proxyState, 'primary_incompatible');
-  assert.equal(status.result.structuredContent.problem.mismatch.kind, 'protocol');
-  assert.equal(status.result.structuredContent.problem.mismatch.actualProtocolVersion, 1);
-  assert.equal(status.result.structuredContent.problem.mismatch.process.pid, 23456);
-  assert.match(status.result.structuredContent.problem.message, /protocolo 1/);
+  assert.equal(status.result.structuredContent.code, 'primary_bridge_version_mismatch');
+  assert.equal(status.result.structuredContent.data.mismatch.kind, 'protocol');
+  assert.equal(status.result.structuredContent.data.mismatch.actualProtocolVersion, 1);
+  assert.equal(status.result.structuredContent.data.mismatch.process.pid, 23456);
+  assert.match(status.result.structuredContent.error, /protocolo 1/);
 });
 
 test('segunda instância MCP diferencia porta ocupada por outro serviço', async (t) => {
@@ -488,16 +514,17 @@ test('segunda instância MCP diferencia porta ocupada por outro serviço', async
     id: 1,
     method: 'tools/call',
     params: {
-      name: 'gemini_browser_status',
-      arguments: {},
+      name: 'gemini_ready',
+      arguments: { action: 'status' },
     },
   });
 
   assert.equal(status.result.isError, true);
-  assert.equal(status.result.structuredContent.problem.mismatch.kind, 'name');
-  assert.equal(status.result.structuredContent.problem.mismatch.actualName, 'outro-servico');
-  assert.match(status.result.structuredContent.problem.message, /outro-servico/);
-  assert.match(status.result.structuredContent.problem.message, /não pelo gemini-md-export/);
+  assert.equal(status.result.structuredContent.code, 'primary_bridge_version_mismatch');
+  assert.equal(status.result.structuredContent.data.mismatch.kind, 'name');
+  assert.equal(status.result.structuredContent.data.mismatch.actualName, 'outro-servico');
+  assert.match(status.result.structuredContent.error, /outro-servico/);
+  assert.match(status.result.structuredContent.error, /não pelo gemini-md-export/);
 });
 
 test('segunda instância MCP diagnostica porta ocupada sem healthz HTTP', async (t) => {
@@ -526,13 +553,13 @@ test('segunda instância MCP diagnostica porta ocupada sem healthz HTTP', async 
     id: 1,
     method: 'tools/call',
     params: {
-      name: 'gemini_browser_status',
-      arguments: {},
+      name: 'gemini_ready',
+      arguments: { action: 'status' },
     },
   });
 
   assert.equal(status.result.isError, true);
-  assert.equal(status.result.structuredContent.problem.mismatch.kind, 'unreachable');
-  assert.equal(status.result.structuredContent.browserWake.reason, 'primary_unreachable');
-  assert.match(status.result.structuredContent.problem.message, /parece ocupada/);
+  assert.equal(status.result.structuredContent.code, 'primary_bridge_version_mismatch');
+  assert.equal(status.result.structuredContent.data.mismatch.kind, 'unreachable');
+  assert.match(status.result.structuredContent.error, /parece ocupada/);
 });

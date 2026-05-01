@@ -29,7 +29,7 @@ const hardExit = setTimeout(() => {
 }, HARD_EXIT_MS);
 
 const SESSION_CONTEXT = [
-  'Gemini MD Export: use the gemini-md-export MCP tools for browser status, listing, downloads, and batch exports.',
+  'Gemini MD Export: use the compact gemini-md-export MCP tools: gemini_ready, gemini_tabs, gemini_chats, gemini_export, gemini_job, gemini_config, and gemini_support.',
   'Treat media as complete only when mediaFailureCount is 0. If a media warning appears and mediaFileCount is 0, investigate before saying images were imported.',
   'Forbidden paths for this project: Gemini cookies, private/internal Gemini APIs, chrome.debugger, captureVisibleTab, screenshot/crop media fallbacks, and new browser permissions.',
 ].join('\n');
@@ -61,27 +61,23 @@ let diagnosticState = {
   stageDurations: {},
 };
 
-const BROWSER_DEPENDENT_EXPORTER_TOOLS = new Set([
-  'gemini_browser_status',
-  'gemini_browser_ready',
-  'gemini_list_tabs',
-  'gemini_claim_tab',
-  'gemini_list_recent_chats',
-  'gemini_list_notebook_chats',
-  'gemini_get_current_chat',
-  'gemini_download_chat',
-  'gemini_download_notebook_chat',
-  'gemini_export_recent_chats',
-  'gemini_export_missing_chats',
-  'gemini_sync_vault',
-  'gemini_reexport_chats',
-  'gemini_export_notebook',
-  'gemini_cache_status',
-  'gemini_clear_cache',
-  'gemini_open_chat',
-  'gemini_reload_gemini_tabs',
-  'gemini_snapshot',
-]);
+const BROWSER_DEPENDENT_EXPORTER_TOOL_ACTIONS = {
+  gemini_ready: new Set(['check', 'status']),
+  gemini_tabs: new Set(['list', 'claim', 'reload']),
+  gemini_chats: new Set(['list', 'current', 'open', 'download']),
+  gemini_export: new Set(['recent', 'missing', 'sync', 'reexport', 'notebook']),
+  gemini_config: new Set(['cache_status', 'clear_cache']),
+  gemini_support: new Set(['snapshot']),
+};
+
+const DEFAULT_EXPORTER_TOOL_ACTION = {
+  gemini_ready: 'check',
+  gemini_tabs: 'list',
+  gemini_chats: 'list',
+  gemini_export: 'recent',
+  gemini_config: 'get_export_dir',
+  gemini_support: 'diagnose',
+};
 
 const normalizeExporterToolName = (toolName) =>
   String(toolName || '')
@@ -91,8 +87,15 @@ const normalizeExporterToolName = (toolName) =>
 
 const isBrowserDependentExporterTool = (input) => {
   const normalized = normalizeExporterToolName(getToolName(input));
-  if (BROWSER_DEPENDENT_EXPORTER_TOOLS.has(normalized)) return true;
-  return BROWSER_DEPENDENT_EXPORTER_TOOLS.has(normalized.replace(/-/g, '_'));
+  const toolName = normalized.replace(/-/g, '_');
+  const allowedActions = BROWSER_DEPENDENT_EXPORTER_TOOL_ACTIONS[toolName];
+  if (!allowedActions) return false;
+  const toolInput = getToolInput(input);
+  const action = String(toolInput?.action || DEFAULT_EXPORTER_TOOL_ACTION[toolName] || '').replace(
+    /-/g,
+    '_',
+  );
+  return allowedActions.has(action);
 };
 
 const parseNonNegativeInt = (value, fallback) => {
@@ -294,7 +297,7 @@ const browserNameFromLaunch = (launch) =>
   launch?.browserName || launch?.plan?.browserName || launch?.browserKey || 'navegador';
 
 const manualBrowserRecoveryMessage =
-  'Rode gemini_browser_status para acionar o auto-reload da extensao; se houver abas conectadas mas travadas, use gemini_reload_gemini_tabs. Recarregar o card em chrome://extensions ou edge://extensions e o ultimo recurso.';
+  'Rode gemini_ready { action: "status" } para acionar o auto-reload da extensao; se houver abas conectadas mas travadas, use gemini_tabs { action: "reload" }. Recarregar o card em chrome://extensions ou edge://extensions e o ultimo recurso.';
 
 const systemMessageForConnectWait = (connectWait, launch, { reusedLaunch = false } = {}) => {
   const browserName = browserNameFromLaunch(launch);
@@ -940,7 +943,7 @@ const prelaunchBrowserDetached = async (input) => {
       sessionId,
       bridgeStatus,
     });
-    return `Gemini Exporter: o bridge MCP local nao respondeu (${bridgeReasonText(bridgeStatus)}); nao abri o navegador as cegas. Reinicie o Gemini CLI ou rode gemini_browser_status de novo depois que o MCP subir.`;
+    return `Gemini Exporter: o bridge MCP local nao respondeu (${bridgeReasonText(bridgeStatus)}); nao abri o navegador as cegas. Reinicie o Gemini CLI ou rode gemini_ready { action: "status" } de novo depois que o MCP subir.`;
   }
 
   const launch = buildWindowsBrowserStartCommand();
@@ -1395,7 +1398,7 @@ const afterTool = (input) => {
   }
   if (analysis.bridgeProblem) {
     notes.push(
-      'A resposta sugere problema de bridge/extensao do navegador. Antes de repetir a mesma exportacao ou pedir acao manual, cheque gemini_browser_status: ele tenta auto-reload da extensao stale. Se o problema for modo proxy/porta ocupada, use gemini_mcp_diagnose_processes antes de cleanup ou restart manual. Se houver abas conectadas mas presas, use gemini_reload_gemini_tabs. Reload manual do card da extensao e ultimo recurso.',
+      'A resposta sugere problema de bridge/extensao do navegador. Antes de repetir a mesma exportacao ou pedir acao manual, cheque gemini_ready { action: "status" }: ele tenta auto-reload da extensao stale. Se o problema for modo proxy/porta ocupada, use gemini_support { action: "processes" } antes de cleanup ou restart manual. Se houver abas conectadas mas presas, use gemini_tabs { action: "reload" }. Reload manual do card da extensao e ultimo recurso.',
     );
   }
 

@@ -348,8 +348,8 @@ const runSmoke = async (options) => {
         method: 'POST',
         timeoutMs: options.timeoutMs,
         body: {
-          name: 'gemini_mcp_diagnose_processes',
-          arguments: {},
+          name: 'gemini_support',
+          arguments: { action: 'processes', detail: 'full' },
         },
       });
       const structured = value.result?.structuredContent;

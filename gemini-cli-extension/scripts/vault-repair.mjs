@@ -189,7 +189,7 @@ const usage = () => {
       '  --staging-dir <dir>       Default: <report-dir>/staging',
       '  --backup-dir <dir>        Default: <report-dir>/backups/<timestamp>',
       '  --bridge-url <url>        Default: http://127.0.0.1:47283',
-      '  --skip-browser-check      Uso de teste/debug: pula gemini_browser_status.',
+      '  --skip-browser-check      Uso de teste/debug: pula gemini_ready.',
       '',
     ].join('\n') + '\n',
   );
@@ -281,8 +281,9 @@ const callMcpTool = async ({ bridgeUrl, name, args = {} }) => {
 const ensureBrowserReady = async (options) => {
   const status = await callMcpTool({
     bridgeUrl: options.bridgeUrl,
-    name: 'gemini_browser_status',
+    name: 'gemini_ready',
     args: {
+      action: 'status',
       wakeBrowser: true,
       selfHeal: true,
       allowReload: true,
@@ -314,8 +315,8 @@ const pollExportJob = async ({ bridgeUrl, jobId, pollMs, timeoutMs }) => {
   while (Date.now() - startedAt <= timeoutMs) {
     status = await callMcpTool({
       bridgeUrl,
-      name: 'gemini_export_job_status',
-      args: { jobId },
+      name: 'gemini_job',
+      args: { action: 'status', jobId },
     });
     if (TERMINAL_JOB_STATUSES.has(status.status)) return status;
     await sleep(pollMs);
@@ -346,8 +347,9 @@ const reexportChats = async ({ items, paths, options }) => {
   for (const chunk of chunkItems(items, DIRECT_REEXPORT_CHUNK_SIZE)) {
     const started = await callMcpTool({
       bridgeUrl: options.bridgeUrl,
-      name: 'gemini_reexport_chats',
+      name: 'gemini_export',
       args: {
+        action: 'reexport',
         outputDir: paths.stagingDir,
         items: chunk,
       },

@@ -1490,7 +1490,7 @@ const writeSummary = (claudeResult, geminiCliResult) => {
     '2. Open http://127.0.0.1:47283/healthz.',
     '3. Open http://127.0.0.1:47283/agent/diagnostics for the consolidated field report.',
     `4. Abra ${GEMINI_APP_URL} ou use open-gemini.cmd, entre numa conversa /app/<id>, recarregue a aba e depois abra http://127.0.0.1:47283/agent/clients.`,
-    '5. Before reinstalling, run diagnose-windows-mcp.ps1 or gemini_diagnose_environment.',
+    '5. Before reinstalling, run diagnose-windows-mcp.ps1 or gemini_support { action: "diagnose" }.',
     '',
     'Important:',
     '- The installed copy lives in this folder. If you rerun the installer, it refreshes extension and MCP files here.',

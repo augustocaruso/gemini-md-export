@@ -4,6 +4,60 @@ Este roadmap registra as próximas frentes de estabilidade e performance do
 Gemini Markdown Export. A ordem abaixo prioriza confiabilidade operacional antes
 de acelerar exportações grandes.
 
+## v0.5.0 — Streamline MCP com Gemini CLI Agent Skills
+
+Status: implementado nesta atualização.
+
+Objetivo: reduzir contexto permanente do agente e tornar os fluxos longos mais
+confiáveis por progressive disclosure: MCP público pequeno, `GEMINI.md` curto e
+playbooks em skills da extensão Gemini CLI.
+
+### Entregas
+
+- Publicar somente 7 tools MCP:
+  - `gemini_ready`;
+  - `gemini_tabs`;
+  - `gemini_chats`;
+  - `gemini_export`;
+  - `gemini_job`;
+  - `gemini_config`;
+  - `gemini_support`.
+- Manter os handlers antigos apenas como implementação interna.
+- Remover nomes antigos de `tools/list`; chamadas diretas aos nomes antigos
+  retornam `code: "tool_renamed"` com `{ tool, arguments }` exato.
+- Respostas compactas por padrão: `ok`, `ready/status`, ids, contagens,
+  `progressMessage`, `nextAction`, paths e warnings essenciais.
+- `detail: "full"` libera diagnóstico rico quando necessário.
+- Preservar endpoints HTTP `/agent/*` para debug manual/local.
+- Reescrever `gemini-cli-extension/GEMINI.md` como roteador curto:
+  - qual tool chamar;
+  - quando ativar skill;
+  - guardrails: sem APIs privadas/cookies, sem despejar histórico inteiro no
+    chat, sem reload manual antes do self-heal.
+- Adicionar skills empacotadas em `gemini-cli-extension/skills/`:
+  - `gemini-vault-sync`;
+  - `gemini-vault-repair`;
+  - `gemini-mcp-diagnostics`;
+  - `gemini-tabs-and-browser`.
+- Adicionar comando top-level `/sync` para o humano disparar sync completo do
+  vault conhecido sem precisar lembrar a chamada MCP.
+- Copiar `skills/` no build para `dist/gemini-cli-extension/skills/`.
+- Atualizar hooks para os 7 nomes novos, com pré-launch action-aware.
+- Atualizar runner de reparo, smoke tests e docs operacionais para as tools
+  novas.
+- Atualizar a skill Codex `gemini-cli-extension-autoupdate` para documentar
+  skills de extensões Gemini CLI como mecanismo oficial de playbooks.
+
+### Critérios de aceite
+
+- `tools/list` retorna exatamente os 7 nomes públicos.
+- Nomes antigos não executam e retornam migração explícita.
+- `GEMINI.md` permanece pequeno e referencia skills em vez de embutir
+  playbooks.
+- Build contém `skills/<name>/SKILL.md` com frontmatter.
+- Export/sync/repair/status continuam passando pelos handlers já testados.
+- Hook do navegador acorda o Chrome apenas para ações que dependem do browser.
+
 ## v0.2.1 — Ciclo de vida do MCP e modo proxy
 
 Status: implementado na versão `0.2.1`.

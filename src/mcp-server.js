@@ -950,7 +950,7 @@ const recommendedRecoveryAction = (mismatch, cleanupPlan) => {
     return 'Modo proxy saudável ou bridge primário compatível; não há processo para limpar.';
   }
   if (cleanupPlan?.eligible) {
-    return 'Há um processo primário antigo/travado reconhecido como exporter. Rode gemini_mcp_cleanup_stale_processes sem confirm para dry-run; se o alvo estiver correto, repita com confirm=true.';
+    return 'Há um processo primário antigo/travado reconhecido como exporter. Rode gemini_support { action: "cleanup_processes" } sem confirm para dry-run; se o alvo estiver correto, repita com confirm=true.';
   }
   if (mismatch.kind === 'name') {
     return 'A porta está ocupada por outro serviço; não vou encerrar automaticamente. Feche esse app ou use outra GEMINI_MCP_BRIDGE_PORT.';
@@ -1291,21 +1291,21 @@ const environmentNextAction = ({ processDiagnostics, clients, matchingClients })
     return {
       code: 'no_gemini_tab_connected',
       message:
-        'Abra uma aba do Gemini Web ou rode gemini_browser_status para tentar acordar o navegador e reconectar a extensão.',
+        'Abra uma aba do Gemini Web ou rode gemini_ready { action: "status" } para tentar acordar o navegador e reconectar a extensão.',
     };
   }
   if (!matchingClients.length) {
     return {
       code: 'extension_version_mismatch',
       message:
-        'A extensão Chrome conectada não bate com a versão/protocolo/build esperados. Rode gemini_browser_status para tentar self-heal antes de pedir reload manual.',
+        'A extensão Chrome conectada não bate com a versão/protocolo/build esperados. Rode gemini_ready { action: "status" } para tentar self-heal antes de pedir reload manual.',
     };
   }
   const unhealthy = matchingClients.find((client) => client.bridgeHealth?.blockingIssue);
   if (unhealthy) {
     return {
       code: unhealthy.bridgeHealth.blockingIssue,
-      message: unhealthy.bridgeHealth.action || 'Rode gemini_browser_status para diagnóstico da aba.',
+      message: unhealthy.bridgeHealth.action || 'Rode gemini_ready { action: "status" } para diagnóstico da aba.',
     };
   }
   return {
@@ -1911,11 +1911,11 @@ const clientSelectorProperties = () => ({
   clientId: { type: 'string' },
   tabId: {
     type: 'integer',
-    description: 'ID da aba do navegador retornado por gemini_list_tabs/gemini_browser_status.',
+    description: 'ID da aba do navegador retornado por gemini_tabs/gemini_ready.',
   },
   claimId: {
     type: 'string',
-    description: 'Claim explícita retornada por gemini_claim_tab.',
+    description: 'Claim explícita retornada por gemini_tabs { action: "claim" }.',
   },
   sessionId: {
     type: 'string',
@@ -2009,7 +2009,7 @@ const removeTabClaim = (claimId) => {
 
 const ambiguousTabsError = (liveClients, selector = {}) => {
   const error = new Error(
-    'Há várias abas do Gemini conectadas. Use gemini_list_tabs e depois informe clientId, tabId ou claimId antes de listar/exportar.',
+    'Há várias abas do Gemini conectadas. Use gemini_tabs { action: "list" } e depois informe clientId, tabId ou claimId antes de listar/exportar.',
   );
   error.code = 'ambiguous_gemini_tabs';
   error.data = {
@@ -2772,19 +2772,19 @@ const buildBridgeHealth = (client, now = Date.now()) => {
   if (!versionMatches) {
     status = 'version_mismatch';
     blockingIssue = 'extension_version_mismatch';
-    action = 'Rode gemini_browser_status para tentar recarregar a extensão automaticamente.';
+    action = 'Rode gemini_ready { action: "status" } para tentar recarregar a extensão automaticamente.';
   } else if (heartbeatAgeMs === null || heartbeatAgeMs > CLIENT_STALE_MS) {
     status = 'stale';
     blockingIssue = 'stale_client';
-    action = 'Recarregue a aba do Gemini ou chame gemini_browser_status para reconectar.';
+    action = 'Recarregue a aba do Gemini ou chame gemini_ready { action: "status" } para reconectar.';
   } else if (!eventStreamConnected && !longPollConnected && pagePolling !== true) {
     status = 'command_channel_stuck';
     blockingIssue = 'command_channel_stuck';
-    action = 'Use gemini_reload_gemini_tabs se a aba estiver aberta mas não aceitar comandos.';
+    action = 'Use gemini_tabs { action: "reload" } se a aba estiver aberta mas não aceitar comandos.';
   } else if (heartbeatAgeMs > CLIENT_DEGRADED_HEARTBEAT_MS) {
     status = 'degraded';
     blockingIssue = 'heartbeat_delayed';
-    action = 'Aguarde alguns segundos; se persistir, rode gemini_browser_status.';
+    action = 'Aguarde alguns segundos; se persistir, rode gemini_ready { action: "status" }.';
   }
 
   return {
@@ -4964,8 +4964,9 @@ const shellQuoteJson = (value) => JSON.stringify(value);
 
 const exportJobResumeCommand = (job) => {
   if (!job?.reportFile) return null;
-  const tool = job.exportMissingOnly ? 'gemini_export_missing_chats' : 'gemini_export_recent_chats';
+  const tool = 'gemini_export';
   const args = {
+    action: job.syncMode ? 'sync' : job.exportMissingOnly ? 'missing' : 'recent',
     resumeReportFile: job.reportFile,
   };
   if (job.exportMissingOnly && job.existingScanDir) {
@@ -4982,15 +4983,15 @@ const exportJobResumeCommand = (job) => {
 };
 
 const exportJobPollCommand = (job) => ({
-  tool: 'gemini_export_job_status',
-  args: { jobId: job.jobId },
-  text: `gemini_export_job_status(${shellQuoteJson({ jobId: job.jobId })})`,
+  tool: 'gemini_job',
+  args: { action: 'status', jobId: job.jobId },
+  text: `gemini_job(${shellQuoteJson({ action: 'status', jobId: job.jobId })})`,
 });
 
 const exportJobCancelCommand = (job) => ({
-  tool: 'gemini_export_job_cancel',
-  args: { jobId: job.jobId },
-  text: `gemini_export_job_cancel(${shellQuoteJson({ jobId: job.jobId })})`,
+  tool: 'gemini_job',
+  args: { action: 'cancel', jobId: job.jobId },
+  text: `gemini_job(${shellQuoteJson({ action: 'cancel', jobId: job.jobId })})`,
 });
 
 const mediaWarningCountForJob = (job) =>
@@ -6334,7 +6335,7 @@ const reloadGeminiTabs = async (args = {}) => {
   };
 };
 
-const rawTools = [
+const legacyRawTools = [
   {
     name: 'gemini_browser_status',
     description:
@@ -6601,19 +6602,21 @@ const rawTools = [
           liveClients.length === 0
             ? {
                 code: 'no_gemini_tab_connected',
-                message: 'Abra uma aba do Gemini ou chame gemini_list_tabs com openIfMissing=true.',
+                message:
+                  'Abra uma aba do Gemini ou chame gemini_tabs { action: "list", openIfMissing: true }.',
               }
             : liveClients.length === 1
               ? {
                   code: 'claim_single_tab',
                   command: {
-                    tool: 'gemini_claim_tab',
-                    arguments: { clientId: liveClients[0].clientId },
+                    tool: 'gemini_tabs',
+                    arguments: { action: 'claim', clientId: liveClients[0].clientId },
                   },
                 }
               : {
                   code: 'choose_tab',
-                  message: 'Escolha uma aba por index/clientId/tabId e chame gemini_claim_tab.',
+                  message:
+                    'Escolha uma aba por index/clientId/tabId e chame gemini_tabs { action: "claim" }.',
                 },
       });
     },
@@ -6629,7 +6632,7 @@ const rawTools = [
         index: {
           type: 'integer',
           minimum: 1,
-          description: 'Índice 1-based retornado por gemini_list_tabs.',
+          description: 'Índice 1-based retornado por gemini_tabs { action: "list" }.',
         },
         chatId: {
           type: 'string',
@@ -6926,7 +6929,7 @@ const rawTools = [
           type: 'integer',
           minimum: 1,
           maximum: 100,
-          description: 'Posição 1-based na lista retornada por gemini_list_recent_chats.',
+          description: 'Posição 1-based na lista retornada por gemini_chats { action: "list" }.',
         },
         chatId: {
           type: 'string',
@@ -7313,13 +7316,13 @@ const rawTools = [
   {
     name: 'gemini_export_job_status',
     description:
-      'Consulta o andamento de um job de exportacao/sync em lote iniciado por gemini_export_recent_chats, gemini_export_missing_chats, gemini_sync_vault ou gemini_reexport_chats.',
+      'Consulta o andamento de um job de exportacao/sync em lote iniciado por gemini_export.',
     inputSchema: {
       type: 'object',
       properties: {
         jobId: {
           type: 'string',
-          description: 'ID retornado por gemini_export_recent_chats, gemini_export_missing_chats, gemini_sync_vault ou gemini_reexport_chats.',
+          description: 'ID retornado por gemini_export.',
         },
       },
       required: ['jobId'],
@@ -7344,7 +7347,7 @@ const rawTools = [
       properties: {
         jobId: {
           type: 'string',
-          description: 'ID retornado por gemini_export_recent_chats, gemini_export_missing_chats, gemini_sync_vault ou gemini_reexport_chats.',
+          description: 'ID retornado por gemini_export.',
         },
       },
       required: ['jobId'],
@@ -7520,7 +7523,7 @@ const rawTools = [
   },
 ];
 
-const BROWSER_DEPENDENT_TOOL_NAMES = new Set([
+const LEGACY_BROWSER_DEPENDENT_TOOL_NAMES = new Set([
   'gemini_list_recent_chats',
   'gemini_list_notebook_chats',
   'gemini_get_current_chat',
@@ -7538,14 +7541,6 @@ const BROWSER_DEPENDENT_TOOL_NAMES = new Set([
   'gemini_snapshot',
 ]);
 
-const LOCAL_PROXY_TOOL_NAMES = new Set([
-  'gemini_mcp_diagnose_processes',
-  'gemini_mcp_cleanup_stale_processes',
-  'gemini_diagnose_environment',
-  'gemini_flight_recorder',
-  'gemini_collect_support_bundle',
-]);
-
 const withChromeExtensionGuard = (tool) => ({
   ...tool,
   call: async (args = {}) => {
@@ -7556,10 +7551,609 @@ const withChromeExtensionGuard = (tool) => ({
   },
 });
 
-const tools = rawTools.map((tool) =>
-  BROWSER_DEPENDENT_TOOL_NAMES.has(tool.name) ? withChromeExtensionGuard(tool) : tool,
+const legacyTools = legacyRawTools.map((tool) =>
+  LEGACY_BROWSER_DEPENDENT_TOOL_NAMES.has(tool.name) ? withChromeExtensionGuard(tool) : tool,
 );
 
+const legacyToolByName = new Map(legacyTools.map((tool) => [tool.name, tool]));
+
+const migrationArguments = (action, args = {}, defaults = {}) => {
+  const next = { ...args };
+  delete next.detail;
+  return { ...next, ...defaults, action };
+};
+
+const legacyToolReplacement = (name, args = {}) => {
+  switch (name) {
+    case 'gemini_browser_status':
+      return { tool: 'gemini_ready', arguments: migrationArguments('status', args) };
+    case 'gemini_browser_ready':
+      return { tool: 'gemini_ready', arguments: migrationArguments('check', args) };
+    case 'gemini_list_tabs':
+      return { tool: 'gemini_tabs', arguments: migrationArguments('list', args) };
+    case 'gemini_claim_tab':
+      return { tool: 'gemini_tabs', arguments: migrationArguments('claim', args) };
+    case 'gemini_release_tab':
+      return { tool: 'gemini_tabs', arguments: migrationArguments('release', args) };
+    case 'gemini_reload_gemini_tabs':
+      return { tool: 'gemini_tabs', arguments: migrationArguments('reload', args) };
+    case 'gemini_list_recent_chats':
+      return { tool: 'gemini_chats', arguments: migrationArguments('list', args, { source: 'recent' }) };
+    case 'gemini_list_notebook_chats':
+      return { tool: 'gemini_chats', arguments: migrationArguments('list', args, { source: 'notebook' }) };
+    case 'gemini_get_current_chat':
+      return { tool: 'gemini_chats', arguments: migrationArguments('current', args) };
+    case 'gemini_open_chat':
+      {
+        const { notebook: _notebook, ...openArgs } = args;
+        return {
+          tool: 'gemini_chats',
+          arguments: migrationArguments('open', openArgs, {
+            source: args.notebook ? 'notebook' : 'recent',
+          }),
+        };
+      }
+    case 'gemini_download_chat':
+      return {
+        tool: 'gemini_chats',
+        arguments: migrationArguments('download', args, { source: 'recent' }),
+      };
+    case 'gemini_download_notebook_chat':
+      return {
+        tool: 'gemini_chats',
+        arguments: migrationArguments('download', args, { source: 'notebook' }),
+      };
+    case 'gemini_export_recent_chats':
+      return { tool: 'gemini_export', arguments: migrationArguments('recent', args) };
+    case 'gemini_export_missing_chats':
+      return { tool: 'gemini_export', arguments: migrationArguments('missing', args) };
+    case 'gemini_sync_vault':
+      return { tool: 'gemini_export', arguments: migrationArguments('sync', args) };
+    case 'gemini_reexport_chats':
+      return { tool: 'gemini_export', arguments: migrationArguments('reexport', args) };
+    case 'gemini_export_notebook':
+      return { tool: 'gemini_export', arguments: migrationArguments('notebook', args) };
+    case 'gemini_export_job_status':
+      return { tool: 'gemini_job', arguments: migrationArguments('status', args) };
+    case 'gemini_export_job_cancel':
+      return { tool: 'gemini_job', arguments: migrationArguments('cancel', args) };
+    case 'gemini_get_export_dir':
+      return { tool: 'gemini_config', arguments: migrationArguments('get_export_dir', args) };
+    case 'gemini_set_export_dir':
+      return { tool: 'gemini_config', arguments: migrationArguments('set_export_dir', args) };
+    case 'gemini_cache_status':
+      return { tool: 'gemini_config', arguments: migrationArguments('cache_status', args) };
+    case 'gemini_clear_cache':
+      return { tool: 'gemini_config', arguments: migrationArguments('clear_cache', args) };
+    case 'gemini_diagnose_environment':
+      return { tool: 'gemini_support', arguments: migrationArguments('diagnose', args) };
+    case 'gemini_mcp_diagnose_processes':
+      return { tool: 'gemini_support', arguments: migrationArguments('processes', args) };
+    case 'gemini_mcp_cleanup_stale_processes':
+      return { tool: 'gemini_support', arguments: migrationArguments('cleanup_processes', args) };
+    case 'gemini_flight_recorder':
+      return { tool: 'gemini_support', arguments: migrationArguments('flight_recorder', args) };
+    case 'gemini_collect_support_bundle':
+      return { tool: 'gemini_support', arguments: migrationArguments('bundle', args) };
+    case 'gemini_snapshot':
+      return { tool: 'gemini_support', arguments: migrationArguments('snapshot', args) };
+    default:
+      return null;
+  }
+};
+
+const legacyToolRenamedResult = (name, args = {}) => {
+  const replacement = legacyToolReplacement(name, args);
+  return toolTextResult(
+    {
+      ok: false,
+      error: `Tool renomeada no gemini-md-export v0.5.0: ${name}.`,
+      code: 'tool_renamed',
+      legacyTool: name,
+      replacement,
+      nextAction: replacement
+        ? {
+            code: 'call_replacement_tool',
+            message: `Use ${replacement.tool} com os argumentos informados em replacement.arguments.`,
+            command: replacement,
+          }
+        : null,
+    },
+    { isError: true },
+  );
+};
+
+const fullDetailRequested = (args = {}) => String(args.detail || '').toLowerCase() === 'full';
+
+const compactClient = (client) => {
+  if (!client) return null;
+  return {
+    clientId: client.clientId || null,
+    tabId: client.tabId ?? null,
+    windowId: client.windowId ?? null,
+    url: client.url || null,
+    title: client.title || null,
+    chatId: client.chatId || client.page?.chatId || null,
+    routeKind: client.routeKind || client.page?.routeKind || null,
+    isActiveTab: client.isActiveTab === true,
+    claimed: client.claimed === true || client.claim ? true : undefined,
+  };
+};
+
+const compactClients = (clients, limit = 20) =>
+  Array.isArray(clients) ? clients.slice(0, limit).map(compactClient) : [];
+
+const compactNextAction = (nextAction) => {
+  if (!nextAction || typeof nextAction !== 'object') return nextAction || null;
+  const command =
+    nextAction.command?.tool && legacyToolByName.has(nextAction.command.tool)
+      ? legacyToolReplacement(nextAction.command.tool, nextAction.command.arguments || {})
+      : nextAction.command || null;
+  return {
+    code: nextAction.code || null,
+    message: nextAction.message || null,
+    command,
+  };
+};
+
+const compactStructuredContent = (name, action, structured = {}) => {
+  if (!structured || typeof structured !== 'object') return structured;
+
+  if (name === 'gemini_ready') {
+    return {
+      ok: structured.ok !== false,
+      ready: structured.ready === true,
+      status: structured.ready === true ? 'ready' : 'not_ready',
+      blockingIssue: structured.blockingIssue || null,
+      matchingClientCount: structured.matchingClientCount ?? structured.connectedClientCount ?? null,
+      connectedClientCount: Array.isArray(structured.connectedClients)
+        ? structured.connectedClients.length
+        : structured.connectedClientCount ?? null,
+      clients: compactClients(structured.connectedClients || structured.clients, 8),
+      manualReloadRequired: structured.manualReloadRequired === true,
+      handshake: structured.handshake
+        ? {
+            mode: structured.handshake.mode || null,
+            timings: structured.handshake.timings || null,
+          }
+        : null,
+      extensionReadiness: structured.extensionReadiness
+        ? {
+            status: structured.extensionReadiness.status || null,
+            serviceWorker: structured.extensionReadiness.serviceWorker?.status || null,
+            contentScript: structured.extensionReadiness.contentScript?.status || null,
+            reload: structured.extensionReadiness.reload || null,
+          }
+        : null,
+      nextAction: compactNextAction(structured.nextAction),
+    };
+  }
+
+  if (name === 'gemini_tabs') {
+    return {
+      ok: structured.ok !== false,
+      action,
+      status: structured.status || (structured.ok === false ? 'failed' : 'ok'),
+      connectedTabCount: structured.connectedTabCount ?? null,
+      connectedClientCount: structured.connectedClientCount ?? null,
+      tabs: compactClients(structured.tabs, 20),
+      claim: structured.claim || structured.claimed || null,
+      released: structured.released ?? null,
+      reloaded: structured.reloaded ?? null,
+      failureCount: structured.failureCount ?? structured.failures?.length ?? null,
+      browserWake: structured.browserWake
+        ? {
+            attempted: structured.browserWake.attempted === true,
+            reason: structured.browserWake.reason || null,
+            connectedAfterWake: structured.browserWake.connectedAfterWake ?? null,
+          }
+        : null,
+      nextAction: compactNextAction(structured.nextAction),
+    };
+  }
+
+  if (name === 'gemini_chats') {
+    const conversations = Array.isArray(structured.conversations)
+      ? structured.conversations
+      : Array.isArray(structured.chats)
+        ? structured.chats
+        : [];
+    return {
+      ok: structured.ok !== false,
+      action,
+      source: structured.source || structured.page?.source || null,
+      client: compactClient(structured.client),
+      chatId: structured.chatId || structured.markdown?.chatId || null,
+      title: structured.title || structured.markdown?.title || null,
+      filePath: structured.filePath || structured.path || null,
+      outputDir: structured.outputDir || null,
+      mediaFileCount: structured.mediaFileCount ?? structured.mediaFiles?.length ?? null,
+      mediaFailureCount: structured.mediaFailureCount ?? structured.mediaFailures?.length ?? null,
+      count: structured.count ?? conversations.length,
+      pagination: structured.pagination || null,
+      conversations: conversations.slice(0, 50).map((conversation, index) => ({
+        index: conversation.index ?? index + 1,
+        chatId: conversation.chatId || conversation.id || null,
+        title: conversation.title || null,
+        url: conversation.url || null,
+        source: conversation.source || null,
+      })),
+      nextAction: compactNextAction(structured.nextAction),
+    };
+  }
+
+  if (name === 'gemini_export' || name === 'gemini_job') {
+    return {
+      ok: structured.ok !== false,
+      action,
+      jobId: structured.jobId || null,
+      type: structured.type || structured.kind || null,
+      status: structured.status || null,
+      phase: structured.phase || null,
+      progressMessage: structured.progressMessage || null,
+      decisionSummary: structured.decisionSummary || null,
+      nextAction: compactNextAction(structured.nextAction),
+      outputDir: structured.outputDir || null,
+      reportFile: structured.reportFile || null,
+      current: structured.current || structured.currentChat || null,
+      counts: {
+        total: structured.totalCount ?? structured.total ?? null,
+        processed: structured.processedCount ?? structured.processed ?? null,
+        success: structured.successCount ?? structured.savedCount ?? null,
+        failure: structured.failureCount ?? structured.errorCount ?? null,
+        skipped: structured.skippedCount ?? null,
+        existingVault: structured.existingVaultCount ?? null,
+        webConversations: structured.webConversationCount ?? null,
+        missing: structured.missingCount ?? null,
+      },
+      recentErrors: Array.isArray(structured.recentErrors)
+        ? structured.recentErrors.slice(-5)
+        : Array.isArray(structured.failures)
+          ? structured.failures.slice(-5)
+          : [],
+      error: structured.error || null,
+    };
+  }
+
+  if (name === 'gemini_config') {
+    return {
+      ok: structured.ok !== false,
+      action,
+      outputDir: structured.outputDir || null,
+      defaultExportDir: structured.defaultExportDir || null,
+      reset: structured.reset === true,
+      client: compactClient(structured.client),
+      count: structured.count ?? structured.entries?.length ?? null,
+      cleared: structured.cleared ?? null,
+      error: structured.error || null,
+    };
+  }
+
+  if (name === 'gemini_support') {
+    return {
+      ok: structured.ok !== false,
+      action,
+      status: structured.status || null,
+      ready: structured.ready ?? null,
+      bridgeRole: structured.mcp?.bridgeRole || structured.bridgeRole || null,
+      pid: structured.pid || structured.process?.pid || null,
+      file: structured.file || structured.bundleFile || structured.path || null,
+      outputDir: structured.outputDir || null,
+      eventCount: Array.isArray(structured.events) ? structured.events.length : null,
+      processCount: Array.isArray(structured.processes) ? structured.processes.length : null,
+      wouldTerminate: structured.wouldTerminate || null,
+      terminated: structured.terminated || null,
+      client: compactClient(structured.client),
+      error: structured.error || null,
+      nextAction: compactNextAction(structured.nextAction),
+    };
+  }
+
+  return structured;
+};
+
+const callLegacyTool = async (legacyName, args = {}) => {
+  const tool = legacyToolByName.get(legacyName);
+  if (!tool) {
+    return toolTextResult({ error: `Handler legado desconhecido: ${legacyName}` }, { isError: true });
+  }
+  return tool.call(args);
+};
+
+const callLegacyToolCompacted = async (publicName, action, legacyName, args = {}) => {
+  const result = await callLegacyTool(legacyName, args);
+  if (fullDetailRequested(args)) return result;
+  return {
+    ...result,
+    structuredContent: compactStructuredContent(publicName, action, result.structuredContent),
+    content: [
+      {
+        type: 'text',
+        text: JSON.stringify(
+          compactStructuredContent(publicName, action, result.structuredContent),
+          null,
+          2,
+        ),
+      },
+    ],
+  };
+};
+
+const domainSelectorProperties = () => clientSelectorProperties();
+
+const advancedExportArgs = (args = {}) => {
+  const { action: _action, source: _source, detail: _detail, advanced, ...rest } = args;
+  return {
+    ...rest,
+    ...(advanced && typeof advanced === 'object' ? advanced : {}),
+  };
+};
+
+const rawTools = [
+  {
+    name: 'gemini_ready',
+    description:
+      'Checa prontidão do bridge/extensão/abas Gemini. Use detail="full" apenas para diagnóstico rico.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['check', 'status'],
+          description: 'check é leve; status inclui diagnóstico mais completo.',
+        },
+        wakeBrowser: { type: 'boolean' },
+        waitMs: { type: 'number' },
+        initialWaitMs: { type: 'number' },
+        selfHeal: { type: 'boolean' },
+        allowReload: { type: 'boolean' },
+        reloadWaitMs: { type: 'number' },
+        diagnostics: { type: 'boolean' },
+        detail: { type: 'string', enum: ['compact', 'full'] },
+      },
+      additionalProperties: false,
+    },
+    call: async (args = {}) => {
+      const action = args.action === 'status' ? 'status' : 'check';
+      return callLegacyToolCompacted(
+        'gemini_ready',
+        action,
+        action === 'status' ? 'gemini_browser_status' : 'gemini_browser_ready',
+        args,
+      );
+    },
+  },
+  {
+    name: 'gemini_tabs',
+    description:
+      'Lista, reivindica, libera ou recarrega abas Gemini conectadas. Use para evitar trabalhar na aba errada.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['list', 'claim', 'release', 'reload'] },
+        ...domainSelectorProperties(),
+        index: { type: 'integer', minimum: 1 },
+        chatId: { type: 'string' },
+        claimId: { type: 'string' },
+        sessionId: { type: 'string' },
+        label: { type: 'string' },
+        color: {
+          type: 'string',
+          enum: ['grey', 'blue', 'red', 'yellow', 'green', 'pink', 'purple', 'cyan', 'orange'],
+        },
+        ttlMs: { type: 'integer', minimum: 30000, maximum: 86400000 },
+        force: { type: 'boolean' },
+        openIfMissing: { type: 'boolean' },
+        waitMs: { type: 'number' },
+        allowReload: { type: 'boolean' },
+        delayMs: { type: 'integer', minimum: 0, maximum: 10000 },
+        detail: { type: 'string', enum: ['compact', 'full'] },
+      },
+      additionalProperties: false,
+    },
+    call: async (args = {}) => {
+      const action = args.action || 'list';
+      const legacyName =
+        action === 'claim'
+          ? 'gemini_claim_tab'
+          : action === 'release'
+            ? 'gemini_release_tab'
+            : action === 'reload'
+              ? 'gemini_reload_gemini_tabs'
+              : 'gemini_list_tabs';
+      return callLegacyToolCompacted('gemini_tabs', action, legacyName, args);
+    },
+  },
+  {
+    name: 'gemini_chats',
+    description:
+      'Lista, abre, obtém ou baixa conversas do Gemini. Para histórico inteiro, use gemini_export em vez de despejar listas enormes.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['list', 'current', 'open', 'download'] },
+        source: { type: 'string', enum: ['recent', 'notebook'] },
+        ...domainSelectorProperties(),
+        limit: { type: 'integer', minimum: 1, maximum: 500 },
+        offset: { type: 'integer', minimum: 0, maximum: 999 },
+        refresh: { type: 'boolean' },
+        index: { type: 'integer', minimum: 1 },
+        chatId: { type: 'string' },
+        url: { type: 'string' },
+        title: { type: 'string' },
+        outputDir: { type: 'string' },
+        returnToOriginal: { type: 'boolean' },
+        detail: { type: 'string', enum: ['compact', 'full'] },
+      },
+      additionalProperties: false,
+    },
+    call: async (args = {}) => {
+      const action = args.action || 'list';
+      const source = args.source === 'notebook' ? 'notebook' : 'recent';
+      const legacyArgs = { ...args };
+      if (source === 'notebook') legacyArgs.notebook = true;
+      const legacyName =
+        action === 'current'
+          ? 'gemini_get_current_chat'
+          : action === 'open'
+            ? 'gemini_open_chat'
+            : action === 'download'
+              ? source === 'notebook'
+                ? 'gemini_download_notebook_chat'
+                : 'gemini_download_chat'
+              : source === 'notebook'
+                ? 'gemini_list_notebook_chats'
+                : 'gemini_list_recent_chats';
+      return callLegacyToolCompacted('gemini_chats', action, legacyName, legacyArgs);
+    },
+  },
+  {
+    name: 'gemini_export',
+    description:
+      'Inicia export/sync em lote em background: recent, missing, sync, reexport ou notebook. Retorna progresso compacto e jobId.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['recent', 'missing', 'sync', 'reexport', 'notebook'] },
+        ...domainSelectorProperties(),
+        vaultDir: { type: 'string' },
+        outputDir: { type: 'string' },
+        syncStateFile: { type: 'string' },
+        resumeReportFile: { type: 'string' },
+        reportFile: { type: 'string' },
+        startIndex: { type: 'integer', minimum: 1 },
+        maxChats: { type: 'integer', minimum: 1, maximum: 1000 },
+        limit: { type: 'integer', minimum: 1, maximum: 1000 },
+        refresh: { type: 'boolean' },
+        skipExisting: { type: 'boolean' },
+        knownBoundaryCount: { type: 'integer', minimum: 1, maximum: 100 },
+        chatId: { type: 'string' },
+        chatIds: { type: 'array', maxItems: 500, items: { type: 'string' } },
+        items: { type: 'array', maxItems: 500, items: { type: 'object', additionalProperties: true } },
+        delayMs: { type: 'integer', minimum: 0, maximum: 30000 },
+        advanced: { type: 'object', additionalProperties: true },
+        detail: { type: 'string', enum: ['compact', 'full'] },
+      },
+      additionalProperties: false,
+    },
+    call: async (args = {}) => {
+      const action = args.action || 'recent';
+      const legacyName =
+        action === 'missing'
+          ? 'gemini_export_missing_chats'
+          : action === 'sync'
+            ? 'gemini_sync_vault'
+            : action === 'reexport'
+              ? 'gemini_reexport_chats'
+              : action === 'notebook'
+                ? 'gemini_export_notebook'
+                : 'gemini_export_recent_chats';
+      return callLegacyToolCompacted(
+        'gemini_export',
+        action,
+        legacyName,
+        advancedExportArgs(args),
+      );
+    },
+  },
+  {
+    name: 'gemini_job',
+    description: 'Consulta ou cancela job de export/sync iniciado por gemini_export.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['status', 'cancel'] },
+        jobId: { type: 'string' },
+        detail: { type: 'string', enum: ['compact', 'full'] },
+      },
+      required: ['jobId'],
+      additionalProperties: false,
+    },
+    call: async (args = {}) => {
+      const action = args.action === 'cancel' ? 'cancel' : 'status';
+      return callLegacyToolCompacted(
+        'gemini_job',
+        action,
+        action === 'cancel' ? 'gemini_export_job_cancel' : 'gemini_export_job_status',
+        args,
+      );
+    },
+  },
+  {
+    name: 'gemini_config',
+    description:
+      'Consulta/define diretório de export e inspeciona/limpa caches locais da extensão.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['get_export_dir', 'set_export_dir', 'cache_status', 'clear_cache'],
+        },
+        ...domainSelectorProperties(),
+        outputDir: { type: 'string' },
+        reset: { type: 'boolean' },
+        notebookId: { type: 'string' },
+        detail: { type: 'string', enum: ['compact', 'full'] },
+      },
+      additionalProperties: false,
+    },
+    call: async (args = {}) => {
+      const action = args.action || 'get_export_dir';
+      const legacyName =
+        action === 'set_export_dir'
+          ? 'gemini_set_export_dir'
+          : action === 'cache_status'
+            ? 'gemini_cache_status'
+            : action === 'clear_cache'
+              ? 'gemini_clear_cache'
+              : 'gemini_get_export_dir';
+      return callLegacyToolCompacted('gemini_config', action, legacyName, args);
+    },
+  },
+  {
+    name: 'gemini_support',
+    description:
+      'Diagnóstico e suporte operacional: ambiente, processos, cleanup seguro, flight recorder, bundle e snapshot.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['diagnose', 'processes', 'cleanup_processes', 'flight_recorder', 'bundle', 'snapshot'],
+        },
+        ...domainSelectorProperties(),
+        confirm: { type: 'boolean' },
+        dryRun: { type: 'boolean' },
+        force: { type: 'boolean' },
+        waitMs: { type: 'integer', minimum: 100, maximum: 30000 },
+        limit: { type: 'integer', minimum: 1, maximum: 1000 },
+        outputDir: { type: 'string' },
+        flightLimit: { type: 'integer', minimum: 1, maximum: 1000 },
+        detail: { type: 'string', enum: ['compact', 'full'] },
+      },
+      additionalProperties: false,
+    },
+    call: async (args = {}) => {
+      const action = args.action || 'diagnose';
+      const legacyName =
+        action === 'processes'
+          ? 'gemini_mcp_diagnose_processes'
+          : action === 'cleanup_processes'
+            ? 'gemini_mcp_cleanup_stale_processes'
+            : action === 'flight_recorder'
+              ? 'gemini_flight_recorder'
+              : action === 'bundle'
+                ? 'gemini_collect_support_bundle'
+                : action === 'snapshot'
+                  ? 'gemini_snapshot'
+                  : 'gemini_diagnose_environment';
+      return callLegacyToolCompacted('gemini_support', action, legacyName, args);
+    },
+  },
+];
+
+const tools = rawTools;
 const toolByName = new Map(tools.map((tool) => [tool.name, tool]));
 
 const executeToolCall = async (name, args = {}) => {
@@ -7567,6 +8161,13 @@ const executeToolCall = async (name, args = {}) => {
   const startedAt = Date.now();
 
   if (!tool) {
+    if (legacyToolByName.has(name)) {
+      recordFlightEvent('tool_call_renamed', {
+        name,
+        replacement: legacyToolReplacement(name, args),
+      });
+      return legacyToolRenamedResult(name, args);
+    }
     recordFlightEvent('tool_call_unknown', { name });
     return toolTextResult({ error: `Tool desconhecida: ${name}` }, { isError: true });
   }
@@ -7594,6 +8195,23 @@ const executeToolCall = async (name, args = {}) => {
       { isError: true },
     );
   }
+};
+
+const LOCAL_PROXY_SUPPORT_ACTIONS = new Set([
+  'diagnose',
+  'processes',
+  'cleanup_processes',
+  'flight_recorder',
+  'bundle',
+]);
+
+const shouldProxyToolCall = (name, args = {}) => {
+  if (legacyToolByName.has(name)) return false;
+  if (name === 'gemini_support') {
+    const action = args.action || 'diagnose';
+    return !LOCAL_PROXY_SUPPORT_ACTIONS.has(action);
+  }
+  return toolByName.has(name);
 };
 
 const proxyToolCallToPrimary = async (name, args = {}) => {
@@ -8719,12 +9337,9 @@ const handleRequest = async (message) => {
       if (
         bridgeRole === 'proxy' &&
         process.env.GEMINI_MCP_PROXY_TO_PRIMARY !== 'false' &&
-        !LOCAL_PROXY_TOOL_NAMES.has(name)
+        shouldProxyToolCall(name, args)
       ) {
-        result =
-          name === 'gemini_browser_status'
-            ? await proxyBrowserStatus(args)
-            : await proxyToolCallToPrimary(name, args);
+        result = await proxyToolCallToPrimary(name, args);
       } else {
         result = await executeToolCall(name, args);
       }

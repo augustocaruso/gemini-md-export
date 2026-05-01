@@ -1,0 +1,38 @@
+description = "Sincroniza o vault Gemini/Obsidian conhecido com o Gemini Web, baixando apenas conversas novas ou faltantes."
+prompt = """
+Sincronize o vault local de conversas Gemini com o Gemini Web usando a skill
+`gemini-vault-sync` desta extensao.
+
+Argumentos do usuario: {{args}}
+
+Contrato:
+- Este comando deve resolver o fluxo inteiro. Nao apenas explique o plano.
+- Se `{{args}}` trouxer um caminho, use esse caminho como `vaultDir` e
+  `outputDir`.
+- Se `{{args}}` estiver vazio, use o vault correto ja conhecido pelo contexto
+  principal/GEMINI.md da sessao. Nao pergunte pelo caminho apenas porque o
+  usuario nao passou argumento.
+- So pergunte pelo caminho se nenhum vault puder ser inferido do contexto atual.
+- Nao liste todo o historico de conversas no chat.
+- Nao chame paginas de listagem enormes para decidir o que baixar.
+- Primeiro verifique prontidao com `gemini_ready`.
+- Se houver multiplas abas Gemini e a tool pedir escolha, use `gemini_tabs`
+  para listar/claim antes de exportar.
+- Use `gemini_export` com `action: "sync"`, `vaultDir` e `outputDir` apontando
+  para o vault.
+- Acompanhe com `gemini_job` ate status terminal:
+  `completed`, `completed_with_errors`, `failed` ou `cancelled`.
+- Se existir `resumeReportFile`/`reportFile` de uma tentativa anterior no
+  contexto ou no retorno da tool, retome em vez de reiniciar do zero.
+- Mantenha Markdown e assets dentro do vault, nunca em Downloads como destino
+  planejado.
+- Use respostas compactas da tool por padrao; use `detail: "full"` somente se
+  houver erro ou diagnóstico necessário.
+- A resposta final deve ser curta e humana, com:
+  - status final;
+  - quantas conversas novas foram baixadas;
+  - quantas ja existiam/foram puladas quando a tool informar;
+  - falhas ou warnings de midia;
+  - caminho do relatorio;
+  - proxima acao somente se houver falha, sync parcial ou retomada pendente.
+"""
