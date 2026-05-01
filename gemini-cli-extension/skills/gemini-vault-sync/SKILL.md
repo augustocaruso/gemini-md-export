@@ -32,7 +32,8 @@ Use `export missing <vaultDir>` for explicit missing-only imports, `sync
 <vaultDir>` for incremental vault sync, and `export resume <reportFile>` when a
 previous report should be resumed.
 
-For a human-visible progress UI inside Gemini CLI:
+For a human-visible progress UI inside Gemini CLI, only promise this when the
+shell executor is interactive and exposes a real TTY/PTY:
 
 ```bash
 node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" sync "/path/to/vault" --tui
@@ -47,6 +48,9 @@ node "$env:USERPROFILE\.gemini\extensions\gemini-md-export\bin\gemini-md-export.
 For agent-readable execution, use `--plain` instead of `--tui`; parse the final
 `RESULT_JSON` line and avoid interpreting progress-bar text. Use `--json` for
 final JSON only or `--jsonl` when another program needs progress events.
+If `--tui` is requested in a captured/non-interactive shell, the CLI falls back
+to `--plain` and prints a warning; do not describe that as a visible progress
+bar.
 Use `--help` on the CLI or subcommand when you need the exact flags, output
 formats, examples, or exit codes.
 
@@ -105,6 +109,16 @@ Report only:
 
 Do not paste full conversation inventories unless the user explicitly asks for
 a small page of results.
+
+For "quantos chats ao todo?", prefer:
+
+```bash
+node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" chats count --plain
+```
+
+Only report an exact total when `RESULT_JSON.totalKnown=true` or
+`RESULT_JSON.countIsTotal=true`. Otherwise say "pelo menos N" and explain that
+the end of the Gemini sidebar was not confirmed.
 
 Never summarize a `RESULT_JSON` as success when `status` is
 `completed_with_errors`, `failed`, or `cancelled`, or when

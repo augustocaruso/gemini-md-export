@@ -127,6 +127,7 @@ const usage = () =>
     '  doctor                Verifica bridge, extensao Chrome e aba Gemini.',
     '  browser status        Mostra prontidao da bridge/extensao/abas.',
     '  tabs list|claim       Lista/reivindica abas Gemini pela CLI.',
+    '  chats count           Conta chats carregaveis sem despejar lista no chat.',
     '  export recent         Exporta historico recente carregavel.',
     '  export missing        Exporta apenas chats ausentes no vault.',
     '  export resume         Retoma export por relatorio incremental.',
@@ -144,6 +145,7 @@ const usage = () =>
     '  gemini-md-export sync "/path/to/vault" --plain',
     '  gemini-md-export doctor --plain',
     '  gemini-md-export tabs list --plain',
+    '  gemini-md-export chats count --plain',
     '  gemini-md-export export missing "/path/to/vault" --plain',
     '  gemini-md-export job status job-123 --json',
     '',
@@ -259,6 +261,34 @@ const tabsHelp = () =>
     '  gemini-md-export tabs list --plain',
     '  gemini-md-export tabs claim --index 1 --plain',
     '  gemini-md-export sync "/path/to/vault" --claim-id <claimId> --plain',
+  ].join('\n');
+
+const chatsHelp = () =>
+  [
+    'gemini-md-export chats',
+    '',
+    'Uso:',
+    '  gemini-md-export chats count [opcoes]',
+    '',
+    'Conta conversas carregaveis no sidebar sem imprimir a lista inteira.',
+    'A contagem so e total quando RESULT_JSON.totalKnown=true.',
+    'Se totalKnown=false, responda "pelo menos N" e nao "ao todo".',
+    '',
+    'Opcoes:',
+    '  --max-load-more-rounds <n>   Rodadas maximas para puxar historico.',
+    '  --load-more-attempts <n>     Tentativas de scroll por rodada.',
+    '  --max-no-growth-rounds <n>   Rodadas sem crescimento antes de desistir.',
+    '  --load-more-browser-rounds <n> Rodadas internas no navegador por comando.',
+    '  --load-more-browser-timeout-ms <ms> Timeout do carregamento no navegador.',
+    '  --load-more-timeout-ms <ms>  Timeout total do comando de contagem.',
+    '',
+    ...outputModeHelp(),
+    '',
+    ...commonOptionHelp(),
+    '',
+    'Exemplos:',
+    '  gemini-md-export chats count --plain',
+    '  gemini-md-export chats count --json',
   ].join('\n');
 
 const exportHelp = () =>
@@ -476,6 +506,7 @@ const helpForParsed = (parsed) => {
   if (command === 'doctor') return doctorHelp();
   if (command === 'browser') return browserHelp();
   if (command === 'tabs') return tabsHelp();
+  if (command === 'chats') return chatsHelp();
   if (command === 'export' && subcommand === 'recent') return exportRecentHelp();
   if (command === 'export' && subcommand === 'missing') return exportMissingHelp();
   if (command === 'export' && subcommand === 'resume') return exportResumeHelp();
@@ -773,21 +804,39 @@ const dim = (ui, text) => (wantsColor(ui) ? `${ANSI.dim}${text}${ANSI.reset}` : 
 
 const stripAnsi = (text) => String(text).replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
 
+const supportsTui = (stdout = process.stdout) => stdout.isTTY && process.env.TERM !== 'dumb';
+
 const selectFormat = (flags, stdout = process.stdout) => {
+  if (flags.format === 'tui' && !stdout.isTTY) return 'plain';
   if (flags.format !== 'auto') return flags.format;
-  if (stdout.isTTY && process.env.TERM !== 'dumb') return 'tui';
+  if (supportsTui(stdout)) return 'tui';
   return 'plain';
 };
 
-const makeUi = (flags, streams = {}) => ({
-  format: selectFormat(flags, streams.stdout || process.stdout),
-  color: flags.color,
-  stdout: streams.stdout || process.stdout,
-  stderr: streams.stderr || process.stderr,
-  lastLineCount: 0,
-  firstRender: true,
-  closed: false,
-});
+const makeUi = (flags, streams = {}) => {
+  const stdout = streams.stdout || process.stdout;
+  const format = selectFormat(flags, stdout);
+  return {
+    format,
+    requestedFormat: flags.format,
+    tuiFallback: flags.format === 'tui' && format !== 'tui',
+    tuiFallbackWarned: false,
+    color: flags.color,
+    stdout,
+    stderr: streams.stderr || process.stderr,
+    lastLineCount: 0,
+    firstRender: true,
+    closed: false,
+  };
+};
+
+const warnTuiFallback = (ui) => {
+  if (!ui.tuiFallback || ui.tuiFallbackWarned) return;
+  ui.tuiFallbackWarned = true;
+  ui.stderr.write(
+    'Aviso: --tui precisa de terminal interativo (TTY/PTY). Este shell esta capturando a saida; usando --plain.\n',
+  );
+};
 
 const terminalWidth = (ui) => Math.max(60, Math.min(120, ui.stdout.columns || 88));
 
@@ -1230,6 +1279,7 @@ const runSync = async (parsed, streams = {}) => {
     throw usageError('Informe vaultDir ou --resume-report-file.');
   }
   const ui = makeUi(flags, streams);
+  warnTuiFallback(ui);
   try {
     if (ui.format !== 'json' && ui.format !== 'jsonl') {
       ui.stdout.write(`Conectando na bridge ${normalizeBridgeUrl(flags.bridgeUrl)}...\n`);
@@ -1249,6 +1299,7 @@ const runSync = async (parsed, streams = {}) => {
 
 const runDoctor = async (parsed, streams = {}) => {
   const ui = makeUi(parsed.flags, streams);
+  warnTuiFallback(ui);
   await ensureBridgeAvailable(parsed.flags, ui);
   const ready = await readyWithCliWake(parsed.flags.bridgeUrl, parsed.flags, ui);
   const result = {
@@ -1276,6 +1327,7 @@ const runBrowser = async (parsed, streams = {}) => {
   const subcommand = parsed.positionals[0];
   if (subcommand !== 'status') throw usageError('Uso: gemini-md-export browser status.');
   const ui = makeUi(parsed.flags, streams);
+  warnTuiFallback(ui);
   await ensureBridgeAvailable(parsed.flags, ui);
   const ready = await readyWithCliWake(parsed.flags.bridgeUrl, parsed.flags, ui);
   let clients = null;
@@ -1357,6 +1409,7 @@ const runTabs = async (parsed, streams = {}) => {
     throw usageError('Uso: gemini-md-export tabs list|claim|release|reload.');
   }
   const ui = makeUi(parsed.flags, streams);
+  warnTuiFallback(ui);
   await ensureBridgeAvailable(parsed.flags, ui);
   const result = await requestJson(
     parsed.flags.bridgeUrl,
@@ -1388,6 +1441,58 @@ const runTabs = async (parsed, streams = {}) => {
   return { exitCode: summary.ok ? EXIT.OK : EXIT.EXTENSION_UNREADY, result: summary };
 };
 
+const summarizeChatsCountResult = (result = {}) => ({
+  ok: result.ok !== false,
+  status: result.countStatus || (result.totalKnown ? 'complete' : 'partial'),
+  totalKnown: result.totalKnown === true,
+  totalCount: result.totalCount ?? null,
+  knownLoadedCount: result.knownLoadedCount ?? result.pagination?.loadedCount ?? null,
+  minimumKnownCount: result.minimumKnownCount ?? result.pagination?.loadedCount ?? null,
+  countIsTotal: result.countIsTotal === true,
+  reachedEnd: result.pagination?.reachedEnd === true,
+  canLoadMore: result.pagination?.canLoadMore === true,
+  loadMoreRoundsCompleted: result.loadMoreRoundsCompleted ?? null,
+  loadMoreTimedOut: result.loadMoreTimedOut === true,
+  warning: result.countWarning || null,
+  answer: result.answer || null,
+  nextAction: result.nextAction || null,
+});
+
+const runChats = async (parsed, streams = {}) => {
+  const subcommand = parsed.positionals[0] || 'count';
+  if (subcommand !== 'count') {
+    throw usageError('Uso: gemini-md-export chats count [opcoes].');
+  }
+  const ui = makeUi(parsed.flags, streams);
+  warnTuiFallback(ui);
+  if (ui.format !== 'json' && ui.format !== 'jsonl') {
+    ui.stdout.write(`Conectando na bridge ${normalizeBridgeUrl(parsed.flags.bridgeUrl)}...\n`);
+  }
+  await ensureBridgeAvailable(parsed.flags, ui);
+  await ensureReady(parsed.flags.bridgeUrl, parsed.flags, ui);
+  const raw = await requestJson(
+    parsed.flags.bridgeUrl,
+    appendParams('/agent/recent-chats', {
+      limit: 1,
+      offset: 0,
+      countOnly: true,
+      untilEnd: true,
+      refresh: parsed.flags.refresh,
+      ...loadMoreParamsFromFlags(parsed.flags),
+      clientId: parsed.flags.clientId,
+      tabId: parsed.flags.tabId,
+      claimId: parsed.flags.claimId,
+    }),
+    { timeoutMs: Math.max(20_000, Number(parsed.flags.loadMoreTimeoutMs || DEFAULT_TIMEOUT_MS)) },
+  );
+  const result = summarizeChatsCountResult(raw);
+  const label = result.totalKnown
+    ? `Total confirmado: ${result.totalCount} chat(s).`
+    : `Contagem parcial: pelo menos ${result.minimumKnownCount ?? result.knownLoadedCount ?? 0} chat(s).`;
+  writeStructuredResult(ui, result, { label });
+  return { exitCode: result.totalKnown ? EXIT.OK : EXIT.WARNINGS, result };
+};
+
 const runExport = async (parsed, streams = {}) => {
   const subcommand = parsed.positionals[0];
   const flags = { ...parsed.flags };
@@ -1412,6 +1517,7 @@ const runExport = async (parsed, streams = {}) => {
   }
 
   const ui = makeUi(flags, streams);
+  warnTuiFallback(ui);
   try {
     if (ui.format !== 'json' && ui.format !== 'jsonl') {
       ui.stdout.write(`Conectando na bridge ${normalizeBridgeUrl(flags.bridgeUrl)}...\n`);
@@ -1436,6 +1542,7 @@ const runJob = async (parsed, streams = {}) => {
     throw usageError('Uso: gemini-md-export job status|cancel <jobId>.');
   }
   const ui = makeUi(parsed.flags, streams);
+  warnTuiFallback(ui);
   await ensureBridgeAvailable(parsed.flags, ui);
   const job = subcommand === 'cancel' ? await cancelJob(parsed.flags.bridgeUrl, jobId) : await fetchJobStatus(parsed.flags.bridgeUrl, jobId);
   if (ui.format === 'json') {
@@ -1451,6 +1558,7 @@ const runExportDir = async (parsed, streams = {}) => {
   const subcommand = parsed.positionals[0] || 'get';
   if (!['get', 'set'].includes(subcommand)) throw usageError('Uso: gemini-md-export export-dir get|set.');
   const ui = makeUi(parsed.flags, streams);
+  warnTuiFallback(ui);
   await ensureBridgeAvailable(parsed.flags, ui);
   const result =
     subcommand === 'get'
@@ -1478,6 +1586,7 @@ const runCleanup = async (parsed, streams = {}) => {
     throw usageError('Uso: gemini-md-export cleanup stale-processes [--confirm].');
   }
   const ui = makeUi(parsed.flags, streams);
+  warnTuiFallback(ui);
   await ensureBridgeAvailable(parsed.flags, ui);
   const result = await requestJson(
     parsed.flags.bridgeUrl,
@@ -1536,6 +1645,7 @@ export const main = async (argv = process.argv.slice(2), streams = {}) => {
   if (parsed.command === 'doctor') return runDoctor(parsed, streams);
   if (parsed.command === 'browser') return runBrowser(parsed, streams);
   if (parsed.command === 'tabs') return runTabs(parsed, streams);
+  if (parsed.command === 'chats') return runChats(parsed, streams);
   if (parsed.command === 'export') return runExport(parsed, streams);
   if (parsed.command === 'job') return runJob(parsed, streams);
   if (parsed.command === 'export-dir') return runExportDir(parsed, streams);

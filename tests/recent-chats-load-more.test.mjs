@@ -105,6 +105,22 @@ test('job status diferencia lote parcial de historico inteiro verificado', () =>
   assert.match(source, /loadMoreTrace/);
 });
 
+test('listagem de chats expõe contagem parcial sem fingir total', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const block = source.match(
+    /const listRecentChatsForClient = async[\s\S]*?\nconst emptyTimingBucket/,
+  )?.[0];
+  assert.ok(block, 'listRecentChatsForClient deve existir');
+  assert.match(block, /countStatus/);
+  assert.match(block, /countIsTotal/);
+  assert.match(block, /totalKnown/);
+  assert.match(block, /totalCount/);
+  assert.match(block, /minimumKnownCount/);
+  assert.match(block, /Nao informe esse numero como "ao todo"/);
+  assert.match(block, /gemini-md-export chats count --plain/);
+  assert.match(source, /action:\s*\{\s*type:\s*'string',\s*enum:\s*\['list', 'count'/);
+});
+
 test('export total registra métricas de performance no status e relatório', () => {
   const serverSource = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const contentSource = readFileSync(resolve(ROOT, 'src', 'userscript-shell.js'), 'utf-8');

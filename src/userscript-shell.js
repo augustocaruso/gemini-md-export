@@ -399,6 +399,8 @@
   const BRIDGE_OUTPUT_DIR_STORAGE_KEY = 'gemini-md-export.bridgeOutputDir';
   const NOTEBOOK_CHAT_URL_CACHE_STORAGE_KEY = 'gemini-md-export.notebookChatUrls.v1';
   const BATCH_EXPORT_SESSION_STORAGE_KEY = 'gemini-md-export.batchExportSession.v1';
+  const MCP_PROGRESS_SESSION_STORAGE_KEY = 'gemini-md-export.mcpProgress.v1';
+  const MCP_PROGRESS_STALE_GRACE_MS = 45_000;
   // Por aba (sessionStorage): quando '1', a aba não envia heartbeat nem
   // long-poll de comandos para a bridge MCP. Usuário liga/desliga pelo menu
   // do botão. Sobrevive reload da própria aba; some quando a aba é fechada.
@@ -472,6 +474,7 @@
     progressCreepTimer: null,
     mcpProgressActive: false,
     mcpProgressJobId: null,
+    mcpProgressLastSeenAt: 0,
     isLoadingMore: false,
     loadMoreFailures: 0,
     lastLoadMoreTrace: [],
@@ -4901,8 +4904,7 @@
       countEl.textContent = `${state.progress.current}/${state.progress.total}${errorSuffix}`;
     }
     if (labelEl) {
-      const phasePrefix = state.progress.phase ? `${state.progress.phase}: ` : '';
-      labelEl.textContent = `${phasePrefix}${state.progress.label || 'Preparando exportação...'}`;
+      labelEl.textContent = state.progress.label || 'Preparando exportação...';
     }
     if (barEl) {
       const { base, next } = computeProgressMilestone(state.progress);
@@ -4999,9 +5001,67 @@
     'cancelled',
   ]);
 
+  const serializeMcpProgress = (jobProgress) => {
+    if (!jobProgress || typeof jobProgress !== 'object') return null;
+    return {
+      source: 'mcp',
+      jobId: jobProgress.jobId || null,
+      status: jobProgress.status || null,
+      total: Math.max(jobProgress.total || 1, 1),
+      current: Math.max(0, Number(jobProgress.current || 0)),
+      label: jobProgress.label || 'Exportando conversas...',
+      phase: jobProgress.phase || null,
+      errorCount: Math.max(0, Number(jobProgress.errorCount || 0)),
+      updatedAt: Date.now(),
+    };
+  };
+
+  const saveMcpProgressSnapshot = (jobProgress) => {
+    const snapshot = serializeMcpProgress(jobProgress);
+    if (!snapshot) return;
+    try {
+      pageWindow.sessionStorage?.setItem(
+        MCP_PROGRESS_SESSION_STORAGE_KEY,
+        JSON.stringify(snapshot),
+      );
+    } catch {
+      // sessionStorage pode estar indisponível; o dock ao vivo continua.
+    }
+  };
+
+  const clearMcpProgressSnapshot = () => {
+    try {
+      pageWindow.sessionStorage?.removeItem(MCP_PROGRESS_SESSION_STORAGE_KEY);
+    } catch {
+      // Sem impacto funcional.
+    }
+  };
+
+  const loadMcpProgressSnapshot = () => {
+    try {
+      const raw = pageWindow.sessionStorage?.getItem(MCP_PROGRESS_SESSION_STORAGE_KEY);
+      if (!raw) return null;
+      const snapshot = JSON.parse(raw);
+      if (!snapshot || snapshot.source !== 'mcp') return null;
+      if (Date.now() - Number(snapshot.updatedAt || 0) > MCP_PROGRESS_STALE_GRACE_MS) {
+        clearMcpProgressSnapshot();
+        return null;
+      }
+      if (snapshot.status && TERMINAL_MCP_STATUSES.has(snapshot.status)) {
+        clearMcpProgressSnapshot();
+        return null;
+      }
+      return snapshot;
+    } catch {
+      clearMcpProgressSnapshot();
+      return null;
+    }
+  };
+
   const beginMcpProgress = (jobProgress) => {
     state.mcpProgressActive = true;
     state.mcpProgressJobId = jobProgress.jobId || null;
+    state.mcpProgressLastSeenAt = Date.now();
     state.isExporting = true;
     state.exportSource = 'mcp';
     state.progress = {
@@ -5013,8 +5073,23 @@
       startedAt: Date.now(),
       displayPercent: 0,
     };
+    saveMcpProgressSnapshot(jobProgress);
     updateProgressDock();
     startProgressCreep();
+  };
+
+  const clearMcpProgressState = () => {
+    state.mcpProgressActive = false;
+    state.mcpProgressJobId = null;
+    state.mcpProgressLastSeenAt = 0;
+    clearMcpProgressSnapshot();
+    if (state.exportSource === 'mcp') {
+      stopProgressCreep();
+      state.isExporting = false;
+      state.exportSource = null;
+      state.progress = null;
+      updateProgressDock();
+    }
   };
 
   const handleMcpJobProgressBroadcast = (jobProgress) => {
@@ -5024,24 +5099,23 @@
     }
 
     if (!jobProgress) {
-      // Sem broadcast no heartbeat: se a sessão MCP ainda estava ativa,
-      // limpamos o dock — ou foi finalizada com terminal, ou o MCP
-      // simplesmente não está mais reportando.
+      // Um heartbeat/SSE pode chegar sem snapshot durante navegação da SPA ou
+      // reconexão do content script. Mantemos o dock por uma janela curta para
+      // evitar sumiço no meio do job; se o MCP realmente parou, aí limpamos.
       if (state.mcpProgressActive) {
-        state.mcpProgressActive = false;
-        state.mcpProgressJobId = null;
-        if (state.exportSource === 'mcp') {
-          stopProgressCreep();
-          state.isExporting = false;
-          state.exportSource = null;
-          state.progress = null;
+        const ageMs = Date.now() - (state.mcpProgressLastSeenAt || 0);
+        if (ageMs < MCP_PROGRESS_STALE_GRACE_MS) {
           updateProgressDock();
+          return;
         }
+        clearMcpProgressState();
       }
       return;
     }
 
     if (jobProgress.source && jobProgress.source !== 'mcp') return;
+    state.mcpProgressLastSeenAt = Date.now();
+    saveMcpProgressSnapshot(jobProgress);
 
     if (!state.mcpProgressActive) {
       beginMcpProgress(jobProgress);
@@ -5075,8 +5149,19 @@
       // de "concluído" antes de esconder.
       state.mcpProgressActive = false;
       state.mcpProgressJobId = null;
+      state.mcpProgressLastSeenAt = 0;
+      clearMcpProgressSnapshot();
       void finishExportProgress();
     }
+  };
+
+  const restoreMcpProgressSnapshot = () => {
+    const snapshot = loadMcpProgressSnapshot();
+    if (!snapshot) return;
+    beginMcpProgress({
+      ...snapshot,
+      label: snapshot.label || 'Retomando indicador de exportação...',
+    });
   };
 
   const runBatchExport = async (
@@ -5265,8 +5350,7 @@
     if (statusEl) {
       if (state.progress) {
         const prefix = state.progress.errorCount > 0 ? 'com erros' : 'em andamento';
-        const phasePrefix = state.progress.phase ? `${state.progress.phase}: ` : '';
-        statusEl.textContent = `${state.progress.current}/${state.progress.total} ${prefix}: ${phasePrefix}${state.progress.label}`;
+        statusEl.textContent = `${state.progress.current}/${state.progress.total} ${prefix}: ${state.progress.label}`;
       } else {
         statusEl.textContent =
           state.reachedSidebarEnd
@@ -7190,6 +7274,7 @@
   const bootstrap = () => {
     if (!document.body) return;
     installDebugApi();
+    restoreMcpProgressSnapshot();
     installExtensionBridge().catch((err) => {
       warn('Falha ao iniciar bridge da extensão.', err);
     });

@@ -4843,6 +4843,8 @@ const listRecentChatsForClient = async (client, args = {}) => {
   const targetCount = Math.min(MAX_RECENT_CHATS_LOAD_TARGET, offset + limit);
   let refresh = null;
   let loadMore = null;
+  const countOnly = args.countOnly === true || args.action === 'count';
+  const untilEnd = args.untilEnd === true || args.countAll === true || args.action === 'count';
   const refreshPlan = buildRecentChatsRefreshPlan(client, args, {
     maxAgeMs: RECENT_CHATS_CACHE_MAX_AGE_MS,
     requestedCount: targetCount,
@@ -4861,7 +4863,32 @@ const listRecentChatsForClient = async (client, args = {}) => {
       };
     }
   }
-  if (recentConversationsForClient(client).length < targetCount) {
+  if (untilEnd) {
+    try {
+      const loadAllPromise = loadAllRecentChatsForClient(client, {
+        ...args,
+        trustCachedReachedEnd: args.trustCachedReachedEnd === true,
+      });
+      loadMore = await withTimeout(
+        loadAllPromise,
+        Math.max(1000, Number(args.loadMoreTimeoutMs || COMMAND_TIMEOUT_MS)),
+      );
+    } catch (err) {
+      loadMore = {
+        attempted: true,
+        loadedAny: false,
+        roundsCompleted: 0,
+        reachedEnd: recentChatsReachedEndForClient(client),
+        snapshot: client.lastSnapshot || null,
+        conversations: recentConversationsForClient(client),
+        ok: false,
+        error: err.message,
+        timedOut:
+          err.message.includes('Timeout após') ||
+          err.code === 'command_timeout',
+      };
+    }
+  } else if (recentConversationsForClient(client).length < targetCount) {
     try {
       const loadMorePromise = loadMoreRecentChatsForClient(client, targetCount, args);
       loadMore = await withTimeout(
@@ -4888,8 +4915,29 @@ const listRecentChatsForClient = async (client, args = {}) => {
   const page = conversations.slice(offset, offset + limit);
   const reachedEnd = loadMore?.reachedEnd === true || recentChatsReachedEndForClient(client);
   const nextOffset = offset + page.length;
+  const canLoadMore = !reachedEnd && conversations.length < MAX_RECENT_CHATS_LOAD_TARGET;
+  const totalKnown = reachedEnd;
+  const totalCount = totalKnown ? conversations.length : null;
+  const countStatus = totalKnown
+    ? 'complete'
+    : loadMore?.timedOut === true || loadMore?.ok === false
+      ? 'incomplete'
+      : 'partial';
+  const countWarning = totalKnown
+    ? null
+    : `Contagem parcial: carreguei pelo menos ${conversations.length} conversa(s), mas ainda nao confirmei o fim do historico. Nao informe esse numero como "ao todo".`;
   return {
     client: summarizeClient(client),
+    countStatus,
+    countIsTotal: totalKnown,
+    totalKnown,
+    totalCount,
+    knownLoadedCount: conversations.length,
+    minimumKnownCount: conversations.length,
+    countWarning,
+    answer: totalKnown
+      ? `${conversations.length} conversa(s) confirmada(s) no total carregavel.`
+      : `Pelo menos ${conversations.length} conversa(s); total ainda nao confirmado.`,
     refreshAttempted: refreshPlan.shouldRefresh,
     refreshed: refresh?.ok === true,
     refreshTimedOut: refresh?.timedOut === true,
@@ -4906,13 +4954,29 @@ const listRecentChatsForClient = async (client, args = {}) => {
       limit,
       returned: page.length,
       loadedCount: conversations.length,
+      countIsTotal: totalKnown,
+      totalKnown,
+      totalCount,
+      knownLoadedCount: conversations.length,
+      minimumKnownCount: conversations.length,
+      countStatus,
       maxLoadTarget: MAX_RECENT_CHATS_LOAD_TARGET,
       nextOffset: page.length > 0 ? nextOffset : null,
       hasMoreLoaded: nextOffset < conversations.length,
       reachedEnd,
-      canLoadMore: !reachedEnd && conversations.length < MAX_RECENT_CHATS_LOAD_TARGET,
+      canLoadMore,
     },
-    conversations: page,
+    conversations: countOnly ? [] : page,
+    nextAction: totalKnown
+      ? null
+      : {
+          code: 'count_incomplete',
+          message:
+            'A lista ainda nao chegou ao fim. Para contar de verdade, use a CLI: gemini-md-export chats count --plain. Se mesmo assim nao confirmar o fim, responda "pelo menos N", nunca "ao todo".',
+          command: {
+            text: 'gemini-md-export chats count --plain',
+          },
+        },
   };
 };
 
@@ -7095,6 +7159,22 @@ const legacyRawTools = [
           description:
             'Se true, força atualizar o sidebar antes de responder. Se false, usa o cache atual mesmo que esteja velho.',
         },
+        untilEnd: {
+          type: 'boolean',
+          description:
+            'Se true, tenta carregar ate confirmar o fim do historico antes de responder. Use para contagem, nao para despejar listas no chat.',
+        },
+        countOnly: {
+          type: 'boolean',
+          description:
+            'Se true, retorna contagem/estado sem incluir conversas.',
+        },
+        maxLoadMoreRounds: { type: 'integer', minimum: 1, maximum: 500 },
+        loadMoreAttempts: { type: 'integer', minimum: 1, maximum: 5 },
+        maxNoGrowthRounds: { type: 'integer', minimum: 1, maximum: 20 },
+        loadMoreBrowserRounds: { type: 'integer', minimum: 1, maximum: 20 },
+        loadMoreBrowserTimeoutMs: { type: 'integer', minimum: 500, maximum: 30000 },
+        loadMoreTimeoutMs: { type: 'integer', minimum: 1000 },
       },
       additionalProperties: false,
     },
@@ -8025,11 +8105,26 @@ const compactStructuredContent = (name, action, structured = {}) => {
       : Array.isArray(structured.chats)
         ? structured.chats
         : [];
+    const conversationPreviewLimit = structured.countOnly === true || structured.action === 'count'
+      ? 0
+      : structured.totalKnown === false
+        ? 10
+        : 50;
     return {
       ok: structured.ok !== false,
       action,
       source: structured.source || structured.page?.source || null,
       client: compactClient(structured.client),
+      countStatus: structured.countStatus || structured.pagination?.countStatus || null,
+      countIsTotal: structured.countIsTotal ?? structured.pagination?.countIsTotal ?? null,
+      totalKnown: structured.totalKnown ?? structured.pagination?.totalKnown ?? null,
+      totalCount: structured.totalCount ?? structured.pagination?.totalCount ?? null,
+      knownLoadedCount:
+        structured.knownLoadedCount ?? structured.pagination?.knownLoadedCount ?? structured.pagination?.loadedCount ?? null,
+      minimumKnownCount:
+        structured.minimumKnownCount ?? structured.pagination?.minimumKnownCount ?? structured.pagination?.loadedCount ?? null,
+      countWarning: structured.countWarning || null,
+      answer: structured.answer || null,
       chatId: structured.chatId || structured.markdown?.chatId || null,
       title: structured.title || structured.markdown?.title || null,
       filePath: structured.filePath || structured.path || null,
@@ -8038,7 +8133,9 @@ const compactStructuredContent = (name, action, structured = {}) => {
       mediaFailureCount: structured.mediaFailureCount ?? structured.mediaFailures?.length ?? null,
       count: structured.count ?? conversations.length,
       pagination: structured.pagination || null,
-      conversations: conversations.slice(0, 50).map((conversation, index) => ({
+      conversationPreviewCount: Math.min(conversations.length, conversationPreviewLimit),
+      omittedConversationCount: Math.max(0, conversations.length - conversationPreviewLimit),
+      conversations: conversations.slice(0, conversationPreviewLimit).map((conversation, index) => ({
         index: conversation.index ?? index + 1,
         chatId: conversation.chatId || conversation.id || null,
         title: conversation.title || null,
@@ -8351,16 +8448,24 @@ const rawTools = [
   {
     name: 'gemini_chats',
     description:
-      'Lista, abre, obtém ou baixa conversas do Gemini. Para histórico inteiro, use gemini_export em vez de despejar listas enormes.',
+      'Lista, conta, abre, obtém ou baixa conversas do Gemini. Para histórico inteiro/exportação, use a CLI; se reachedEnd/countIsTotal não for true, nunca trate loadedCount como total.',
     inputSchema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['list', 'current', 'open', 'download'] },
+        action: { type: 'string', enum: ['list', 'count', 'current', 'open', 'download'] },
         source: { type: 'string', enum: ['recent', 'notebook'] },
         ...domainSelectorProperties(),
         limit: { type: 'integer', minimum: 1, maximum: 500 },
         offset: { type: 'integer', minimum: 0, maximum: 999 },
         refresh: { type: 'boolean' },
+        untilEnd: { type: 'boolean' },
+        countOnly: { type: 'boolean' },
+        maxLoadMoreRounds: { type: 'integer', minimum: 1, maximum: 500 },
+        loadMoreAttempts: { type: 'integer', minimum: 1, maximum: 5 },
+        maxNoGrowthRounds: { type: 'integer', minimum: 1, maximum: 20 },
+        loadMoreBrowserRounds: { type: 'integer', minimum: 1, maximum: 20 },
+        loadMoreBrowserTimeoutMs: { type: 'integer', minimum: 500, maximum: 30000 },
+        loadMoreTimeoutMs: { type: 'integer', minimum: 1000 },
         index: { type: 'integer', minimum: 1 },
         chatId: { type: 'string' },
         url: { type: 'string' },
@@ -8385,9 +8490,17 @@ const rawTools = [
               ? source === 'notebook'
                 ? 'gemini_download_notebook_chat'
                 : 'gemini_download_chat'
+              : action === 'count'
+                ? 'gemini_list_recent_chats'
               : source === 'notebook'
                 ? 'gemini_list_notebook_chats'
                 : 'gemini_list_recent_chats';
+      if (action === 'count') {
+        legacyArgs.limit = 1;
+        legacyArgs.offset = 0;
+        legacyArgs.countOnly = true;
+        legacyArgs.untilEnd = true;
+      }
       return callLegacyToolCompacted('gemini_chats', action, legacyName, legacyArgs);
     },
   },
@@ -9054,6 +9167,15 @@ const bridgeServer = createServer(async (req, res) => {
           limit: url.searchParams.get('limit'),
           offset: url.searchParams.get('offset'),
           refresh: parseOptionalBoolean(url.searchParams.get('refresh')),
+          untilEnd: parseOptionalBoolean(url.searchParams.get('untilEnd')),
+          countOnly: parseOptionalBoolean(url.searchParams.get('countOnly')),
+          maxLoadMoreRounds: url.searchParams.get('maxLoadMoreRounds') || undefined,
+          loadMoreRounds: url.searchParams.get('loadMoreRounds') || undefined,
+          loadMoreAttempts: url.searchParams.get('loadMoreAttempts') || undefined,
+          maxNoGrowthRounds: url.searchParams.get('maxNoGrowthRounds') || undefined,
+          loadMoreBrowserRounds: url.searchParams.get('loadMoreBrowserRounds') || undefined,
+          loadMoreBrowserTimeoutMs: url.searchParams.get('loadMoreBrowserTimeoutMs') || undefined,
+          loadMoreTimeoutMs: url.searchParams.get('loadMoreTimeoutMs') || undefined,
         }),
       );
     } catch (err) {

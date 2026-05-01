@@ -21,7 +21,9 @@ Contrato:
 - Nao rode uma sequencia de `gemini_ready`/`gemini_tabs` antes da CLI. Isso
   polui a UI com JSON e duplica o readiness que a CLI ja faz.
 - Se o usuario pediu visualmente uma UI/barra de progresso, execute o CLI com
-  `--tui` via shell interativo/pty quando disponivel:
+  `--tui` via shell interativo/pty quando disponivel. So prometa barra visivel
+  quando o executor realmente tiver TTY/PTY; em shell capturado a CLI cai para
+  `--plain` e avisa:
   macOS/Linux:
   `node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" sync "<vaultDir>" --tui`
   Windows/PowerShell:

@@ -482,6 +482,18 @@ test('content script reporta diagnóstico de scroll ao puxar histórico', async 
   assert.match(source, /state\.listLoadStatus === 'inconclusive'/);
 });
 
+test('content script mantém dock MCP durante navegação e sem prefixo de fase', async () => {
+  const source = await readFile(new URL('../src/userscript-shell.js', import.meta.url), 'utf8');
+  assert.match(source, /MCP_PROGRESS_SESSION_STORAGE_KEY/);
+  assert.match(source, /MCP_PROGRESS_STALE_GRACE_MS/);
+  assert.match(source, /saveMcpProgressSnapshot/);
+  assert.match(source, /loadMcpProgressSnapshot/);
+  assert.match(source, /restoreMcpProgressSnapshot\(\)/);
+  assert.match(source, /ageMs < MCP_PROGRESS_STALE_GRACE_MS/);
+  assert.doesNotMatch(source, /phasePrefix/);
+  assert.doesNotMatch(source, /labelEl\.textContent = `\$\{.*phase.*:/);
+});
+
 test('content script explica fallback para Downloads e warnings de mídia', async () => {
   const source = await readFile(new URL('../src/userscript-shell.js', import.meta.url), 'utf8');
   assert.match(source, /Vou cair em Downloads/);

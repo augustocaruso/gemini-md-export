@@ -27,8 +27,11 @@ Default tool output is compact. Ask for `detail: "full"` only while debugging.
 - Browser/extension health for small diagnostics only: call `gemini_ready`.
 - Multiple tabs, wrong tab, tab claim, reload Gemini tabs, or open-if-missing
   for small diagnostics: call `gemini_tabs`.
-- Small chat listing, current chat, open chat, or one-off download:
-  call `gemini_chats`.
+- Small chat listing, current chat, open chat, one-off download, or an
+  explicitly partial count: call `gemini_chats`. For "quantos chats ao todo",
+  prefer the CLI `gemini-md-export chats count --plain`; never use
+  `loadedCount`, `knownLoadedCount`, or `count` as a total unless
+  `totalKnown=true`/`countIsTotal=true`.
 - Recent export, full import, missing-chat import, incremental sync, reexport,
   or notebook export: run the bundled CLI directly first. Do not preflight with
   repeated `gemini_ready`/`gemini_tabs`; the CLI owns readiness, browser wake,
@@ -74,7 +77,9 @@ the same local bridge used by MCP.
   `wakeBrowser=false`, opens Gemini Web in the configured Chromium browser when
   no tab is connected, then waits for the extension before starting the job.
 - For a visible human progress UI inside Gemini CLI, run it through shell mode
-  or `run_shell_command` with an interactive shell/pty:
+  or `run_shell_command` with an interactive shell/pty. Only promise a TUI when
+  the executor exposes a real TTY/PTY; captured shell output cannot animate the
+  progress bar and the CLI will fall back to `--plain` with a warning:
   `node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" sync <vaultDir> --tui`
 - On Windows, use:
   `node "$env:USERPROFILE\.gemini\extensions\gemini-md-export\bin\gemini-md-export.mjs" sync <vaultDir> --tui`
@@ -83,9 +88,9 @@ the same local bridge used by MCP.
 - To discover the contract, run `gemini-md-export --help`,
   `gemini-md-export sync --help`, or `gemini-md-export job status --help`.
 - CLI subcommands include `browser status`, `tabs list/claim/release/reload`,
-  `export recent`, `export missing`, `export resume`, `export reexport`,
-  `export notebook`, `job status`, `job cancel`, `export-dir get/set`,
-  `cleanup stale-processes`, and `repair-vault`.
+  `chats count`, `export recent`, `export missing`, `export resume`,
+  `export reexport`, `export notebook`, `job status`, `job cancel`,
+  `export-dir get/set`, `cleanup stale-processes`, and `repair-vault`.
 - For automation, use `--json` for final JSON only or `--jsonl` for progress
   events.
 - Do not use custom-command shell injection for long sync jobs; it injects the
@@ -106,6 +111,10 @@ the same local bridge used by MCP.
   `completed_with_errors`, `failed`, or `cancelled`, or when
   `fullHistoryRequested=true` and `fullHistoryVerified=false`. Mention
   `failures`, `reportFile`, and the resume command/next action instead.
+- Never answer "N chats ao todo" from `gemini_chats` unless the response says
+  `totalKnown=true` or `countIsTotal=true`. If it says `countStatus:
+  "partial"`/`"incomplete"`, answer "pelo menos N" and explain that the end of
+  the sidebar was not confirmed.
 - Do not ask for manual Chrome extension reload before trying
   `gemini_ready { "action": "status", "selfHeal": true, "allowReload": true }`,
   unless the loaded extension is too old to support self-heal.
@@ -122,41 +131,5 @@ the same local bridge used by MCP.
   imported when `mediaFailureCount > 0` or a media warning produced no files.
 - Use Brazilian Portuguese, plain language, and concrete next actions for user-facing
   errors.
-
-## Common Calls
-
-Check readiness:
-
-```json
-{ "action": "check" }
-```
-
-Full status/self-heal:
-
-```json
-{ "action": "status", "selfHeal": true, "allowReload": true }
-```
-
-List or claim tabs:
-
-```json
-{ "action": "list", "openIfMissing": true }
-```
-
-```json
-{ "action": "claim", "index": 1, "label": "GME", "force": true }
-```
-
-Sync a vault:
-
-```bash
-node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" sync "/path/to/vault" --plain
-```
-
-Poll a job:
-
-```json
-{ "action": "status", "jobId": "<jobId>" }
-```
 
 For richer procedures, activate the matching bundled skill and follow it.

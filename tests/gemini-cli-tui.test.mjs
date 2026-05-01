@@ -237,6 +237,12 @@ test('CLI expõe ajuda contextual para comandos e subcomandos', async () => {
   assert.equal((await main(['tabs', '--help'], { stdout: tabsStdout })).exitCode, 0);
   assert.match(tabsStdout.text(), /gemini-md-export tabs/);
   assert.match(tabsStdout.text(), /tabs claim/);
+
+  const chatsStdout = captureStream();
+  assert.equal((await main(['chats', '--help'], { stdout: chatsStdout })).exitCode, 0);
+  assert.match(chatsStdout.text(), /gemini-md-export chats/);
+  assert.match(chatsStdout.text(), /chats count/);
+  assert.match(chatsStdout.text(), /totalKnown=true/);
 });
 
 test('CLI tabs list usa endpoint proprio sem preflight gemini_ready', async () => {
@@ -283,6 +289,119 @@ test('CLI tabs list usa endpoint proprio sem preflight gemini_ready', async () =
     assert.equal(result.tabs[0].listedConversationCount, 42);
     assert.equal(stderr.text(), '');
     assert.equal(requests.some((item) => item.pathname === '/agent/ready'), false);
+  });
+});
+
+test('CLI chats count carrega ate o fim sem despejar lista no chat', async () => {
+  await withServer((req, res, url) => {
+    if (url.pathname === '/agent/ready') {
+      sendJson(res, 200, {
+        ready: true,
+        mode: 'hot',
+        connectedClientCount: 1,
+        selectableTabCount: 1,
+        commandReadyClientCount: 1,
+      });
+      return;
+    }
+    if (url.pathname === '/agent/recent-chats') {
+      sendJson(res, 200, {
+        ok: true,
+        countStatus: 'complete',
+        countIsTotal: true,
+        totalKnown: true,
+        totalCount: 203,
+        knownLoadedCount: 203,
+        minimumKnownCount: 203,
+        pagination: {
+          loadedCount: 203,
+          reachedEnd: true,
+          canLoadMore: false,
+        },
+        conversations: [],
+      });
+      return;
+    }
+    sendJson(res, 404, { error: `not found: ${url.pathname}` });
+  }, async (bridgeUrl, requests) => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+    const run = await main(['chats', 'count', '--bridge-url', bridgeUrl, '--plain'], {
+      stdout,
+      stderr,
+    });
+
+    assert.equal(run.exitCode, 0);
+    assert.match(stdout.text(), /Total confirmado: 203 chat\(s\)/);
+    const resultLine = stdout
+      .text()
+      .split(/\r?\n/)
+      .find((line) => line.startsWith('RESULT_JSON '));
+    const result = JSON.parse(resultLine.replace('RESULT_JSON ', ''));
+    assert.equal(result.totalKnown, true);
+    assert.equal(result.totalCount, 203);
+    assert.equal(result.knownLoadedCount, 203);
+    assert.equal(stderr.text(), '');
+
+    const countRequest = requests.find((item) => item.pathname === '/agent/recent-chats');
+    assert.equal(countRequest.searchParams.get('countOnly'), 'true');
+    assert.equal(countRequest.searchParams.get('untilEnd'), 'true');
+    assert.equal(countRequest.searchParams.get('limit'), '1');
+  });
+});
+
+test('CLI chats count nao transforma contagem parcial em total', async () => {
+  await withServer((req, res, url) => {
+    if (url.pathname === '/agent/ready') {
+      sendJson(res, 200, {
+        ready: true,
+        mode: 'hot',
+        connectedClientCount: 1,
+        selectableTabCount: 1,
+        commandReadyClientCount: 1,
+      });
+      return;
+    }
+    if (url.pathname === '/agent/recent-chats') {
+      sendJson(res, 200, {
+        ok: true,
+        countStatus: 'incomplete',
+        countIsTotal: false,
+        totalKnown: false,
+        totalCount: null,
+        knownLoadedCount: 73,
+        minimumKnownCount: 73,
+        countWarning: 'Contagem parcial: nao informe como total.',
+        pagination: {
+          loadedCount: 73,
+          reachedEnd: false,
+          canLoadMore: true,
+        },
+        conversations: [],
+      });
+      return;
+    }
+    sendJson(res, 404, { error: `not found: ${url.pathname}` });
+  }, async (bridgeUrl) => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+    const run = await main(['chats', 'count', '--bridge-url', bridgeUrl, '--plain'], {
+      stdout,
+      stderr,
+    });
+
+    assert.equal(run.exitCode, 1);
+    assert.match(stdout.text(), /Contagem parcial: pelo menos 73 chat\(s\)/);
+    const resultLine = stdout
+      .text()
+      .split(/\r?\n/)
+      .find((line) => line.startsWith('RESULT_JSON '));
+    const result = JSON.parse(resultLine.replace('RESULT_JSON ', ''));
+    assert.equal(result.totalKnown, false);
+    assert.equal(result.totalCount, null);
+    assert.equal(result.minimumKnownCount, 73);
+    assert.match(result.warning, /parcial/);
+    assert.equal(stderr.text(), '');
   });
 });
 
@@ -510,6 +629,22 @@ test('CLI sync --tui renderiza painel ANSI quando usado com TTY', async () => {
     assert.match(stdout.text(), /\[[=-]+]/);
     assert.match(stdout.text(), /RESULT_JSON /);
     assert.equal(stderr.text(), '');
+  });
+});
+
+test('CLI sync --tui avisa e cai para plain sem TTY', async () => {
+  await withServer(mockSyncServer({ completedImmediately: true }), async (bridgeUrl) => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+    const run = await main(
+      ['sync', '/vault/Gemini', '--bridge-url', bridgeUrl, '--tui', '--poll-ms', '10'],
+      { stdout, stderr },
+    );
+
+    assert.equal(run.exitCode, 0);
+    assert.doesNotMatch(stdout.text(), /\x1b\[\?25l/);
+    assert.match(stdout.text(), /RESULT_JSON /);
+    assert.match(stderr.text(), /--tui precisa de terminal interativo/);
   });
 });
 
