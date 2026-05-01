@@ -377,6 +377,34 @@ test('bridge acumula conversas vistas quando sidebar virtualiza lista', { timeou
   window.close();
 });
 
+test('modal virtualiza lista grande sem renderizar todas as conversas', { timeout: 3000 }, async () => {
+  const ids = Array.from({ length: 160 }, (_, index) =>
+    `a${String(index + 1).padStart(15, '0')}`,
+  );
+  const { dom, runtimeErrors } = createGeminiSidebarDom(ids);
+  const { window } = dom;
+  const debug = await evaluateContentScript(window);
+
+  await debug.openExportModal();
+  await new Promise((resolve) => window.setTimeout(resolve, 50));
+
+  const list = window.document.getElementById('gm-md-export-modern-list');
+  assert.ok(list, 'lista do modal deve existir');
+  assert.equal(list.classList.contains('is-virtual'), true);
+  assert.ok(
+    list.querySelectorAll('.gm-conversation-item').length < ids.length,
+    'lista virtualizada não deve criar um nó por conversa',
+  );
+
+  list.scrollTop = 78 * 120;
+  list.dispatchEvent(new window.Event('scroll', { bubbles: true }));
+  await new Promise((resolve) => window.setTimeout(resolve, 50));
+
+  assert.match(list.textContent, /Chat 1(1|2|3)/, 'janela virtual deve acompanhar o scroll');
+  assert.deepEqual(runtimeErrors, []);
+  window.close();
+});
+
 test('content script não contém fallback de captura visual', async () => {
   const [contentScript, backgroundScript] = await Promise.all([
     readFile(contentScriptUrl, 'utf8'),
@@ -417,6 +445,13 @@ test('content script mantém caminhos frequentes leves', async () => {
   assert.match(source, /missing_on_conversation/);
   assert.match(source, /extensionSendMessageWithRetry/);
   assert.match(source, /lastExtensionPingAttempts/);
+  assert.match(source, /const scheduleDomWork = \(reason = 'changed'/);
+  assert.match(source, /tab-backpressure-v1/);
+  assert.match(source, /TAB_OPERATION_COMMAND_TYPES/);
+  assert.match(source, /runWithTabOperationBackpressure/);
+  assert.match(source, /MODAL_VIRTUALIZATION_THRESHOLD/);
+  assert.match(source, /gm-list\.is-virtual/);
+  assert.match(source, /modalVirtual/);
   assert.match(backgroundScript, /source:\s*'service-worker'/);
   assert.match(snapshotPayload, /collectConversationLinkSnapshot\(\)/);
   assert.match(source, /new EventSource\(url\)/);

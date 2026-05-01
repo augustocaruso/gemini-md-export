@@ -34,6 +34,7 @@ test('MCP protocolo v2 usa SSE para comandos e snapshot separado', () => {
   assert.match(source, /commandDelivery:\s*heartbeatCommand/);
   assert.match(source, /duplicate:\s*!resolved/);
   assert.match(contentSource, /heartbeat-incremental-v1/);
+  assert.match(contentSource, /tab-backpressure-v1/);
   assert.match(contentSource, /const buildBridgeHeartbeatPayload = \(\) => \(\{/);
   assert.doesNotMatch(
     contentSource.match(/const buildBridgeHeartbeatPayload = \(\) => \(\{[\s\S]*?\n  \}\);/)?.[0] || '',

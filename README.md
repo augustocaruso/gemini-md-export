@@ -316,6 +316,14 @@ métricas por conversa (`openConversationMs`, `hydrateDomMs`,
 heartbeat/snapshot e contadores de assets/cache/backoff. Use esses campos para
 separar gargalo de Gemini lento, bridge, mídia externa, disco ou vault.
 
+No lado da extensão, listas grandes do modal são virtualizadas a partir de
+centenas de conversas, então o modal não cria um nó DOM por item visível no
+histórico inteiro. O content script também coalesce trabalho de DOM em
+`scheduleDomWork` e expõe `metrics.domScheduler` no heartbeat/snapshot. Comandos
+pesados vindos do MCP usam backpressure por aba (`tab-backpressure-v1`): se uma
+aba já estiver carregando histórico, navegando ou exportando, comandos
+concorrentes retornam `busy=true` em vez de disputar o mesmo DOM.
+
 Para importar/exportar o histórico inteiro, use `gemini_export_recent_chats`.
 Ela inicia um job em background, percorre o sidebar carregável, grava os
 Markdown no diretório configurado e mantém um relatório JSON incremental;

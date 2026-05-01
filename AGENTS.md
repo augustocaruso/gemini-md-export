@@ -334,6 +334,17 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   estiver true ou quando o status provar que o navegador ainda aponta para uma
   pasta/perfil antigo depois do self-heal. Falha de top-bar não bloqueia
   export por hotkey/API de debug se o content script está vivo.
+  O content script anuncia `tab-backpressure-v1`: comandos pesados por aba
+  (`list-conversations`, `load-more-conversations`, `get-current-chat`,
+  `get-chat-by-id`, `open-chat`) passam por `activeTabOperation`; se outro
+  comando pesado chegar durante navegação/hidratação/listagem, a resposta vem
+  com `busy=true`/`code: "tab_operation_in_progress"` em vez de disputar o DOM.
+  Não remova esse lock para ganhar paralelismo: a próxima etapa multi-aba
+  (`v0.4.3`) deve resolver paralelismo entre abas, não dentro da mesma aba.
+  Observers devem passar por `scheduleDomWork` para coalescer top-bar/sidebar/
+  modal em um frame e alimentar `metrics.domScheduler`. O modal virtualiza
+  listas grandes com `.gm-list.is-virtual`/`MODAL_VIRTUALIZATION_THRESHOLD`;
+  não reintroduzir renderização de um nó por conversa para centenas de itens.
   Antes de executar tools que dependem do navegador, o MCP passa por
   `ensureChromeExtensionReady()` em `src/chrome-extension-guard.mjs`: lê
   `bridge-version.json`, chama o comando interno `get-extension-info`, compara

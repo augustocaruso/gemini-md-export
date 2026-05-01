@@ -387,7 +387,11 @@
     'snapshot-v1',
     'heartbeat-incremental-v1',
     'command-result-retry-v1',
+    'tab-backpressure-v1',
   ];
+  const MODAL_VIRTUALIZATION_THRESHOLD = 120;
+  const MODAL_VIRTUAL_ITEM_HEIGHT = 78;
+  const MODAL_VIRTUAL_BUFFER = 10;
   const BRIDGE_CLIENT_STALE_MS = 45000;
   const BRIDGE_FILE_TIMEOUT_MS = 60000;
   const BRIDGE_PICKER_TIMEOUT_MS = 5 * 60000;
@@ -470,6 +474,25 @@
     filterQuery: '',
     reachedSidebarEnd: false,
     sidebarConversationCache: new Map(),
+    domScheduler: {
+      scheduled: false,
+      pending: new Set(),
+      lastRunAt: 0,
+      runs: 0,
+      skipped: 0,
+      reasons: [],
+    },
+    activeTabOperation: null,
+    completedTabOperations: 0,
+    rejectedTabOperations: 0,
+    modalVirtual: {
+      active: false,
+      scheduled: false,
+      renderedStart: 0,
+      renderedEnd: 0,
+      lastKey: '',
+      lastTotal: 0,
+    },
     bridgeSnapshotDirty: true,
     bridgeSnapshotDirtyReason: 'startup',
     bridgeSnapshotHash: '',
@@ -535,6 +558,46 @@
   const markBridgeSnapshotDirty = (reason = 'changed') => {
     state.bridgeSnapshotDirty = true;
     state.bridgeSnapshotDirtyReason = reason;
+  };
+
+  const scheduleDomWork = (reason = 'changed', flags = {}) => {
+    const scheduler = state.domScheduler;
+    if (reason) {
+      scheduler.reasons.push(String(reason));
+      if (scheduler.reasons.length > 12) scheduler.reasons.shift();
+    }
+    if (flags.topBar) scheduler.pending.add('topBar');
+    if (flags.conversations) scheduler.pending.add('conversations');
+    if (flags.modal) scheduler.pending.add('modal');
+    if (scheduler.scheduled) {
+      scheduler.skipped += 1;
+      return;
+    }
+
+    scheduler.scheduled = true;
+    const schedule =
+      typeof pageWindow.requestAnimationFrame === 'function'
+        ? pageWindow.requestAnimationFrame.bind(pageWindow)
+        : (callback) => setTimeout(callback, 16);
+
+    schedule(() => {
+      const pending = new Set(scheduler.pending);
+      scheduler.pending.clear();
+      scheduler.scheduled = false;
+      scheduler.lastRunAt = Date.now();
+      scheduler.runs += 1;
+
+      if (pending.has('topBar')) {
+        scheduleInjectButton();
+      }
+      if (pending.has('conversations')) {
+        refreshConversationState();
+      }
+      if (pending.has('modal')) {
+        const modal = document.getElementById(MODAL_ID);
+        if (modal && !modal.hidden) updateModalState();
+      }
+    });
   };
 
   const bridgeBackoffWithJitter = (currentMs, baseMs, maxMs) => {
@@ -1393,15 +1456,11 @@
   };
 
   const scheduleSidebarRefresh = () => {
-    clearTimeout(sidebarRefreshTimer);
-    sidebarRefreshTimer = setTimeout(() => {
-      refreshConversationState();
-      markBridgeSnapshotDirty('sidebar-mutation');
-      const modal = document.getElementById(MODAL_ID);
-      if (modal && !modal.hidden) {
-        updateModalState();
-      }
-    }, 60);
+    markBridgeSnapshotDirty('sidebar-mutation');
+    scheduleDomWork('sidebar-mutation', {
+      conversations: true,
+      modal: true,
+    });
   };
 
   const stopSidebarConversationObserver = () => {
@@ -1778,6 +1837,25 @@
       isLoadingMore: state.isLoadingMore,
       loadMoreFailures: state.loadMoreFailures,
       lastLoadMoreTrace: state.lastLoadMoreTrace,
+      domScheduler: {
+        scheduled: state.domScheduler.scheduled,
+        pending: Array.from(state.domScheduler.pending),
+        runs: state.domScheduler.runs,
+        skipped: state.domScheduler.skipped,
+        lastRunAt: state.domScheduler.lastRunAt || null,
+        recentReasons: state.domScheduler.reasons.slice(-8),
+      },
+      activeTabOperation: activeTabOperationSummary(),
+      tabOperationCounts: {
+        completed: state.completedTabOperations,
+        rejected: state.rejectedTabOperations,
+      },
+      modalVirtual: {
+        active: state.modalVirtual.active,
+        renderedStart: state.modalVirtual.renderedStart,
+        renderedEnd: state.modalVirtual.renderedEnd,
+        total: state.modalVirtual.lastTotal,
+      },
       batchExportSession: loadBatchExportSession(),
     };
   };
@@ -2191,6 +2269,21 @@
           : null,
         lastAttempts: bridgeState.lastExtensionPingAttempts,
         lastError: bridgeState.lastExtensionPingError,
+      },
+      domScheduler: {
+        scheduled: state.domScheduler.scheduled,
+        pending: Array.from(state.domScheduler.pending),
+        runs: state.domScheduler.runs,
+        skipped: state.domScheduler.skipped,
+        lastRunAt: state.domScheduler.lastRunAt
+          ? new Date(state.domScheduler.lastRunAt).toISOString()
+          : null,
+        recentReasons: state.domScheduler.reasons.slice(-5),
+      },
+      tabOperation: {
+        active: activeTabOperationSummary(),
+        completed: state.completedTabOperations,
+        rejected: state.rejectedTabOperations,
       },
     },
     page: {
@@ -2980,6 +3073,68 @@
       stripGeminiConversationPrefix(item.id || ''),
     ];
     return candidates.find((candidate) => /^[a-f0-9]{12,}$/i.test(candidate || '')) || '';
+  };
+
+  const TAB_OPERATION_COMMAND_TYPES = new Set([
+    'list-conversations',
+    'load-more-conversations',
+    'get-current-chat',
+    'open-chat',
+    'get-chat-by-id',
+  ]);
+
+  const tabOperationLabel = (command) => {
+    const type = command?.type || 'comando';
+    if (type === 'load-more-conversations') return 'carregando histórico';
+    if (type === 'list-conversations') return 'listando conversas';
+    if (type === 'get-current-chat') return 'exportando conversa atual';
+    if (type === 'get-chat-by-id') return 'exportando conversa por ID';
+    if (type === 'open-chat') return 'abrindo conversa';
+    return type;
+  };
+
+  const activeTabOperationSummary = () => {
+    const active = state.activeTabOperation;
+    if (!active) return null;
+    return {
+      type: active.type,
+      label: active.label,
+      commandId: active.commandId || null,
+      startedAt: new Date(active.startedAt).toISOString(),
+      elapsedMs: Date.now() - active.startedAt,
+    };
+  };
+
+  const runWithTabOperationBackpressure = async (command, fn) => {
+    if (!TAB_OPERATION_COMMAND_TYPES.has(command?.type)) {
+      return fn();
+    }
+
+    if (state.activeTabOperation) {
+      state.rejectedTabOperations += 1;
+      return {
+        ok: false,
+        busy: true,
+        code: 'tab_operation_in_progress',
+        error:
+          'Esta aba do Gemini já está ocupada com outro comando pesado. Aguarde terminar antes de enviar outro.',
+        activeOperation: activeTabOperationSummary(),
+      };
+    }
+
+    state.activeTabOperation = {
+      type: command.type,
+      label: tabOperationLabel(command),
+      commandId: command.id || null,
+      startedAt: Date.now(),
+    };
+
+    try {
+      return await fn();
+    } finally {
+      state.completedTabOperations += 1;
+      state.activeTabOperation = null;
+    }
   };
 
   const findConversationForBridgeCommand = (args = {}) => {
@@ -4110,9 +4265,9 @@
   };
 
   const exportNow = async () => {
-    if (state.isExporting) {
+    if (state.isExporting || state.activeTabOperation) {
       updateProgressDock();
-      showToast('Já tem uma exportação rodando. Acompanhe pela barra de progresso no canto.', 'info');
+      showToast('Esta aba já está ocupada. Aguarde o comando atual terminar.', 'info');
       return;
     }
 
@@ -4137,16 +4292,19 @@
       await beginExportProgress({
         total: 1,
         label: 'Hidratando conversa atual...',
+        phase: 'hidratação',
       });
       const payload = await collectExportForCurrentConversation();
       updateExportProgress({
         current: 0,
         label: `Salvando ${payload.filename}...`,
+        phase: 'escrita',
       });
       await saveExportPayload(payload);
       updateExportProgress({
         current: 1,
         label: payload.title || payload.filename,
+        phase: 'concluído',
       });
       log(`exported ${payload.turns.length} turns`, {
         chatId: payload.chatId,
@@ -4185,7 +4343,61 @@
     `);
   };
 
-  const renderConversationList = () => {
+  const filteredConversationsForModal = () =>
+    state.conversations.filter(
+      (item) =>
+        !state.filterQuery ||
+        conversationSearchText(item).includes(state.filterQuery.toLowerCase()),
+    );
+
+  const renderConversationItemHtml = (item) => {
+    const checked = state.selectedChatIds.has(item.id) ? 'checked' : '';
+    const currentBadge = item.current
+      ? '<span class="gm-badge">Atual</span>'
+      : '';
+    const notebookBadge =
+      item.source === 'notebook'
+        ? '<span class="gm-badge">Caderno</span>'
+        : '';
+    const subtitle =
+      item.subtitle && item.subtitle !== item.title
+        ? `<span class="gm-conversation-id">${escapeHtml(item.subtitle)}</span>`
+        : '';
+    return `
+      <label class="gm-conversation-item">
+        <input class="gm-checkbox" type="checkbox" data-chat-id="${item.id}" ${checked}>
+        <span class="gm-conversation-copy">
+          <span class="gm-conversation-title-row">
+            <strong class="gm-conversation-title">${escapeHtml(item.title)}</strong>
+            ${currentBadge}
+            ${notebookBadge}
+          </span>
+          <span class="gm-conversation-id">${escapeHtml(conversationDisplayId(item))}</span>
+          ${subtitle}
+        </span>
+      </label>
+    `;
+  };
+
+  const modalVirtualListKey = (filtered) =>
+    `${state.filterQuery}|${state.selectedChatIds.size}|${filtered.length}|${
+      filtered[0]?.id || ''
+    }|${filtered.at(-1)?.id || ''}`;
+
+  const scheduleVirtualListRender = () => {
+    if (!state.modalVirtual.active || state.modalVirtual.scheduled) return;
+    state.modalVirtual.scheduled = true;
+    const schedule =
+      typeof pageWindow.requestAnimationFrame === 'function'
+        ? pageWindow.requestAnimationFrame.bind(pageWindow)
+        : (callback) => setTimeout(callback, 16);
+    schedule(() => {
+      state.modalVirtual.scheduled = false;
+      renderConversationList({ fromVirtualScroll: true });
+    });
+  };
+
+  const renderConversationList = ({ fromVirtualScroll = false } = {}) => {
     const container = document.getElementById(MODAL_LIST_ID);
     const countEl = document.getElementById(MODAL_COUNT_ID);
     if (!container || !countEl) return;
@@ -4214,10 +4426,7 @@
       });
     };
 
-    const filtered = state.conversations.filter((item) =>
-      !state.filterQuery ||
-      conversationSearchText(item).includes(state.filterQuery.toLowerCase()),
-    );
+    const filtered = filteredConversationsForModal();
 
     const selCount = state.selectedChatIds.size;
     const visCount = filtered.length;
@@ -4226,6 +4435,8 @@
     countEl.textContent = `${selLabel} · ${visLabel}`;
 
     if (state.conversations.length === 0) {
+      state.modalVirtual.active = false;
+      container.classList.remove('is-virtual');
       setHtml(container, `
         <div style="padding:20px;border:1px dashed var(--gm-border);border-radius:16px;background:var(--gm-surface-muted);color:var(--gm-text-muted);">
           Nenhuma conversa encontrada. Abra a barra lateral do Gemini e clique em atualizar.
@@ -4236,6 +4447,8 @@
     }
 
     if (filtered.length === 0) {
+      state.modalVirtual.active = false;
+      container.classList.remove('is-virtual');
       setHtml(container, `
         <div style="padding:28px 20px;text-align:center;border:1px dashed var(--gm-border);border-radius:16px;background:var(--gm-surface-muted);color:var(--gm-text-muted);">
           Nenhuma conversa encontrada para "${escapeHtml(state.filterQuery)}".
@@ -4245,38 +4458,55 @@
       return;
     }
 
+    const shouldVirtualize = filtered.length >= MODAL_VIRTUALIZATION_THRESHOLD;
+    state.modalVirtual.active = shouldVirtualize;
+    container.classList.toggle('is-virtual', shouldVirtualize);
+
+    if (shouldVirtualize) {
+      const key = modalVirtualListKey(filtered);
+      const prevScrollTop = container.scrollTop;
+      const viewportHeight = Math.max(container.clientHeight || 360, MODAL_VIRTUAL_ITEM_HEIGHT * 4);
+      const start = Math.max(
+        0,
+        Math.floor(prevScrollTop / MODAL_VIRTUAL_ITEM_HEIGHT) - MODAL_VIRTUAL_BUFFER,
+      );
+      const visibleCount =
+        Math.ceil(viewportHeight / MODAL_VIRTUAL_ITEM_HEIGHT) + MODAL_VIRTUAL_BUFFER * 2;
+      const end = Math.min(filtered.length, start + visibleCount);
+      const unchangedWindow =
+        fromVirtualScroll &&
+        key === state.modalVirtual.lastKey &&
+        start >= state.modalVirtual.renderedStart &&
+        end <= state.modalVirtual.renderedEnd;
+
+      if (!unchangedWindow) {
+        state.modalVirtual.lastKey = key;
+        state.modalVirtual.lastTotal = filtered.length;
+        state.modalVirtual.renderedStart = start;
+        state.modalVirtual.renderedEnd = end;
+        setHtml(
+          container,
+          `
+            <div class="gm-virtual-spacer" style="height:${start * MODAL_VIRTUAL_ITEM_HEIGHT}px"></div>
+            ${filtered.slice(start, end).map(renderConversationItemHtml).join('')}
+            <div class="gm-virtual-spacer" style="height:${Math.max(
+              0,
+              (filtered.length - end) * MODAL_VIRTUAL_ITEM_HEIGHT,
+            )}px"></div>
+          `,
+        );
+        if (prevScrollTop > 0) container.scrollTop = prevScrollTop;
+      }
+      finishRender();
+      return;
+    }
+
+    state.modalVirtual.renderedStart = 0;
+    state.modalVirtual.renderedEnd = filtered.length;
+    state.modalVirtual.lastKey = modalVirtualListKey(filtered);
     setHtml(
       container,
-      filtered
-        .map((item) => {
-        const checked = state.selectedChatIds.has(item.id) ? 'checked' : '';
-        const currentBadge = item.current
-          ? '<span class="gm-badge">Atual</span>'
-          : '';
-        const notebookBadge =
-          item.source === 'notebook'
-            ? '<span class="gm-badge">Caderno</span>'
-            : '';
-        const subtitle =
-          item.subtitle && item.subtitle !== item.title
-            ? `<span class="gm-conversation-id">${escapeHtml(item.subtitle)}</span>`
-            : '';
-        return `
-          <label class="gm-conversation-item">
-            <input class="gm-checkbox" type="checkbox" data-chat-id="${item.id}" ${checked}>
-            <span class="gm-conversation-copy">
-              <span class="gm-conversation-title-row">
-                <strong class="gm-conversation-title">${escapeHtml(item.title)}</strong>
-                ${currentBadge}
-                ${notebookBadge}
-              </span>
-              <span class="gm-conversation-id">${escapeHtml(conversationDisplayId(item))}</span>
-              ${subtitle}
-            </span>
-          </label>
-        `;
-        })
-        .join(''),
+      filtered.map(renderConversationItemHtml).join(''),
     );
     finishRender();
   };
@@ -4470,7 +4700,8 @@
       countEl.textContent = `${state.progress.current}/${state.progress.total}${errorSuffix}`;
     }
     if (labelEl) {
-      labelEl.textContent = state.progress.label || 'Preparando exportação...';
+      const phasePrefix = state.progress.phase ? `${state.progress.phase}: ` : '';
+      labelEl.textContent = `${phasePrefix}${state.progress.label || 'Preparando exportação...'}`;
     }
     if (barEl) {
       const { base, next } = computeProgressMilestone(state.progress);
@@ -4497,7 +4728,13 @@
     dock.style.display = 'block';
   };
 
-  const beginExportProgress = async ({ total, label }) => {
+  const beginExportProgress = async ({ total, label, phase = 'preparando' }) => {
+    state.activeTabOperation = state.activeTabOperation || {
+      type: 'gui-export',
+      label: 'exportação pela interface',
+      commandId: null,
+      startedAt: Date.now(),
+    };
     state.isExporting = true;
     state.exportSource = 'gui';
     state.browserDownloadFallbackNotified = false;
@@ -4505,6 +4742,7 @@
       total,
       current: 0,
       label,
+      phase,
       errorCount: 0,
       startedAt: Date.now(),
       displayPercent: 0,
@@ -4540,6 +4778,10 @@
     state.isExporting = false;
     state.exportSource = null;
     state.progress = null;
+    if (state.activeTabOperation?.type === 'gui-export') {
+      state.completedTabOperations += 1;
+      state.activeTabOperation = null;
+    }
     updateProgressDock();
   };
 
@@ -4565,6 +4807,7 @@
       total: Math.max(jobProgress.total || 1, 1),
       current: jobProgress.current || 0,
       label: jobProgress.label || 'MCP exportando conversas...',
+      phase: jobProgress.phase || 'MCP',
       errorCount: jobProgress.errorCount || 0,
       startedAt: Date.now(),
       displayPercent: 0,
@@ -4609,6 +4852,7 @@
           total: Math.max(jobProgress.total || 1, 1),
           current: jobProgress.current || 0,
           label: jobProgress.label || 'MCP exportando conversas...',
+          phase: jobProgress.phase || 'MCP',
           errorCount: jobProgress.errorCount || 0,
           startedAt: Date.now(),
           displayPercent: 0,
@@ -4618,6 +4862,7 @@
           total: Math.max(jobProgress.total || state.progress?.total || 1, 1),
           current: jobProgress.current ?? state.progress?.current ?? 0,
           label: jobProgress.label || state.progress?.label || 'MCP exportando...',
+          phase: jobProgress.phase || state.progress?.phase || 'MCP',
           errorCount: jobProgress.errorCount ?? state.progress?.errorCount ?? 0,
         });
       }
@@ -4665,6 +4910,7 @@
     await beginExportProgress({
       total: activeSession.items.length,
       label: resume ? 'Retomando exportação...' : 'Preparando exportação...',
+      phase: resume ? 'retomada' : 'preparo',
     });
 
     const failures = new Set(activeSession.failureIds || []);
@@ -4673,6 +4919,7 @@
       updateExportProgress({
         current: i,
         label: `Exportando ${item.title}...`,
+        phase: 'navegação/hidratação',
         errorCount: failures.size,
       });
 
@@ -4684,6 +4931,7 @@
         updateExportProgress({
           current: i,
           label: `Salvando ${payload.filename}...`,
+          phase: 'escrita',
           errorCount: failures.size,
         });
         await saveExportPayload(payload);
@@ -4693,6 +4941,7 @@
         updateExportProgress({
           current: i + 1,
           label: item.title,
+          phase: 'concluído',
           errorCount: failures.size,
         });
       } catch (err) {
@@ -4704,6 +4953,7 @@
         updateExportProgress({
           current: i + 1,
           label: `Falha em ${item.title}`,
+          phase: 'falha',
           errorCount: failures.size,
         });
         warn(`Falha ao exportar ${item.chatId || item.id || i}.`, err);
@@ -4720,6 +4970,7 @@
         updateExportProgress({
           current: activeSession.items.length,
           label: `Voltando para ${resumeOriginalItem.title}...`,
+          phase: 'retorno',
           errorCount: failures.size,
         });
         await navigateToConversation(resumeOriginalItem);
@@ -4731,6 +4982,7 @@
         updateExportProgress({
           current: activeSession.items.length,
           label: 'Voltando para o caderno...',
+          phase: 'retorno',
           errorCount: failures.size,
         });
         await returnToNotebookPage(resumeOriginalNotebookReturnItem, {
@@ -4812,7 +5064,8 @@
     if (statusEl) {
       if (state.progress) {
         const prefix = state.progress.errorCount > 0 ? 'com erros' : 'em andamento';
-        statusEl.textContent = `${state.progress.current}/${state.progress.total} ${prefix}: ${state.progress.label}`;
+        const phasePrefix = state.progress.phase ? `${state.progress.phase}: ` : '';
+        statusEl.textContent = `${state.progress.current}/${state.progress.total} ${prefix}: ${phasePrefix}${state.progress.label}`;
       } else {
         statusEl.textContent =
           state.reachedSidebarEnd
@@ -5101,6 +5354,16 @@
           outline: 2px solid var(--gm-accent);
           outline-offset: 2px;
         }
+        #${MODAL_ID} .gm-list.is-virtual {
+          gap: 0;
+        }
+        #${MODAL_ID} .gm-list.is-virtual .gm-conversation-item {
+          margin-bottom: 8px;
+        }
+        #${MODAL_ID} .gm-virtual-spacer {
+          flex: 0 0 auto;
+          pointer-events: none;
+        }
         /* Scrollbar mais discreto e coerente com o tema do modal. */
         #${MODAL_ID} .gm-list::-webkit-scrollbar {
           width: 10px;
@@ -5321,6 +5584,9 @@
       if (!(target instanceof HTMLInputElement)) return;
       if (target.id !== MODAL_SEARCH_ID) return;
       state.filterQuery = target.value.trim();
+      state.modalVirtual.lastKey = '';
+      const list = document.getElementById(MODAL_LIST_ID);
+      if (list) list.scrollTop = 0;
       updateModalState();
     });
 
@@ -5329,6 +5595,7 @@
       (event) => {
         const target = event.target;
         if (!(target instanceof HTMLElement) || target.id !== MODAL_LIST_ID) return;
+        scheduleVirtualListRender();
         if (target.scrollHeight - target.scrollTop - target.clientHeight < 120) {
           loadMoreConversations(
             isNotebookPage() ? NOTEBOOK_LOAD_MORE_ATTEMPTS : SIDEBAR_LOAD_MORE_ATTEMPTS,
@@ -5363,13 +5630,7 @@
       }
 
       if (action === 'select-all') {
-        const visibleIds = state.conversations
-          .filter(
-            (item) =>
-              !state.filterQuery ||
-              conversationSearchText(item).includes(state.filterQuery.toLowerCase()),
-          )
-          .map((item) => item.id);
+        const visibleIds = filteredConversationsForModal().map((item) => item.id);
         state.selectedChatIds = new Set([...state.selectedChatIds, ...visibleIds]);
         updateModalState();
         return;
@@ -5548,9 +5809,9 @@
 
   const safeOpenExportModal = async () => {
     try {
-      if (state.isExporting) {
+      if (state.isExporting || state.activeTabOperation) {
         updateProgressDock();
-        showToast('Já tem uma exportação rodando. Acompanhe pela barra de progresso no canto.', 'info');
+        showToast('Esta aba já está ocupada. Aguarde o comando atual terminar.', 'info');
         return;
       }
       log('abrindo modal de exportação');
@@ -5721,7 +5982,9 @@
     }
     let result;
     try {
-      result = await executeBridgeCommand(command);
+      result = await runWithTabOperationBackpressure(command, () =>
+        executeBridgeCommand(command),
+      );
     } catch (err) {
       result = {
         ok: false,
@@ -6718,9 +6981,11 @@
 
     // O Gemini é uma SPA que re-renderiza o body; precisamos re-injetar o
     // botão quando isso acontece.
-    const observer = new MutationObserver(() => scheduleInjectButton());
+    const observer = new MutationObserver(() =>
+      scheduleDomWork('body-mutation', { topBar: true }),
+    );
     observer.observe(document.body, { childList: true, subtree: true });
-    injectButton();
+    scheduleDomWork('bootstrap', { topBar: true });
     setTimeout(() => {
       resumePendingBatchExport().catch((err) => {
         warn('Falha ao agendar retomada do batch export.', err);

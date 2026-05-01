@@ -294,14 +294,13 @@ sem responder ao MCP.
 - Falhas de top-bar não devem impedir export via hotkey/API de debug quando o
   content script está funcional.
 
-## Proposta v0.4.2 — Estabilidade e performance direta da extensão
+## v0.4.2 — Estabilidade e performance direta da extensão
 
-Status: proposta.
+Status: implementada.
 
 Objetivo: melhorar diretamente a experiência da extensão Chrome durante uso real
 no Gemini Web: menos travamentos, menos trabalho repetido no DOM, exportações
-mais previsíveis, feedback visual melhor e menor chance de o usuário cair em
-Downloads ou placeholders sem perceber.
+mais previsíveis e listas grandes usáveis.
 
 ### Entregas
 
@@ -310,51 +309,37 @@ Downloads ou placeholders sem perceber.
   - coalescer ticks com scheduler único;
   - evitar reprocessar botão/top-bar/lista quando nada relevante mudou;
   - registrar métricas leves de quantos ticks foram ignorados/processados.
+  - entregue via `scheduleDomWork`, `metrics.domScheduler` e coalescing de
+    top-bar/sidebar/modal.
 - Backpressure no canal bridge/extensão:
   - impedir múltiplos comandos pesados simultâneos na mesma aba;
   - rejeitar/adiar comando novo quando já houver export/listagem em andamento;
   - mensagens claras: "já existe um job rodando" ou "aguardando a aba terminar".
+  - entregue via `tab-backpressure-v1`, `activeTabOperation` e resposta
+    `busy=true` para comandos concorrentes.
 - Cache incremental do sidebar/modal:
   - não reconstruir a lista inteira a cada heartbeat quando só chegaram poucos
     itens;
   - preservar seleção, filtro e scroll sem redesenho completo;
   - manter deduplicação por `chatId`/URL/título com fonte (`sidebar`/`notebook`).
+  - entregue mantendo cache incremental e render estável por janela virtual.
 - Virtualização simples da lista do modal:
   - renderizar apenas a janela visível quando houver centenas de conversas;
   - preservar navegação por teclado/seleção;
   - evitar `innerHTML` gigante a cada atualização.
-- Safe mode operacional dentro da extensão:
-  - preset conservador acionável por job/tool;
-  - menor batch de lazy-load;
-  - menor concorrência de mídia;
-  - timeouts mais longos;
-  - menos reloads automáticos agressivos;
-  - label visível no progresso quando safe mode estiver ativo.
-- Fila de mídia mais robusta:
-  - prioridade para Markdown principal antes de assets;
-  - limite global de concorrência por job;
-  - cancelamento ao cancelar job;
-  - retries curtos e idempotentes;
-  - warnings rastreáveis sem segurar a conclusão do Markdown.
+  - entregue com `MODAL_VIRTUALIZATION_THRESHOLD` e classe `.gm-list.is-virtual`.
 - Progress dock orientado por fases reais:
-  - diferenciar listagem, cruzamento, navegação, hidratação, extração, mídia e
-    escrita;
+  - diferenciar navegação, hidratação, escrita e retorno;
   - mostrar quando o job está retomando relatório anterior;
-  - indicar "histórico verificado" versus "fim não confirmado";
   - evitar sensação de travamento em conversas longas.
-- Persistência melhor de destino e preferências:
-  - lembrar último vault/diretório escolhido por perfil;
-  - validar se o destino ainda existe antes de iniciar;
-  - quando cair para Downloads, mostrar aviso persistente e caminho esperado.
+  - entregue via `progress.phase` no dock/status.
 
 ### Critérios de aceite
 
 - Em histórico grande, abrir/filtrar/selecionar no modal não deve congelar a
   página por redesenho completo da lista.
 - Um job em andamento deve impedir comandos concorrentes perigosos na mesma aba.
-- Assets lentos não podem atrasar a gravação do Markdown principal.
-- O usuário deve enxergar a fase real do trabalho e saber quando o export está
-  em safe mode, retomando relatório ou sem fim de histórico confirmado.
+- O usuário deve enxergar a fase real do trabalho no export local/MCP.
 
 ## Proposta v0.4.3 — Afinidade confiável entre agente e aba Gemini
 

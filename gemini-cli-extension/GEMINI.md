@@ -142,6 +142,12 @@ Operational guidance:
   `bridgeHealth.status="command_channel_stuck"` as a page/extension channel
   problem: prefer `gemini_reload_gemini_tabs` or `gemini_browser_status`
   self-heal before asking for manual Chrome extension reload.
+- The browser extension advertises `tab-backpressure-v1`. If a heavy command
+  returns `busy=true` / `code="tab_operation_in_progress"`, do not retry in a
+  tight loop or start a second export on the same tab. Poll the job/status or
+  wait for the active operation to finish. The content script also reports
+  `metrics.domScheduler` and `modalVirtual` for direct stability/performance
+  clues.
 - Multiple Gemini CLI sessions can create more than one MCP process. If
   `gemini_browser_status` reports `mcp.bridgeRole="proxy"`, inspect
   `mcp.proxyState`, `problem`, `primaryBridge.process`, and
