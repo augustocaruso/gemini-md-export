@@ -26,6 +26,18 @@
             "timeout": 20000
           }
         ]
+      },
+      {
+        "matcher": "^(write_file|replace|run_shell_command|shell|edit|apply_patch)$",
+        "hooks": [
+          {
+            "name": "gemini-md-export-scope-guard",
+            "description": "Block forbidden Gemini scraping and media fallback implementation paths.",
+            "type": "command",
+            "command": "node \"${extensionPath}${/}scripts${/}hooks${/}gemini-md-export-hook.mjs\" before-tool",
+            "timeout": 3000
+          }
+        ]
       }
     ]
   }

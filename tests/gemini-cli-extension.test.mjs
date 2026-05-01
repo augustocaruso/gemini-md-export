@@ -80,6 +80,13 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.doesNotMatch(hooksConfig.hooks.BeforeTool[0].matcher, /mcp_cleanup_stale_processes/);
   assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /reexport/);
   assert.equal(hooksConfig.hooks.BeforeTool[0].hooks[0].timeout, 20000);
+  const scopeGuard = hooksConfig.hooks.BeforeTool.find(
+    (entry) => entry.hooks?.[0]?.name === 'gemini-md-export-scope-guard',
+  );
+  assert.ok(scopeGuard);
+  assert.match(scopeGuard.matcher, /write_file/);
+  assert.match(scopeGuard.matcher, /run_shell_command/);
+  assert.equal(scopeGuard.hooks[0].timeout, 3000);
 
   const repairAgent = readFileSync(repairAgentPath, 'utf-8');
   assert.match(repairAgent, /^---\nname: gemini-vault-repair/m);

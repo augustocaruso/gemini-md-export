@@ -81,7 +81,7 @@ const BROWSER_DEPENDENT_EXPORTER_TOOLS = new Set([
 
 const normalizeExporterToolName = (toolName) =>
   String(toolName || '')
-    .replace(/^mcp__gemini-md-export__/, '')
+    .replace(/^mcp__gemini[-_]md[-_]export__/, '')
     .replace(/^mcp[_-]gemini[_-]md[_-]export[_-]/, '')
     .replace(/^gemini-md-export[_-]/, '');
 

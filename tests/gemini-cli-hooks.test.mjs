@@ -202,6 +202,23 @@ test('BeforeTool bloqueia caminhos proibidos', () => {
   assert.match(output.reason, /fora do escopo combinado/);
 });
 
+test('hooks.json aplica guardrail em ferramentas que podem editar', () => {
+  const hooksConfig = JSON.parse(
+    readFileSync(resolve(ROOT, 'gemini-cli-extension', 'hooks', 'hooks.json'), 'utf-8'),
+  );
+  const guard = hooksConfig.hooks.BeforeTool.find(
+    (entry) => entry.hooks?.[0]?.name === 'gemini-md-export-scope-guard',
+  );
+  const matcher = new RegExp(guard.matcher);
+
+  assert.equal(guard.hooks[0].timeout, 3000);
+  for (const toolName of ['write_file', 'replace', 'run_shell_command', 'shell', 'apply_patch']) {
+    assert.equal(matcher.test(toolName), true, toolName);
+  }
+  assert.equal(matcher.test('read_file'), false);
+  assert.equal(matcher.test('mcp_gemini-md-export_gemini_browser_status'), false);
+});
+
 test('BeforeTool falha aberto para chamada normal', () => {
   const output = runHook('before-tool', {
     hook_event_name: 'BeforeTool',
@@ -306,6 +323,42 @@ test('BeforeTool abre Gemini pelo launcher PowerShell quando nao ha cliente cone
     assert.equal(state.fallbackCommand, undefined);
     assert.equal(state.fallbackArgs, undefined);
     assert.equal(state.bridgeStatus.connectedCount, 0);
+  } finally {
+    await closeServer(server);
+    rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test('BeforeTool normaliza prefixo MCP com underscores duplos', async () => {
+  const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-hook-test-'));
+  const server = createServer((_req, res) => {
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify({ connectedClients: [] }));
+  });
+  const port = await listen(server);
+
+  try {
+    const output = await runHookAsync(
+      'before-tool',
+      {
+        hook_event_name: 'BeforeTool',
+        tool_name: 'mcp__gemini_md_export__gemini_browser_status',
+        tool_input: {},
+      },
+      {
+        GEMINI_MCP_HOOK_PLATFORM: 'win32',
+        GEMINI_MCP_HOOK_DRY_RUN: 'true',
+        GEMINI_MCP_HOOK_STATE_DIR: tmpRoot,
+        GEMINI_MCP_BRIDGE_PORT: String(port),
+        GEMINI_MCP_BROWSER_LAUNCH_COOLDOWN_MS: '0',
+      },
+    );
+    const state = JSON.parse(readFileSync(resolve(tmpRoot, 'hook-browser-launch.json'), 'utf-8'));
+
+    assert.equal(output.suppressOutput, true);
+    assert.match(output.systemMessage, /dry-run do hook/);
+    assert.equal(state.status, 'dry-run');
+    assert.equal(state.launch.plan.browserCommand, 'chrome.exe');
   } finally {
     await closeServer(server);
     rmSync(tmpRoot, { recursive: true, force: true });
