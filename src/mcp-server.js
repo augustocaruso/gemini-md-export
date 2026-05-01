@@ -20,6 +20,7 @@ import readline from 'node:readline';
 import {
   buildRecentChatsRefreshPlan,
   DEFAULT_RECENT_CHATS_CACHE_MAX_AGE_MS,
+  inferRecentChatsCountStatus,
 } from './recent-chats-policy.mjs';
 import {
   MAX_RECENT_CHATS_LOAD_TARGET,
@@ -4851,10 +4852,18 @@ const listRecentChatsForClient = async (client, args = {}) => {
   let loadMore = null;
   const countOnly = args.countOnly === true || args.action === 'count';
   const untilEnd = args.untilEnd === true || args.countAll === true || args.action === 'count';
-  const refreshPlan = buildRecentChatsRefreshPlan(client, args, {
+  const baseRefreshPlan = buildRecentChatsRefreshPlan(client, args, {
     maxAgeMs: RECENT_CHATS_CACHE_MAX_AGE_MS,
     requestedCount: targetCount,
   });
+  const forceCountRefresh = countOnly && untilEnd && args.refresh !== false;
+  const refreshPlan = forceCountRefresh
+    ? {
+        ...baseRefreshPlan,
+        shouldRefresh: true,
+        preferFastRefresh: recentConversationsForClient(client).length > 0,
+      }
+    : baseRefreshPlan;
   if (refreshPlan.shouldRefresh) {
     try {
       const refreshPromise = refreshClientConversations(client, { ensureSidebar: true });
@@ -4920,15 +4929,18 @@ const listRecentChatsForClient = async (client, args = {}) => {
   const conversations = recentConversationsForClient(client);
   const page = conversations.slice(offset, offset + limit);
   const reachedEnd = loadMore?.reachedEnd === true || recentChatsReachedEndForClient(client);
+  const countInference = inferRecentChatsCountStatus(client, conversations.length, {
+    reachedEnd,
+  });
   const nextOffset = offset + page.length;
-  const canLoadMore = !reachedEnd && conversations.length < MAX_RECENT_CHATS_LOAD_TARGET;
-  const totalKnown = reachedEnd;
-  const totalCount = totalKnown ? conversations.length : null;
+  const totalKnown = countInference.totalKnown === true;
+  const totalCount = countInference.totalCount;
+  const canLoadMore = !totalKnown && conversations.length < MAX_RECENT_CHATS_LOAD_TARGET;
   const countStatus = totalKnown
     ? 'complete'
     : loadMore?.timedOut === true || loadMore?.ok === false
       ? 'incomplete'
-      : 'partial';
+      : countInference.countStatus;
   const countWarning = totalKnown
     ? null
     : `Contagem parcial: carreguei pelo menos ${conversations.length} conversa(s), mas ainda nao confirmei o fim do historico. Nao informe esse numero como "ao todo".`;
@@ -4938,11 +4950,16 @@ const listRecentChatsForClient = async (client, args = {}) => {
     countIsTotal: totalKnown,
     totalKnown,
     totalCount,
+    countSource: countInference.countSource,
+    countConfidence: countInference.countConfidence,
+    countEvidence: countInference.countEvidence,
     knownLoadedCount: conversations.length,
     minimumKnownCount: conversations.length,
     countWarning,
     answer: totalKnown
-      ? `${conversations.length} conversa(s) confirmada(s) no total carregavel.`
+      ? countInference.countSource === 'browser_dom_count_match'
+        ? `${conversations.length} conversa(s) confirmada(s) pelo DOM do sidebar.`
+        : `${conversations.length} conversa(s) confirmada(s) no total carregavel.`
       : `Pelo menos ${conversations.length} conversa(s); total ainda nao confirmado.`,
     refreshAttempted: refreshPlan.shouldRefresh,
     refreshed: refresh?.ok === true,
@@ -4963,6 +4980,8 @@ const listRecentChatsForClient = async (client, args = {}) => {
       countIsTotal: totalKnown,
       totalKnown,
       totalCount,
+      countSource: countInference.countSource,
+      countConfidence: countInference.countConfidence,
       knownLoadedCount: conversations.length,
       minimumKnownCount: conversations.length,
       countStatus,
@@ -8123,6 +8142,8 @@ const compactStructuredContent = (name, action, structured = {}) => {
       countIsTotal: structured.countIsTotal ?? structured.pagination?.countIsTotal ?? null,
       totalKnown: structured.totalKnown ?? structured.pagination?.totalKnown ?? null,
       totalCount: structured.totalCount ?? structured.pagination?.totalCount ?? null,
+      countSource: structured.countSource ?? structured.pagination?.countSource ?? null,
+      countConfidence: structured.countConfidence ?? structured.pagination?.countConfidence ?? null,
       knownLoadedCount:
         structured.knownLoadedCount ?? structured.pagination?.knownLoadedCount ?? structured.pagination?.loadedCount ?? null,
       minimumKnownCount:

@@ -115,6 +115,11 @@ test('listagem de chats expõe contagem parcial sem fingir total', () => {
   assert.match(block, /countIsTotal/);
   assert.match(block, /totalKnown/);
   assert.match(block, /totalCount/);
+  assert.match(block, /inferRecentChatsCountStatus/);
+  assert.match(block, /countSource/);
+  assert.match(block, /countConfidence/);
+  assert.match(block, /browser_dom_count_match/);
+  assert.match(block, /DOM do sidebar/);
   assert.match(block, /minimumKnownCount/);
   assert.match(block, /Nao informe esse numero como "ao todo"/);
   assert.match(block, /Nao chame gemini_chats\/gemini_ready\/gemini_tabs como fallback/);

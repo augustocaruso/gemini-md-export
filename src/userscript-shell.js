@@ -1553,6 +1553,26 @@
     };
   };
 
+  const scrollInfoIsNearBottom = (info, threshold = 160) => {
+    if (!info?.found) return false;
+    if (info.atBottom === true || info.hasOverflow === false) return true;
+    const remaining =
+      Number(info.scrollHeight || 0) -
+      Number(info.scrollTop || 0) -
+      Number(info.clientHeight || 0);
+    return Number.isFinite(remaining) && remaining <= threshold;
+  };
+
+  const traceConfirmsStableBottom = (trace) =>
+    trace.some((entry) => {
+      if (entry.loaded === true) return false;
+      const beforeKnown = Number(entry.beforeKnown);
+      const afterKnown = Number(entry.afterKnown);
+      if (!Number.isFinite(beforeKnown) || !Number.isFinite(afterKnown)) return false;
+      if (beforeKnown !== afterKnown) return false;
+      return scrollInfoIsNearBottom(entry.scrollAfter);
+    });
+
   const waitForSidebarConversationGrowth = (
     beforeCount,
     timeoutMs = 1800,
@@ -1754,7 +1774,7 @@
       //      tem overflow — lista inteira já cabe), e
       //  (b) a(s) tentativa(s) nao trouxeram novos itens.
       // Sem isso, um no-op de scroll (scroller errado) virava "fim" falso.
-      let scrolledToBottom = isAtBottom(scroller);
+      let scrolledToBottom = isAtBottom(scroller) || traceConfirmsStableBottom(trace);
       if (
         !loaded &&
         loadOptions.fastMode &&
@@ -1782,7 +1802,7 @@
         if (loaded) {
           state.loadMoreFailures = 0;
         }
-        scrolledToBottom = isAtBottom(scroller);
+        scrolledToBottom = isAtBottom(scroller) || traceConfirmsStableBottom(trace);
       }
       state.reachedSidebarEnd =
         !loaded && state.loadMoreFailures >= endFailureThreshold && scrolledToBottom;
@@ -2445,6 +2465,7 @@
       ...buildBridgePageSummary(),
       listedConversationCount: state.conversations.length,
       bridgeConversationCount: state.sidebarConversationCache.size,
+      sidebarConversationCount: state.sidebarConversationCache.size,
       notebookCacheCount: notebookChatUrlCacheSummary().size,
     },
   });

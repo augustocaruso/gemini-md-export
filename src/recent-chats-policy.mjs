@@ -39,3 +39,84 @@ export const buildRecentChatsRefreshPlan = (client, args = {}, options = {}) => 
     preferFastRefresh: shouldRefresh && conversations.length > 0,
   };
 };
+
+const normalizeCount = (value) => {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 0) return null;
+  return parsed;
+};
+
+const normalizeKind = (...values) =>
+  values.find((value) => typeof value === 'string' && value.length > 0) || null;
+
+const addCountEvidence = (items, field, value, kind = 'sidebar') => {
+  const count = normalizeCount(value);
+  if (count === null) return;
+  items.push({ field, count, kind });
+};
+
+export const browserSidebarCountEvidenceGroups = (client = {}) => {
+  const groups = [];
+  const addPageGroup = (name, page, pageKind) => {
+    if (!page || typeof page !== 'object') return;
+    const kind = normalizeKind(page.kind, page.pageKind, pageKind);
+    const isNotebook = kind === 'notebook';
+    const evidence = [];
+    addCountEvidence(evidence, 'sidebarConversationCount', page.sidebarConversationCount, 'sidebar');
+    addCountEvidence(evidence, 'bridgeConversationCount', page.bridgeConversationCount, 'sidebar');
+    if (!isNotebook) {
+      addCountEvidence(evidence, 'listedConversationCount', page.listedConversationCount, 'listed');
+    }
+    if (evidence.length > 0) groups.push({ source: name, pageKind: kind, evidence });
+  };
+
+  addPageGroup('client.page', client.page, client.pageKind);
+  addPageGroup(
+    'client.lastSnapshot.page',
+    client.lastSnapshot?.page,
+    normalizeKind(client.lastSnapshot?.pageKind, client.lastSnapshot?.kind),
+  );
+
+  return groups;
+};
+
+export const inferRecentChatsCountStatus = (client, loadedCount, options = {}) => {
+  const count = normalizeCount(loadedCount) ?? 0;
+  if (options.reachedEnd === true) {
+    return {
+      countStatus: 'complete',
+      totalKnown: true,
+      totalCount: count,
+      countSource: 'sidebar_end',
+      countConfidence: 'confirmed',
+      countEvidence: [],
+    };
+  }
+
+  const countEvidence = browserSidebarCountEvidenceGroups(client);
+  const confirmingGroup = countEvidence.find((group) => {
+    if (count <= 0 || group.evidence.length < 2) return false;
+    if (!group.evidence.some((item) => item.kind === 'sidebar')) return false;
+    return group.evidence.every((item) => item.count === count);
+  });
+
+  if (confirmingGroup) {
+    return {
+      countStatus: 'complete',
+      totalKnown: true,
+      totalCount: count,
+      countSource: 'browser_dom_count_match',
+      countConfidence: 'dom-counts-agree',
+      countEvidence: [confirmingGroup],
+    };
+  }
+
+  return {
+    countStatus: 'partial',
+    totalKnown: false,
+    totalCount: null,
+    countSource: 'unconfirmed',
+    countConfidence: 'partial',
+    countEvidence,
+  };
+};

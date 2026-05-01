@@ -311,6 +311,8 @@ test('CLI chats count carrega ate o fim sem despejar lista no chat', async () =>
         countIsTotal: true,
         totalKnown: true,
         totalCount: 203,
+        countSource: 'browser_dom_count_match',
+        countConfidence: 'dom-counts-agree',
         knownLoadedCount: 203,
         minimumKnownCount: 203,
         pagination: {
@@ -342,6 +344,8 @@ test('CLI chats count carrega ate o fim sem despejar lista no chat', async () =>
     const result = JSON.parse(resultLine.replace('RESULT_JSON ', ''));
     assert.equal(result.totalKnown, true);
     assert.equal(result.totalCount, 203);
+    assert.equal(result.countSource, 'browser_dom_count_match');
+    assert.equal(result.countConfidence, 'dom-counts-agree');
     assert.equal(result.knownLoadedCount, 203);
     assert.equal(stderr.text(), '');
 

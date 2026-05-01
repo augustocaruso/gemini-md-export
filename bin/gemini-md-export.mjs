@@ -1506,6 +1506,8 @@ const summarizeChatsCountResult = (result = {}) => ({
   status: result.countStatus || (result.totalKnown ? 'complete' : 'partial'),
   totalKnown: result.totalKnown === true,
   totalCount: result.totalCount ?? null,
+  countSource: result.countSource || result.pagination?.countSource || null,
+  countConfidence: result.countConfidence || result.pagination?.countConfidence || null,
   knownLoadedCount: result.knownLoadedCount ?? result.pagination?.loadedCount ?? null,
   minimumKnownCount: result.minimumKnownCount ?? result.pagination?.loadedCount ?? null,
   countIsTotal: result.countIsTotal === true,
