@@ -67,6 +67,10 @@ const BRIDGE_ASSET_FETCH_MAX_BYTES = Math.max(
   1024,
   Math.min(50 * 1024 * 1024, Number(process.env.GEMINI_MCP_ASSET_FETCH_MAX_BYTES || 20 * 1024 * 1024)),
 );
+const BRIDGE_ASSET_FETCH_CACHE_MAX_ENTRIES = Math.max(
+  0,
+  Math.min(1000, Number(process.env.GEMINI_MCP_ASSET_FETCH_CACHE_MAX_ENTRIES || 300)),
+);
 const ALLOWED_BRIDGE_ORIGIN = 'https://gemini.google.com';
 const RECENT_CHATS_CACHE_MAX_AGE_MS = Number(
   process.env.GEMINI_MCP_RECENT_CHATS_CACHE_MAX_AGE_MS || DEFAULT_RECENT_CHATS_CACHE_MAX_AGE_MS,
@@ -2061,6 +2065,88 @@ const summarizeVaultScan = (scan) =>
       }
     : null;
 
+const normalizeReportPath = (filePath) => {
+  if (!filePath) return null;
+  return resolveOutputDir(filePath);
+};
+
+const normalizeReportItemChatId = (item = {}) =>
+  normalizeConversationChatId(item) ||
+  chatIdFromText(item.chatId) ||
+  chatIdFromText(item.url) ||
+  chatIdFromText(item.filename) ||
+  chatIdFromText(item.filePath) ||
+  '';
+
+const compactReportItems = (items, kind) =>
+  (Array.isArray(items) ? items : [])
+    .map((item) => {
+      const chatId = normalizeReportItemChatId(item);
+      if (!chatId) return null;
+      return {
+        kind,
+        index: item.index ?? null,
+        chatId: chatId.toLowerCase(),
+        title: item.title || null,
+        filename: item.filename || null,
+        filePath: item.filePath || null,
+        relativePath: item.relativePath || null,
+        bytes: item.bytes ?? null,
+        reason: item.reason || kind,
+        mediaFileCount: item.mediaFileCount ?? null,
+        mediaFailureCount: item.mediaFailureCount ?? null,
+        turns: item.turns ?? null,
+        overwritten: item.overwritten ?? null,
+        error: item.error || null,
+      };
+    })
+    .filter(Boolean);
+
+const loadRecentChatsResumeCheckpoint = (filePath) => {
+  const reportFile = normalizeReportPath(filePath);
+  if (!reportFile) return null;
+  const report = readJsonFile(reportFile);
+  if (report?.job?.type && report.job.type !== 'recent-chats-export') {
+    throw new Error(`Relatório não é de exportação de histórico recente: ${reportFile}`);
+  }
+
+  const previousSuccesses = compactReportItems(report.successes, 'success');
+  const previousSkipped = compactReportItems(report.skippedExisting, 'skipped');
+  const previousFailures = compactReportItems(report.failures, 'failure');
+  const completedChatIds = new Set();
+  for (const item of [...previousSuccesses, ...previousSkipped]) {
+    if (item.chatId) completedChatIds.add(item.chatId);
+  }
+
+  return {
+    enabled: true,
+    reportFile,
+    reportFilename: basename(reportFile),
+    previousJobId: report?.job?.jobId || null,
+    previousStatus: report?.job?.status || null,
+    previousUpdatedAt: report?.job?.updatedAt || null,
+    previousFinishedAt: report?.job?.finishedAt || null,
+    previousOutputDir: report?.outputDir || null,
+    previousExistingScanDir: report?.existingScanDir || null,
+    previousSuccesses,
+    previousSkipped,
+    previousFailures,
+    completedChatIds,
+    completedCount: completedChatIds.size,
+    previousSuccessCount: previousSuccesses.length,
+    previousSkippedCount: previousSkipped.length,
+    previousFailureCount: previousFailures.length,
+    previousCounters: {
+      webConversationCount: report.webConversationCount ?? null,
+      existingVaultCount: report.existingVaultCount ?? 0,
+      missingCount: report.missingCount ?? null,
+      reachedEnd: report.reachedEnd ?? null,
+      truncated: report.truncated ?? null,
+      fullHistoryVerified: report.job?.fullHistoryVerified ?? null,
+    },
+  };
+};
+
 const writeExportPayload = (payload, { outputDir } = {}) => {
   if (!payload?.content && !payload?.contentBase64) {
     throw new Error('A extensão não retornou conteúdo para salvar.');
@@ -2127,6 +2213,8 @@ const overwriteExportReport = (filePath, report) => {
   writeFileSync(filePath, `${JSON.stringify(report, null, 2)}\n`, 'utf-8');
 };
 
+const readJsonFile = (filePath) => JSON.parse(readFileSync(filePath, 'utf-8'));
+
 const writeExportFiles = (payload = {}) => {
   const files = Array.isArray(payload.files)
     ? payload.files
@@ -2157,6 +2245,21 @@ const isPrivateNetworkHostname = (hostname) => {
   return !!match && Number(match[1]) >= 16 && Number(match[1]) <= 31;
 };
 
+const bridgeAssetCache = new Map();
+const bridgeAssetInFlight = new Map();
+
+const rememberBridgeAsset = (key, value) => {
+  if (BRIDGE_ASSET_FETCH_CACHE_MAX_ENTRIES <= 0) return;
+  if (bridgeAssetCache.has(key)) bridgeAssetCache.delete(key);
+  bridgeAssetCache.set(key, {
+    ...value,
+    cachedAt: new Date().toISOString(),
+  });
+  while (bridgeAssetCache.size > BRIDGE_ASSET_FETCH_CACHE_MAX_ENTRIES) {
+    bridgeAssetCache.delete(bridgeAssetCache.keys().next().value);
+  }
+};
+
 const fetchAssetForBridge = async (source) => {
   const url = new URL(String(source || ''));
   if (url.protocol !== 'https:' && url.protocol !== 'http:') {
@@ -2166,9 +2269,29 @@ const fetchAssetForBridge = async (source) => {
     throw new Error('URL de mídia local/privada não permitida.');
   }
 
+  const cacheKey = url.href;
+  const cached = bridgeAssetCache.get(cacheKey);
+  if (cached) {
+    bridgeAssetCache.delete(cacheKey);
+    bridgeAssetCache.set(cacheKey, cached);
+    return {
+      ...cached,
+      cacheHit: true,
+      inFlightDeduped: false,
+    };
+  }
+  if (bridgeAssetInFlight.has(cacheKey)) {
+    const result = await bridgeAssetInFlight.get(cacheKey);
+    return {
+      ...result,
+      cacheHit: false,
+      inFlightDeduped: true,
+    };
+  }
+
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), BRIDGE_ASSET_FETCH_TIMEOUT_MS);
-  try {
+  const fetchPromise = (async () => {
     const response = await fetch(url.href, {
       headers: {
         Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
@@ -2198,9 +2321,19 @@ const fetchAssetForBridge = async (source) => {
       mimeType: response.headers.get('content-type') || 'application/octet-stream',
       contentBase64: buffer.toString('base64'),
       bytes: buffer.length,
+      cacheHit: false,
+      inFlightDeduped: false,
     };
+  })();
+
+  bridgeAssetInFlight.set(cacheKey, fetchPromise);
+  try {
+    const result = await fetchPromise;
+    rememberBridgeAsset(cacheKey, result);
+    return result;
   } finally {
     clearTimeout(timer);
+    bridgeAssetInFlight.delete(cacheKey);
   }
 };
 
@@ -2701,6 +2834,8 @@ const loadAllRecentChatsForClient = async (client, args = {}) => {
   const loadTrace = [];
   let previousCount = recentConversationsForClient(client).length;
   const batchSize = Math.max(10, Math.min(200, Number(args.batchSize || 50)));
+  let adaptiveBatchSize = batchSize;
+  const adaptiveLoad = args.adaptiveLoad !== false;
   const maxRounds = Math.max(1, Math.min(500, Number(args.maxLoadMoreRounds || args.loadMoreRounds || 200)));
   const attempts = Math.max(1, Math.min(5, Number(args.loadMoreAttempts || 3)));
   const maxNoGrowthRounds = Math.max(1, Math.min(20, Number(args.maxNoGrowthRounds || 8)));
@@ -2728,7 +2863,7 @@ const loadAllRecentChatsForClient = async (client, args = {}) => {
     if (args.shouldStop?.()) break;
 
     const beforeCount = previousCount;
-    const targetCount = previousCount + batchSize;
+    const targetCount = previousCount + adaptiveBatchSize;
     const roundStartedAt = Date.now();
     const result = await enqueueCommand(
       client.clientId,
@@ -2772,6 +2907,8 @@ const loadAllRecentChatsForClient = async (client, args = {}) => {
     timedOut = timedOut || result.timedOut === true;
     const grew = result.loadedAny === true || currentCount > previousCount;
     loadedAny = loadedAny || grew;
+    const delta = Math.max(0, currentCount - beforeCount);
+    const elapsedMs = Date.now() - roundStartedAt;
 
     if (grew) {
       noGrowthRounds = 0;
@@ -2785,7 +2922,9 @@ const loadAllRecentChatsForClient = async (client, args = {}) => {
       beforeCount,
       targetCount,
       afterCount: currentCount,
-      delta: Math.max(0, currentCount - beforeCount),
+      batchSize: adaptiveBatchSize,
+      adaptiveLoad,
+      delta,
       loadedAny: result.loadedAny === true,
       grew,
       reachedEnd,
@@ -2795,9 +2934,17 @@ const loadAllRecentChatsForClient = async (client, args = {}) => {
       browserMaxRounds,
       commandTimeoutMs,
       attempts,
-      elapsedMs: Date.now() - roundStartedAt,
+      elapsedMs,
       browserTrace: Array.isArray(result.loadTrace) ? result.loadTrace : [],
     });
+
+    if (adaptiveLoad) {
+      if (result.timedOut === true || !grew) {
+        adaptiveBatchSize = Math.max(10, Math.floor(adaptiveBatchSize / 2));
+      } else if (delta >= adaptiveBatchSize && elapsedMs < browserTimeoutMs * 0.65) {
+        adaptiveBatchSize = Math.min(200, Math.ceil(adaptiveBatchSize * 1.5));
+      }
+    }
 
     if (!grew && noGrowthRounds >= maxNoGrowthRounds) break;
   }
@@ -2964,6 +3111,20 @@ const summarizeExportJob = (job) => ({
   current: job.current || null,
   reportFile: job.reportFile || null,
   reportFilename: job.reportFilename || null,
+  resume: job.resume
+    ? {
+        enabled: true,
+        reportFile: job.resume.reportFile,
+        previousJobId: job.resume.previousJobId,
+        previousStatus: job.resume.previousStatus,
+        previousExistingScanDir: job.resume.previousExistingScanDir,
+        previousSuccessCount: job.resume.previousSuccessCount,
+        previousSkippedCount: job.resume.previousSkippedCount,
+        previousFailureCount: job.resume.previousFailureCount,
+        resumedCompletedCount: job.resumedCompletedCount || 0,
+        remainingAfterResume: job.remainingAfterResume ?? null,
+      }
+    : { enabled: false },
   error: job.error || null,
   refreshError: job.refreshError || null,
   loadWarning: job.loadWarning || null,
@@ -3056,6 +3217,26 @@ const buildRecentChatsExportReport = (job, client, successes, failures) => ({
   current: job.current || null,
   successes,
   skippedExisting: Array.isArray(job.skippedExisting) ? job.skippedExisting : [],
+  resume: job.resume
+    ? {
+        enabled: true,
+        reportFile: job.resume.reportFile,
+        reportFilename: job.resume.reportFilename,
+        previousJobId: job.resume.previousJobId,
+        previousStatus: job.resume.previousStatus,
+        previousUpdatedAt: job.resume.previousUpdatedAt,
+        previousFinishedAt: job.resume.previousFinishedAt,
+        previousExistingScanDir: job.resume.previousExistingScanDir,
+        previousSuccessCount: job.resume.previousSuccessCount,
+        previousSkippedCount: job.resume.previousSkippedCount,
+        previousFailureCount: job.resume.previousFailureCount,
+        previousCounters: job.resume.previousCounters,
+        completedChatIds: [...job.resume.completedChatIds],
+        previousFailures: job.resume.previousFailures,
+        resumedCompletedCount: job.resumedCompletedCount || 0,
+        remainingAfterResume: job.remainingAfterResume ?? null,
+      }
+    : { enabled: false },
   failures,
 });
 
@@ -3267,8 +3448,14 @@ const broadcastDirectChatsJobProgress = (job, client, patch = {}) => {
 };
 
 const runRecentChatsExportJob = async (job, client, args = {}) => {
-  const successes = [];
+  const successes = job.resume ? [...job.resume.previousSuccesses] : [];
   const failures = [];
+  const resumedCompletedChatIds = job.resume?.completedChatIds || new Set();
+  const resumedCompletedCount = resumedCompletedChatIds.size;
+  job.successCount = successes.length;
+  job.skippedCount = Array.isArray(job.skippedExisting) ? job.skippedExisting.length : 0;
+  job.resumedCompletedCount = resumedCompletedCount;
+  job.completed = resumedCompletedCount;
   try {
     job.phase = 'loading-history';
     touchExportJob(job);
@@ -3379,14 +3566,30 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
       selected = missing;
       job.existingVaultCount = existingInVault.length;
       job.missingCount = missing.length;
-      job.skippedExisting.push(...existingInVault);
+      const alreadySkipped = new Set(
+        job.skippedExisting.map((item) => normalizeReportItemChatId(item)).filter(Boolean),
+      );
+      for (const item of existingInVault) {
+        if (item.chatId && alreadySkipped.has(item.chatId)) continue;
+        job.skippedExisting.push(item);
+        if (item.chatId) alreadySkipped.add(item.chatId);
+      }
       job.recentSkipped = job.skippedExisting.slice(-10);
       job.skippedCount = job.skippedExisting.length;
     } else {
       job.missingCount = loadedItems.length;
     }
 
-    job.requested = selected.length;
+    if (resumedCompletedChatIds.size > 0) {
+      selected = selected.filter((item) => {
+        const chatId = normalizeConversationChatId(item.conversation).toLowerCase();
+        return !chatId || !resumedCompletedChatIds.has(chatId);
+      });
+      job.remainingAfterResume = selected.length;
+    }
+
+    job.requested = resumedCompletedCount + selected.length;
+    job.completed = resumedCompletedCount;
     if (selected.length === 0) {
       job.status =
         job.truncated || job.loadMoreTimedOut || job.vaultScan?.truncated
@@ -3478,7 +3681,7 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
         job.failures = job.failures.slice(-20);
         job.failureCount = failures.length;
       } finally {
-        job.completed = i + 1;
+        job.completed = resumedCompletedCount + i + 1;
         touchExportJob(job);
         persistRecentChatsExportReport(job, client, successes, failures);
         broadcastRecentChatsJobProgress(job, client);
@@ -3525,11 +3728,14 @@ const startRecentChatsExportJob = (client, args = {}) => {
     );
   }
 
-  const outputDir = resolveOutputDir(args.outputDir);
-  const existingScanDir = args.existingScanDir || args.vaultDir || null;
+  const resumeReportFile = args.resumeReportFile || args.reportFile || null;
+  const resume = resumeReportFile ? loadRecentChatsResumeCheckpoint(resumeReportFile) : null;
+  const outputDir = resolveOutputDir(args.outputDir || resume?.previousOutputDir);
   const exportMissingOnly = args.exportMissingOnly === true;
+  const existingScanDir =
+    args.existingScanDir || args.vaultDir || (exportMissingOnly ? resume?.previousExistingScanDir : null);
   if (exportMissingOnly && !existingScanDir) {
-    throw new Error('Informe vaultDir/existingScanDir para cruzar o histórico do Gemini com o vault.');
+    throw new Error('Informe vaultDir/existingScanDir ou resumeReportFile com existingScanDir para cruzar o histórico do Gemini com o vault.');
   }
   const hasExplicitMaxChats = args.maxChats !== undefined || args.limit !== undefined;
   const skipExisting =
@@ -3567,17 +3773,20 @@ const startRecentChatsExportJob = (client, args = {}) => {
     cancelRequested: false,
     cancelledAt: null,
     current: null,
-    reportFile: null,
-    reportFilename: null,
+    reportFile: resume?.reportFile || null,
+    reportFilename: resume?.reportFilename || null,
+    resume,
+    resumedCompletedCount: resume?.completedCount || 0,
+    remainingAfterResume: null,
     error: null,
     refreshError: null,
     loadWarning: null,
     loadMoreRoundsCompleted: 0,
     loadMoreTimedOut: false,
     loadMoreTrace: [],
-    recentSuccesses: [],
-    recentSkipped: [],
-    skippedExisting: [],
+    recentSuccesses: resume?.previousSuccesses?.slice(-10) || [],
+    recentSkipped: resume?.previousSkipped?.slice(-10) || [],
+    skippedExisting: resume?.previousSkipped ? [...resume.previousSkipped] : [],
     failures: [],
   };
   exportJobs.set(job.jobId, job);
@@ -4299,6 +4508,15 @@ const rawTools = [
           type: 'string',
           description: 'Diretório local de destino. Default: diretório MCP configurado.',
         },
+        resumeReportFile: {
+          type: 'string',
+          description:
+            'Relatório JSON de gemini-md-export-recent-chats anterior. O job continua no mesmo relatório e pula chats já concluídos.',
+        },
+        reportFile: {
+          type: 'string',
+          description: 'Alias de resumeReportFile.',
+        },
         startIndex: {
           type: 'integer',
           minimum: 1,
@@ -4333,6 +4551,11 @@ const rawTools = [
           maximum: 200,
           description:
             'Diagnóstico: quantidade alvo de novas conversas por rodada de carregamento. Default: 50.',
+        },
+        adaptiveLoad: {
+          type: 'boolean',
+          description:
+            'Quando true ou omitido, ajusta batchSize durante o lazy-load conforme o Gemini responde.',
         },
         maxLoadMoreRounds: {
           type: 'integer',
@@ -4395,6 +4618,15 @@ const rawTools = [
           description:
             'Diretório local onde salvar os chats faltantes. Default: vaultDir, para manter Markdown e assets dentro do vault.',
         },
+        resumeReportFile: {
+          type: 'string',
+          description:
+            'Relatório JSON anterior. Permite retomar e reaproveitar existingScanDir/outputDir gravados no relatório.',
+        },
+        reportFile: {
+          type: 'string',
+          description: 'Alias de resumeReportFile.',
+        },
         refresh: {
           type: 'boolean',
           description:
@@ -4406,6 +4638,11 @@ const rawTools = [
           maximum: 200,
           description:
             'Diagnóstico: quantidade alvo de novas conversas por rodada de carregamento. Default: 50.',
+        },
+        adaptiveLoad: {
+          type: 'boolean',
+          description:
+            'Quando true ou omitido, ajusta batchSize durante o lazy-load conforme o Gemini responde.',
         },
         maxLoadMoreRounds: {
           type: 'integer',
@@ -4443,7 +4680,6 @@ const rawTools = [
             'Diagnóstico: tempo máximo dentro da aba para cada rodada de lazy-load. Default: 12000.',
         },
       },
-      required: ['vaultDir'],
       additionalProperties: false,
     },
     call: async (args = {}) => {
@@ -5064,10 +5300,12 @@ const bridgeServer = createServer(async (req, res) => {
         202,
         startRecentChatsExportJob(client, {
           outputDir: url.searchParams.get('outputDir'),
+          resumeReportFile: url.searchParams.get('resumeReportFile') || url.searchParams.get('reportFile') || undefined,
           startIndex: url.searchParams.get('startIndex'),
           maxChats: url.searchParams.get('maxChats') || url.searchParams.get('limit'),
           refresh: parseOptionalBoolean(url.searchParams.get('refresh')),
           batchSize: url.searchParams.get('batchSize') || undefined,
+          adaptiveLoad: parseOptionalBoolean(url.searchParams.get('adaptiveLoad')),
           maxLoadMoreRounds: url.searchParams.get('maxLoadMoreRounds') || undefined,
           loadMoreAttempts: url.searchParams.get('loadMoreAttempts') || undefined,
           maxNoGrowthRounds: url.searchParams.get('maxNoGrowthRounds') || undefined,
@@ -5096,9 +5334,11 @@ const bridgeServer = createServer(async (req, res) => {
             url.searchParams.get('vaultDir') ||
             url.searchParams.get('existingScanDir') ||
             undefined,
+          resumeReportFile: url.searchParams.get('resumeReportFile') || url.searchParams.get('reportFile') || undefined,
           exportMissingOnly: true,
           refresh: parseOptionalBoolean(url.searchParams.get('refresh')),
           batchSize: url.searchParams.get('batchSize') || undefined,
+          adaptiveLoad: parseOptionalBoolean(url.searchParams.get('adaptiveLoad')),
           maxLoadMoreRounds: url.searchParams.get('maxLoadMoreRounds') || undefined,
           loadMoreAttempts: url.searchParams.get('loadMoreAttempts') || undefined,
           maxNoGrowthRounds: url.searchParams.get('maxNoGrowthRounds') || undefined,

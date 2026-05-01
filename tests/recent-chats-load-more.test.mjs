@@ -61,7 +61,8 @@ test('export all mantém lista acumulada do browser a cada rodada', () => {
   assert.match(block, /const loadTrace = \[\]/);
   assert.match(block, /beforeCount/);
   assert.match(block, /afterCount:\s*currentCount/);
-  assert.match(block, /elapsedMs:\s*Date\.now\(\) - roundStartedAt/);
+  assert.match(block, /const elapsedMs = Date\.now\(\) - roundStartedAt/);
+  assert.match(block, /elapsedMs,/);
   assert.match(block, /browserTrace:\s*Array\.isArray\(result\.loadTrace\)/);
   assert.match(block, /Array\.isArray\(result\.conversations\)/);
   assert.match(block, /maxNoGrowthRounds/);
@@ -70,6 +71,11 @@ test('export all mantém lista acumulada do browser a cada rodada', () => {
   assert.match(block, /ignoreFailureCap:\s*true/);
   assert.match(block, /resetReachedEnd:\s*round === 0/);
   assert.match(block, /loadMoreBrowserRounds/);
+  assert.match(block, /let adaptiveBatchSize = batchSize/);
+  assert.match(block, /adaptiveLoad = args\.adaptiveLoad !== false/);
+  assert.match(block, /targetCount = previousCount \+ adaptiveBatchSize/);
+  assert.match(block, /adaptiveBatchSize = Math\.max\(10, Math\.floor\(adaptiveBatchSize \/ 2\)\)/);
+  assert.match(block, /adaptiveBatchSize = Math\.min\(200, Math\.ceil\(adaptiveBatchSize \* 1\.5\)\)/);
   assert.doesNotMatch(block, /includeConversations:\s*false/);
 });
 
@@ -109,6 +115,7 @@ test('export recent chats expõe knobs de diagnóstico para lazy-load lento', ()
     'loadMoreBrowserRounds',
     'loadMoreBrowserTimeoutMs',
     'skipExisting',
+    'adaptiveLoad',
   ]) {
     assert.match(block, new RegExp(`${field}:`));
   }
@@ -122,6 +129,7 @@ test('export recent chats expõe knobs de diagnóstico para lazy-load lento', ()
   ]) {
     assert.match(source, new RegExp(`${field}: url\\.searchParams\\.get\\('${field}'\\)`));
   }
+  assert.match(source, /adaptiveLoad:\s*parseOptionalBoolean\(url\.searchParams\.get\('adaptiveLoad'\)\)/);
   assert.match(source, /skipExisting:\s*parseOptionalBoolean\(url\.searchParams\.get\('skipExisting'\)\)/);
 });
 
@@ -139,6 +147,29 @@ test('export total pula arquivos existentes por padrão', () => {
   assert.match(source, /const skipExisting =[\s\S]*!hasExplicitMaxChats/);
   assert.match(source, /skippedExisting:/);
   assert.match(source, /skippedCount:/);
+});
+
+test('export total consegue retomar a partir do relatório incremental', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const jobBlock = source.match(
+    /const runRecentChatsExportJob = async[\s\S]*?\nconst startRecentChatsExportJob/,
+  )?.[0];
+  const recentToolBlock = source.match(
+    /name: 'gemini_export_recent_chats'[\s\S]*?\n  \{\n    name: 'gemini_export_missing_chats'/,
+  )?.[0];
+  assert.ok(jobBlock, 'runRecentChatsExportJob deve existir');
+  assert.ok(recentToolBlock, 'schema de gemini_export_recent_chats deve existir');
+  assert.match(source, /const loadRecentChatsResumeCheckpoint = \(filePath\) =>/);
+  assert.match(source, /resumeReportFile:\s*\{/);
+  assert.match(source, /reportFile:\s*\{/);
+  assert.match(source, /const resumeReportFile = args\.resumeReportFile \|\| args\.reportFile/);
+  assert.match(source, /loadRecentChatsResumeCheckpoint\(resumeReportFile\)/);
+  assert.match(jobBlock, /const successes = job\.resume \? \[\.\.\.job\.resume\.previousSuccesses\] : \[\]/);
+  assert.match(jobBlock, /resumedCompletedChatIds/);
+  assert.match(jobBlock, /remainingAfterResume/);
+  assert.match(jobBlock, /!resumedCompletedChatIds\.has\(chatId\)/);
+  assert.match(jobBlock, /job\.completed = resumedCompletedCount \+ i \+ 1/);
+  assert.match(source, /previousFailures: job\.resume\.previousFailures/);
 });
 
 test('export missing cruza histórico completo com exports raw no vault', () => {
@@ -160,12 +191,14 @@ test('export missing cruza histórico completo com exports raw no vault', () => 
   assert.match(jobBlock, /job\.webConversationCount = loadedItems\.length/);
   assert.match(jobBlock, /job\.existingVaultCount = existingInVault\.length/);
   assert.match(jobBlock, /job\.missingCount = missing\.length/);
-  assert.match(toolBlock, /required:\s*\['vaultDir'\]/);
+  assert.match(toolBlock, /resumeReportFile/);
+  assert.match(source, /Informe vaultDir\/existingScanDir ou resumeReportFile/);
   assert.match(toolBlock, /outputDir:\s*args\.outputDir \|\| args\.vaultDir/);
   assert.match(toolBlock, /Default: vaultDir/);
   assert.match(toolBlock, /exportMissingOnly:\s*true/);
   assert.match(toolBlock, /skipExisting:\s*true/);
   assert.match(source, /url\.pathname === '\/agent\/export-missing-chats'/);
+  assert.match(source, /resumeReportFile:\s*url\.searchParams\.get\('resumeReportFile'\)/);
   assert.match(source, /url\.searchParams\.get\('outputDir'\)[\s\S]*url\.searchParams\.get\('vaultDir'\)/);
   assert.match(source, /'gemini_export_missing_chats'/);
 });

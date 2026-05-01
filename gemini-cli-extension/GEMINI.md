@@ -24,8 +24,13 @@ Operational guidance:
   `gemini_export_job_status` until it finishes. If the user wants the missing
   files in a specific raw-export folder, pass `outputDir`; otherwise the MCP
   saves them under `vaultDir`, so the Markdown and `assets/<chatId>/...` stay
-  inside the vault instead of falling back to Downloads. Do not emulate this by
-  listing pages in chat or looping over `gemini_download_chat`.
+  inside the vault instead of falling back to Downloads. If the job is
+  interrupted, call `gemini_export_missing_chats` again with `resumeReportFile`
+  set to the previous report JSON; it reuses `existingScanDir`/`outputDir`,
+  preserves `webConversationCount`, `existingVaultCount`, and `missingCount`,
+  skips chats already completed, and retries only the unfinished/failed items.
+  Do not emulate this by listing pages in chat or looping over
+  `gemini_download_chat`.
 - When the user asks for a blind full export outside a vault reconciliation, do
   not list the chats first. Start `gemini_export_recent_chats`, tell the user the
   job ID, and poll `gemini_export_job_status` until the job finishes. The job
@@ -40,7 +45,10 @@ Operational guidance:
   when the user explicitly asks to overwrite/re-export already saved chats. If
   individual chats fail because the extension could not prove it reached the
   beginning of the conversation, report those failures from the job status
-  instead of treating them as completed exports.
+  instead of treating them as completed exports. If the run is interrupted,
+  restart it with `resumeReportFile` pointing to the report JSON; the MCP keeps
+  writing to the same report, skips prior successes/skips, and retries prior
+  failures.
 - When summarizing an export job, distinguish "100% of the requested partial
   batch" from "100% of the user's full Gemini history". Only call the full
   history complete when `fullHistoryRequested=true`, `fullHistoryVerified=true`,

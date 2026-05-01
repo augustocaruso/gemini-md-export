@@ -74,6 +74,8 @@ usuário mate processos às cegas.
 
 ## v0.3.0 — Performance e robustez do export total
 
+Status: implementado na versão `0.3.0`.
+
 Objetivo: acelerar e tornar retomável o fluxo "importar todo o histórico" sem
 sacrificar integridade.
 

@@ -285,6 +285,13 @@ em uma única resposta do Gemini CLI; peça páginas de 25-50 itens e continue a
 `reachedEnd=true` ou uma página vazia. A listagem paginada tem teto defensivo de
 1000 conversas por sessão.
 
+Exports longos gravam relatório JSON incremental. Se `gemini_export_recent_chats`
+ou `gemini_export_missing_chats` for interrompido, rode a mesma tool com
+`resumeReportFile` apontando para esse relatório. O MCP reutiliza o mesmo
+arquivo, pula chatIds já concluídos ou já encontrados no vault e retenta apenas
+os itens faltantes/falhos. O lazy-load do histórico usa batches adaptativos e o
+bridge de mídia mantém cache por URL para reduzir downloads repetidos de assets.
+
 Para importar/exportar o histórico inteiro, use `gemini_export_recent_chats`.
 Ela inicia um job em background, percorre o sidebar carregável, grava os
 Markdown no diretório configurado e mantém um relatório JSON incremental;

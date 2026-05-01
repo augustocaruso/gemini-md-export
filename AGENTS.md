@@ -447,7 +447,16 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   recentes e caminho do relatório para evitar timeout e excesso de contexto no
   Gemini CLI. O MCP bloqueia dois jobs simultâneos de histórico recente na
   mesma aba; se já houver um rodando, consultar/cancelar o job existente antes
-  de iniciar outro.
+  de iniciar outro. Se um job longo for interrompido, o agente deve chamar
+  `gemini_export_recent_chats` ou `gemini_export_missing_chats` novamente com
+  `resumeReportFile` apontando para o JSON incremental anterior, em vez de
+  reiniciar do zero. O resume reaproveita o mesmo relatório, pula chatIds já
+  concluídos/saltados, preserva `webConversationCount`, `existingVaultCount` e
+  `missingCount` no relatório, e retenta apenas itens faltantes ou falhos. O
+  lazy-load do histórico usa batch adaptativo por padrão (`adaptiveLoad=true`);
+  só desligue isso para diagnóstico. O bridge de assets mantém cache em memória
+  por URL e deduplica fetches simultâneos, então falha de mídia deve ficar como
+  warning rastreável e não travar o job principal.
   Integridade vence velocidade: antes de exportar uma conversa depois de
   navegação SPA, o content script compara uma assinatura leve dos turns do DOM
   anterior com a página atual. URL nova com DOM antigo não libera export; o item

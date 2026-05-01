@@ -92,6 +92,11 @@ test('bridge busca mídia sem depender de CORS da extensão Chrome', () => {
   assert.match(serverSource, /url\.pathname === '\/bridge\/fetch-asset'/);
   assert.match(serverSource, /isPrivateNetworkHostname/);
   assert.match(serverSource, /BRIDGE_ASSET_FETCH_MAX_BYTES/);
+  assert.match(serverSource, /BRIDGE_ASSET_FETCH_CACHE_MAX_ENTRIES/);
+  assert.match(serverSource, /const bridgeAssetCache = new Map\(\)/);
+  assert.match(serverSource, /const bridgeAssetInFlight = new Map\(\)/);
+  assert.match(serverSource, /cacheHit/);
+  assert.match(serverSource, /inFlightDeduped/);
   assert.match(contentSource, /const fetchImageAssetViaBridge = async \(source\) =>/);
   assert.match(contentSource, /\/bridge\/fetch-asset/);
   assert.match(contentSource, /shouldFetchViaBridgeFirst/);
