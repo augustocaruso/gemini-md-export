@@ -53,6 +53,8 @@ const spawnMcp = (port) => {
       ...process.env,
       GEMINI_MCP_BRIDGE_PORT: String(port),
       GEMINI_MCP_CHROME_LAUNCH_IF_CLOSED: 'false',
+      GEMINI_MCP_PORT_OWNER_DIAGNOSTIC_TIMEOUT_MS: '1000',
+      GEMINI_MCP_PROCESS_DIAGNOSTIC_TIMEOUT_MS: '1000',
     },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
@@ -84,7 +86,7 @@ const spawnMcp = (port) => {
       const timer = setTimeout(() => {
         pending.delete(message.id);
         rejectCall(new Error(`timeout waiting for RPC response ${message.id}`));
-      }, 5000);
+      }, 10000);
       pending.set(message.id, (response) => {
         clearTimeout(timer);
         resolveCall(response);
@@ -106,6 +108,73 @@ const spawnMcp = (port) => {
     callRpc,
     stop,
     stderr: () => stderr,
+  };
+};
+
+const spawnFakeStaleExporter = async (port) => {
+  const script = `
+    const { createServer } = require('node:http');
+    const port = Number(process.env.TEST_MCP_PORT);
+    const server = createServer((req, res) => {
+      res.setHeader('content-type', 'application/json; charset=utf-8');
+      if (req.url === '/healthz') {
+        res.end(JSON.stringify({
+          ok: true,
+          name: 'gemini-md-export',
+          version: '0.0.1',
+          protocolVersion: 1,
+          pid: process.pid,
+          process: {
+            pid: process.pid,
+            ppid: process.ppid,
+            platform: process.platform,
+            processName: 'node',
+            commandLine: process.argv.join(' '),
+            bridgeRole: 'primary'
+          },
+          clients: 0
+        }));
+        return;
+      }
+      if (req.url === '/agent/clients') {
+        res.end(JSON.stringify({ connectedClients: [] }));
+        return;
+      }
+      res.statusCode = 404;
+      res.end(JSON.stringify({ error: 'not found' }));
+    });
+    server.listen(port, '127.0.0.1');
+    process.on('SIGTERM', () => server.close(() => process.exit(0)));
+    setInterval(() => {}, 1000);
+  `;
+  const child = spawn(
+    process.execPath,
+    ['-e', script, 'gemini-md-export', 'mcp-server.js'],
+    {
+      cwd: ROOT,
+      env: {
+        ...process.env,
+        TEST_MCP_PORT: String(port),
+      },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    },
+  );
+  let stderr = '';
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk.toString('utf-8');
+  });
+  await waitForHealth(port);
+  return {
+    child,
+    stderr: () => stderr,
+    stop: async () => {
+      if (child.exitCode !== null) return;
+      child.kill('SIGTERM');
+      await Promise.race([
+        new Promise((resolveExit) => child.once('exit', resolveExit)),
+        sleep(1000).then(() => child.kill('SIGKILL')),
+      ]);
+    },
   };
 };
 
@@ -141,6 +210,33 @@ test('segunda instância MCP não emite erro quando o bridge já está em uso e 
   assert.equal(secondary.child.exitCode, null);
   assert.doesNotMatch(secondary.stderr(), /EADDRINUSE|porta já está em uso|falha no bridge/i);
 
+  const listedTools = await secondary.callRpc({
+    jsonrpc: '2.0',
+    id: 20,
+    method: 'tools/list',
+    params: {},
+  });
+  assert.ok(
+    listedTools.result.tools.some((tool) => tool.name === 'gemini_mcp_diagnose_processes'),
+  );
+  assert.ok(
+    listedTools.result.tools.some((tool) => tool.name === 'gemini_mcp_cleanup_stale_processes'),
+  );
+
+  const processDiagnosis = await secondary.callRpc({
+    jsonrpc: '2.0',
+    id: 21,
+    method: 'tools/call',
+    params: {
+      name: 'gemini_mcp_diagnose_processes',
+      arguments: {},
+    },
+  });
+  assert.equal(processDiagnosis.result.isError, false);
+  assert.equal(processDiagnosis.result.structuredContent.proxyState, 'proxy_healthy');
+  assert.equal(processDiagnosis.result.structuredContent.cleanupPlan.eligible, false);
+  assert.equal(processDiagnosis.result.structuredContent.primaryBridge.process.pid, primary.child.pid);
+
   const setDir = await secondary.callRpc({
     jsonrpc: '2.0',
     id: 2,
@@ -158,6 +254,77 @@ test('segunda instância MCP não emite erro quando o bridge já está em uso e 
   const exportDirResponse = await fetch(`http://127.0.0.1:${port}/agent/export-dir`);
   const exportDir = await exportDirResponse.json();
   assert.equal(exportDir.outputDir, outputDir);
+});
+
+test('cleanup exige alvo seguro e promove a segunda instância após encerrar primário antigo', async (t) => {
+  const port = await getFreePort();
+  const fakePrimary = await spawnFakeStaleExporter(port);
+  const secondary = spawnMcp(port);
+
+  t.after(async () => {
+    await secondary.stop();
+    await fakePrimary.stop();
+  });
+
+  await sleep(200);
+
+  const diagnosis = await secondary.callRpc({
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'tools/call',
+    params: {
+      name: 'gemini_mcp_diagnose_processes',
+      arguments: {},
+    },
+  });
+
+  assert.equal(diagnosis.result.isError, false);
+  assert.equal(diagnosis.result.structuredContent.proxyState, 'primary_incompatible');
+  assert.equal(diagnosis.result.structuredContent.cleanupPlan.eligible, true);
+  assert.equal(diagnosis.result.structuredContent.cleanupPlan.targets[0].pid, fakePrimary.child.pid);
+  assert.match(
+    diagnosis.result.structuredContent.cleanupPlan.targets[0].commandLine,
+    /gemini-md-export/,
+  );
+
+  const dryRun = await secondary.callRpc({
+    jsonrpc: '2.0',
+    id: 2,
+    method: 'tools/call',
+    params: {
+      name: 'gemini_mcp_cleanup_stale_processes',
+      arguments: {},
+    },
+  });
+
+  assert.equal(dryRun.result.isError, false);
+  assert.equal(dryRun.result.structuredContent.dryRun, true);
+  assert.equal(dryRun.result.structuredContent.wouldTerminate[0].pid, fakePrimary.child.pid);
+  assert.equal(fakePrimary.child.exitCode, null);
+
+  const cleanup = await secondary.callRpc({
+    jsonrpc: '2.0',
+    id: 3,
+    method: 'tools/call',
+    params: {
+      name: 'gemini_mcp_cleanup_stale_processes',
+      arguments: {
+        confirm: true,
+        waitMs: 1500,
+      },
+    },
+  });
+
+  assert.equal(cleanup.result.isError, false);
+  assert.equal(cleanup.result.structuredContent.ok, true);
+  assert.equal(cleanup.result.structuredContent.terminated[0].pid, fakePrimary.child.pid);
+  assert.equal(cleanup.result.structuredContent.terminated[0].exited, true);
+  assert.equal(cleanup.result.structuredContent.bridgeRetry.ok, true);
+
+  const promotedHealth = await waitForHealth(port);
+  assert.equal(promotedHealth.version, PACKAGE_VERSION);
+  assert.equal(promotedHealth.bridgeRole, 'primary');
+  assert.equal(promotedHealth.pid, secondary.child.pid);
 });
 
 test('segunda instância MCP diagnostica bridge primário com versão antiga', async (t) => {

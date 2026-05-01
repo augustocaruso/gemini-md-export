@@ -408,14 +408,23 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   `primary_incompatible`, `primary_unreachable` ou `port_owned_by_other_service`,
   a mensagem acionável deve citar PID/versão/caminho quando disponíveis e pedir
   para fechar/reiniciar a sessão antiga; não trate automaticamente como zumbi e
-  não recomende matar processos sem diagnóstico.
+  não recomende matar processos sem diagnóstico. Para recuperação controlada,
+  o agente deve chamar `gemini_mcp_diagnose_processes` antes de sugerir restart
+  manual. Se houver alvo seguro, `gemini_mcp_cleanup_stale_processes` faz dry-run
+  por padrão e só encerra com `confirm=true`; ele só pode considerar processos
+  cujo comando/caminho pareça `gemini-md-export` ou `mcp-server.js`, nunca o
+  processo MCP atual nem o processo pai, e deve retornar exatamente os PIDs
+  encerrados e se a sessão assumiu o bridge depois do cleanup.
   O MCP também expõe tools para status, diretório de export, listagem de
   sidebar, listagem/export de cadernos, download individual, cache e navegação:
-  `gemini_browser_status`, `gemini_get_export_dir`, `gemini_set_export_dir`,
+  `gemini_browser_status`, `gemini_mcp_diagnose_processes`,
+  `gemini_mcp_cleanup_stale_processes`, `gemini_get_export_dir`,
+  `gemini_set_export_dir`,
   `gemini_list_recent_chats`, `gemini_list_notebook_chats`,
   `gemini_get_current_chat`, `gemini_download_chat`,
   `gemini_download_notebook_chat`, `gemini_export_notebook`,
-  `gemini_export_recent_chats`, `gemini_export_job_status`,
+  `gemini_export_recent_chats`, `gemini_export_missing_chats`,
+  `gemini_reexport_chats`, `gemini_export_job_status`,
   `gemini_export_job_cancel`, `gemini_cache_status`, `gemini_clear_cache`,
   `gemini_open_chat`, `gemini_reload_gemini_tabs` e `gemini_snapshot`.
   `gemini_list_recent_chats` é paginada: `limit` é tamanho de página

@@ -241,6 +241,13 @@ saudável de primário antigo/travado ou porta usada por outro serviço. O
 diagnóstico inclui PID, versão, protocolo e dono provável da porta quando o
 sistema permite descobrir isso.
 
+Para ambientes com processos antigos acumulados, use
+`gemini_mcp_diagnose_processes` antes de qualquer orientação manual. Se ele
+identificar um primário antigo/travado reconhecido como exporter,
+`gemini_mcp_cleanup_stale_processes` faz dry-run por padrão e só encerra o alvo
+com `confirm=true`; ele nunca encerra o processo MCP atual nem processo fora do
+escopo `gemini-md-export`/`mcp-server.js`.
+
 O manifesto da extensão Gemini CLI não define `cwd` dentro de
 `~/.gemini/extensions/gemini-md-export`. Isso é intencional: no Windows, um MCP
 rodando com diretório de trabalho dentro da pasta da extensão pode travar o
@@ -249,6 +256,8 @@ auto-update com `EBUSY: resource busy or locked, rmdir ...`.
 Tools disponíveis:
 
 - `gemini_browser_status`
+- `gemini_mcp_diagnose_processes`
+- `gemini_mcp_cleanup_stale_processes`
 - `gemini_get_export_dir`
 - `gemini_set_export_dir`
 - `gemini_list_recent_chats`
@@ -257,6 +266,8 @@ Tools disponíveis:
 - `gemini_download_chat`
 - `gemini_download_notebook_chat`
 - `gemini_export_recent_chats`
+- `gemini_export_missing_chats`
+- `gemini_reexport_chats`
 - `gemini_export_job_status`
 - `gemini_export_job_cancel`
 - `gemini_export_notebook`

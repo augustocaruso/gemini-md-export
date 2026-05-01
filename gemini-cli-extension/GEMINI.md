@@ -120,8 +120,13 @@ Operational guidance:
   `primaryBridge.portOwner` before giving recovery advice. `proxy_healthy` is
   not an error. For `primary_incompatible`, `primary_unreachable`, or
   `port_owned_by_other_service`, report the PID/version/path when available and
-  recommend closing/restarting the stale Gemini CLI/exporter process; do not
-  ask the user to kill processes blindly.
+  call `gemini_mcp_diagnose_processes` before asking the user to close anything.
+  If it reports `cleanupPlan.eligible=true`, call
+  `gemini_mcp_cleanup_stale_processes` first without `confirm` to show the
+  dry-run, then with `confirm=true` only when the target is clearly an old
+  `gemini-md-export`/`mcp-server.js` process. Do not ask the user to kill
+  processes blindly, and never treat `port_owned_by_other_service` as safe for
+  exporter cleanup.
 - On slow Windows machines, prefer background jobs over long synchronous tool
   loops. `gemini_reexport_chats` is the stable path for a known list of chatIds:
   it navigates and saves one chat at a time, writes an incremental JSON report,

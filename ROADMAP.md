@@ -41,6 +41,8 @@ e confundam sessões novas do Gemini CLI.
 
 ## v0.2.2 — Limpeza controlada e UX de recuperação
 
+Status: implementado na versão `0.2.2`.
+
 Objetivo: permitir recuperar ambientes Windows/macOS bagunçados sem pedir que o
 usuário mate processos às cegas.
 

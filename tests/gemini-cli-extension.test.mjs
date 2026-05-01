@@ -66,6 +66,8 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.ok(Array.isArray(hooksConfig.hooks?.AfterTool));
   assert.ok(Array.isArray(hooksConfig.hooks?.BeforeTool));
   assert.equal(hooksConfig.hooks?.SessionStart, undefined);
+  assert.match(hooksConfig.hooks.AfterTool[0].matcher, /mcp_diagnose_processes/);
+  assert.match(hooksConfig.hooks.AfterTool[0].matcher, /mcp_cleanup_stale_processes/);
   assert.notEqual(hooksConfig.hooks.BeforeTool[0].matcher, '*');
   assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /browser_status/);
   assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /export_missing_chats/);
@@ -74,6 +76,8 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.doesNotMatch(hooksConfig.hooks.BeforeTool[0].matcher, /set_export_dir/);
   assert.doesNotMatch(hooksConfig.hooks.BeforeTool[0].matcher, /export_job_status/);
   assert.doesNotMatch(hooksConfig.hooks.BeforeTool[0].matcher, /export_job_cancel/);
+  assert.doesNotMatch(hooksConfig.hooks.BeforeTool[0].matcher, /mcp_diagnose_processes/);
+  assert.doesNotMatch(hooksConfig.hooks.BeforeTool[0].matcher, /mcp_cleanup_stale_processes/);
   assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /reexport/);
   assert.equal(hooksConfig.hooks.BeforeTool[0].hooks[0].timeout, 20000);
 
@@ -120,6 +124,8 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.match(context, /blockingIssue/);
   assert.match(context, /selfHeal\.reloadAttempts/);
   assert.match(context, /gemini_reload_gemini_tabs/);
+  assert.match(context, /gemini_mcp_diagnose_processes/);
+  assert.match(context, /gemini_mcp_cleanup_stale_processes/);
   assert.match(context, /Only ask for manual reload/);
   assert.match(context, /Do not keep\s+calling `gemini_download_chat`/);
   assert.match(context, /gemini_reexport_chats/);

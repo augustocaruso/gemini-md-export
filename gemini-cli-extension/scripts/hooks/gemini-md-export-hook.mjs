@@ -1136,7 +1136,7 @@ const afterTool = (input) => {
   }
   if (analysis.bridgeProblem) {
     notes.push(
-      'A resposta sugere problema de bridge/extensao do navegador. Antes de repetir a mesma exportacao ou pedir acao manual, cheque gemini_browser_status: ele tenta auto-reload da extensao stale. Se houver abas conectadas mas presas, use gemini_reload_gemini_tabs. Reload manual do card da extensao e ultimo recurso.',
+      'A resposta sugere problema de bridge/extensao do navegador. Antes de repetir a mesma exportacao ou pedir acao manual, cheque gemini_browser_status: ele tenta auto-reload da extensao stale. Se o problema for modo proxy/porta ocupada, use gemini_mcp_diagnose_processes antes de cleanup ou restart manual. Se houver abas conectadas mas presas, use gemini_reload_gemini_tabs. Reload manual do card da extensao e ultimo recurso.',
     );
   }
 

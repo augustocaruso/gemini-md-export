@@ -44,7 +44,7 @@ test('browser_status expõe saúde da bridge MCP/Chrome', () => {
 test('browser_status diagnostica e tenta self-heal sem depender do guard wrapper', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const statusBlock = source.match(
-    /name: 'gemini_browser_status'[\s\S]*?\n  \{\n    name: 'gemini_get_export_dir'/,
+    /name: 'gemini_browser_status'[\s\S]*?\n  \{\n    name: 'gemini_mcp_diagnose_processes'/,
   )?.[0];
   const guardedBlock = source.match(
     /const BROWSER_DEPENDENT_TOOL_NAMES = new Set\(\[[\s\S]*?\]\);/,
@@ -59,6 +59,28 @@ test('browser_status diagnostica e tenta self-heal sem depender do guard wrapper
   assert.match(statusBlock, /allowReload:\s*args\.allowReload !== false/);
   assert.match(statusBlock, /reloadWaitMs/);
   assert.doesNotMatch(guardedBlock, /gemini_browser_status/);
+});
+
+test('MCP expõe diagnóstico e cleanup controlado de processos sem guard de browser', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const guardedBlock = source.match(
+    /const BROWSER_DEPENDENT_TOOL_NAMES = new Set\(\[[\s\S]*?\]\);/,
+  )?.[0];
+  const localProxyBlock = source.match(
+    /const LOCAL_PROXY_TOOL_NAMES = new Set\(\[[\s\S]*?\]\);/,
+  )?.[0];
+
+  assert.match(source, /name: 'gemini_mcp_diagnose_processes'/);
+  assert.match(source, /name: 'gemini_mcp_cleanup_stale_processes'/);
+  assert.match(source, /buildProcessDiagnostics/);
+  assert.match(source, /cleanupStaleMcpProcesses/);
+  assert.match(source, /confirm=true/);
+  assert.ok(guardedBlock, 'lista de tools com guard deve existir');
+  assert.ok(localProxyBlock, 'lista de tools locais em proxy deve existir');
+  assert.doesNotMatch(guardedBlock, /gemini_mcp_diagnose_processes/);
+  assert.doesNotMatch(guardedBlock, /gemini_mcp_cleanup_stale_processes/);
+  assert.match(localProxyBlock, /gemini_mcp_diagnose_processes/);
+  assert.match(localProxyBlock, /gemini_mcp_cleanup_stale_processes/);
 });
 
 test('bridge busca mídia sem depender de CORS da extensão Chrome', () => {

@@ -125,6 +125,16 @@ const PRIMARY_BRIDGE_HEALTH_TIMEOUT_MS = Number(
 const PORT_OWNER_DIAGNOSTIC_TIMEOUT_MS = Number(
   process.env.GEMINI_MCP_PORT_OWNER_DIAGNOSTIC_TIMEOUT_MS || 1500,
 );
+const PROCESS_DIAGNOSTIC_TIMEOUT_MS = Number(
+  process.env.GEMINI_MCP_PROCESS_DIAGNOSTIC_TIMEOUT_MS || 2500,
+);
+const PROCESS_CLEANUP_WAIT_MS = Number(
+  process.env.GEMINI_MCP_PROCESS_CLEANUP_WAIT_MS || 4000,
+);
+const PROCESS_CLEANUP_TIMEOUT_MS = Number(
+  process.env.GEMINI_MCP_PROCESS_CLEANUP_TIMEOUT_MS || 8000,
+);
+const EXPORTER_PROCESS_RE = /gemini-md-export|mcp-server\.js/i;
 const detectExpectedBrowserBuildStamp = () => {
   if (process.env.GEMINI_MCP_EXPECTED_BUILD_STAMP) {
     return process.env.GEMINI_MCP_EXPECTED_BUILD_STAMP;
@@ -409,6 +419,242 @@ const processFromHealthAndOwner = (health, owner) => {
   };
 };
 
+const proxyStateFromMismatch = (mismatch) => {
+  if (!mismatch) return 'proxy_healthy';
+  if (mismatch.kind === 'unreachable') return 'primary_unreachable';
+  if (mismatch.kind === 'name') return 'port_owned_by_other_service';
+  return 'primary_incompatible';
+};
+
+const trimDiagnosticText = (value, maxLength = 1200) => {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength - 3)}...`;
+};
+
+const parseListeningPort = (value) => {
+  const match = String(value || '').match(/:(\d+)(?:\s|$)/);
+  return match ? parseInteger(match[1]) : null;
+};
+
+const uniqueNumbers = (items) =>
+  [...new Set(items.map(parseInteger).filter((item) => Number.isInteger(item)))].sort((a, b) => a - b);
+
+const looksLikeExporterProcess = (processInfo = {}) =>
+  EXPORTER_PROCESS_RE.test(
+    [
+      processInfo.processName,
+      processInfo.path,
+      processInfo.commandLine,
+      processInfo.cwd,
+      ...(Array.isArray(processInfo.argv) ? processInfo.argv : []),
+    ]
+      .filter(Boolean)
+      .join('\n'),
+  );
+
+const normalizeProcessCandidate = (candidate = {}) => {
+  const pid = parseInteger(candidate.pid);
+  const ppid = parseInteger(candidate.ppid);
+  return {
+    pid,
+    ppid,
+    platform: candidate.platform || process.platform,
+    processName: candidate.processName || null,
+    path: candidate.path || null,
+    commandLine: trimDiagnosticText(candidate.commandLine || ''),
+    cwd: candidate.cwd || null,
+    startedAt: candidate.startedAt || candidate.startTime || null,
+    listeningPorts: uniqueNumbers(candidate.listeningPorts || []),
+    source: candidate.source || 'process-scan',
+  };
+};
+
+const mergeProcessCandidate = (target, candidate) => {
+  for (const [key, value] of Object.entries(candidate)) {
+    if (key === 'listeningPorts') continue;
+    if ((target[key] === null || target[key] === undefined || target[key] === '') && value !== null && value !== undefined && value !== '') {
+      target[key] = value;
+    }
+  }
+  target.listeningPorts = uniqueNumbers([...(target.listeningPorts || []), ...(candidate.listeningPorts || [])]);
+  target.source = [...new Set([target.source, candidate.source].filter(Boolean).flatMap((item) => String(item).split('+')))].join('+');
+  return target;
+};
+
+const addProcessCandidate = (map, candidate) => {
+  const normalized = normalizeProcessCandidate(candidate);
+  if (!normalized.pid) return;
+  const existing = map.get(normalized.pid);
+  if (existing) {
+    mergeProcessCandidate(existing, normalized);
+    return;
+  }
+  map.set(normalized.pid, normalized);
+};
+
+const currentProcessCandidate = () =>
+  normalizeProcessCandidate({
+    pid: process.pid,
+    ppid: process.ppid,
+    platform: process.platform,
+    processName: basename(process.execPath),
+    path: process.execPath,
+    commandLine: process.argv.join(' '),
+    cwd: process.cwd(),
+    startedAt: PROCESS_STARTED_AT.toISOString(),
+    listeningPorts: bridgeListening ? [cli.port] : [],
+    source: 'current',
+  });
+
+const portOwnerProcessCandidate = (owner) => {
+  if (!owner?.pid) return null;
+  return normalizeProcessCandidate({
+    pid: owner.pid,
+    ppid: owner.ppid,
+    platform: owner.platform,
+    processName: owner.processName,
+    path: owner.path,
+    commandLine: owner.commandLine,
+    startedAt: owner.startTime,
+    listeningPorts: [cli.port],
+    source: 'port-owner',
+  });
+};
+
+const listUnixListeningPortsForPid = async (pid) => {
+  const result = await execFileText(
+    'lsof',
+    ['-nP', '-a', '-p', String(pid), '-iTCP', '-sTCP:LISTEN', '-Fn'],
+    { timeoutMs: PROCESS_DIAGNOSTIC_TIMEOUT_MS },
+  );
+  if (!result.ok) return [];
+  return uniqueNumbers(
+    result.stdout
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith('n'))
+      .map((line) => parseListeningPort(line.slice(1))),
+  );
+};
+
+const listUnixExporterProcesses = async () => {
+  const result = await execFileText('ps', ['-axo', 'pid=,ppid=,command='], {
+    timeoutMs: PROCESS_DIAGNOSTIC_TIMEOUT_MS,
+  });
+  if (!result.ok) {
+    return {
+      ok: false,
+      platform: process.platform,
+      method: 'ps',
+      error: result.error || result.stderr || 'Falha ao listar processos.',
+      processes: [],
+    };
+  }
+  const baseProcesses = result.stdout
+    .split(/\r?\n/)
+    .map((line) => {
+      const match = line.match(/^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/);
+      if (!match) return null;
+      return normalizeProcessCandidate({
+        pid: match[1],
+        ppid: match[2],
+        commandLine: match[3],
+        processName: basename(String(match[3]).split(/\s+/)[0] || ''),
+        source: 'ps',
+      });
+    })
+    .filter((item) => item?.pid && looksLikeExporterProcess(item));
+
+  const processes = await Promise.all(
+    baseProcesses.map(async (item) => ({
+      ...item,
+      listeningPorts: await listUnixListeningPortsForPid(item.pid),
+    })),
+  );
+
+  return {
+    ok: true,
+    platform: process.platform,
+    method: 'ps+lsof',
+    processes,
+  };
+};
+
+const listWindowsExporterProcesses = async () => {
+  const script = [
+    '$ErrorActionPreference = "SilentlyContinue"',
+    '$ports = @{}',
+    'Get-NetTCPConnection -State Listen | ForEach-Object {',
+    '  $ownerPid = [int]$_.OwningProcess;',
+    '  if (-not $ports.ContainsKey($ownerPid)) { $ports[$ownerPid] = @() }',
+    '  $ports[$ownerPid] = @($ports[$ownerPid] + [int]$_.LocalPort | Sort-Object -Unique)',
+    '}',
+    '$items = Get-CimInstance Win32_Process | Where-Object {',
+    '  ($_.CommandLine -match "gemini-md-export|mcp-server\\.js") -or',
+    '  ($_.ExecutablePath -match "gemini-md-export|mcp-server\\.js")',
+    '} | ForEach-Object {',
+    '  $processId = [int]$_.ProcessId;',
+    '  [pscustomobject]@{',
+    '    pid = $processId;',
+    '    ppid = [int]$_.ParentProcessId;',
+    '    processName = $_.Name;',
+    '    path = $_.ExecutablePath;',
+    '    commandLine = $_.CommandLine;',
+    '    startedAt = $null;',
+    '    listeningPorts = @($ports[$processId])',
+    '  }',
+    '}',
+    '@($items) | ConvertTo-Json -Compress -Depth 5',
+  ].join('; ');
+  const result = await execFileText(
+    'powershell.exe',
+    ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', script],
+    { timeoutMs: PROCESS_DIAGNOSTIC_TIMEOUT_MS },
+  );
+  if (!result.ok) {
+    return {
+      ok: false,
+      platform: 'win32',
+      method: 'Get-CimInstance',
+      error: result.error || result.stderr || 'Falha ao listar processos.',
+      processes: [],
+    };
+  }
+  try {
+    const payload = JSON.parse(result.stdout.trim() || '[]');
+    const items = Array.isArray(payload) ? payload : [payload].filter(Boolean);
+    return {
+      ok: true,
+      platform: 'win32',
+      method: 'Get-CimInstance+Get-NetTCPConnection',
+      processes: items.map((item) =>
+        normalizeProcessCandidate({
+          ...item,
+          platform: 'win32',
+          source: 'cim',
+        }),
+      ),
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      platform: 'win32',
+      method: 'Get-CimInstance',
+      error: err?.message || String(err),
+      raw: result.stdout.trim(),
+      processes: [],
+    };
+  }
+};
+
+const listExporterProcesses = async () => {
+  if (process.env.GEMINI_MCP_PROCESS_DIAGNOSTICS === 'false') {
+    return { ok: false, disabled: true, error: 'diagnostico de processos desabilitado', processes: [] };
+  }
+  if (process.platform === 'win32') return listWindowsExporterProcesses();
+  return listUnixExporterProcesses();
+};
+
 const fetchJsonWithTimeout = async (url, timeoutMs = PRIMARY_BRIDGE_HEALTH_TIMEOUT_MS) => {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -522,6 +768,344 @@ const primaryBridgeMismatchMessage = (mismatch) => {
     return `A porta ${cli.host}:${cli.port} está ocupada por ${mismatch.actualName || 'outro serviço'}${pid}, não pelo ${SERVER_NAME}. Feche esse processo ou altere GEMINI_MCP_BRIDGE_PORT.`;
   }
   return `A porta ${cli.host}:${cli.port} parece ocupada${pid}, mas esta instância não conseguiu consultar o bridge primário (${mismatch.detail || 'sem detalhe'}). Reinicie o Gemini CLI; se persistir, feche o processo dono da porta ou reinicie a máquina.`;
+};
+
+const cleanupEligibilityForProcess = (candidate, mismatch, portOwner) => {
+  if (!candidate.isPortOwner) {
+    return { eligible: false, reason: 'not_port_owner' };
+  }
+  if (!mismatch) {
+    return { eligible: false, reason: 'primary_healthy' };
+  }
+  if (mismatch.kind === 'name') {
+    return { eligible: false, reason: 'port_owner_is_other_service' };
+  }
+  if (!portOwner?.pid) {
+    return { eligible: false, reason: 'port_owner_unknown' };
+  }
+  if (candidate.pid === process.pid) {
+    return { eligible: false, reason: 'current_process_protected' };
+  }
+  if (candidate.pid === process.ppid) {
+    return { eligible: false, reason: 'parent_process_protected' };
+  }
+  if (!candidate.looksLikeExporter) {
+    return { eligible: false, reason: 'process_not_recognized_as_exporter' };
+  }
+  return {
+    eligible: true,
+    reason: `stale_primary_${mismatch.kind}`,
+    requiresConfirm: true,
+  };
+};
+
+const recommendedRecoveryAction = (mismatch, cleanupPlan) => {
+  if (!mismatch) {
+    return 'Modo proxy saudável ou bridge primário compatível; não há processo para limpar.';
+  }
+  if (cleanupPlan?.eligible) {
+    return 'Há um processo primário antigo/travado reconhecido como exporter. Rode gemini_mcp_cleanup_stale_processes sem confirm para dry-run; se o alvo estiver correto, repita com confirm=true.';
+  }
+  if (mismatch.kind === 'name') {
+    return 'A porta está ocupada por outro serviço; não vou encerrar automaticamente. Feche esse app ou use outra GEMINI_MCP_BRIDGE_PORT.';
+  }
+  return 'Não há alvo seguro para limpeza automática. Use o PID/caminho do diagnóstico para fechar manualmente ou reinicie o Gemini CLI.';
+};
+
+const buildProcessDiagnostics = async () => {
+  const [health, portOwner, processScan] = await Promise.all([
+    primaryBridgeHealth(),
+    diagnoseBridgePortOwner(),
+    listExporterProcesses(),
+  ]);
+  const mismatch = primaryBridgeMismatch(health, portOwner);
+  const processMap = new Map();
+
+  addProcessCandidate(processMap, currentProcessCandidate());
+  for (const item of processScan.processes || []) addProcessCandidate(processMap, item);
+  const ownerCandidate = portOwnerProcessCandidate(portOwner);
+  if (ownerCandidate) addProcessCandidate(processMap, ownerCandidate);
+
+  const processes = [...processMap.values()]
+    .map((item) => {
+      const isCurrent = item.pid === process.pid;
+      const isParent = item.pid === process.ppid;
+      const isPortOwner = item.pid === portOwner?.pid;
+      const looksLikeExporter = looksLikeExporterProcess(item);
+      const detectedVersion = isCurrent
+        ? SERVER_VERSION
+        : isPortOwner && health?.payload?.version
+          ? health.payload.version
+          : null;
+      const state = isCurrent
+        ? bridgeRole
+        : isPortOwner
+          ? mismatch
+            ? proxyStateFromMismatch(mismatch)
+            : 'primary_healthy'
+          : 'related_exporter_process';
+      const cleanup = cleanupEligibilityForProcess(
+        {
+          ...item,
+          isCurrent,
+          isParent,
+          isPortOwner,
+          looksLikeExporter,
+        },
+        mismatch,
+        portOwner,
+      );
+      return {
+        ...item,
+        isCurrent,
+        isParent,
+        isPortOwner,
+        looksLikeExporter,
+        detectedVersion,
+        state,
+        cleanup,
+      };
+    })
+    .sort((a, b) => {
+      if (a.isCurrent !== b.isCurrent) return a.isCurrent ? -1 : 1;
+      if (a.isPortOwner !== b.isPortOwner) return a.isPortOwner ? -1 : 1;
+      return a.pid - b.pid;
+    });
+
+  const targets = processes
+    .filter((item) => item.cleanup?.eligible)
+    .map((item) => ({
+      pid: item.pid,
+      ppid: item.ppid,
+      processName: item.processName,
+      path: item.path,
+      commandLine: item.commandLine,
+      listeningPorts: item.listeningPorts,
+      detectedVersion: item.detectedVersion,
+      state: item.state,
+      reason: item.cleanup.reason,
+    }));
+  const cleanupPlan = {
+    eligible: targets.length > 0,
+    targets,
+    reason: targets.length > 0 ? 'safe_stale_primary_found' : processes.find((item) => item.isPortOwner)?.cleanup?.reason || 'no_safe_target',
+    requiresConfirm: targets.length > 0,
+  };
+
+  return {
+    ok: true,
+    mcp: {
+      name: SERVER_NAME,
+      version: SERVER_VERSION,
+      protocolVersion: EXTENSION_PROTOCOL_VERSION,
+      bridgeRole,
+      process: summarizeProcess(),
+    },
+    primaryBridge: {
+      ok: health.ok,
+      status: health.status,
+      health: health.payload || null,
+      error: health.error || null,
+      process: processFromHealthAndOwner(health, portOwner),
+      portOwner,
+    },
+    proxyState: proxyStateFromMismatch(mismatch),
+    problem: mismatch
+      ? {
+          code: 'primary_bridge_version_mismatch',
+          message: primaryBridgeMismatchMessage(mismatch),
+          mismatch,
+        }
+      : null,
+    processScan: {
+      ok: processScan.ok,
+      method: processScan.method || null,
+      platform: processScan.platform || process.platform,
+      disabled: processScan.disabled === true,
+      error: processScan.error || null,
+      count: processes.length,
+    },
+    processes,
+    cleanupPlan,
+    recommendedAction: recommendedRecoveryAction(mismatch, cleanupPlan),
+  };
+};
+
+const isPidAlive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err?.code === 'EPERM';
+  }
+};
+
+const waitForPidExit = async (pid, waitMs) => {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt <= waitMs) {
+    if (!isPidAlive(pid)) {
+      return { exited: true, waitedMs: Date.now() - startedAt };
+    }
+    await sleep(100);
+  }
+  return { exited: !isPidAlive(pid), waitedMs: Date.now() - startedAt };
+};
+
+const terminateProcessCandidate = async (target, { force = false, waitMs = PROCESS_CLEANUP_WAIT_MS } = {}) => {
+  const pid = parseInteger(target?.pid);
+  if (!pid || pid <= 0) {
+    throw new Error(`PID inválido para cleanup: ${target?.pid}`);
+  }
+  if (pid === process.pid) {
+    throw new Error(`Recusei encerrar o processo MCP atual (PID ${pid}).`);
+  }
+  if (pid === process.ppid) {
+    throw new Error(`Recusei encerrar o processo pai do MCP atual (PID ${pid}).`);
+  }
+
+  if (process.platform === 'win32') {
+    const args = ['/PID', String(pid), '/T', ...(force ? ['/F'] : [])];
+    const result = await execFileText('taskkill.exe', args, {
+      timeoutMs: PROCESS_CLEANUP_TIMEOUT_MS,
+    });
+    const exit = await waitForPidExit(pid, waitMs);
+    return {
+      pid,
+      method: 'taskkill',
+      force,
+      ok: result.ok || exit.exited,
+      exited: exit.exited,
+      waitedMs: exit.waitedMs,
+      stdout: trimDiagnosticText(result.stdout || ''),
+      stderr: trimDiagnosticText(result.stderr || ''),
+      error: result.ok ? null : result.error || null,
+    };
+  }
+
+  const signal = force ? 'SIGKILL' : 'SIGTERM';
+  try {
+    process.kill(pid, signal);
+  } catch (err) {
+    if (err?.code !== 'ESRCH') throw err;
+  }
+  const exit = await waitForPidExit(pid, waitMs);
+  return {
+    pid,
+    method: 'process.kill',
+    signal,
+    force,
+    ok: exit.exited,
+    exited: exit.exited,
+    waitedMs: exit.waitedMs,
+  };
+};
+
+const retryBridgeListen = async () => {
+  if (bridgeListening) {
+    return { attempted: false, ok: true, reason: 'already-listening', bridgeRole };
+  }
+  return new Promise((resolveRetry) => {
+    const cleanup = () => {
+      bridgeServer.off('listening', onListening);
+      bridgeServer.off('error', onError);
+    };
+    const onListening = () => {
+      cleanup();
+      bridgeListening = true;
+      settleBridgeStartup('primary');
+      resolveRetry({ attempted: true, ok: true, bridgeRole, host: cli.host, port: cli.port });
+    };
+    const onError = (err) => {
+      cleanup();
+      resolveRetry({
+        attempted: true,
+        ok: false,
+        bridgeRole,
+        error: err?.message || String(err),
+        code: err?.code || null,
+      });
+    };
+    bridgeServer.once('listening', onListening);
+    bridgeServer.once('error', onError);
+    try {
+      bridgeServer.listen(cli.port, cli.host);
+    } catch (err) {
+      cleanup();
+      resolveRetry({
+        attempted: true,
+        ok: false,
+        bridgeRole,
+        error: err?.message || String(err),
+        code: err?.code || null,
+      });
+    }
+  });
+};
+
+const cleanupStaleMcpProcesses = async (args = {}) => {
+  const diagnosis = await buildProcessDiagnostics();
+  const targets = diagnosis.cleanupPlan.targets || [];
+  const confirm = args.confirm === true;
+  const dryRun = args.dryRun !== undefined ? args.dryRun !== false : !confirm;
+
+  if (targets.length === 0) {
+    return {
+      ok: false,
+      dryRun,
+      terminated: [],
+      message: 'Nenhum processo MCP/exporter antigo foi considerado seguro para encerramento automático.',
+      diagnosis,
+    };
+  }
+
+  if (dryRun || !confirm) {
+    return {
+      ok: false,
+      dryRun: true,
+      wouldTerminate: targets,
+      terminated: [],
+      message: 'Dry-run: confirme com confirm=true para encerrar apenas os processos listados em wouldTerminate.',
+      diagnosis,
+    };
+  }
+
+  const waitMs = normalizeWaitMs(args.waitMs, PROCESS_CLEANUP_WAIT_MS, 30_000);
+  const terminated = [];
+  for (const target of targets) {
+    try {
+      terminated.push({
+        target,
+        ...(await terminateProcessCandidate(target, {
+          force: args.force === true,
+          waitMs,
+        })),
+      });
+    } catch (err) {
+      terminated.push({
+        target,
+        pid: target.pid,
+        ok: false,
+        exited: false,
+        error: err?.message || String(err),
+      });
+    }
+  }
+
+  const bridgeRetry = terminated.some((item) => item.ok && item.exited)
+    ? await retryBridgeListen()
+    : { attempted: false, ok: false, reason: 'no-process-exited' };
+
+  return {
+    ok: terminated.every((item) => item.ok && item.exited),
+    dryRun: false,
+    force: args.force === true,
+    terminated,
+    bridgeRetry,
+    diagnosis,
+    message: bridgeRetry.ok
+      ? 'Processo antigo encerrado e esta sessão assumiu o bridge local.'
+      : 'Cleanup executado; confira bridgeRetry para saber se esta sessão conseguiu assumir a porta.',
+  };
 };
 
 const parseArgs = (argv) => {
@@ -3468,6 +4052,53 @@ const rawTools = [
     },
   },
   {
+    name: 'gemini_mcp_diagnose_processes',
+    description:
+      'Diagnostica processos MCP/exporter locais, dono da porta do bridge, versão/protocolo do primário e se há alvo seguro para cleanup.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+      additionalProperties: false,
+    },
+    call: async () => toolTextResult(await buildProcessDiagnostics()),
+  },
+  {
+    name: 'gemini_mcp_cleanup_stale_processes',
+    description:
+      'Encerra somente processo primário antigo/travado reconhecido como gemini-md-export. Por segurança, exige confirm=true; sem isso faz dry-run.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        confirm: {
+          type: 'boolean',
+          description:
+            'Obrigatório true para encerrar processos. Sem confirm=true, a tool retorna apenas wouldTerminate.',
+        },
+        dryRun: {
+          type: 'boolean',
+          description:
+            'Quando true, nunca encerra processos. Default: true se confirm não for true.',
+        },
+        force: {
+          type: 'boolean',
+          description:
+            'Quando true, usa SIGKILL no macOS/Linux ou taskkill /F no Windows. Default: false.',
+        },
+        waitMs: {
+          type: 'integer',
+          minimum: 100,
+          maximum: 30000,
+          description: 'Tempo para aguardar o processo sair após o sinal. Default: 4000.',
+        },
+      },
+      additionalProperties: false,
+    },
+    call: async (args = {}) => {
+      const result = await cleanupStaleMcpProcesses(args);
+      return toolTextResult(result, { isError: args.confirm === true && !result.ok });
+    },
+  },
+  {
     name: 'gemini_get_export_dir',
     description: 'Retorna o diretório local padrão usado pelo MCP para salvar exports.',
     inputSchema: {
@@ -4113,6 +4744,11 @@ const BROWSER_DEPENDENT_TOOL_NAMES = new Set([
   'gemini_snapshot',
 ]);
 
+const LOCAL_PROXY_TOOL_NAMES = new Set([
+  'gemini_mcp_diagnose_processes',
+  'gemini_mcp_cleanup_stale_processes',
+]);
+
 const withChromeExtensionGuard = (tool) => ({
   ...tool,
   call: async (args = {}) => {
@@ -4199,13 +4835,7 @@ const proxyBrowserStatus = async () => {
   const portOwner = await diagnoseBridgePortOwner();
   const mismatch = primaryBridgeMismatch(health, portOwner);
   const primaryProcess = processFromHealthAndOwner(health, portOwner);
-  const proxyState = mismatch
-    ? mismatch.kind === 'unreachable'
-      ? 'primary_unreachable'
-      : mismatch.kind === 'name'
-        ? 'port_owned_by_other_service'
-        : 'primary_incompatible'
-    : 'proxy_healthy';
+  const proxyState = proxyStateFromMismatch(mismatch);
 
   return toolTextResult(
     {
@@ -5091,7 +5721,11 @@ const handleRequest = async (message) => {
     try {
       await waitForBridgeStartup();
       let result;
-      if (bridgeRole === 'proxy' && process.env.GEMINI_MCP_PROXY_TO_PRIMARY !== 'false') {
+      if (
+        bridgeRole === 'proxy' &&
+        process.env.GEMINI_MCP_PROXY_TO_PRIMARY !== 'false' &&
+        !LOCAL_PROXY_TOOL_NAMES.has(name)
+      ) {
         result =
           name === 'gemini_browser_status'
             ? await proxyBrowserStatus(args)
