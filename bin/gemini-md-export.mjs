@@ -85,6 +85,7 @@ const commonOptionHelp = () => [
   '  --client-id <id>         Escolhe uma aba Gemini pelo clientId.',
   '  --tab-id <id>            Escolhe uma aba Gemini pelo tabId do navegador.',
   '  --claim-id <id>          Usa uma claim criada por gemini-md-export tabs claim.',
+  '  --keep-claim             Nao libera --claim-id automaticamente apos chats/sync/export.',
   '  --no-wake                Nao tentar acordar o navegador.',
   '  --no-self-heal           Nao tentar auto-recuperacao da extensao.',
   '  --no-reload              Nao pedir reload automatico da extensao.',
@@ -593,6 +594,9 @@ const parseArgs = (argv) => {
     else if (arg === '--client-id') out.flags.clientId = value();
     else if (arg === '--tab-id') out.flags.tabId = value();
     else if (arg === '--claim-id') out.flags.claimId = value();
+    else if (arg === '--keep-claim' || arg === '--no-auto-release-claim')
+      out.flags.autoReleaseClaim = false;
+    else if (arg === '--auto-release-claim') out.flags.autoReleaseClaim = true;
     else if (arg === '--index') out.flags.index = Number(value());
     else if (arg === '--label') out.flags.label = value();
     else if (arg === '--color') out.flags.colorName = value();
@@ -1228,6 +1232,7 @@ const startSyncJob = async (bridgeUrl, flags) =>
       clientId: flags.clientId,
       tabId: flags.tabId,
       claimId: flags.claimId,
+      autoReleaseClaim: flags.autoReleaseClaim,
     }),
     { timeoutMs: 20000 },
   );
@@ -1246,6 +1251,7 @@ const startExportJob = async (bridgeUrl, kind, flags) => {
     clientId: flags.clientId,
     tabId: flags.tabId,
     claimId: flags.claimId,
+    autoReleaseClaim: flags.autoReleaseClaim,
   };
   if (kind === 'recent') {
     return requestJson(bridgeUrl, appendParams('/agent/export-recent-chats', params), { timeoutMs: 20000 });
@@ -1294,6 +1300,36 @@ const fetchJobStatus = async (bridgeUrl, jobId) =>
 const cancelJob = async (bridgeUrl, jobId) =>
   requestJson(bridgeUrl, appendParams('/agent/export-job-cancel', { jobId }), { timeoutMs: 20000 });
 
+const claimIdFromJob = (job = {}) => {
+  const value = job || {};
+  return value.tabClaimId || value.tabClaim?.claimId || value.serverClaim?.claimId || value.claim?.claimId || null;
+};
+
+const shouldReleaseCliClaim = (flags = {}, job = null) =>
+  flags.autoReleaseClaim !== false && !!(flags.claimId || claimIdFromJob(job));
+
+const releaseCliClaimQuietly = async (flags = {}, reason, job = null) => {
+  if (!shouldReleaseCliClaim(flags, job)) return null;
+  const claimId = flags.claimId || claimIdFromJob(job);
+  if (!claimId) return null;
+  try {
+    return await requestJson(
+      flags.bridgeUrl,
+      appendParams('/agent/release-tab', {
+        claimId,
+        reason,
+      }),
+      { timeoutMs: 8000 },
+    );
+  } catch (err) {
+    return {
+      ok: false,
+      claimId,
+      error: err?.message || String(err),
+    };
+  }
+};
+
 const writeStructuredResult = (ui, result, { label = null } = {}) => {
   if (ui.format === 'json') {
     ui.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
@@ -1340,20 +1376,23 @@ const runSync = async (parsed, streams = {}) => {
   }
   const ui = makeUi(flags, streams);
   warnTuiFallback(ui);
+  let initialJob = null;
+  let finalJob = null;
   try {
     if (ui.format !== 'json' && ui.format !== 'jsonl') {
       ui.stdout.write(`Conectando na bridge ${normalizeBridgeUrl(flags.bridgeUrl)}...\n`);
     }
     await ensureBridgeAvailable(flags, ui);
     await ensureReady(flags.bridgeUrl, flags, ui);
-    const initialJob = await startSyncJob(flags.bridgeUrl, flags);
-    const finalJob = await followJob(flags.bridgeUrl, initialJob, flags, ui);
-    closeTui(ui);
+    initialJob = await startSyncJob(flags.bridgeUrl, flags);
+    finalJob = await followJob(flags.bridgeUrl, initialJob, flags, ui);
     const result = emitResult(ui, finalJob);
     return { exitCode: exitCodeForJob(finalJob), result };
   } catch (err) {
-    closeTui(ui);
     throw err;
+  } finally {
+    await releaseCliClaimQuietly(flags, 'cli-sync-finished', finalJob || initialJob);
+    closeTui(ui);
   }
 };
 
@@ -1546,40 +1585,44 @@ const runChats = async (parsed, streams = {}) => {
     DEFAULT_COUNT_STATUS_INTERVAL_MS,
     60_000,
   );
-  const raw = await withWaitStatus(
-    ui,
-    {
-      message: `Carregando historico do Gemini ate confirmar o fim (limite ${formatDuration(countTimeoutMs)}).`,
-      intervalMs: statusIntervalMs,
-      intervalMessage: (elapsedMs) =>
-        `Ainda carregando historico... ${formatDuration(elapsedMs)} decorridos; nao vou abrir outra tool MCP como fallback.`,
-    },
-    () =>
-      requestJson(
-        parsed.flags.bridgeUrl,
-        appendParams('/agent/recent-chats', {
-          limit: 1,
-          offset: 0,
-          countOnly: true,
-          untilEnd: true,
-          preferActive: true,
-          refresh: parsed.flags.refresh,
-          ...loadMoreParamsFromFlags(parsed.flags),
-          loadMoreTimeoutMs: countTimeoutMs,
-          clientId: parsed.flags.clientId,
-          tabId: parsed.flags.tabId,
-          claimId: parsed.flags.claimId,
-        }),
-        { timeoutMs: countTimeoutMs + 15_000 },
-      ),
-  );
-  const result = summarizeChatsCountResult(raw);
-  const partialReason = result.loadMoreError || result.refreshError;
-  const label = result.totalKnown
-    ? `Total confirmado: ${result.totalCount} chat(s).`
-    : `Contagem parcial: pelo menos ${result.minimumKnownCount ?? result.knownLoadedCount ?? 0} chat(s).${partialReason ? ` Motivo: ${partialReason}` : ''}`;
-  writeStructuredResult(ui, result, { label });
-  return { exitCode: result.totalKnown ? EXIT.OK : EXIT.WARNINGS, result };
+  try {
+    const raw = await withWaitStatus(
+      ui,
+      {
+        message: `Carregando historico do Gemini ate confirmar o fim (limite ${formatDuration(countTimeoutMs)}).`,
+        intervalMs: statusIntervalMs,
+        intervalMessage: (elapsedMs) =>
+          `Ainda carregando historico... ${formatDuration(elapsedMs)} decorridos; nao vou abrir outra tool MCP como fallback.`,
+      },
+      () =>
+        requestJson(
+          parsed.flags.bridgeUrl,
+          appendParams('/agent/recent-chats', {
+            limit: 1,
+            offset: 0,
+            countOnly: true,
+            untilEnd: true,
+            preferActive: true,
+            refresh: parsed.flags.refresh,
+            ...loadMoreParamsFromFlags(parsed.flags),
+            loadMoreTimeoutMs: countTimeoutMs,
+            clientId: parsed.flags.clientId,
+            tabId: parsed.flags.tabId,
+            claimId: parsed.flags.claimId,
+          }),
+          { timeoutMs: countTimeoutMs + 15_000 },
+        ),
+    );
+    const result = summarizeChatsCountResult(raw);
+    const partialReason = result.loadMoreError || result.refreshError;
+    const label = result.totalKnown
+      ? `Total confirmado: ${result.totalCount} chat(s).`
+      : `Contagem parcial: pelo menos ${result.minimumKnownCount ?? result.knownLoadedCount ?? 0} chat(s).${partialReason ? ` Motivo: ${partialReason}` : ''}`;
+    writeStructuredResult(ui, result, { label });
+    return { exitCode: result.totalKnown ? EXIT.OK : EXIT.WARNINGS, result };
+  } finally {
+    await releaseCliClaimQuietly(parsed.flags, 'cli-chats-count-finished');
+  }
 };
 
 const runExport = async (parsed, streams = {}) => {
@@ -1607,20 +1650,23 @@ const runExport = async (parsed, streams = {}) => {
 
   const ui = makeUi(flags, streams);
   warnTuiFallback(ui);
+  let initialJob = null;
+  let finalJob = null;
   try {
     if (ui.format !== 'json' && ui.format !== 'jsonl') {
       ui.stdout.write(`Conectando na bridge ${normalizeBridgeUrl(flags.bridgeUrl)}...\n`);
     }
     await ensureBridgeAvailable(flags, ui);
     await ensureReady(flags.bridgeUrl, flags, ui);
-    const initialJob = await startExportJob(flags.bridgeUrl, subcommand, flags);
-    const finalJob = await followJob(flags.bridgeUrl, initialJob, flags, ui);
-    closeTui(ui);
+    initialJob = await startExportJob(flags.bridgeUrl, subcommand, flags);
+    finalJob = await followJob(flags.bridgeUrl, initialJob, flags, ui);
     const result = emitResult(ui, finalJob);
     return { exitCode: exitCodeForJob(finalJob), result };
   } catch (err) {
-    closeTui(ui);
     throw err;
+  } finally {
+    await releaseCliClaimQuietly(flags, `cli-export-${subcommand || 'job'}-finished`, finalJob || initialJob);
+    closeTui(ui);
   }
 };
 

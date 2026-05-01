@@ -93,6 +93,10 @@ test('export all incompleto vira aviso em vez de sucesso silencioso', () => {
   assert.match(block, /Nao consegui confirmar que cheguei ao fim do historico do Gemini/);
   assert.match(block, /failures\.length > 0 \|\| job\.truncated \|\| job\.loadMoreTimedOut/);
   assert.match(block, /completed_with_errors/);
+  assert.match(source, /const autoReleaseTabClaimForJob = async/);
+  assert.match(source, /await autoReleaseTabClaimForJob\(job, `job-\$\{job\.status \|\| 'finished'\}`\)/);
+  assert.match(source, /tabClaimRelease/);
+  assert.match(source, /autoReleaseTabClaim/);
 });
 
 test('job status diferencia lote parcial de historico inteiro verificado', () => {

@@ -2874,6 +2874,29 @@ const releaseTabClaim = async (args = {}) => {
   };
 };
 
+const shouldAutoReleaseTabClaim = (args = {}) =>
+  args.autoReleaseClaim !== false && args.keepClaim !== true;
+
+const autoReleaseTabClaimForJob = async (job, reason) => {
+  if (!job?.autoReleaseTabClaim || !job.tabClaimId || job.tabClaimRelease) {
+    return job?.tabClaimRelease || null;
+  }
+  try {
+    job.tabClaimRelease = await releaseTabClaim({
+      claimId: job.tabClaimId,
+      reason,
+    });
+  } catch (err) {
+    job.tabClaimRelease = {
+      ok: false,
+      claimId: job.tabClaimId,
+      error: err?.message || String(err),
+      code: err?.code || null,
+    };
+  }
+  return job.tabClaimRelease;
+};
+
 const ensureTabClaimForJob = async (client, args = {}, label = 'GME Job') => {
   const sessionId = normalizeSessionId(args.sessionId || args._proxySessionId);
   const existingSessionClaim = claimForSession(sessionId);
@@ -5180,6 +5203,9 @@ const summarizeExportJob = (job) => ({
     : directChatsExportScope(job)),
   clientId: job.clientId,
   tabClaim: summarizeTabClaim(claimForClient(clients.get(job.clientId))),
+  autoReleaseTabClaim: job.autoReleaseTabClaim ?? null,
+  tabClaimId: job.tabClaimId || null,
+  tabClaimRelease: job.tabClaimRelease || null,
   outputDir: job.outputDir,
   createdAt: job.createdAt,
   updatedAt: job.updatedAt,
@@ -6200,6 +6226,18 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
         // A primeira escrita já deixou o status principal; esta só atualiza a métrica final.
       }
     }
+    await autoReleaseTabClaimForJob(job, `job-${job.status || 'finished'}`);
+    touchExportJob(job);
+    try {
+      if (job.reportFile) {
+        overwriteExportReport(
+          job.reportFile,
+          buildRecentChatsExportReport(job, client, successes, failures),
+        );
+      }
+    } catch {
+      // A liberação da claim é melhor esforço e não deve mascarar o resultado do job.
+    }
     broadcastRecentChatsJobProgress(job, client);
   }
 };
@@ -6227,12 +6265,16 @@ const startRecentChatsExportJob = (client, args = {}) => {
   const hasExplicitMaxChats = args.maxChats !== undefined || args.limit !== undefined;
   const skipExisting =
     typeof args.skipExisting === 'boolean' ? args.skipExisting : !hasExplicitMaxChats;
+  const activeClaim = claimForClient(client);
   const job = {
     jobId: randomUUID(),
     type: 'recent-chats-export',
     status: 'running',
     phase: 'queued',
     clientId: client.clientId,
+    autoReleaseTabClaim: shouldAutoReleaseTabClaim(args),
+    tabClaimId: activeClaim?.claimId || args.claimId || null,
+    tabClaimRelease: null,
     outputDir,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -6437,6 +6479,18 @@ const runDirectChatsExportJob = async (job, client, args = {}) => {
         // A primeira escrita já deixou o status principal; esta só atualiza a métrica final.
       }
     }
+    await autoReleaseTabClaimForJob(job, `job-${job.status || 'finished'}`);
+    touchExportJob(job);
+    try {
+      if (job.reportFile) {
+        overwriteExportReport(
+          job.reportFile,
+          buildDirectChatsExportReport(job, client, successes, failures),
+        );
+      }
+    } catch {
+      // A liberação da claim é melhor esforço e não deve mascarar o resultado do job.
+    }
     broadcastDirectChatsJobProgress(job, client);
   }
 };
@@ -6455,12 +6509,16 @@ const startDirectChatsExportJob = (client, args = {}) => {
     0,
     Math.min(30_000, Number(args.delayMs ?? DIRECT_REEXPORT_DELAY_MS)),
   );
+  const activeClaim = claimForClient(client);
   const job = {
     jobId: randomUUID(),
     type: 'direct-chats-export',
     status: 'running',
     phase: 'queued',
     clientId: client.clientId,
+    autoReleaseTabClaim: shouldAutoReleaseTabClaim(args),
+    tabClaimId: activeClaim?.claimId || args.claimId || null,
+    tabClaimRelease: null,
     outputDir,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -7765,8 +7823,19 @@ const legacyRawTools = [
     },
     call: async (args = {}) => {
       const client = requireNotebookClient(args);
-      await ensureTabClaimForJob(client, args, 'GME Notebook');
-      const result = await exportNotebookForClient(client, args);
+      const claim = await ensureTabClaimForJob(client, args, 'GME Notebook');
+      let result = null;
+      try {
+        result = await exportNotebookForClient(client, args);
+      } finally {
+        if (shouldAutoReleaseTabClaim(args) && claim?.claimId) {
+          const tabClaimRelease = await releaseTabClaim({
+            claimId: claim.claimId,
+            reason: 'notebook-export-finished',
+          });
+          if (result) result.tabClaimRelease = tabClaimRelease;
+        }
+      }
       return toolTextResult(result, { isError: result.failureCount > 0 });
     },
   },
@@ -9233,6 +9302,7 @@ const bridgeServer = createServer(async (req, res) => {
           loadMoreBrowserTimeoutMs: url.searchParams.get('loadMoreBrowserTimeoutMs') || undefined,
           loadMoreTimeoutMs: url.searchParams.get('loadMoreTimeoutMs') || undefined,
           skipExisting: parseOptionalBoolean(url.searchParams.get('skipExisting')),
+          autoReleaseClaim: parseOptionalBoolean(url.searchParams.get('autoReleaseClaim')),
         }),
       );
     } catch (err) {
@@ -9270,6 +9340,7 @@ const bridgeServer = createServer(async (req, res) => {
           loadMoreBrowserTimeoutMs: url.searchParams.get('loadMoreBrowserTimeoutMs') || undefined,
           loadMoreTimeoutMs: url.searchParams.get('loadMoreTimeoutMs') || undefined,
           skipExisting: true,
+          autoReleaseClaim: parseOptionalBoolean(url.searchParams.get('autoReleaseClaim')),
         }),
       );
     } catch (err) {
@@ -9305,6 +9376,7 @@ const bridgeServer = createServer(async (req, res) => {
           loadMoreBrowserTimeoutMs: url.searchParams.get('loadMoreBrowserTimeoutMs') || undefined,
           loadMoreTimeoutMs: url.searchParams.get('loadMoreTimeoutMs') || undefined,
           skipExisting: true,
+          autoReleaseClaim: parseOptionalBoolean(url.searchParams.get('autoReleaseClaim')),
         }),
       );
     } catch (err) {
@@ -9343,6 +9415,9 @@ const bridgeServer = createServer(async (req, res) => {
           chatIds,
           items,
           delayMs: body.delayMs || url.searchParams.get('delayMs') || undefined,
+          autoReleaseClaim: parseOptionalBoolean(
+            body.autoReleaseClaim ?? url.searchParams.get('autoReleaseClaim'),
+          ),
         }),
       );
     } catch (err) {
@@ -9456,10 +9531,22 @@ const bridgeServer = createServer(async (req, res) => {
           ? Number(url.searchParams.get('startIndex'))
           : undefined,
         limit: url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : undefined,
+        autoReleaseClaim: parseOptionalBoolean(url.searchParams.get('autoReleaseClaim')),
       };
       const client = requireNotebookClient(args);
-      await ensureTabClaimForJob(client, args, 'GME Notebook');
-      const result = await exportNotebookForClient(client, args);
+      const claim = await ensureTabClaimForJob(client, args, 'GME Notebook');
+      let result = null;
+      try {
+        result = await exportNotebookForClient(client, args);
+      } finally {
+        if (shouldAutoReleaseTabClaim(args) && claim?.claimId) {
+          const tabClaimRelease = await releaseTabClaim({
+            claimId: claim.claimId,
+            reason: 'notebook-export-finished',
+          });
+          if (result) result.tabClaimRelease = tabClaimRelease;
+        }
+      }
       sendAgentJson(res, result.failureCount > 0 ? 207 : 200, result);
     } catch (err) {
       sendAgentJson(res, 503, { error: err.message });

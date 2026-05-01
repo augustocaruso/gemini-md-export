@@ -416,6 +416,117 @@ test('CLI chats count nao transforma contagem parcial em total', async () => {
   });
 });
 
+test('CLI chats count libera claim explicita sem imprimir JSON extra', async () => {
+  await withServer((req, res, url) => {
+    if (url.pathname === '/agent/ready') {
+      sendJson(res, 200, {
+        ready: true,
+        mode: 'hot',
+        connectedClientCount: 1,
+        selectableTabCount: 1,
+        commandReadyClientCount: 1,
+      });
+      return;
+    }
+    if (url.pathname === '/agent/recent-chats') {
+      sendJson(res, 200, {
+        ok: true,
+        countStatus: 'complete',
+        countIsTotal: true,
+        totalKnown: true,
+        totalCount: 277,
+        knownLoadedCount: 277,
+        minimumKnownCount: 277,
+        conversations: [],
+      });
+      return;
+    }
+    if (url.pathname === '/agent/release-tab') {
+      sendJson(res, 200, {
+        ok: true,
+        released: {
+          claimId: url.searchParams.get('claimId'),
+        },
+      });
+      return;
+    }
+    sendJson(res, 404, { error: `not found: ${url.pathname}` });
+  }, async (bridgeUrl, requests) => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+    const run = await main(
+      ['chats', 'count', '--bridge-url', bridgeUrl, '--claim-id', 'claim-123', '--plain'],
+      { stdout, stderr },
+    );
+
+    assert.equal(run.exitCode, 0);
+    assert.match(stdout.text(), /Total confirmado: 277 chat\(s\)/);
+    assert.equal(
+      stdout.text().split(/\r?\n/).filter((line) => line.startsWith('RESULT_JSON ')).length,
+      1,
+      'release silencioso nao deve emitir segundo RESULT_JSON',
+    );
+    const releaseRequest = requests.find((item) => item.pathname === '/agent/release-tab');
+    assert.ok(releaseRequest, 'deve liberar a claim depois da contagem');
+    assert.equal(releaseRequest.searchParams.get('claimId'), 'claim-123');
+    assert.equal(releaseRequest.searchParams.get('reason'), 'cli-chats-count-finished');
+    assert.equal(stderr.text(), '');
+  });
+});
+
+test('CLI --keep-claim preserva claim explicita', async () => {
+  await withServer((req, res, url) => {
+    if (url.pathname === '/agent/ready') {
+      sendJson(res, 200, {
+        ready: true,
+        mode: 'hot',
+        connectedClientCount: 1,
+        selectableTabCount: 1,
+        commandReadyClientCount: 1,
+      });
+      return;
+    }
+    if (url.pathname === '/agent/recent-chats') {
+      sendJson(res, 200, {
+        ok: true,
+        countStatus: 'complete',
+        countIsTotal: true,
+        totalKnown: true,
+        totalCount: 277,
+        knownLoadedCount: 277,
+        minimumKnownCount: 277,
+        conversations: [],
+      });
+      return;
+    }
+    if (url.pathname === '/agent/release-tab') {
+      sendJson(res, 500, { ok: false, error: 'nao deveria liberar' });
+      return;
+    }
+    sendJson(res, 404, { error: `not found: ${url.pathname}` });
+  }, async (bridgeUrl, requests) => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+    const run = await main(
+      [
+        'chats',
+        'count',
+        '--bridge-url',
+        bridgeUrl,
+        '--claim-id',
+        'claim-123',
+        '--keep-claim',
+        '--plain',
+      ],
+      { stdout, stderr },
+    );
+
+    assert.equal(run.exitCode, 0);
+    assert.equal(requests.some((item) => item.pathname === '/agent/release-tab'), false);
+    assert.equal(stderr.text(), '');
+  });
+});
+
 test('CLI sync --plain emite progresso estavel e RESULT_JSON final', async () => {
   await withServer(mockSyncServer(), async (bridgeUrl, requests) => {
     const stdout = captureStream();
