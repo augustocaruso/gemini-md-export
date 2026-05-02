@@ -19,6 +19,9 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   const guardPath = resolve(extensionDir, 'src', 'chrome-extension-guard.mjs');
   const browserLaunchPath = resolve(extensionDir, 'src', 'browser-launch.mjs');
   const jobProgressBroadcastPath = resolve(extensionDir, 'src', 'job-progress-broadcast.mjs');
+  const jobTracePath = resolve(extensionDir, 'src', 'job-trace.mjs');
+  const tabSessionPath = resolve(extensionDir, 'src', 'tab-session.mjs');
+  const timeoutDiagnosticsPath = resolve(extensionDir, 'src', 'timeout-diagnostics.mjs');
   const nativeHostPath = resolve(extensionDir, 'src', 'native-host.mjs');
   const bridgeVersionPath = resolve(extensionDir, 'bridge-version.json');
   const browserManifestPath = resolve(extensionDir, 'browser-extension', 'manifest.json');
@@ -63,6 +66,9 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.equal(existsSync(guardPath), true);
   assert.equal(existsSync(browserLaunchPath), true);
   assert.equal(existsSync(jobProgressBroadcastPath), true);
+  assert.equal(existsSync(jobTracePath), true);
+  assert.equal(existsSync(tabSessionPath), true);
+  assert.equal(existsSync(timeoutDiagnosticsPath), true);
   assert.equal(existsSync(nativeHostPath), true);
   assert.equal(existsSync(bridgeVersionPath), true);
   assert.equal(existsSync(browserManifestPath), true);

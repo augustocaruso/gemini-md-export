@@ -318,6 +318,18 @@ cpSync(
   resolve(ROOT, 'src', 'job-progress-broadcast.mjs'),
   resolve(geminiCliExtensionDir, 'src', 'job-progress-broadcast.mjs'),
 );
+cpSync(
+  resolve(ROOT, 'src', 'job-trace.mjs'),
+  resolve(geminiCliExtensionDir, 'src', 'job-trace.mjs'),
+);
+cpSync(
+  resolve(ROOT, 'src', 'tab-session.mjs'),
+  resolve(geminiCliExtensionDir, 'src', 'tab-session.mjs'),
+);
+cpSync(
+  resolve(ROOT, 'src', 'timeout-diagnostics.mjs'),
+  resolve(geminiCliExtensionDir, 'src', 'timeout-diagnostics.mjs'),
+);
 cpSync(resolve(ROOT, 'src', 'native-host.mjs'), resolve(geminiCliExtensionDir, 'src', 'native-host.mjs'));
 if (existsSync(resolve(ROOT, 'native-messaging'))) {
   cpSync(

@@ -2088,7 +2088,7 @@ Obsidian.
 
 ## v0.8.22–v0.8.26 — Confiabilidade inspirada no Playwright
 
-Status: implementação inicial concluída em `0.8.26`.
+Status: implementação inicial concluída em `0.8.26`; empacotamento corrigido em `0.8.27`.
 
 Objetivo: parar de tratar o Gemini Web como "um content script esperto no DOM"
 e passar a tratá-lo como um alvo controlado por runtime, lifecycle, contratos
