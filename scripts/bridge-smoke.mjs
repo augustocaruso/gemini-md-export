@@ -16,6 +16,7 @@ const bridgeVersion = JSON.parse(readFileSync(resolve(ROOT, 'bridge-version.json
 
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_ORIGIN = 'https://gemini.google.com';
+const DEFAULT_EXTENSION_ORIGIN = 'chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 
 const parseArgs = (argv) => {
   const out = {
@@ -284,6 +285,34 @@ const runSmoke = async (options) => {
         },
       });
       if (!value.ok) throw new Error('heartbeat retornou ok=false');
+      return {
+        clientId: value.clientId,
+        transport: value.transport,
+        bridgeHealth: value.bridgeHealth,
+      };
+    });
+
+    await runCheck(checks, 'bridge_heartbeat_extension_origin', async () => {
+      const value = await requestJson(bridgeUrl, '/bridge/heartbeat', {
+        method: 'POST',
+        origin: DEFAULT_EXTENSION_ORIGIN,
+        timeoutMs: options.timeoutMs,
+        body: {
+          clientId,
+          extensionVersion: expectedChromeExtension.extensionVersion,
+          protocolVersion: expectedChromeExtension.protocolVersion,
+          buildStamp: expectedChromeExtension.buildStamp || 'smoke-test',
+          capabilities: ['snapshot', 'events'],
+          snapshotHash: 'smoke-empty',
+          commandPoll: { polling: true },
+          page: {
+            url: 'https://gemini.google.com/app',
+            title: 'Smoke test extension origin',
+            buildStamp: expectedChromeExtension.buildStamp || 'smoke-test',
+          },
+        },
+      });
+      if (!value.ok) throw new Error('heartbeat com origem da extensao retornou ok=false');
       return {
         clientId: value.clientId,
         transport: value.transport,

@@ -1848,6 +1848,29 @@ Critérios de aceite:
 - `doctor --plain` sem `--browser` não deve diagnosticar Chrome/Default por
   reflexo se a extensão só existe no Dia.
 
+## v0.8.18 — Hotfix de origem `chrome-extension://` no bridge
+
+Status: implementada na versão `0.8.18`.
+
+Objetivo: corrigir a falha em que o Dia/Chromium deixava o service worker vivo,
+mas nenhuma aba Gemini aparecia como cliente porque o heartbeat do content
+script chegava ao bridge com `Origin: chrome-extension://<id>` e era rejeitado
+por CORS/origin guard.
+
+Entregas:
+
+- Bridge passa a aceitar `https://gemini.google.com` e origens Chromium
+  `chrome-extension://<id>` com ID no formato válido.
+- Smoke test cobre heartbeat com origem da página e com origem da extensão.
+- Mantém a proteção contra sites arbitrários chamando endpoints de bridge.
+
+Critérios de aceite:
+
+- `POST /bridge/heartbeat` com origem `chrome-extension://<id>` retorna sucesso
+  para a extensão, permitindo que abas Dia reapareçam em `/agent/clients`.
+- `doctor --plain` deve sair de `no_connected_clients` quando uma aba Gemini
+  real estiver carregada e a extensão estiver ativa.
+
 ## v0.9.0 — Spike condicional de `debugger`/CDP
 
 Status: possibilidade técnica de alto poder, no mesmo bloco de avaliação de

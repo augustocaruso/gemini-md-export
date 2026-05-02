@@ -146,7 +146,8 @@ const BRIDGE_ASSET_HOST_BACKOFF_MAX_MS = Math.max(
   BRIDGE_ASSET_HOST_BACKOFF_BASE_MS,
   Math.min(10 * 60_000, Number(process.env.GEMINI_MCP_ASSET_HOST_BACKOFF_MAX_MS || 30_000)),
 );
-const ALLOWED_BRIDGE_ORIGIN = 'https://gemini.google.com';
+const ALLOWED_BRIDGE_PAGE_ORIGIN = 'https://gemini.google.com';
+const CHROMIUM_EXTENSION_ID_RE = /^[a-p]{32}$/;
 const RECENT_CHATS_CACHE_MAX_AGE_MS = Number(
   process.env.GEMINI_MCP_RECENT_CHATS_CACHE_MAX_AGE_MS || DEFAULT_RECENT_CHATS_CACHE_MAX_AGE_MS,
 );
@@ -1811,7 +1812,11 @@ const sendJson = (res, statusCode, payload) => {
 const isAllowedBridgeOrigin = (origin) => {
   if (!origin) return true;
   try {
-    return new URL(origin).origin === ALLOWED_BRIDGE_ORIGIN;
+    const parsed = new URL(origin);
+    if (parsed.origin === ALLOWED_BRIDGE_PAGE_ORIGIN) return true;
+    // Dia/Chromium podem emitir fetch de content script com Origin
+    // chrome-extension://<id>; sem isto o heartbeat morre antes da aba aparecer.
+    return parsed.protocol === 'chrome-extension:' && CHROMIUM_EXTENSION_ID_RE.test(parsed.hostname);
   } catch {
     return false;
   }

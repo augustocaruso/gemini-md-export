@@ -40,6 +40,9 @@ test('MCP protocolo v2 usa SSE para comandos e snapshot separado', () => {
     contentSource.match(/const buildBridgeHeartbeatPayload = \(\) => \(\{[\s\S]*?\n  \}\);/)?.[0] || '',
     /conversations:/,
   );
+  assert.match(source, /ALLOWED_BRIDGE_PAGE_ORIGIN = 'https:\/\/gemini\.google\.com'/);
+  assert.match(source, /parsed\.protocol === 'chrome-extension:'/);
+  assert.match(source, /CHROMIUM_EXTENSION_ID_RE\.test\(parsed\.hostname\)/);
 });
 
 test('browser_status expõe saúde da bridge MCP/Chrome', () => {
