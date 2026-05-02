@@ -1933,6 +1933,7 @@ const clientSelectorFromSearchParams = (searchParams) => ({
   claimId: searchParams.get('claimId') || undefined,
   sessionId: searchParams.get('sessionId') || undefined,
   preferActive: parseOptionalBoolean(searchParams.get('preferActive')),
+  preferRecent: parseOptionalBoolean(searchParams.get('preferRecent')),
 });
 
 const getLiveClients = () => {
@@ -2233,6 +2234,42 @@ const removeTabClaim = (claimId) => {
     sessionClaims.delete(claim.sessionId);
   }
   return claim;
+};
+
+const releaseTabClaimVisualByTabId = async ({
+  tabId,
+  claimId = null,
+  reason = 'mcp-release-by-tab-id',
+} = {}) => {
+  const normalizedTabId = normalizeTabId(tabId);
+  if (normalizedTabId === null) return null;
+  let visual = null;
+  const controllers = getSelectableGeminiClients();
+  for (const controller of controllers) {
+    try {
+      visual = await enqueueCommand(
+        controller.clientId,
+        'release-tab-claim-by-tab-id',
+        {
+          tabId: normalizedTabId,
+          claimId,
+          reason,
+        },
+        {
+          timeoutMs: 8000,
+          dispatchTimeoutMs: 4000,
+        },
+      );
+      if (visual?.ok) break;
+    } catch (err) {
+      visual = {
+        ok: false,
+        error: err?.message || String(err),
+        code: err?.code || null,
+      };
+    }
+  }
+  return visual;
 };
 
 const ambiguousTabsError = (liveClients, selector = {}) => {
@@ -2845,6 +2882,21 @@ const selectClaimableClient = async (args = {}) => {
     liveClients = getSelectableGeminiClients();
   }
 
+  if (args.preferActive === true) {
+    const activeClients = liveClients.filter((client) => client.isActiveTab === true);
+    if (activeClients.length === 1) return activeClients[0];
+  }
+
+  if (args.preferRecent === true) {
+    const candidates = [...liveClients].sort(
+      (a, b) =>
+        recentConversationCountForClient(b) - recentConversationCountForClient(a) ||
+        Number(b.isActiveTab === true) - Number(a.isActiveTab === true) ||
+        b.lastSeenAt - a.lastSeenAt,
+    );
+    if (candidates[0]) return candidates[0];
+  }
+
   if (Number.isInteger(Number(args.index))) {
     const index = Number(args.index);
     if (index < 1 || index > liveClients.length) {
@@ -2997,6 +3049,18 @@ const releaseTabClaim = async (args = {}) => {
   const sessionId = normalizeSessionId(args.sessionId || args._proxySessionId);
   const claimId = args.claimId || sessionClaims.get(sessionId);
   if (!claimId) {
+    const visual = await releaseTabClaimVisualByTabId({
+      tabId: args.tabId,
+      reason: args.reason || 'mcp-release-without-server-claim',
+    });
+    if (visual?.ok) {
+      return {
+        ok: true,
+        released: null,
+        visual,
+        client: null,
+      };
+    }
     return {
       ok: false,
       reason: 'no-claim-for-session',
@@ -3008,6 +3072,21 @@ const releaseTabClaim = async (args = {}) => {
   const claim = tabClaims.get(claimId);
   if (!claim) {
     sessionClaims.delete(sessionId);
+    const visual = await releaseTabClaimVisualByTabId({
+      tabId: args.tabId,
+      claimId,
+      reason: args.reason || 'mcp-release-missing-server-claim',
+    });
+    if (visual?.ok) {
+      return {
+        ok: true,
+        released: null,
+        claimId,
+        sessionId,
+        visual,
+        client: null,
+      };
+    }
     return {
       ok: false,
       reason: 'claim-not-found',
@@ -3019,6 +3098,22 @@ const releaseTabClaim = async (args = {}) => {
 
   let visual = null;
   let client = liveClientForClaim(claim);
+  if (!client && args.tabId !== undefined && args.tabId !== null) {
+    visual = await releaseTabClaimVisualByTabId({
+      tabId: args.tabId,
+      claimId,
+      reason: args.reason || 'mcp-release-stale-claim-by-tab-id',
+    });
+    if (visual?.ok) {
+      const removed = removeTabClaim(claimId);
+      return {
+        ok: true,
+        released: summarizeTabClaim(removed),
+        visual,
+        client: null,
+      };
+    }
+  }
   if (!client) {
     const recoveredClient = await waitForContinuationClient(
       {
@@ -3059,33 +3154,11 @@ const releaseTabClaim = async (args = {}) => {
     }
   }
   if (visual?.ok !== true && claim.tabId !== null && claim.tabId !== undefined) {
-    const controllers = getSelectableGeminiClients().filter(
-      (candidate) => candidate.clientId !== client?.clientId,
-    );
-    for (const controller of controllers) {
-      try {
-        visual = await enqueueCommand(
-          controller.clientId,
-          'release-tab-claim-by-tab-id',
-          {
-            tabId: claim.tabId,
-            claimId,
-            reason: args.reason || 'mcp-release-by-tab-id',
-          },
-          {
-            timeoutMs: 8000,
-            dispatchTimeoutMs: 4000,
-          },
-        );
-        if (visual?.ok) break;
-      } catch (err) {
-        visual = {
-          ok: false,
-          error: err?.message || String(err),
-          code: err?.code || null,
-        };
-      }
-    }
+    visual = await releaseTabClaimVisualByTabId({
+      tabId: claim.tabId,
+      claimId,
+      reason: args.reason || 'mcp-release-by-tab-id',
+    });
   }
 
   const removed = removeTabClaim(claimId);
@@ -9898,7 +9971,7 @@ const bridgeServer = createServer(async (req, res) => {
           if (args.countOnly === true && !temporaryClaimArgs.ttlMs) {
             temporaryClaimArgs.ttlMs = Math.max(
               120_000,
-              Math.min(15 * 60_000, Number(args.loadMoreTimeoutMs || COMMAND_TIMEOUT_MS) + 60_000),
+              Math.min(30 * 60_000, Number(args.loadMoreTimeoutMs || COMMAND_TIMEOUT_MS) + 60_000),
             );
           }
           claim = await ensureTabClaimForJob(

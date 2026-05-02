@@ -329,6 +329,17 @@ test('CLI chats count carrega ate o fim sem despejar lista no chat', async () =>
       });
       return;
     }
+    if (url.pathname === '/agent/tabs' && url.searchParams.get('action') === 'claim') {
+      sendJson(res, 200, {
+        ok: true,
+        claim: {
+          claimId: 'count-claim',
+          tabId: 101,
+          label: 'GME Count',
+        },
+      });
+      return;
+    }
     if (url.pathname === '/agent/recent-chats') {
       sendJson(res, 200, {
         ok: true,
@@ -346,6 +357,16 @@ test('CLI chats count carrega ate o fim sem despejar lista no chat', async () =>
           canLoadMore: false,
         },
         conversations: [],
+      });
+      return;
+    }
+    if (url.pathname === '/agent/release-tab') {
+      sendJson(res, 200, {
+        ok: true,
+        released: {
+          claimId: url.searchParams.get('claimId'),
+          tabId: Number(url.searchParams.get('tabId')),
+        },
       });
       return;
     }
@@ -376,10 +397,20 @@ test('CLI chats count carrega ate o fim sem despejar lista no chat', async () =>
     assert.equal(countRequest.searchParams.get('untilEnd'), 'true');
     assert.equal(countRequest.searchParams.get('preferActive'), 'true');
     assert.equal(countRequest.searchParams.get('limit'), '1');
-    assert.equal(countRequest.searchParams.get('loadMoreTimeoutMs'), '600000');
+    assert.equal(countRequest.searchParams.get('loadMoreTimeoutMs'), '900000');
     assert.equal(countRequest.searchParams.get('maxNoGrowthRounds'), '8');
     assert.equal(countRequest.searchParams.get('loadMoreBrowserRounds'), '12');
     assert.equal(countRequest.searchParams.get('loadMoreBrowserTimeoutMs'), '30000');
+    assert.equal(countRequest.searchParams.get('claimId'), 'count-claim');
+    assert.equal(countRequest.searchParams.get('tabId'), '101');
+    assert.equal(countRequest.searchParams.get('autoClaim'), 'false');
+    assert.equal(countRequest.searchParams.get('autoReleaseClaim'), 'false');
+    const claimRequest = requests.find((item) => item.pathname === '/agent/tabs');
+    assert.equal(claimRequest.searchParams.get('preferRecent'), 'true');
+    assert.equal(claimRequest.searchParams.get('openIfMissing'), 'false');
+    const releaseRequest = requests.find((item) => item.pathname === '/agent/release-tab');
+    assert.equal(releaseRequest.searchParams.get('claimId'), 'count-claim');
+    assert.equal(releaseRequest.searchParams.get('tabId'), '101');
   });
 });
 
@@ -395,6 +426,17 @@ test('CLI chats count --result-json reativa RESULT_JSON explicitamente', async (
       });
       return;
     }
+    if (url.pathname === '/agent/tabs' && url.searchParams.get('action') === 'claim') {
+      sendJson(res, 200, {
+        ok: true,
+        claim: {
+          claimId: 'count-claim',
+          tabId: 101,
+          label: 'GME Count',
+        },
+      });
+      return;
+    }
     if (url.pathname === '/agent/recent-chats') {
       sendJson(res, 200, {
         ok: true,
@@ -406,6 +448,10 @@ test('CLI chats count --result-json reativa RESULT_JSON explicitamente', async (
         minimumKnownCount: 277,
         conversations: [],
       });
+      return;
+    }
+    if (url.pathname === '/agent/release-tab') {
+      sendJson(res, 200, { ok: true, released: { claimId: url.searchParams.get('claimId') } });
       return;
     }
     sendJson(res, 404, { error: `not found: ${url.pathname}` });
@@ -434,6 +480,17 @@ test('CLI chats count nao transforma contagem parcial em total', async () => {
       });
       return;
     }
+    if (url.pathname === '/agent/tabs' && url.searchParams.get('action') === 'claim') {
+      sendJson(res, 200, {
+        ok: true,
+        claim: {
+          claimId: 'count-claim',
+          tabId: 101,
+          label: 'GME Count',
+        },
+      });
+      return;
+    }
     if (url.pathname === '/agent/recent-chats') {
       sendJson(res, 200, {
         ok: true,
@@ -452,6 +509,10 @@ test('CLI chats count nao transforma contagem parcial em total', async () => {
         },
         conversations: [],
       });
+      return;
+    }
+    if (url.pathname === '/agent/release-tab') {
+      sendJson(res, 200, { ok: true, released: { claimId: url.searchParams.get('claimId') } });
       return;
     }
     sendJson(res, 404, { error: `not found: ${url.pathname}` });
@@ -531,6 +592,60 @@ test('CLI chats count libera claim explicita sem imprimir JSON extra', async () 
     assert.ok(releaseRequest, 'deve liberar a claim depois da contagem');
     assert.equal(releaseRequest.searchParams.get('claimId'), 'claim-123');
     assert.equal(releaseRequest.searchParams.get('reason'), 'cli-chats-count-finished');
+    assert.equal(stderr.text(), '');
+  });
+});
+
+test('CLI chats count libera claim propria quando a bridge cai durante a contagem', async () => {
+  await withServer((req, res, url) => {
+    if (url.pathname === '/agent/ready') {
+      sendJson(res, 200, {
+        ready: true,
+        mode: 'hot',
+        connectedClientCount: 1,
+        selectableTabCount: 1,
+        commandReadyClientCount: 1,
+      });
+      return;
+    }
+    if (url.pathname === '/agent/tabs' && url.searchParams.get('action') === 'claim') {
+      sendJson(res, 200, {
+        ok: true,
+        claim: {
+          claimId: 'count-claim',
+          tabId: 101,
+          label: 'GME Count',
+        },
+      });
+      return;
+    }
+    if (url.pathname === '/agent/recent-chats') {
+      req.socket.destroy(new Error('simulated bridge drop'));
+      return;
+    }
+    if (url.pathname === '/agent/release-tab') {
+      sendJson(res, 200, {
+        ok: true,
+        released: {
+          claimId: url.searchParams.get('claimId'),
+          tabId: Number(url.searchParams.get('tabId')),
+        },
+      });
+      return;
+    }
+    sendJson(res, 404, { error: `not found: ${url.pathname}` });
+  }, async (bridgeUrl, requests) => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+    await assert.rejects(
+      () => main(['chats', 'count', '--bridge-url', bridgeUrl, '--plain'], { stdout, stderr }),
+      /Conexao com a bridge caiu antes da resposta/,
+    );
+
+    const releaseRequest = requests.find((item) => item.pathname === '/agent/release-tab');
+    assert.ok(releaseRequest, 'deve liberar a claim mesmo quando a contagem cai');
+    assert.equal(releaseRequest.searchParams.get('claimId'), 'count-claim');
+    assert.equal(releaseRequest.searchParams.get('tabId'), '101');
     assert.equal(stderr.text(), '');
   });
 });

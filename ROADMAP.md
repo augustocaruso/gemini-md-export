@@ -1871,6 +1871,41 @@ Critérios de aceite:
 - `doctor --plain` deve sair de `no_connected_clients` quando uma aba Gemini
   real estiver carregada e a extensão estiver ativa.
 
+## v0.8.19 — Hotfix de contagem longa e release da claim
+
+Status: implementada na versão `0.8.19`.
+
+Objetivo: tornar `gemini-md-export chats count --plain` resiliente ao caso real
+em que a contagem longa passa de 5 minutos, a conexão HTTP da CLI cai antes da
+resposta e o indicador visual da aba fica preso.
+
+Entregas:
+
+- A CLI deixa de usar `fetch`/Undici para requests longos ao bridge e passa a
+  usar `http.request`/`https.request` com timeout explícito do próprio comando.
+- `chats count` cria a claim visual pela CLI antes de iniciar o lazy-load,
+  reutiliza esse `claimId` na contagem e desliga `autoClaim`/`autoRelease` da
+  rota longa para não perder o identificador se a conexão cair.
+- A claim da contagem prefere a aba com mais histórico recente já conhecido, em
+  vez de escolher uma aba ativa vazia quando há várias abas Gemini abertas.
+- O timeout padrão da contagem sobe para 15 minutos, com TTL da claim maior que
+  a janela de contagem, para históricos grandes não morrerem perto do fim.
+- O `finally` da CLI libera a claim pelo `claimId` e pelo `tabId`, inclusive
+  quando a bridge cai durante a contagem.
+- O bridge aceita liberar visual por `tabId` mesmo quando a claim do servidor
+  já expirou ou sumiu, permitindo limpar Tab Group/badge órfão.
+- Erros de socket deixam de aparecer como `fetch failed`; a CLI reporta uma
+  falha curta de conexão com a bridge.
+
+Critérios de aceite:
+
+- Se `/agent/recent-chats` cair no meio da contagem, a CLI ainda chama
+  `/agent/release-tab` com `claimId` e `tabId`.
+- Contagens longas usam o timeout configurado da CLI, não o timeout interno de
+  5 minutos do cliente `fetch`.
+- `tabs release --claim-id ... --tab-id ...` consegue remover o indicador
+  visual mesmo se a claim server-side não existir mais.
+
 ## v0.9.0 — Spike condicional de `debugger`/CDP
 
 Status: possibilidade técnica de alto poder, no mesmo bloco de avaliação de

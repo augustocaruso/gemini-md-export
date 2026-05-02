@@ -2,6 +2,8 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
+import { request as httpRequest } from 'node:http';
+import { request as httpsRequest } from 'node:https';
 import { homedir } from 'node:os';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -19,7 +21,7 @@ const DEFAULT_READY_WAIT_MS = 30_000;
 const DEFAULT_READY_REQUEST_TIMEOUT_MS = 60_000;
 const DEFAULT_EXISTING_TAB_RECONNECT_GRACE_MS = 8_000;
 const DEFAULT_TIMEOUT_MS = 6 * 60 * 60 * 1000;
-const DEFAULT_COUNT_LOAD_MORE_TIMEOUT_MS = 10 * 60 * 1000;
+const DEFAULT_COUNT_LOAD_MORE_TIMEOUT_MS = 15 * 60 * 1000;
 const DEFAULT_COUNT_STATUS_INTERVAL_MS = 15_000;
 const DEFAULT_READY_STATUS_INTERVAL_MS = 15_000;
 const DEFAULT_COUNT_LOAD_MORE_BROWSER_TIMEOUT_MS = 30_000;
@@ -696,33 +698,75 @@ const loadMoreParamsFromFlags = (flags = {}) => ({
   loadMoreTimeoutMs: flags.loadMoreTimeoutMs,
 });
 
+const normalizeBridgeRequestError = (err) => {
+  const message = String(err?.message || '');
+  if (
+    err?.code === 'ECONNRESET' ||
+    err?.code === 'EPIPE' ||
+    /socket hang up|fetch failed|terminated/i.test(message)
+  ) {
+    const wrapped = new Error('Conexao com a bridge caiu antes da resposta.');
+    wrapped.code = 'bridge_connection_lost';
+    wrapped.cause = err;
+    return wrapped;
+  }
+  return err;
+};
+
 const requestJson = async (bridgeUrl, path, { timeoutMs = 15000, method = 'GET' } = {}) => {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(new URL(path, `${normalizeBridgeUrl(bridgeUrl)}/`), {
-      method,
-      signal: controller.signal,
-    });
-    const text = await response.text();
-    const json = text ? JSON.parse(text) : null;
-    if (!response.ok) {
-      const err = new Error(json?.error || `HTTP ${response.status}`);
-      err.statusCode = response.status;
-      err.data = json;
-      throw err;
-    }
-    return json;
-  } catch (err) {
-    if (err.name === 'AbortError') {
+  const url = new URL(path, `${normalizeBridgeUrl(bridgeUrl)}/`);
+  const transport = url.protocol === 'https:' ? httpsRequest : httpRequest;
+
+  return new Promise((resolveRequest, rejectRequest) => {
+    let settled = false;
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      fn(value);
+    };
+    const req = transport(
+      url,
+      {
+        method,
+        headers: {
+          accept: 'application/json',
+        },
+      },
+      (response) => {
+        let text = '';
+        response.setEncoding('utf8');
+        response.on('data', (chunk) => {
+          text += chunk;
+        });
+        response.on('error', (err) => finish(rejectRequest, normalizeBridgeRequestError(err)));
+        response.on('end', () => {
+          let json = null;
+          try {
+            json = text ? JSON.parse(text) : null;
+          } catch (err) {
+            finish(rejectRequest, err);
+            return;
+          }
+          if (response.statusCode < 200 || response.statusCode >= 300) {
+            const err = new Error(json?.error || `HTTP ${response.statusCode}`);
+            err.statusCode = response.statusCode;
+            err.data = json;
+            finish(rejectRequest, err);
+            return;
+          }
+          finish(resolveRequest, json);
+        });
+      },
+    );
+
+    req.setTimeout(timeoutMs, () => {
       const timeout = new Error(`Timeout falando com a bridge em ${timeoutMs}ms.`);
       timeout.code = 'bridge_timeout';
-      throw timeout;
-    }
-    throw err;
-  } finally {
-    clearTimeout(timer);
-  }
+      req.destroy(timeout);
+    });
+    req.on('error', (err) => finish(rejectRequest, normalizeBridgeRequestError(err)));
+    req.end();
+  });
 };
 
 const requestReadyStatus = async (bridgeUrl, flags, { waitMs = 0 } = {}) =>
@@ -1378,6 +1422,17 @@ const claimIdFromJob = (job = {}) => {
   return value.tabClaimId || value.tabClaim?.claimId || value.serverClaim?.claimId || value.claim?.claimId || null;
 };
 
+const tabIdFromClaimLike = (value = {}) => {
+  const source = value || {};
+  return (
+    source.tabId ??
+    source.tabClaim?.tabId ??
+    source.serverClaim?.tabId ??
+    source.claim?.tabId ??
+    null
+  );
+};
+
 const shouldReleaseCliClaim = (flags = {}, job = null) =>
   flags.autoReleaseClaim !== false && !!(flags.claimId || claimIdFromJob(job));
 
@@ -1385,22 +1440,46 @@ const releaseCliClaimQuietly = async (flags = {}, reason, job = null) => {
   if (!shouldReleaseCliClaim(flags, job)) return null;
   const claimId = flags.claimId || claimIdFromJob(job);
   if (!claimId) return null;
+  const tabId = flags.tabId ?? tabIdFromClaimLike(job);
   try {
     return await requestJson(
       flags.bridgeUrl,
       appendParams('/agent/release-tab', {
         claimId,
+        tabId,
         reason,
       }),
-      { timeoutMs: 8000 },
+      { timeoutMs: 45_000 },
     );
   } catch (err) {
     return {
       ok: false,
       claimId,
+      tabId,
       error: err?.message || String(err),
     };
   }
+};
+
+const claimCliTabForCount = async (flags = {}, countTimeoutMs) => {
+  if (flags.claimId || flags.autoReleaseClaim === false) return null;
+  const ttlMs = Math.max(120_000, Math.min(30 * 60_000, countTimeoutMs + 60_000));
+  return requestJson(
+    flags.bridgeUrl,
+    appendParams('/agent/tabs', {
+      action: 'claim',
+      clientId: flags.clientId,
+      tabId: flags.tabId,
+      index: flags.index,
+      preferRecent: true,
+      label: 'GME Count',
+      color: 'purple',
+      ttlMs,
+      openIfMissing: false,
+      allowReload: flags.allowReload,
+    }),
+    { timeoutMs: 20_000 },
+  );
 };
 
 const writeStructuredResult = (ui, result, { label = null, includeResultJson = true } = {}) => {
@@ -1763,7 +1842,19 @@ const runChats = async (parsed, streams = {}) => {
     DEFAULT_COUNT_STATUS_INTERVAL_MS,
     60_000,
   );
+  let countClaimResult = null;
+  let releaseFlags = { ...parsed.flags };
   try {
+    countClaimResult = await claimCliTabForCount(parsed.flags, countTimeoutMs);
+    if (countClaimResult?.claim?.claimId) {
+      releaseFlags = {
+        ...releaseFlags,
+        claimId: countClaimResult.claim.claimId,
+        tabId: countClaimResult.claim.tabId ?? releaseFlags.tabId,
+      };
+    }
+    const requestClaimId = parsed.flags.claimId || countClaimResult?.claim?.claimId || undefined;
+    const requestTabId = parsed.flags.tabId ?? countClaimResult?.claim?.tabId ?? undefined;
     const raw = await withWaitStatus(
       ui,
       {
@@ -1784,10 +1875,11 @@ const runChats = async (parsed, streams = {}) => {
             refresh: parsed.flags.refresh,
             ...countLoadMoreParams,
             loadMoreTimeoutMs: countTimeoutMs,
-            autoReleaseClaim: parsed.flags.autoReleaseClaim,
+            autoClaim: requestClaimId ? false : undefined,
+            autoReleaseClaim: requestClaimId ? false : parsed.flags.autoReleaseClaim,
             clientId: parsed.flags.clientId,
-            tabId: parsed.flags.tabId,
-            claimId: parsed.flags.claimId,
+            tabId: requestTabId,
+            claimId: requestClaimId,
           }),
           { timeoutMs: countTimeoutMs + 15_000 },
         ),
@@ -1803,7 +1895,7 @@ const runChats = async (parsed, streams = {}) => {
     });
     return { exitCode: result.totalKnown ? EXIT.OK : EXIT.WARNINGS, result };
   } finally {
-    await releaseCliClaimQuietly(parsed.flags, 'cli-chats-count-finished');
+    await releaseCliClaimQuietly(releaseFlags, 'cli-chats-count-finished', countClaimResult);
   }
 };
 
@@ -1984,7 +2076,9 @@ if (cliEntrypoint) {
           ? EXIT.USAGE
           : err.code === 'extension_unready'
             ? EXIT.EXTENSION_UNREADY
-            : err.code === 'bridge_timeout' || /fetch failed|ECONNREFUSED|Bridge/i.test(err.message)
+            : err.code === 'bridge_timeout' ||
+                err.code === 'bridge_connection_lost' ||
+                /fetch failed|ECONNREFUSED|Bridge/i.test(err.message)
               ? EXIT.BRIDGE_UNAVAILABLE
               : EXIT.JOB_FAILED;
       if (code === EXIT.USAGE) {
