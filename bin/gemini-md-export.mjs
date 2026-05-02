@@ -15,11 +15,12 @@ import {
 const DEFAULT_BRIDGE_URL = 'http://127.0.0.1:47283';
 const DEFAULT_POLL_MS = 1200;
 const DEFAULT_READY_WAIT_MS = 30_000;
-const DEFAULT_READY_REQUEST_TIMEOUT_MS = 15_000;
+const DEFAULT_READY_REQUEST_TIMEOUT_MS = 60_000;
 const DEFAULT_EXISTING_TAB_RECONNECT_GRACE_MS = 8_000;
 const DEFAULT_TIMEOUT_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_COUNT_LOAD_MORE_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_COUNT_STATUS_INTERVAL_MS = 15_000;
+const DEFAULT_READY_STATUS_INTERVAL_MS = 15_000;
 const DEFAULT_COUNT_LOAD_MORE_BROWSER_TIMEOUT_MS = 12_000;
 const DEFAULT_COUNT_LOAD_MORE_BROWSER_ROUNDS = 8;
 const DEFAULT_COUNT_MAX_NO_GROWTH_ROUNDS = 2;
@@ -714,7 +715,16 @@ const requestReadyStatus = async (bridgeUrl, flags, { waitMs = 0 } = {}) =>
       allowReload: flags.allowReload,
       clientId: flags.clientId,
     }),
-    { timeoutMs: Math.max(DEFAULT_READY_REQUEST_TIMEOUT_MS, waitMs + 5000) },
+    {
+      timeoutMs: Math.max(
+        nonNegativeIntEnv(
+          process.env.GEMINI_MD_EXPORT_READY_REQUEST_TIMEOUT_MS,
+          DEFAULT_READY_REQUEST_TIMEOUT_MS,
+          5 * 60_000,
+        ),
+        waitMs + 15_000,
+      ),
+    },
   );
 
 const packageRoot = () => resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -1227,7 +1237,20 @@ const readyWithCliWake = async (bridgeUrl, flags, ui) => {
 };
 
 const ensureReady = async (bridgeUrl, flags, ui) => {
-  const ready = await readyWithCliWake(bridgeUrl, flags, ui);
+  const ready = await withWaitStatus(
+    ui,
+    {
+      message: 'Verificando Gemini Web e extensao do navegador.',
+      intervalMs: nonNegativeIntEnv(
+        process.env.GEMINI_MD_EXPORT_READY_STATUS_INTERVAL_MS,
+        DEFAULT_READY_STATUS_INTERVAL_MS,
+        60_000,
+      ),
+      intervalMessage: (elapsedMs) =>
+        `Ainda verificando Gemini Web... ${formatDuration(elapsedMs)} decorridos; sem fallback MCP.`,
+    },
+    () => readyWithCliWake(bridgeUrl, flags, ui),
+  );
   if (ready.ready === true) return ready;
   if (ui.format !== 'json' && ui.format !== 'jsonl') {
     ui.stderr.write(

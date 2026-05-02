@@ -135,6 +135,8 @@ Do not run `cleanup stale-processes` before count/export. It creates noisy
 process JSON and is diagnostic-only. After a count/export timeout, do not
 suggest `kill <pid>`; report the timeout plainly and wait for the user's next
 instruction.
+Do not ask whether to run diagnostics immediately after that timeout. The next
+step must come from the user explicitly.
 
 MCP now enforces this: `gemini_chats` count/download returns a short
 `use_cli_only` refusal, and `gemini_ready`/`gemini_tabs`/`gemini_chats` require

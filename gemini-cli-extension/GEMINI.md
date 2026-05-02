@@ -110,6 +110,9 @@ and exits idle bridges unless `--no-exit-when-idle` is set.
   Cleanup is diagnostic-only and is not a recovery step for "quantos chats" or
   "baixe conversas". Do not recommend `kill <pid>` as a next step after a CLI
   timeout.
+- After a CLI timeout, do not ask "quer que eu rode diagnostico agora?". Stop
+  with the concise failure; diagnostics only happen if the user's next message
+  explicitly asks for them.
 - Do not ask for manual Chrome extension reload before trying
   `gemini_ready { "action": "status", "diagnostic": true, "selfHeal": true, "allowReload": true }`,
   unless the loaded extension is too old to support self-heal.

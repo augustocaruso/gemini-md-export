@@ -1492,8 +1492,11 @@ const hasCliCountOrExportFailure = (value) => {
   return CLI_FAILURE_RE.test(text) && CLI_USER_FACING_RE.test(text);
 };
 
-const analyzeToolResponse = (response) => {
-  const candidates = responseCandidates(response);
+const analyzeToolResponse = (response, toolInput = {}) => {
+  const candidates = responseCandidates({
+    toolInput,
+    response,
+  });
   let mediaFailureCount = null;
   let mediaFileCount = null;
   let mediaWarning = false;
@@ -1523,8 +1526,9 @@ const analyzeToolResponse = (response) => {
 
 const afterTool = (input) => {
   const toolName = getToolName(input);
+  const toolInput = getToolInput(input);
   const response = getToolResponse(input);
-  const analysis = analyzeToolResponse(response);
+  const analysis = analyzeToolResponse(response, toolInput);
 
   const notes = [];
   if (analysis.mediaFailureCount > 0) {
@@ -1544,7 +1548,7 @@ const afterTool = (input) => {
   }
   if (analysis.cliCountOrExportFailure) {
     notes.push(
-      'A CLI gemini-md-export falhou no caminho de contagem/exportacao. Pare aqui e responda a falha curta ao usuario; nao chame gemini_ready, gemini_tabs, gemini_chats nem gemini_support como fallback, nao rode cleanup stale-processes e nao recomende kill/pkill/taskkill, a menos que o usuario peca diagnostico explicitamente depois da falha.',
+      'A CLI gemini-md-export falhou no caminho de contagem/exportacao. Pare aqui e responda a falha curta ao usuario; nao chame gemini_ready, gemini_tabs, gemini_chats nem gemini_support como fallback, nao rode cleanup stale-processes, nao recomende kill/pkill/taskkill e nao pergunte se deve rodar diagnostico agora. Diagnostico so entra se o usuario pedir explicitamente depois da falha.',
     );
   }
 

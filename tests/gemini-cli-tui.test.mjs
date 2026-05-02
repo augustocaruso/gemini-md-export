@@ -11,6 +11,13 @@ import { main } from '../bin/gemini-md-export.mjs';
 
 const ROOT = resolve(import.meta.dirname, '..');
 
+test('CLI usa timeout honesto e status visivel para readiness lenta', () => {
+  const source = readFileSync(resolve(ROOT, 'bin', 'gemini-md-export.mjs'), 'utf-8');
+  assert.match(source, /const DEFAULT_READY_REQUEST_TIMEOUT_MS = 60_000/);
+  assert.match(source, /process\.env\.GEMINI_MD_EXPORT_READY_REQUEST_TIMEOUT_MS/);
+  assert.match(source, /Ainda verificando Gemini Web\.\.\. \$\{formatDuration\(elapsedMs\)\} decorridos; sem fallback MCP/);
+});
+
 const captureStream = ({ isTTY = false, columns = 88 } = {}) => {
   let text = '';
   return {

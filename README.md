@@ -341,6 +341,8 @@ fallback de contagem/exportação; diagnóstico e cleanup de processos só entra
 quando o usuário pedir diagnóstico explicitamente.
 Não rode `cleanup stale-processes` antes de tentar contar/exportar, e não
 recomende `kill <pid>` depois de timeout da CLI.
+Depois de timeout da CLI, também não pergunte se deve rodar diagnóstico; pare
+na falha curta e espere pedido explícito do usuário.
 
 Exports longos gravam relatório JSON incremental. Se
 `gemini-md-export export recent`, `export missing` ou `sync` for interrompido,

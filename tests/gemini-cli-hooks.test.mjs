@@ -296,15 +296,19 @@ test('AfterTool de shell manda parar depois de falha da CLI', () => {
   const output = runHook('after-tool', {
     hook_event_name: 'AfterTool',
     tool_name: 'run_shell_command',
+    tool_input: {
+      command:
+        'node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" chats count --plain',
+    },
     tool_response: {
-      stdout:
-        'node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" chats count --plain\nTimeout falando com a bridge em 5000ms.',
+      stdout: 'Conectando na bridge http://127.0.0.1:47283...\nTimeout falando com a bridge em 15000ms.',
     },
   });
 
   assert.equal(output.suppressOutput, true);
   assert.match(output.hookSpecificOutput.additionalContext, /Pare aqui/);
   assert.match(output.hookSpecificOutput.additionalContext, /nao chame gemini_ready/);
+  assert.match(output.hookSpecificOutput.additionalContext, /nao pergunte se deve rodar diagnostico agora/);
   assert.doesNotMatch(output.hookSpecificOutput.additionalContext, /cheque gemini_ready/);
 });
 
