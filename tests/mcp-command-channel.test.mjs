@@ -155,6 +155,8 @@ test('MCP implementa afinidade confiável por claim de aba', () => {
   assert.match(backgroundSource, /chrome\.alarms\.create/);
   assert.match(backgroundSource, /chrome\.alarms\?\.onAlarm/);
   assert.match(backgroundSource, /restoreTabClaimExpiryAlarms/);
+  assert.match(backgroundSource, /tab-claim-expiry-watch/);
+  assert.match(backgroundSource, /ensureOffscreenDocument\(\{\s*reason: 'tab-claim-expiry-watch'/);
   assert.match(backgroundSource, /looksLikeManagedClaimGroupTitle/);
   assert.match(backgroundSource, /releaseTrackedTabClaimByTabId/);
   assert.match(backgroundSource, /chrome\.tabs\.group/);
@@ -165,7 +167,7 @@ test('MCP implementa afinidade confiável por claim de aba', () => {
   assert.match(backgroundSource, /chrome\.runtime\.onInstalled\.addListener/);
   assert.match(backgroundSource, /message\?\.type === 'RELOAD_SELF'/);
   assert.match(buildSource, /'tabGroups'/);
-  assert.match(buildSource, /'alarms'/);
+  assert.doesNotMatch(buildSource, /'alarms'/);
 });
 
 test('browser_status diagnostica e tenta self-heal sem depender do guard wrapper', () => {

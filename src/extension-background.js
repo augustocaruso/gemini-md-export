@@ -235,6 +235,13 @@ const scheduleTabClaimExpiry = (tabId, claim = {}) => {
   if (!Number.isFinite(expiresAt)) return;
   scheduleTabClaimExpiryAlarm(tabId, expiresAt);
   const delayMs = Math.max(0, expiresAt - Date.now());
+  ensureOffscreenDocument({
+    reason: 'tab-claim-expiry-watch',
+    idleCloseMs: Math.min(15 * 60_000, Math.max(OFFSCREEN_IDLE_CLOSE_MS, delayMs + 30_000)),
+  }).catch(() => {
+    // Offscreen é reforço de confiabilidade; o timer normal e o release
+    // explícito continuam sendo o caminho principal.
+  });
   const timer = setTimeout(() => {
     tabClaimExpiryTimers.delete(String(tabId));
     releaseTrackedTabClaimByTabId(tabId, {

@@ -81,6 +81,51 @@ test('diagnostico local encontra extensao e native host no Dia', async () => {
   }
 });
 
+test('diagnostico local sem browser explicito prefere perfil com extensao carregada', async () => {
+  const home = await mkdtemp(resolve(tmpdir(), 'gme-auto-doctor-'));
+  try {
+    const packageRoot = resolve(home, 'pkg');
+    const extensionPath = resolve(packageRoot, 'browser-extension');
+    mkdirSync(extensionPath, { recursive: true });
+    writeJson(resolve(extensionPath, 'manifest.json'), {
+      manifest_version: 3,
+      name: 'Gemini Chat -> Markdown Export',
+      version: '0.8.16',
+    });
+    writeJson(
+      securePreferencesPath({
+        browser: 'dia',
+        home,
+        platform: 'darwin',
+        profileDirectory: 'Default',
+      }),
+      {
+        extensions: {
+          settings: {
+            ikjanjokpogoakdlikhcgfgcjbgoogkc: {
+              location: 4,
+              path: extensionPath,
+            },
+          },
+        },
+      },
+    );
+
+    const report = buildLocalDoctorReport({
+      home,
+      packageRoot,
+      platform: 'darwin',
+      profileDirectory: 'Default',
+      version: '0.8.16',
+    });
+
+    assert.equal(report.browser, 'dia');
+    assert.equal(report.loadedExtension.ok, true);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
 test('diagnostico local sinaliza runtime antigo e native host ausente', async () => {
   const home = await mkdtemp(resolve(tmpdir(), 'gme-stale-doctor-'));
   try {

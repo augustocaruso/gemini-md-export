@@ -1798,6 +1798,34 @@ Critérios de aceite:
 - Se uma execução anterior deixou um grupo `GME` preso, a próxima claim deve
   conseguir retomá-lo e removê-lo.
 
+## v0.8.16 — Hotfix sem nova permissão obrigatória
+
+Status: implementada na versão `0.8.16`.
+
+Objetivo: manter a correção de release consistente da `0.8.15`, mas evitar que
+uma nova permissão de manifest (`alarms`) crie atrito de reload/manual approval
+no navegador em que a extensão já estava funcionando.
+
+Entregas:
+
+- Remover `alarms` da lista obrigatória de permissões publicadas no manifest.
+- Usar o documento `offscreen` já permitido para manter o service worker vivo
+  enquanto existe uma claim temporária de contagem.
+- Manter o suporte opcional a `chrome.alarms` quando disponível, sem depender
+  dele para o fluxo principal.
+- Fazer o `doctor` preferir automaticamente o navegador/perfil onde a extensão
+  unpacked está carregada, em vez de diagnosticar Chrome/Default quando o uso
+  real está no Dia.
+
+Critérios de aceite:
+
+- Atualizar a extensão não deve introduzir uma permissão nova que deixe o
+  runtime preso até reload manual.
+- `doctor --plain` deve apontar para Dia quando a extensão estiver carregada no
+  perfil Dia/Default.
+- A claim visual continua com release imediato por content script e fallback de
+  expiração enquanto o offscreen mantém o service worker acordado.
+
 ## v0.9.0 — Spike condicional de `debugger`/CDP
 
 Status: possibilidade técnica de alto poder, no mesmo bloco de avaliação de

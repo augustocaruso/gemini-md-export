@@ -239,6 +239,32 @@ export const discoverLoadedExtension = ({
   };
 };
 
+export const discoverPreferredLoadedExtension = ({
+  profileDirectory = 'Default',
+  packageRoot,
+  extensionId = '',
+  platform = osPlatform(),
+  home = homedir(),
+  env = process.env,
+  browserKeys = ['chrome', 'edge', 'brave', 'dia'],
+} = {}) => {
+  for (const browser of browserKeys) {
+    const diagnosis = discoverLoadedExtension({
+      browser,
+      profileDirectory,
+      packageRoot,
+      extensionId,
+      platform,
+      home,
+      env,
+    });
+    if (diagnosis?.ok && diagnosis.extension?.version) {
+      return diagnosis;
+    }
+  }
+  return null;
+};
+
 export const diagnoseNativeHost = ({
   browser = 'chrome',
   extensionId = '',
@@ -321,7 +347,18 @@ export const buildLocalDoctorReport = ({
   home = homedir(),
   env = process.env,
 } = {}) => {
-  const key = normalizeBrowserKey(browser || env.GEMINI_MCP_BROWSER || env.GME_BROWSER || 'chrome');
+  const explicitBrowser = browser || env.GEMINI_MCP_BROWSER || env.GME_BROWSER || '';
+  const autoDetected = explicitBrowser
+    ? null
+    : discoverPreferredLoadedExtension({
+        profileDirectory,
+        packageRoot,
+        extensionId,
+        platform,
+        home,
+        env,
+      });
+  const key = normalizeBrowserKey(explicitBrowser || autoDetected?.browser || 'chrome');
   const loaded = discoverLoadedExtension({
     browser: key,
     profileDirectory,

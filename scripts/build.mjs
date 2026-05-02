@@ -148,7 +148,7 @@ const manifest = {
       run_at: 'document_idle',
     },
   ],
-  permissions: ['tabs', 'storage', 'tabGroups', 'scripting', 'nativeMessaging', 'offscreen', 'alarms'],
+  permissions: ['tabs', 'storage', 'tabGroups', 'scripting', 'nativeMessaging', 'offscreen'],
   host_permissions: [
     'https://gemini.google.com/*',
     'https://lh3.google.com/*',
