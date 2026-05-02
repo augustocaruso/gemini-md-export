@@ -377,9 +377,9 @@ test('CLI chats count carrega ate o fim sem despejar lista no chat', async () =>
     assert.equal(countRequest.searchParams.get('preferActive'), 'true');
     assert.equal(countRequest.searchParams.get('limit'), '1');
     assert.equal(countRequest.searchParams.get('loadMoreTimeoutMs'), '600000');
-    assert.equal(countRequest.searchParams.get('maxNoGrowthRounds'), '2');
-    assert.equal(countRequest.searchParams.get('loadMoreBrowserRounds'), '8');
-    assert.equal(countRequest.searchParams.get('loadMoreBrowserTimeoutMs'), '12000');
+    assert.equal(countRequest.searchParams.get('maxNoGrowthRounds'), '8');
+    assert.equal(countRequest.searchParams.get('loadMoreBrowserRounds'), '12');
+    assert.equal(countRequest.searchParams.get('loadMoreBrowserTimeoutMs'), '30000');
   });
 });
 

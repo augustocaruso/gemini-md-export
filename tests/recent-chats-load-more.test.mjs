@@ -164,12 +164,16 @@ test('listagem de chats expõe contagem parcial sem fingir total', () => {
   assert.match(block, /countConfidence/);
   assert.match(block, /browser_dom_count_match/);
   assert.match(block, /DOM do sidebar/);
+  assert.match(block, /loadMoreIncomplete/);
+  assert.match(block, /allowDomCountConfirmation:\s*!loadMoreBusy && !loadMoreIncomplete/);
   assert.match(block, /minimumKnownCount/);
   assert.match(block, /Nao informe esse numero como "ao todo"/);
   assert.match(block, /Nao chame gemini_chats\/gemini_ready\/gemini_tabs como fallback/);
   assert.match(block, /command: null/);
   assert.match(source, /preferActive/);
   assert.match(source, /activeClients\.length === 1/);
+  assert.match(source, /usefulRecentClients/);
+  assert.match(source, /recentConversationCountForClient\(client\) > 0 \|\| !!client\.page\?\.chatId/);
   assert.match(source, /action:\s*\{\s*type:\s*'string',\s*enum:\s*\['list', 'count'/);
 });
 

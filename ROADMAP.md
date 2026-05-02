@@ -1667,6 +1667,29 @@ Critérios de aceite:
 - `doctor --browser dia --plain` e o launch plan concordam sobre o browser
   recuperável.
 
+## v0.8.11 — Hotfix de contagem longa sem confirmação falsa
+
+Status: implementada na versão `0.8.11`.
+
+Objetivo: impedir que a contagem responda "total confirmado" quando o lazy-load
+do browser terminou por timeout sem `reachedEnd=true`, e dar tempo suficiente
+para sidebars grandes terminarem de carregar.
+
+Entregas:
+
+- Bloquear confirmação por contagem DOM quando `loadMoreTimedOut=true` ou o
+  carregamento terminou com erro não transitório.
+- Aumentar os defaults da CLI de contagem para histórico grande:
+  `loadMoreBrowserTimeoutMs=30000`, `loadMoreBrowserRounds=12` e
+  `maxNoGrowthRounds=8`.
+
+Critérios de aceite:
+
+- Um resultado como `knownLoadedCount=93`, `reachedEnd=false` e
+  `loadMoreTimedOut=true` vira parcial, não total confirmado.
+- A CLI continua sem fallback MCP e sem despejar JSON salvo quando
+  `--result-json` não foi pedido.
+
 ## v0.9.0 — Spike condicional de `debugger`/CDP
 
 Status: possibilidade técnica de alto poder, no mesmo bloco de avaliação de

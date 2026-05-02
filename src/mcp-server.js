@@ -3384,21 +3384,25 @@ const requireRecentChatsClient = (selector = {}) => {
   if (liveClients.length === 0) {
     throw new Error('Nenhuma aba do Gemini conectada à extensão.');
   }
+  const usefulRecentClients = liveClients.filter(
+    (client) => recentConversationCountForClient(client) > 0 || !!client.page?.chatId,
+  );
+  const candidateClients = usefulRecentClients.length > 0 ? usefulRecentClients : liveClients;
 
   const sessionClaim = claimForSession(normalized.sessionId);
   const sessionClaimClient = liveClientForClaim(sessionClaim);
   if (sessionClaimClient) return sessionClaimClient;
 
   if (selector.preferActive === true) {
-    const activeClients = liveClients.filter((client) => client.isActiveTab === true);
+    const activeClients = candidateClients.filter((client) => client.isActiveTab === true);
     if (activeClients.length === 1) return activeClients[0];
   }
 
-  if (liveClients.length > 1) {
-    throw ambiguousTabsError(liveClients, normalized);
+  if (candidateClients.length > 1) {
+    throw ambiguousTabsError(candidateClients, normalized);
   }
 
-  return [...liveClients].sort(
+  return [...candidateClients].sort(
     (a, b) =>
       Number(clientMatchesExpectedBrowserExtension(b)) -
         Number(clientMatchesExpectedBrowserExtension(a)) ||
@@ -5253,9 +5257,12 @@ const listRecentChatsForClient = async (client, args = {}) => {
   const loadMoreBusy =
     loadMore?.ok === false &&
     isTransientTabBusyError({ message: loadMore.error, code: loadMore.code, data: loadMore.data });
+  const loadMoreIncomplete =
+    loadMore?.timedOut === true ||
+    (loadMore?.ok === false && !loadMoreBusy);
   const countInference = inferRecentChatsCountStatus(client, conversations.length, {
     reachedEnd,
-    allowDomCountConfirmation: !loadMoreBusy,
+    allowDomCountConfirmation: !loadMoreBusy && !loadMoreIncomplete,
   });
   const nextOffset = offset + page.length;
   const totalKnown = countInference.totalKnown === true;
