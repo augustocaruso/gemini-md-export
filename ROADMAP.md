@@ -1397,6 +1397,27 @@ worker efêmero.
 - Sem aumento perceptível de consumo quando idle.
 - Diagnóstico mostra se offscreen está ativo e por quê.
 
+## v0.8.4 — Hotfix de reload pós-update
+
+Status: implementada como correção da `0.8.3`.
+
+Problema observado: depois do reload manual do card da extensão, o Dia podia
+manter a aba Gemini rodando um content script antigo (`0.7.15`) enquanto o
+service worker e os arquivos unpacked já estavam em `0.8.3`. O self-heal por
+`scripting` tentava reinjetar, mas isso não substituía de forma confiável o
+runtime antigo já vivo na aba.
+
+Correção:
+
+- após `runtime.onInstalled` e após `RELOAD_SELF`, recarregar as abas Gemini
+  antes de tentar o self-heal por `scripting`;
+- aguardar um curto intervalo para a página subir novamente;
+- só então confirmar/reinjetar o content script atual se necessário.
+
+Critério de aceite: depois de atualizar/recarregar a extensão unpacked, a aba
+Gemini deve anunciar a mesma versão/build esperados pela bridge, sem exigir que
+o usuário descubra manualmente que precisa recarregar a página.
+
 ## v0.9.0 — Spike condicional de `debugger`/CDP
 
 Status: possibilidade técnica de alto poder, no mesmo bloco de avaliação de

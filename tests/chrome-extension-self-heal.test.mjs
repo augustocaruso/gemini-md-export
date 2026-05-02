@@ -16,6 +16,26 @@ test('service worker implementa self-heal por scripting com cooldown', () => {
   assert.match(source, /chrome\.runtime\.onStartup/);
 });
 
+test('service worker recarrega abas Gemini antes de reinjetar apos update/reload', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'extension-background.js'), 'utf-8');
+
+  assert.match(source, /GEMINI_TAB_RELOAD_SETTLE_MS/);
+  assert.match(source, /reloadThenSelfHealGeminiTabs/);
+  assert.match(
+    source,
+    /chrome\.runtime\.onInstalled\.addListener[\s\S]*reloadThenSelfHealGeminiTabs/,
+  );
+  assert.match(
+    source,
+    /const consumePendingGeminiTabsReload[\s\S]*reloadThenSelfHealGeminiTabs/,
+  );
+
+  const helperStart = source.indexOf('const reloadThenSelfHealGeminiTabs');
+  const helperEnd = source.indexOf('const consumePendingGeminiTabsReload', helperStart);
+  const helperSource = source.slice(helperStart, helperEnd);
+  assert.ok(helperSource.indexOf('reloadGeminiTabs(reason)') < helperSource.indexOf('selfHealGeminiTabs'));
+});
+
 test('content script responde ping do service worker e evita dupla injecao do mesmo build', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'userscript-shell.js'), 'utf-8');
 

@@ -16,6 +16,7 @@ const OFFSCREEN_DOCUMENT_PATH = 'offscreen.html';
 const CONTENT_SCRIPT_SELF_HEAL_COOLDOWN_MS = 10_000;
 const CONTENT_SCRIPT_POST_INJECT_PING_ATTEMPTS = 5;
 const CONTENT_SCRIPT_POST_INJECT_PING_DELAY_MS = 180;
+const GEMINI_TAB_RELOAD_SETTLE_MS = 900;
 const TAB_CLAIM_COLORS = new Set([
   'grey',
   'blue',
@@ -840,7 +841,7 @@ chrome.runtime.onInstalled.addListener((details) => {
   });
   cleanupStaleTabClaimVisuals(`extension-${details.reason}`).finally(() => {
     setTimeout(() => {
-      selfHealGeminiTabs({
+      reloadThenSelfHealGeminiTabs({
         reason: `extension-${details.reason}`,
         force: true,
       });
@@ -892,13 +893,39 @@ const reloadGeminiTabs = (reason = 'manual') =>
     });
   });
 
+const reloadThenSelfHealGeminiTabs = async ({
+  reason = 'extension-runtime-refresh',
+  force = true,
+  settleMs = GEMINI_TAB_RELOAD_SETTLE_MS,
+} = {}) => {
+  const reload = await reloadGeminiTabs(reason);
+  if (reload?.reloaded > 0 && settleMs > 0) {
+    await sleep(settleMs);
+  }
+  const selfHeal = await selfHealGeminiTabs({
+    reason: `${reason}-post-reload`,
+    force,
+  });
+  lastContentScriptSelfHeal = {
+    ...selfHeal,
+    reload,
+    reloaded: reload?.reloaded ?? 0,
+    status:
+      reload?.ok === false
+        ? 'reload-failed'
+        : selfHeal?.status || (selfHeal?.ok ? 'ok' : 'partial'),
+    ok: reload?.ok !== false && selfHeal?.ok !== false,
+  };
+  return lastContentScriptSelfHeal;
+};
+
 const consumePendingGeminiTabsReload = async () => {
   const pending = await storageGet(PENDING_GEMINI_TABS_RELOAD_KEY);
   if (!pending) return;
   await storageRemove(PENDING_GEMINI_TABS_RELOAD_KEY);
   await cleanupStaleTabClaimVisuals(pending.reason || 'extension-self-reload');
   setTimeout(() => {
-    selfHealGeminiTabs({
+    reloadThenSelfHealGeminiTabs({
       reason: pending.reason || 'extension-self-reload',
       force: true,
     });
