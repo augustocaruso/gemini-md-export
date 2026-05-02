@@ -1804,8 +1804,19 @@
         }
         scrolledToBottom = isAtBottom(scroller) || traceConfirmsStableBottom(trace);
       }
+      const confirmedStableBottom =
+        !loaded &&
+        scrolledToBottom &&
+        trace.some(
+          (entry) =>
+            entry.phase === 'confirm-end' &&
+            entry.loaded !== true &&
+            Number(entry.beforeKnown) === Number(entry.afterKnown) &&
+            scrollInfoIsNearBottom(entry.scrollAfter),
+        );
+      const requiredEndFailures = confirmedStableBottom ? 1 : endFailureThreshold;
       state.reachedSidebarEnd =
-        !loaded && state.loadMoreFailures >= endFailureThreshold && scrolledToBottom;
+        !loaded && state.loadMoreFailures >= requiredEndFailures && scrolledToBottom;
       if (loaded) {
         state.reachedSidebarEnd = false;
       }

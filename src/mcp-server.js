@@ -4903,13 +4903,18 @@ const listRecentChatsForClient = async (client, args = {}) => {
   }
   if (untilEnd) {
     try {
+      const totalLoadMoreTimeoutMs = Math.max(
+        1000,
+        Number(args.loadMoreTimeoutMs || COMMAND_TIMEOUT_MS),
+      );
+      const { loadMoreTimeoutMs: _totalLoadMoreTimeoutMs, ...loadAllArgs } = args;
       const loadAllPromise = loadAllRecentChatsForClient(client, {
-        ...args,
+        ...loadAllArgs,
         trustCachedReachedEnd: args.trustCachedReachedEnd === true,
       });
       loadMore = await withTimeout(
         loadAllPromise,
-        Math.max(1000, Number(args.loadMoreTimeoutMs || COMMAND_TIMEOUT_MS)),
+        totalLoadMoreTimeoutMs,
       );
     } catch (err) {
       loadMore = {

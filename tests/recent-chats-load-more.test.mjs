@@ -80,6 +80,18 @@ test('export all mantém lista acumulada do browser a cada rodada', () => {
   assert.doesNotMatch(block, /includeConversations:\s*false/);
 });
 
+test('contagem usa timeout total sem vazar para rodada interna do browser', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const block = source.match(
+    /const listRecentChatsForClient = async[\s\S]*?\nconst emptyTimingBucket/,
+  )?.[0];
+  assert.ok(block, 'listRecentChatsForClient deve existir');
+  assert.match(block, /totalLoadMoreTimeoutMs/);
+  assert.match(block, /const \{ loadMoreTimeoutMs: _totalLoadMoreTimeoutMs, \.\.\.loadAllArgs \} = args/);
+  assert.match(block, /\.\.\.loadAllArgs/);
+  assert.match(block, /withTimeout\(\s*loadAllPromise,\s*totalLoadMoreTimeoutMs/s);
+});
+
 test('export all incompleto vira aviso em vez de sucesso silencioso', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const block = source.match(

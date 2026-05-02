@@ -16,8 +16,11 @@ const DEFAULT_BRIDGE_URL = 'http://127.0.0.1:47283';
 const DEFAULT_POLL_MS = 1200;
 const DEFAULT_READY_WAIT_MS = 30_000;
 const DEFAULT_TIMEOUT_MS = 6 * 60 * 60 * 1000;
-const DEFAULT_COUNT_LOAD_MORE_TIMEOUT_MS = 180_000;
+const DEFAULT_COUNT_LOAD_MORE_TIMEOUT_MS = 90_000;
 const DEFAULT_COUNT_STATUS_INTERVAL_MS = 15_000;
+const DEFAULT_COUNT_LOAD_MORE_BROWSER_TIMEOUT_MS = 12_000;
+const DEFAULT_COUNT_LOAD_MORE_BROWSER_ROUNDS = 8;
+const DEFAULT_COUNT_MAX_NO_GROWTH_ROUNDS = 2;
 const DEFAULT_BROWSER_LAUNCH_LOCK_GRACE_MS = 2_000;
 const TERMINAL_STATUSES = new Set(['completed', 'completed_with_errors', 'failed', 'cancelled']);
 
@@ -1580,6 +1583,10 @@ const runChats = async (parsed, streams = {}) => {
     1000,
     Number(parsed.flags.loadMoreTimeoutMs || DEFAULT_COUNT_LOAD_MORE_TIMEOUT_MS),
   );
+  const countLoadMoreParams = loadMoreParamsFromFlags(parsed.flags);
+  countLoadMoreParams.maxNoGrowthRounds ??= DEFAULT_COUNT_MAX_NO_GROWTH_ROUNDS;
+  countLoadMoreParams.loadMoreBrowserRounds ??= DEFAULT_COUNT_LOAD_MORE_BROWSER_ROUNDS;
+  countLoadMoreParams.loadMoreBrowserTimeoutMs ??= DEFAULT_COUNT_LOAD_MORE_BROWSER_TIMEOUT_MS;
   const statusIntervalMs = nonNegativeIntEnv(
     process.env.GEMINI_MD_EXPORT_CLI_STATUS_INTERVAL_MS,
     DEFAULT_COUNT_STATUS_INTERVAL_MS,
@@ -1604,7 +1611,7 @@ const runChats = async (parsed, streams = {}) => {
             untilEnd: true,
             preferActive: true,
             refresh: parsed.flags.refresh,
-            ...loadMoreParamsFromFlags(parsed.flags),
+            ...countLoadMoreParams,
             loadMoreTimeoutMs: countTimeoutMs,
             clientId: parsed.flags.clientId,
             tabId: parsed.flags.tabId,
