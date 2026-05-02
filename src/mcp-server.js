@@ -95,6 +95,10 @@ const TAB_CLAIM_LABEL_PREFIX = 'GME';
 const CLIENT_DEGRADED_HEARTBEAT_MS = Number(
   process.env.GEMINI_MCP_CLIENT_DEGRADED_HEARTBEAT_MS || 20_000,
 );
+const COMMAND_CHANNEL_FAILURE_COOLDOWN_MS = Math.max(
+  0,
+  Math.min(300_000, Number(process.env.GEMINI_MCP_COMMAND_CHANNEL_FAILURE_COOLDOWN_MS || 60_000)),
+);
 const LONG_POLL_TIMEOUT_MS = 25_000;
 const SSE_KEEPALIVE_MS = Number(process.env.GEMINI_MCP_SSE_KEEPALIVE_MS || 15_000);
 const COMMAND_TIMEOUT_MS = Number(process.env.GEMINI_MCP_COMMAND_TIMEOUT_MS || 180_000);
@@ -2430,6 +2434,30 @@ const removeQueuedCommand = (clientId, commandId) => {
   client.queue = client.queue.filter((command) => command.id !== commandId);
 };
 
+const markClientCommandTimeout = (clientId, type, { dispatched = false, code = 'command_timeout' } = {}) => {
+  const client = clients.get(clientId);
+  if (!client) return;
+  const now = Date.now();
+  client.lastCommandTimeoutAt = now;
+  client.lastCommandTimeoutIso = new Date(now).toISOString();
+  client.lastCommandTimeoutType = type || null;
+  client.lastCommandTimeoutDispatched = dispatched === true;
+  client.lastCommandTimeoutCode = code;
+};
+
+const clearClientCommandTimeout = (client) => {
+  if (!client) return;
+  client.lastCommandTimeoutAt = null;
+  client.lastCommandTimeoutIso = null;
+  client.lastCommandTimeoutType = null;
+  client.lastCommandTimeoutDispatched = null;
+  client.lastCommandTimeoutCode = null;
+};
+
+const clientHasRecentCommandFailure = (client, now = Date.now()) =>
+  !!client?.lastCommandTimeoutAt &&
+  now - Number(client.lastCommandTimeoutAt) <= COMMAND_CHANNEL_FAILURE_COOLDOWN_MS;
+
 const enqueueCommand = (clientId, type, args = {}, options = {}) => {
   const client = clients.get(clientId);
   if (!client) {
@@ -2477,6 +2505,10 @@ const enqueueCommand = (clientId, type, args = {}, options = {}) => {
       error.code = 'command_timeout';
       error.commandType = type;
       error.commandDispatched = !!pending.dispatchedAt;
+      markClientCommandTimeout(clientId, type, {
+        dispatched: !!pending.dispatchedAt,
+        code: 'command_timeout',
+      });
       recordFlightEvent('command_timeout', {
         commandId: command.id,
         clientId,
@@ -2499,6 +2531,10 @@ const enqueueCommand = (clientId, type, args = {}, options = {}) => {
         error.code = 'command_dispatch_timeout';
         error.commandType = type;
         error.commandDispatched = false;
+        markClientCommandTimeout(clientId, type, {
+          dispatched: false,
+          code: 'command_dispatch_timeout',
+        });
         recordFlightEvent('command_dispatch_timeout', {
           commandId: command.id,
           clientId,
@@ -2524,6 +2560,7 @@ const resolveCommand = (commandId, result) => {
   if (client) {
     client.lastSeenAt = Date.now();
     client.lastCommandResultAt = new Date().toISOString();
+    clearClientCommandTimeout(client);
   }
   recordFlightEvent('command_resolved', {
     commandId,
@@ -3141,6 +3178,10 @@ const buildBridgeHealth = (client, now = Date.now()) => {
     status = 'command_channel_stuck';
     blockingIssue = 'command_channel_stuck';
     action = 'Use gemini_tabs { action: "reload", intent: "tab_management" } se a aba estiver aberta mas não aceitar comandos.';
+  } else if (clientHasRecentCommandFailure(client, now)) {
+    status = 'command_channel_stuck';
+    blockingIssue = 'command_timeout_recent';
+    action = 'Esta aba acabou de ignorar um comando; a CLI deve preferir outra aba Gemini saudável.';
   } else if (heartbeatAgeMs > CLIENT_DEGRADED_HEARTBEAT_MS) {
     status = 'degraded';
     blockingIssue = 'heartbeat_delayed';
@@ -3164,6 +3205,9 @@ const buildBridgeHealth = (client, now = Date.now()) => {
     payloadMetrics: summarizePayloadMetrics(client),
     capabilities: client.capabilities || [],
     lastError: client.metrics?.lastError || null,
+    lastCommandTimeoutAt: client.lastCommandTimeoutIso || null,
+    lastCommandTimeoutType: client.lastCommandTimeoutType || null,
+    lastCommandTimeoutCode: client.lastCommandTimeoutCode || null,
   };
 };
 
@@ -3187,6 +3231,9 @@ const summarizeClient = (client) => ({
     lastPollStartedAt: client.commandPoll?.lastStartedAt || null,
     lastPollEndedAt: client.commandPoll?.lastEndedAt || null,
     lastCommandReceivedAt: client.commandPoll?.lastCommandReceivedAt || null,
+    lastCommandTimeoutAt: client.lastCommandTimeoutIso || null,
+    lastCommandTimeoutType: client.lastCommandTimeoutType || null,
+    lastCommandTimeoutCode: client.lastCommandTimeoutCode || null,
   },
   page: client.page || null,
   tabClaim: client.tabClaim || null,
@@ -3198,10 +3245,13 @@ const summarizeClient = (client) => ({
   notebookConversationCount: notebookConversationsForClient(client).length,
 });
 
-const commandChannelReadyForClient = (client) =>
-  !!client?.eventStream?.res && !client.eventStream.res.destroyed ||
+const clientHasOpenCommandChannel = (client) =>
+  (!!client?.eventStream?.res && !client.eventStream.res.destroyed) ||
   !!client?.pendingPoll ||
   client?.commandPoll?.polling === true;
+
+const commandChannelReadyForClient = (client) =>
+  clientHasOpenCommandChannel(client) && !clientHasRecentCommandFailure(client);
 
 const browserReadyBlockingIssue = ({
   allLiveClients = [],
@@ -3414,10 +3464,12 @@ const requireRecentChatsClient = (selector = {}) => {
   if (liveClients.length === 0) {
     throw new Error('Nenhuma aba do Gemini conectada à extensão.');
   }
-  const usefulRecentClients = liveClients.filter(
+  const commandReadyClients = liveClients.filter(commandChannelReadyForClient);
+  const selectableClients = commandReadyClients.length > 0 ? commandReadyClients : liveClients;
+  const usefulRecentClients = selectableClients.filter(
     (client) => recentConversationCountForClient(client) > 0 || !!client.page?.chatId,
   );
-  const candidateClients = usefulRecentClients.length > 0 ? usefulRecentClients : liveClients;
+  const candidateClients = usefulRecentClients.length > 0 ? usefulRecentClients : selectableClients;
 
   const sessionClaim = claimForSession(normalized.sessionId);
   const sessionClaimClient = liveClientForClaim(sessionClaim);

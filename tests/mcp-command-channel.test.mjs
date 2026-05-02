@@ -125,6 +125,10 @@ test('MCP implementa afinidade confiável por claim de aba', () => {
   assert.match(source, /hasPendingCommandForClient/);
   assert.match(source, /lastSeenAtExtendedByCommandAt/);
   assert.match(source, /lastCommandResultAt/);
+  assert.match(source, /COMMAND_CHANNEL_FAILURE_COOLDOWN_MS/);
+  assert.match(source, /markClientCommandTimeout/);
+  assert.match(source, /clientHasRecentCommandFailure/);
+  assert.match(source, /command_timeout_recent/);
   assert.match(source, /allowLaunchChrome:\s*args\.openIfMissing !== false/);
   assert.match(source, /_proxySessionId/);
   assert.match(contentSource, /tab-claim-v1/);

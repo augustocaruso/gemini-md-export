@@ -1716,6 +1716,31 @@ Critérios de aceite:
 - O resultado continua honesto: sem total confirmado quando o fim do sidebar
   não foi comprovado.
 
+## v0.8.13 — Hotfix de seleção por canal de comando saudável
+
+Status: implementada na versão `0.8.13`.
+
+Objetivo: impedir que a contagem escolha automaticamente uma aba Gemini que
+tem `chatId`/cache, mas acabou de ignorar ou travar um comando. Esse caso fazia
+o fluxo parar em `Timeout aguardando resposta do comando claim-tab`.
+
+Entregas:
+
+- Marcar timeouts de comando por cliente e limpar a marca no próximo comando
+  bem-sucedido.
+- Expor o timeout recente no diagnóstico de `bridgeHealth`.
+- Na contagem/listagem recente sem seleção explícita, preferir abas com canal
+  de comando saudável antes de priorizar cache de conversas ou `chatId`.
+
+Critérios de aceite:
+
+- Uma aba degradada por timeout de comando não deve vencer a seleção automática
+  só porque tem conversa aberta.
+- Se outra aba Gemini saudável estiver conectada, a contagem usa essa aba para
+  abrir/carregar o sidebar.
+- Se nenhuma aba aceitar comandos, a CLI deve falhar curto e com erro honesto,
+  sem fallback MCP.
+
 ## v0.9.0 — Spike condicional de `debugger`/CDP
 
 Status: possibilidade técnica de alto poder, no mesmo bloco de avaliação de

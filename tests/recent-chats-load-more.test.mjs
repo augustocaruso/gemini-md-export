@@ -67,6 +67,8 @@ test('export all mantém lista acumulada do browser a cada rodada', () => {
   assert.match(block, /Array\.isArray\(result\.conversations\)/);
   assert.match(block, /resolveContinuationClient/);
   assert.match(block, /enqueueCommandWithClientRecovery/);
+  assert.match(source, /const commandReadyClients = liveClients\.filter\(commandChannelReadyForClient\)/);
+  assert.match(source, /const candidateClients = usefulRecentClients\.length > 0 \? usefulRecentClients : selectableClients/);
   assert.match(block, /maxNoGrowthRounds/);
   assert.match(block, /args\.maxNoGrowthRounds\s*\|\|\s*8/);
   assert.match(block, /untilEnd:\s*args\.untilEndInBrowser !== false/);
