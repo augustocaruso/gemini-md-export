@@ -158,6 +158,10 @@ const RECENT_CHATS_LOAD_MORE_BROWSER_TIMEOUT_MS = Number(
 const RECENT_CHATS_EXPORT_ALL_LOAD_MORE_BROWSER_TIMEOUT_MS = Number(
   process.env.GEMINI_MCP_RECENT_CHATS_EXPORT_ALL_LOAD_MORE_BROWSER_TIMEOUT_MS || 30_000,
 );
+const RECENT_CHATS_CLIENT_RECOVERY_WAIT_MS = Math.max(
+  0,
+  Math.min(120_000, Number(process.env.GEMINI_MCP_RECENT_CHATS_CLIENT_RECOVERY_WAIT_MS || 30_000)),
+);
 const RECENT_CHATS_TRANSIENT_BUSY_RETRY_LIMIT = Math.max(
   1,
   Math.min(10, Number(process.env.GEMINI_MCP_RECENT_CHATS_BUSY_RETRY_LIMIT || 5)),
@@ -2101,7 +2105,65 @@ const cleanupExpiredTabClaims = () => {
 const liveClientForClaim = (claim) => {
   if (!claim) return null;
   const client = clients.get(claim.clientId);
-  return isLiveClient(client) ? client : null;
+  if (isLiveClient(client)) return client;
+  const replacement = findReplacementClientForClaim(claim);
+  return replacement ? rebindTabClaimToClient(claim, replacement, 'client-reconnected') : null;
+};
+
+const clientTabClaim = (client) => client?.tabClaim || client?.summary?.tabClaim || null;
+
+const clientCarriesClaim = (client, claim) => {
+  if (!client || !claim) return false;
+  const tabClaim = clientTabClaim(client);
+  if (tabClaim?.claimId && tabClaim.claimId === claim.claimId) return true;
+  if (
+    tabClaim?.sessionId &&
+    claim.sessionId &&
+    tabClaim.sessionId === claim.sessionId &&
+    claim.tabId !== null &&
+    claim.tabId !== undefined &&
+    client.tabId !== null &&
+    client.tabId !== undefined &&
+    Number(client.tabId) === Number(claim.tabId)
+  ) {
+    return true;
+  }
+  return false;
+};
+
+const findReplacementClientForClaim = (claim) => {
+  if (!claim) return null;
+  const liveClients = getSelectableGeminiClients();
+  const claimClient = liveClients.find((client) => clientCarriesClaim(client, claim));
+  if (claimClient) return claimClient;
+  if (claim.tabId !== null && claim.tabId !== undefined) {
+    const sameTab = liveClients.find(
+      (client) =>
+        client.tabId !== null &&
+        client.tabId !== undefined &&
+        Number(client.tabId) === Number(claim.tabId),
+    );
+    if (sameTab) return sameTab;
+  }
+  return null;
+};
+
+const rebindTabClaimToClient = (claim, client, reason = 'client-reconnected') => {
+  if (!claim || !client) return null;
+  if (claim.clientId !== client.clientId) {
+    recordFlightEvent('tab_claim_rebound', {
+      claimId: claim.claimId,
+      previousClientId: claim.clientId || null,
+      nextClientId: client.clientId,
+      tabId: client.tabId ?? claim.tabId ?? null,
+      reason,
+    });
+  }
+  claim.clientId = client.clientId;
+  claim.tabId = client.tabId ?? claim.tabId ?? null;
+  claim.windowId = client.windowId ?? claim.windowId ?? null;
+  claim.renewedAt = new Date().toISOString();
+  return client;
 };
 
 const summarizeTabClaim = (claim) => {
@@ -2136,7 +2198,14 @@ const claimForSession = (sessionId) => {
 
 const claimForClient = (client) => {
   cleanupExpiredTabClaims();
-  return [...tabClaims.values()].find((claim) => claim.clientId === client?.clientId) || null;
+  const claim =
+    [...tabClaims.values()].find(
+      (item) => item.clientId === client?.clientId || clientCarriesClaim(client, item),
+    ) || null;
+  if (claim && client?.clientId && claim.clientId !== client.clientId) {
+    rebindTabClaimToClient(claim, client, 'client-tab-claim-heartbeat');
+  }
+  return claim;
 };
 
 const removeTabClaim = (claimId) => {
@@ -2169,6 +2238,45 @@ const ambiguousTabsError = (liveClients, selector = {}) => {
     claims: summarizeTabClaims(),
   };
   return error;
+};
+
+const reconnectSourceForClient = (client) => {
+  if (!client) return null;
+  return Array.from(clients.values())
+    .filter((candidate) => candidate.clientId !== client.clientId)
+    .filter((candidate) => {
+      const sameTab =
+        client.tabId !== null &&
+        client.tabId !== undefined &&
+        candidate.tabId !== null &&
+        candidate.tabId !== undefined &&
+        Number(client.tabId) === Number(candidate.tabId);
+      if (sameTab) return true;
+      const claim = claimForClient(candidate);
+      return claim ? clientCarriesClaim(client, claim) : false;
+    })
+    .sort((a, b) => (b.conversations?.length || 0) - (a.conversations?.length || 0))[0] || null;
+};
+
+const preserveReconnectConversationCache = (client, payload = {}) => {
+  const source = reconnectSourceForClient(client);
+  if (!source?.conversations?.length) return;
+  const incomingCount = Array.isArray(payload.conversations) ? payload.conversations.length : 0;
+  const currentCount = client.conversations?.length || 0;
+  if (Math.max(incomingCount, currentCount) >= source.conversations.length) return;
+  client.conversations = source.conversations;
+  client.modalConversations = source.modalConversations || client.modalConversations || [];
+  client.lastSnapshot = source.lastSnapshot || client.lastSnapshot || null;
+  client.lastSnapshotAt = source.lastSnapshotAt || client.lastSnapshotAt || null;
+  client.lastSnapshotPayloadBytes =
+    source.lastSnapshotPayloadBytes ?? client.lastSnapshotPayloadBytes ?? null;
+  client.snapshotHash = source.snapshotHash || client.snapshotHash || null;
+  recordFlightEvent('client_reconnect_cache_preserved', {
+    previousClientId: source.clientId,
+    nextClientId: client.clientId,
+    tabId: client.tabId ?? null,
+    conversationCount: source.conversations.length,
+  });
 };
 
 const upsertClient = (payload, meta = {}) => {
@@ -2214,8 +2322,12 @@ const upsertClient = (payload, meta = {}) => {
   next.tabClaim = payload.tabClaim || next.tabClaim || null;
   next.page = payload.page || next.page || null;
   next.commandPoll = payload.commandPoll || next.commandPoll || null;
+  preserveReconnectConversationCache(next, payload);
   if (Array.isArray(payload.conversations)) {
-    next.conversations = payload.conversations;
+    next.conversations =
+      (next.conversations?.length || 0) > payload.conversations.length
+        ? next.conversations
+        : payload.conversations;
     next.lastSnapshotAt = now;
     next.lastSnapshotPayloadBytes = meta.payloadBytes ?? next.lastSnapshotPayloadBytes ?? null;
   } else {
@@ -2227,6 +2339,8 @@ const upsertClient = (payload, meta = {}) => {
   next.summary = payload;
 
   clients.set(next.clientId, next);
+  const claim = claimForClient(next);
+  if (claim) rebindTabClaimToClient(claim, next, 'client-upsert');
   return next;
 };
 
@@ -2311,7 +2425,11 @@ const removeQueuedCommand = (clientId, commandId) => {
 const enqueueCommand = (clientId, type, args = {}, options = {}) => {
   const client = clients.get(clientId);
   if (!client) {
-    throw new Error(`Cliente ${clientId} não encontrado.`);
+    const error = new Error(`Cliente ${clientId} não encontrado.`);
+    error.code = 'client_not_found';
+    error.clientId = clientId;
+    error.commandType = type;
+    throw error;
   }
 
   const command = {
@@ -2866,6 +2984,35 @@ const releaseTabClaim = async (args = {}) => {
         error: err?.message || String(err),
         code: err?.code || null,
       };
+    }
+  }
+  if (visual?.ok !== true && claim.tabId !== null && claim.tabId !== undefined) {
+    const controllers = getSelectableGeminiClients().filter(
+      (candidate) => candidate.clientId !== client?.clientId,
+    );
+    for (const controller of controllers) {
+      try {
+        visual = await enqueueCommand(
+          controller.clientId,
+          'release-tab-claim-by-tab-id',
+          {
+            tabId: claim.tabId,
+            claimId,
+            reason: args.reason || 'mcp-release-by-tab-id',
+          },
+          {
+            timeoutMs: 8000,
+            dispatchTimeoutMs: 4000,
+          },
+        );
+        if (visual?.ok) break;
+      } catch (err) {
+        visual = {
+          ok: false,
+          error: err?.message || String(err),
+          code: err?.code || null,
+        };
+      }
     }
   }
 
@@ -3575,6 +3722,7 @@ const findSyncBoundary = (conversations = [], { vaultScan, syncState, knownSeque
 };
 
 const loadRecentChatsUntilSyncBoundaryForClient = async (client, args = {}, { vaultScan, syncState } = {}) => {
+  let activeClient = resolveContinuationClient(client, args);
   let targetCount = Math.max(10, Math.min(200, Number(args.batchSize || 50)));
   const maxRounds = Math.max(1, Math.min(500, Number(args.maxLoadMoreRounds || 200)));
   const attempts = Math.max(1, Math.min(5, Number(args.loadMoreAttempts || 3)));
@@ -3604,18 +3752,19 @@ const loadRecentChatsUntilSyncBoundaryForClient = async (client, args = {}, { va
   );
   const loadTrace = [];
   let boundary = { found: false, type: 'not-found' };
-  let reachedEnd = recentChatsReachedEndForClient(client);
+  let reachedEnd = recentChatsReachedEndForClient(activeClient);
   let timedOut = false;
   let roundsCompleted = 0;
-  let previousCount = recentConversationsForClient(client).length;
+  let previousCount = recentConversationsForClient(activeClient).length;
   let noGrowthRounds = 0;
 
   for (let round = 0; round < maxRounds; round += 1) {
     if (args.shouldStop?.()) break;
-    const beforeCount = recentConversationsForClient(client).length;
+    activeClient = resolveContinuationClient(activeClient, args);
+    const beforeCount = recentConversationsForClient(activeClient).length;
     const startedAt = Date.now();
-    const result = await enqueueCommand(
-      client.clientId,
+    const command = await enqueueCommandWithClientRecovery(
+      activeClient,
       'load-more-conversations',
       {
         ensureSidebar: true,
@@ -3633,26 +3782,29 @@ const loadRecentChatsUntilSyncBoundaryForClient = async (client, args = {}, { va
         includeSnapshot: false,
       },
       { timeoutMs: commandTimeoutMs },
+      args,
     );
+    activeClient = command.client;
+    const { result } = command;
 
     if (!result?.ok) {
       throw new Error(result?.error || 'Falha ao puxar histórico até a fronteira do sync.');
     }
 
     if (Array.isArray(result.conversations)) {
-      client.conversations = result.conversations;
+      activeClient.conversations = result.conversations;
     }
     if (result.snapshot) {
-      client.lastSnapshot = result.snapshot;
+      activeClient.lastSnapshot = result.snapshot;
     }
 
-    const conversations = recentConversationsForClient(client);
+    const conversations = recentConversationsForClient(activeClient);
     boundary = findSyncBoundary(conversations, {
       vaultScan,
       syncState,
       knownSequenceCount,
     });
-    reachedEnd = result.reachedEnd === true || recentChatsReachedEndForClient(client);
+    reachedEnd = result.reachedEnd === true || recentChatsReachedEndForClient(activeClient);
     timedOut = timedOut || result.timedOut === true;
     roundsCompleted += 1;
     const afterCount = Math.max(conversations.length, Number(result.afterCount || 0));
@@ -3694,7 +3846,8 @@ const loadRecentChatsUntilSyncBoundaryForClient = async (client, args = {}, { va
     noGrowthRounds,
     loadTrace,
     boundary,
-    conversations: recentConversationsForClient(client),
+    conversations: recentConversationsForClient(activeClient),
+    client: activeClient,
   };
 };
 
@@ -4506,11 +4659,19 @@ const resolveNotebookConversationRequest = (client, args = {}) => {
 
 const downloadConversationItemForClient = async (client, conversation, args = {}) => {
   const commandStartedAt = Date.now();
-  const result = await enqueueCommand(client.clientId, 'get-chat-by-id', {
-    item: conversation,
-    returnToOriginal: args.returnToOriginal !== false,
-    notebookReturnMode: args.notebookReturnMode || null,
-  });
+  const command = await enqueueCommandWithClientRecovery(
+    client,
+    'get-chat-by-id',
+    {
+      item: conversation,
+      returnToOriginal: args.returnToOriginal !== false,
+      notebookReturnMode: args.notebookReturnMode || null,
+    },
+    {},
+    args,
+  );
+  const activeClient = command.client;
+  const { result } = command;
   const browserCommandMs = Date.now() - commandStartedAt;
 
   if (!result?.ok) {
@@ -4559,7 +4720,7 @@ const downloadConversationItemForClient = async (client, conversation, args = {}
     media: payloadMetrics.media || null,
   };
   return {
-    client: summarizeClient(client),
+    client: summarizeClient(activeClient),
     conversation: result.conversation || conversation,
     chatId: result.payload?.chatId || conversation.chatId || null,
     title: result.payload?.title || conversation.title || null,
@@ -4578,6 +4739,89 @@ const isTransientTabBusyError = (err) =>
   /tab_operation_in_progress|aba do Gemini já está ocupada|outro comando pesado|tab operation/i.test(
     String(err?.message || ''),
   );
+
+const isRecoverableClientDisconnectError = (err) =>
+  err?.code === 'client_not_found' ||
+  (err?.code === 'command_timeout' && err.commandDispatched !== true) ||
+  /Cliente [\w-]+ não encontrado|Cliente [\w-]+ não está ativo|Claim [\w-]+ não está ativa/i.test(
+    String(err?.message || ''),
+  );
+
+const continuationSelectorForClient = (client, args = {}) => {
+  const existingClaim = args.claimId ? tabClaims.get(args.claimId) : claimForClient(client);
+  return {
+    claimId:
+      args.claimId ||
+      existingClaim?.claimId ||
+      clientTabClaim(client)?.claimId ||
+      undefined,
+    tabId:
+      args.tabId ??
+      existingClaim?.tabId ??
+      client?.tabId ??
+      undefined,
+    sessionId: args.sessionId || args._proxySessionId || existingClaim?.sessionId || undefined,
+  };
+};
+
+const resolveContinuationClient = (client, args = {}) => {
+  cleanupStaleClients();
+  cleanupExpiredTabClaims();
+  const current = client?.clientId ? clients.get(client.clientId) : null;
+  if (isLiveClient(current)) return current;
+
+  const selector = continuationSelectorForClient(client, args);
+  if (selector.claimId) {
+    const claimClient = liveClientForClaim(tabClaims.get(selector.claimId));
+    if (claimClient) return claimClient;
+  }
+  if (selector.tabId !== undefined && selector.tabId !== null) {
+    const tabId = normalizeTabId(selector.tabId);
+    const sameTab = getSelectableGeminiClients().find(
+      (candidate) =>
+        candidate.tabId !== null &&
+        candidate.tabId !== undefined &&
+        Number(candidate.tabId) === tabId,
+    );
+    if (sameTab) return sameTab;
+  }
+  const sessionClaimClient = liveClientForClaim(claimForSession(selector.sessionId));
+  return sessionClaimClient || current || client;
+};
+
+const waitForContinuationClient = async (client, args = {}, waitMs = RECENT_CHATS_CLIENT_RECOVERY_WAIT_MS) => {
+  const startedAt = Date.now();
+  let recovered = resolveContinuationClient(client, args);
+  if (recovered?.clientId && recovered.clientId !== client?.clientId) return recovered;
+  while (Date.now() - startedAt < waitMs) {
+    await sleep(500);
+    recovered = resolveContinuationClient(client, args);
+    if (recovered?.clientId && recovered.clientId !== client?.clientId) return recovered;
+  }
+  return recovered;
+};
+
+const enqueueCommandWithClientRecovery = async (
+  client,
+  type,
+  commandArgs = {},
+  options = {},
+  selector = {},
+) => {
+  let activeClient = resolveContinuationClient(client, selector);
+  try {
+    const result = await enqueueCommand(activeClient.clientId, type, commandArgs, options);
+    return { client: activeClient, result, recovered: activeClient.clientId !== client?.clientId };
+  } catch (err) {
+    if (!isRecoverableClientDisconnectError(err)) throw err;
+    const recoveredClient = await waitForContinuationClient(activeClient, selector);
+    if (!recoveredClient?.clientId || recoveredClient.clientId === activeClient?.clientId) {
+      throw err;
+    }
+    const result = await enqueueCommand(recoveredClient.clientId, type, commandArgs, options);
+    return { client: recoveredClient, result, recovered: true };
+  }
+};
 
 const downloadConversationItemWithRetry = async (job, client, conversation, args = {}) => {
   let lastError = null;
@@ -4611,25 +4855,36 @@ const downloadChatForClient = async (client, args = {}) => {
 };
 
 const refreshClientConversations = async (client, args = {}) => {
-  const result = await enqueueCommand(client.clientId, 'list-conversations', {
-    ensureSidebar: args.ensureSidebar !== false,
-  });
+  const {
+    client: activeClient,
+    result,
+  } = await enqueueCommandWithClientRecovery(
+    client,
+    'list-conversations',
+    {
+      ensureSidebar: args.ensureSidebar !== false,
+    },
+    {},
+    args,
+  );
   if (!result?.ok) {
     throw new Error(result?.error || 'Falha ao atualizar lista de conversas no browser.');
   }
   if (Array.isArray(result.conversations)) {
-    client.conversations = result.conversations;
+    activeClient.conversations = result.conversations;
   }
   if (result.snapshot) {
-    client.lastSnapshot = result.snapshot;
+    activeClient.lastSnapshot = result.snapshot;
   }
+  result.client = activeClient;
   return result;
 };
 
 const loadMoreRecentChatsForClient = async (client, requestedLimit, args = {}) => {
-  let latestSnapshot = client.lastSnapshot || null;
-  let reachedEnd = recentChatsReachedEndForClient(client);
-  const initialCount = recentConversationsForClient(client).length;
+  let activeClient = resolveContinuationClient(client, args);
+  let latestSnapshot = activeClient.lastSnapshot || null;
+  let reachedEnd = recentChatsReachedEndForClient(activeClient);
+  const initialCount = recentConversationsForClient(activeClient).length;
   const plan = normalizeRecentChatsLoadMorePlan(initialCount, requestedLimit, {
     loadMoreRounds: args.loadMoreRounds,
     loadMoreAttempts: args.loadMoreAttempts,
@@ -4643,7 +4898,8 @@ const loadMoreRecentChatsForClient = async (client, requestedLimit, args = {}) =
       roundsCompleted: 0,
       reachedEnd,
       snapshot: latestSnapshot,
-      conversations: recentConversationsForClient(client),
+      conversations: recentConversationsForClient(activeClient),
+      client: activeClient,
     };
   }
 
@@ -4653,6 +4909,7 @@ const loadMoreRecentChatsForClient = async (client, requestedLimit, args = {}) =
   let previousCount = initialCount;
 
   for (let round = 0; round < plan.rounds; round += 1) {
+    activeClient = resolveContinuationClient(activeClient, args);
     const browserTimeoutMs = Math.max(
       500,
       Number(args.loadMoreBrowserTimeoutMs || RECENT_CHATS_LOAD_MORE_BROWSER_TIMEOUT_MS),
@@ -4665,8 +4922,8 @@ const loadMoreRecentChatsForClient = async (client, requestedLimit, args = {}) =
           RECENT_CHATS_LOAD_MORE_BUDGET_MS,
       ),
     );
-    const result = await enqueueCommand(
-      client.clientId,
+    const command = await enqueueCommandWithClientRecovery(
+      activeClient,
       'load-more-conversations',
       {
         ensureSidebar: true,
@@ -4677,22 +4934,25 @@ const loadMoreRecentChatsForClient = async (client, requestedLimit, args = {}) =
         timeoutMs: browserTimeoutMs,
       },
       { timeoutMs: commandTimeoutMs },
+      args,
     );
+    activeClient = command.client;
+    const { result } = command;
 
     if (!result?.ok) {
       throw new Error(result?.error || 'Falha ao puxar mais conversas no browser.');
     }
 
     if (Array.isArray(result.conversations)) {
-      client.conversations = result.conversations;
+      activeClient.conversations = result.conversations;
     }
     if (result.snapshot) {
-      client.lastSnapshot = result.snapshot;
+      activeClient.lastSnapshot = result.snapshot;
       latestSnapshot = result.snapshot;
     }
 
-    reachedEnd = result.reachedEnd === true || recentChatsReachedEndForClient(client);
-    const currentCount = recentConversationsForClient(client).length;
+    reachedEnd = result.reachedEnd === true || recentChatsReachedEndForClient(activeClient);
+    const currentCount = recentConversationsForClient(activeClient).length;
     roundsCompleted += 1;
     loadedAny = loadedAny || result.loadedAny === true || currentCount > previousCount;
     timedOut = timedOut || result.timedOut === true;
@@ -4712,20 +4972,22 @@ const loadMoreRecentChatsForClient = async (client, requestedLimit, args = {}) =
     roundsCompleted,
     reachedEnd,
     snapshot: latestSnapshot,
-    conversations: recentConversationsForClient(client),
+    conversations: recentConversationsForClient(activeClient),
+    client: activeClient,
   };
 };
 
 const loadAllRecentChatsForClient = async (client, args = {}) => {
-  let latestSnapshot = client.lastSnapshot || null;
+  let activeClient = resolveContinuationClient(client, args);
+  let latestSnapshot = activeClient.lastSnapshot || null;
   let reachedEnd =
-    args.trustCachedReachedEnd === true ? recentChatsReachedEndForClient(client) : false;
+    args.trustCachedReachedEnd === true ? recentChatsReachedEndForClient(activeClient) : false;
   let loadedAny = false;
   let timedOut = false;
   let roundsCompleted = 0;
   let noGrowthRounds = 0;
   const loadTrace = [];
-  let previousCount = recentConversationsForClient(client).length;
+  let previousCount = recentConversationsForClient(activeClient).length;
   const batchSize = Math.max(10, Math.min(200, Number(args.batchSize || 50)));
   let adaptiveBatchSize = batchSize;
   const adaptiveLoad = args.adaptiveLoad !== false;
@@ -4755,11 +5017,12 @@ const loadAllRecentChatsForClient = async (client, args = {}) => {
   for (let round = 0; round < maxRounds && !reachedEnd; round += 1) {
     if (args.shouldStop?.()) break;
 
+    activeClient = resolveContinuationClient(activeClient, args);
     const beforeCount = previousCount;
     const targetCount = previousCount + adaptiveBatchSize;
     const roundStartedAt = Date.now();
-    const result = await enqueueCommand(
-      client.clientId,
+    const command = await enqueueCommandWithClientRecovery(
+      activeClient,
       'load-more-conversations',
       {
         ensureSidebar: true,
@@ -4777,25 +5040,28 @@ const loadAllRecentChatsForClient = async (client, args = {}) => {
         includeSnapshot: false,
       },
       { timeoutMs: commandTimeoutMs },
+      args,
     );
+    activeClient = command.client;
+    const { result } = command;
 
     if (!result?.ok) {
       throw new Error(result?.error || 'Falha ao puxar historico completo no browser.');
     }
 
     if (Array.isArray(result.conversations)) {
-      client.conversations = result.conversations;
+      activeClient.conversations = result.conversations;
     }
     if (result.snapshot) {
-      client.lastSnapshot = result.snapshot;
+      activeClient.lastSnapshot = result.snapshot;
       latestSnapshot = result.snapshot;
     }
 
     const currentCount = Math.max(
-      recentConversationsForClient(client).length,
+      recentConversationsForClient(activeClient).length,
       Number(result.afterCount || 0),
     );
-    reachedEnd = result.reachedEnd === true || recentChatsReachedEndForClient(client);
+    reachedEnd = result.reachedEnd === true || recentChatsReachedEndForClient(activeClient);
     roundsCompleted += 1;
     timedOut = timedOut || result.timedOut === true;
     const grew = result.loadedAny === true || currentCount > previousCount;
@@ -4843,14 +5109,16 @@ const loadAllRecentChatsForClient = async (client, args = {}) => {
   }
 
   try {
-    await refreshClientConversations(client, { ensureSidebar: false });
-    latestSnapshot = client.lastSnapshot || latestSnapshot;
-    reachedEnd = recentChatsReachedEndForClient(client);
+    const refresh = await refreshClientConversations(activeClient, { ...args, ensureSidebar: false });
+    activeClient = refresh.client || activeClient;
+    latestSnapshot = activeClient.lastSnapshot || latestSnapshot;
+    reachedEnd = recentChatsReachedEndForClient(activeClient);
   } catch {
     // Se a leitura final falhar, ainda preservamos o estado/cache já conhecido.
   }
 
   return {
+    client: activeClient,
     attempted: roundsCompleted > 0,
     loadedAny,
     timedOut,
@@ -4859,7 +5127,7 @@ const loadAllRecentChatsForClient = async (client, args = {}) => {
     loadTrace,
     reachedEnd,
     snapshot: latestSnapshot,
-    conversations: recentConversationsForClient(client),
+    conversations: recentConversationsForClient(activeClient),
   };
 };
 
@@ -4915,6 +5183,7 @@ const listRecentChatsForClient = async (client, args = {}) => {
       refresh = refreshPlan.preferFastRefresh
         ? await withTimeout(refreshPromise, RECENT_CHATS_REFRESH_BUDGET_MS)
         : await refreshPromise;
+      if (refresh?.client) client = refresh.client;
     } catch (err) {
       refresh = {
         ok: false,
@@ -4938,6 +5207,7 @@ const listRecentChatsForClient = async (client, args = {}) => {
         loadAllPromise,
         totalLoadMoreTimeoutMs,
       );
+      if (loadMore?.client) client = loadMore.client;
     } catch (err) {
       loadMore = {
         attempted: true,
@@ -4960,6 +5230,7 @@ const listRecentChatsForClient = async (client, args = {}) => {
         loadMorePromise,
         Math.max(1000, Number(args.loadMoreTimeoutMs || RECENT_CHATS_LOAD_MORE_BUDGET_MS)),
       );
+      if (loadMore?.client) client = loadMore.client;
     } catch (err) {
       loadMore = {
         attempted: true,
@@ -5915,6 +6186,7 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
             const refresh = refreshPlan.preferFastRefresh
               ? await withTimeout(refreshPromise, RECENT_CHATS_REFRESH_BUDGET_MS)
               : await refreshPromise;
+            if (refresh?.client) client = refresh.client;
             if (refresh?.snapshot) {
               client.lastSnapshot = refresh.snapshot;
             }
@@ -5940,6 +6212,7 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
               ...args,
               shouldStop: () => job.cancelRequested === true,
             });
+        if (loadMore?.client) client = loadMore.client;
         const loadMoreResolved =
           loadMore.reachedEnd === true || (job.syncMode && loadMore.boundary?.found === true);
         job.loadMoreRoundsCompleted = loadMore.roundsCompleted;
@@ -5949,12 +6222,14 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
         if (job.loadMoreTimedOut) recordJobCounter(job, 'browserTimeouts');
       } else {
         const targetCount = Math.min(MAX_RECENT_CHATS_LOAD_TARGET, job.startIndex - 1 + job.maxChats);
-        await listRecentChatsForClient(client, {
+        const listed = await listRecentChatsForClient(client, {
           ...args,
           limit: 1,
           offset: Math.max(0, targetCount - 1),
           refresh: args.refresh,
         });
+        const listedClient = listed?.client?.clientId ? clients.get(listed.client.clientId) : null;
+        if (listedClient) client = listedClient;
       }
     });
 
@@ -6142,6 +6417,8 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
           outputDir: job.outputDir,
           returnToOriginal: false,
         });
+        const resultClient = result.client?.clientId ? clients.get(result.client.clientId) : null;
+        if (resultClient) client = resultClient;
         const success = {
           index,
           chatId: result.chatId,
@@ -9474,7 +9751,14 @@ const bridgeServer = createServer(async (req, res) => {
           claim = await ensureTabClaimForJob(client, args, args.countOnly ? 'GME Count' : 'GME List');
           claimVisibleAtMs = claim ? Date.now() : null;
         }
-        result = await listRecentChatsForClient(client, args);
+        const operationArgs = claim?.claimId
+          ? {
+              ...args,
+              claimId: claim.claimId,
+              tabId: claim.tabId ?? args.tabId,
+            }
+          : args;
+        result = await listRecentChatsForClient(client, operationArgs);
         if (claim) result.tabClaim = claim;
       } finally {
         if (claim?.claimId && shouldAutoReleaseTabClaim(args)) {

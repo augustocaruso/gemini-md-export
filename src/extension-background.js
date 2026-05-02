@@ -960,7 +960,8 @@ const applyTabClaim = async (message, sender = {}) => {
 };
 
 const releaseTabClaim = async (message, sender = {}) => {
-  const tabId = sender.tab?.id;
+  const requestedTabId = Number(message?.tabId);
+  const tabId = Number.isInteger(requestedTabId) ? requestedTabId : sender.tab?.id;
   if (!Number.isInteger(tabId)) {
     return { ok: false, reason: 'sender-tab-unavailable' };
   }

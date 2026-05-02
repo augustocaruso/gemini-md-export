@@ -3691,6 +3691,19 @@
       return response || { ok: false, reason: 'empty-release-response' };
     }
 
+    if (command.type === 'release-tab-claim-by-tab-id') {
+      const response = await extensionSendMessage(
+        {
+          type: 'gemini-md-export/release-tab-claim',
+          tabId: Number(command.args?.tabId),
+          claimId: command.args?.claimId || null,
+          reason: command.args?.reason || 'bridge-command-tab-id-release',
+        },
+        { timeoutMs: 5000 },
+      );
+      return response || { ok: false, reason: 'empty-release-response' };
+    }
+
     if (command.type === 'list-conversations') {
       if (command.args?.ensureSidebar !== false) {
         await ensureSidebarOpen();

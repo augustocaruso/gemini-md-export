@@ -65,6 +65,8 @@ test('export all mantém lista acumulada do browser a cada rodada', () => {
   assert.match(block, /elapsedMs,/);
   assert.match(block, /browserTrace:\s*Array\.isArray\(result\.loadTrace\)/);
   assert.match(block, /Array\.isArray\(result\.conversations\)/);
+  assert.match(block, /resolveContinuationClient/);
+  assert.match(block, /enqueueCommandWithClientRecovery/);
   assert.match(block, /maxNoGrowthRounds/);
   assert.match(block, /args\.maxNoGrowthRounds\s*\|\|\s*8/);
   assert.match(block, /untilEnd:\s*args\.untilEndInBrowser !== false/);
@@ -90,6 +92,8 @@ test('contagem usa timeout total sem vazar para rodada interna do browser', () =
   assert.match(block, /const \{ loadMoreTimeoutMs: _totalLoadMoreTimeoutMs, \.\.\.loadAllArgs \} = args/);
   assert.match(block, /\.\.\.loadAllArgs/);
   assert.match(block, /withTimeout\(\s*loadAllPromise,\s*totalLoadMoreTimeoutMs/s);
+  assert.match(block, /if \(loadMore\?\.client\) client = loadMore\.client/);
+  assert.match(source, /RECENT_CHATS_CLIENT_RECOVERY_WAIT_MS/);
 });
 
 test('contagem longa aplica claim visual temporaria na aba', () => {
@@ -102,6 +106,8 @@ test('contagem longa aplica claim visual temporaria na aba', () => {
   assert.match(block, /ensureTabClaimForJob\(client, args, args\.countOnly \? 'GME Count' : 'GME List'\)/);
   assert.match(block, /claimVisibleAtMs = claim \? Date\.now\(\) : null/);
   assert.match(block, /waitForTabClaimMinimumVisibility\(claimVisibleAtMs, args\)/);
+  assert.match(block, /operationArgs/);
+  assert.match(block, /claimId: claim\.claimId/);
   assert.match(block, /recent-chats-list-finished/);
   assert.match(block, /tabClaimRelease/);
 });

@@ -118,11 +118,16 @@ test('MCP implementa afinidade confiável por claim de aba', () => {
   assert.doesNotMatch(source, /em MCP, use gemini_tabs/);
   assert.match(source, /tabClaims = new Map/);
   assert.match(source, /sessionClaims = new Map/);
+  assert.match(source, /findReplacementClientForClaim/);
+  assert.match(source, /rebindTabClaimToClient/);
+  assert.match(source, /tab_claim_rebound/);
+  assert.match(source, /release-tab-claim-by-tab-id/);
   assert.match(source, /allowLaunchChrome:\s*args\.openIfMissing !== false/);
   assert.match(source, /_proxySessionId/);
   assert.match(contentSource, /tab-claim-v1/);
   assert.match(contentSource, /command\.type === 'claim-tab'/);
   assert.match(contentSource, /command\.type === 'release-tab-claim'/);
+  assert.match(contentSource, /command\.type === 'release-tab-claim-by-tab-id'/);
   assert.match(contentSource, /isExtensionContextInvalidatedError/);
   assert.match(contentSource, /reason: 'extension-context-invalidated'/);
   assert.match(contentSource, /localOnly: true/);
@@ -133,6 +138,7 @@ test('MCP implementa afinidade confiável por claim de aba', () => {
   assert.match(backgroundSource, /tabBrokerRegistry = new Map/);
   assert.match(backgroundSource, /summarizeTabBrokerRegistry/);
   assert.match(backgroundSource, /message\?\.type === 'gemini-md-export\/tab-broker-update'/);
+  assert.match(backgroundSource, /requestedTabId/);
   assert.match(backgroundSource, /scheduleTabClaimExpiry/);
   assert.match(backgroundSource, /releaseTrackedTabClaimByTabId/);
   assert.match(backgroundSource, /chrome\.tabs\.group/);

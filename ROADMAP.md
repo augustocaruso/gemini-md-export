@@ -1618,6 +1618,33 @@ Critérios de aceite:
 - Claims/grupos somem ao final ou expiram de forma confiável.
 - Uma aba ocupada não pode produzir total falso.
 
+## v0.8.9 — Hotfix de rebind de aba e limpeza de claim
+
+Status: implementada na versão `0.8.9`.
+
+Objetivo: corrigir a falha observada em contagens longas onde a página
+Gemini reconecta com outro `clientId` no meio do lazy-load. A operação não
+deve abortar em "Cliente ... não encontrado" se a mesma aba/claim reapareceu,
+e o indicador visual da aba não deve ficar preso no final.
+
+Entregas:
+
+- Reatar claims do MCP a um novo client vivo quando o `claimId`, `sessionId`
+  ou `tabId` indicam a mesma aba reconectada.
+- Preservar o cache de conversas já carregadas ao trocar de client na mesma
+  aba, evitando voltar de 277 para 53 por perda temporária do content script.
+- Fazer `load-more-conversations`, refresh de sidebar e export por conversa
+  usarem reaquisição de client antes de desistir.
+- Liberar o indicador visual por `tabId` via background quando o content
+  script original morreu, usando outra aba Gemini viva como controlador.
+
+Critérios de aceite:
+
+- Contagem longa não falha por troca de `clientId` durante reload/reinjeção.
+- A resposta final continua honesta: total só quando confirmado; parcial só
+  quando de fato não houve recuperação.
+- Tab group/badge temporário é liberado no `finally` mesmo após reconexão.
+
 ## v0.9.0 — Spike condicional de `debugger`/CDP
 
 Status: possibilidade técnica de alto poder, no mesmo bloco de avaliação de
