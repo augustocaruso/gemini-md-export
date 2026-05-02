@@ -59,11 +59,14 @@ test('export all mantém lista acumulada do browser a cada rodada', () => {
   assert.match(block, /timeoutMs:\s*browserTimeoutMs/);
   assert.match(block, /\{\s*timeoutMs:\s*commandTimeoutMs\s*\}/);
   assert.match(block, /const loadTrace = \[\]/);
+  assert.match(block, /let loadError = null/);
   assert.match(block, /beforeCount/);
   assert.match(block, /afterCount:\s*currentCount/);
   assert.match(block, /const elapsedMs = Date\.now\(\) - roundStartedAt/);
   assert.match(block, /elapsedMs,/);
   assert.match(block, /browserTrace:\s*Array\.isArray\(result\.loadTrace\)/);
+  assert.match(block, /isLoadMoreCommandTimeoutError/);
+  assert.match(block, /ok:\s*loadError \? false : true/);
   assert.match(block, /Array\.isArray\(result\.conversations\)/);
   assert.match(block, /resolveContinuationClient/);
   assert.match(block, /enqueueCommandWithClientRecovery/);
@@ -106,15 +109,21 @@ test('contagem longa aplica claim visual temporaria na aba', () => {
   )?.[0];
   assert.ok(block, '/agent/recent-chats deve existir');
   assert.match(block, /shouldTemporarilyClaimTab/);
-  assert.match(block, /ensureTabClaimForJob\(client, args, args\.countOnly \? 'GME Count' : 'GME List'\)/);
+  assert.match(block, /const temporaryClaimArgs = \{ \.\.\.args \}/);
+  assert.match(block, /ensureTabClaimForJob\(\s*client,\s*temporaryClaimArgs,\s*args\.countOnly \? 'GME Count' : 'GME List'/);
   assert.match(block, /claimVisibleAtMs = claim \? Date\.now\(\) : null/);
   assert.match(block, /waitForTabClaimMinimumVisibility\(claimVisibleAtMs, args\)/);
+  assert.match(block, /temporaryClaimArgs\.ttlMs/);
   assert.match(block, /operationArgs/);
   assert.match(block, /claimId: claim\.claimId/);
+  assert.match(block, /releaseClaimOnOperationEnd: shouldAutoReleaseTabClaim\(args\)/);
+  assert.match(block, /releaseClaimReason: 'recent-chats-load-more-finished'/);
   assert.match(block, /recent-chats-list-finished/);
   assert.match(block, /tabClaimRelease/);
   assert.match(source, /waitForContinuationClient\(\s*\{\s*clientId: claim\.clientId/);
   assert.match(source, /claimId,\s*tabId: claim\.tabId/);
+  assert.match(source, /Math\.min\(COMMAND_TIMEOUT_MS, browserTimeoutMs \+ 15_000\)/);
+  assert.match(source, /releaseClaimOnSlowOperationMs/);
 });
 
 test('jobs renovam claim existente para recriar indicador visual ausente', () => {

@@ -3436,6 +3436,48 @@
     };
   };
 
+  const maybeReleaseClaimAfterTabOperation = async (command, result, startedAt) => {
+    const args = command?.args || {};
+    const claimId = args.releaseClaimOnOperationEnd ? String(args.claimId || '').trim() : '';
+    if (!claimId) return result;
+
+    const elapsedMs = Date.now() - startedAt;
+    const slowOperationMs = Math.max(0, Number(args.releaseClaimOnSlowOperationMs || 0));
+    const terminalOnly = args.releaseClaimOnOperationTerminalOnly !== false;
+    const terminal =
+      result?.reachedEnd === true ||
+      result?.timedOut === true ||
+      result?.ok === false ||
+      (slowOperationMs > 0 && elapsedMs >= slowOperationMs);
+    if (terminalOnly && !terminal) return result;
+
+    let tabClaimRelease = null;
+    try {
+      tabClaimRelease = await releaseCurrentTabClaim({
+        claimId,
+        reason: args.releaseClaimReason || `${command.type}-operation-end`,
+      });
+    } catch (err) {
+      tabClaimRelease = {
+        ok: false,
+        claimId,
+        error: err?.message || String(err),
+        code: err?.code || null,
+      };
+      if (isExtensionContextInvalidatedError(err)) {
+        clearLocalTabClaim();
+      }
+    }
+
+    if (result && typeof result === 'object' && !Array.isArray(result)) {
+      return {
+        ...result,
+        tabClaimRelease,
+      };
+    }
+    return result;
+  };
+
   const reportTabBrokerState = async (reason = 'heartbeat', { force = false } = {}) => {
     if (!isExtensionContext) return null;
     const now = Date.now();
@@ -3481,10 +3523,23 @@
       commandId: command.id || null,
       startedAt: Date.now(),
     };
+    const operationStartedAt = state.activeTabOperation.startedAt;
     reportTabBrokerState('operation-start', { force: true });
 
     try {
-      return await fn();
+      const result = await fn();
+      return await maybeReleaseClaimAfterTabOperation(command, result, operationStartedAt);
+    } catch (err) {
+      await maybeReleaseClaimAfterTabOperation(
+        command,
+        {
+          ok: false,
+          error: err?.message || String(err),
+          code: err?.code || null,
+        },
+        operationStartedAt,
+      );
+      throw err;
     } finally {
       state.completedTabOperations += 1;
       state.activeTabOperation = null;

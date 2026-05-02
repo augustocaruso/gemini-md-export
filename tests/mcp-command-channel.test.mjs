@@ -129,6 +129,8 @@ test('MCP implementa afinidade confiável por claim de aba', () => {
   assert.match(source, /markClientCommandTimeout/);
   assert.match(source, /clientHasRecentCommandFailure/);
   assert.match(source, /command_timeout_recent/);
+  assert.match(source, /releaseClaimOnOperationEnd/);
+  assert.match(source, /releaseClaimOnSlowOperationMs/);
   assert.match(source, /allowLaunchChrome:\s*args\.openIfMissing !== false/);
   assert.match(source, /_proxySessionId/);
   assert.match(contentSource, /tab-claim-v1/);
@@ -142,11 +144,18 @@ test('MCP implementa afinidade confiável por claim de aba', () => {
   assert.match(contentSource, /gemini-md-export\/tab-broker-update/);
   assert.match(contentSource, /reportTabBrokerState\('operation-start'/);
   assert.match(contentSource, /reportTabBrokerState\('claim-applied'/);
+  assert.match(contentSource, /maybeReleaseClaimAfterTabOperation/);
+  assert.match(contentSource, /releaseClaimOnOperationTerminalOnly/);
   assert.match(backgroundSource, /tabBrokerRegistry = new Map/);
   assert.match(backgroundSource, /summarizeTabBrokerRegistry/);
   assert.match(backgroundSource, /message\?\.type === 'gemini-md-export\/tab-broker-update'/);
   assert.match(backgroundSource, /requestedTabId/);
   assert.match(backgroundSource, /scheduleTabClaimExpiry/);
+  assert.match(backgroundSource, /TAB_CLAIM_ALARM_PREFIX/);
+  assert.match(backgroundSource, /chrome\.alarms\.create/);
+  assert.match(backgroundSource, /chrome\.alarms\?\.onAlarm/);
+  assert.match(backgroundSource, /restoreTabClaimExpiryAlarms/);
+  assert.match(backgroundSource, /looksLikeManagedClaimGroupTitle/);
   assert.match(backgroundSource, /releaseTrackedTabClaimByTabId/);
   assert.match(backgroundSource, /chrome\.tabs\.group/);
   assert.match(backgroundSource, /chrome\.tabGroups\.update/);
@@ -156,6 +165,7 @@ test('MCP implementa afinidade confiável por claim de aba', () => {
   assert.match(backgroundSource, /chrome\.runtime\.onInstalled\.addListener/);
   assert.match(backgroundSource, /message\?\.type === 'RELOAD_SELF'/);
   assert.match(buildSource, /'tabGroups'/);
+  assert.match(buildSource, /'alarms'/);
 });
 
 test('browser_status diagnostica e tenta self-heal sem depender do guard wrapper', () => {

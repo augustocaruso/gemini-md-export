@@ -1763,6 +1763,41 @@ Critérios de aceite:
 - Abas em segundo plano com `chatId` não devem receber `claim-tab` por padrão
   se a aba ativa está pronta.
 
+## v0.8.15 — Hotfix de timeout e liberação consistente do tab group
+
+Status: implementada na versão `0.8.15`.
+
+Objetivo: recuperar a experiência que funcionou bem na prática
+(`claim` visual, scroll rápido, contagem correta e release limpo) e endurecer
+os pontos que faziam o indicador visual ficar preso quando a aba/content script
+ficava ocupada no fim do lazy-load.
+
+Entregas:
+
+- Converter timeout/dispatch timeout de `load-more-conversations` em
+  `loadMoreTimedOut=true` + `loadMoreError`, preservando `loadTrace`.
+- Manter a resposta de contagem no contrato normal da CLI, sem fallback MCP.
+- Separar timeout total da contagem do timeout de cada comando pesado enviado à
+  aba; o total continua podendo ser longo, mas uma rodada travada não prende a
+  fila por minutos.
+- Liberar a claim também pelo próprio content script ao terminar uma operação
+  terminal de `load-more-conversations`, antes de devolver o resultado ao MCP.
+- Persistir expiração de claims no service worker com `chrome.alarms`, porque
+  timers em MV3 morrem quando o service worker dorme.
+- Reconhecer grupos `GME` órfãos como grupos gerenciados pelo exporter, para
+  reaproveitar e soltar o indicador mesmo quando o registro local da claim foi
+  perdido.
+
+Critérios de aceite:
+
+- Se uma rodada de lazy-load ficar presa por `COMMAND_TIMEOUT_MS`, `chats count`
+  responde parcial/erro honesto, não `fetch failed`.
+- O indicador visual da contagem é solto no fim normal da operação e também tem
+  expiração automática persistente como fallback se a aba ou o service worker
+  reiniciar.
+- Se uma execução anterior deixou um grupo `GME` preso, a próxima claim deve
+  conseguir retomá-lo e removê-lo.
+
 ## v0.9.0 — Spike condicional de `debugger`/CDP
 
 Status: possibilidade técnica de alto poder, no mesmo bloco de avaliação de

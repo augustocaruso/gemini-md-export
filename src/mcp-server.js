@@ -3835,7 +3835,10 @@ const loadRecentChatsUntilSyncBoundaryForClient = async (client, args = {}, { va
   );
   const commandTimeoutMs = Math.max(
     browserTimeoutMs + 1500,
-    Number(args.loadMoreCommandTimeoutMs || args.loadMoreTimeoutMs || COMMAND_TIMEOUT_MS),
+    Number(
+      args.loadMoreCommandTimeoutMs ||
+        Math.min(COMMAND_TIMEOUT_MS, browserTimeoutMs + 15_000),
+    ),
   );
   const loadTrace = [];
   let boundary = { found: false, type: 'not-found' };
@@ -4834,6 +4837,13 @@ const isRecoverableClientDisconnectError = (err) =>
     String(err?.message || ''),
   );
 
+const isLoadMoreCommandTimeoutError = (err) =>
+  err?.code === 'command_timeout' ||
+  err?.code === 'command_dispatch_timeout' ||
+  /Timeout aguardando resposta do comando load-more-conversations|canal de comandos/i.test(
+    String(err?.message || ''),
+  );
+
 const continuationSelectorForClient = (client, args = {}) => {
   const existingClaim = args.claimId ? tabClaims.get(args.claimId) : claimForClient(client);
   return {
@@ -5073,6 +5083,7 @@ const loadAllRecentChatsForClient = async (client, args = {}) => {
   let timedOut = false;
   let roundsCompleted = 0;
   let noGrowthRounds = 0;
+  let loadError = null;
   const loadTrace = [];
   let previousCount = recentConversationsForClient(activeClient).length;
   const batchSize = Math.max(10, Math.min(200, Number(args.batchSize || 50)));
@@ -5108,27 +5119,65 @@ const loadAllRecentChatsForClient = async (client, args = {}) => {
     const beforeCount = previousCount;
     const targetCount = previousCount + adaptiveBatchSize;
     const roundStartedAt = Date.now();
-    const command = await enqueueCommandWithClientRecovery(
-      activeClient,
-      'load-more-conversations',
-      {
-        ensureSidebar: true,
-        attempts,
+    let command = null;
+    try {
+      command = await enqueueCommandWithClientRecovery(
+        activeClient,
+        'load-more-conversations',
+        {
+          ensureSidebar: true,
+          attempts,
+          targetCount,
+          fastMode: true,
+          untilEnd: args.untilEndInBrowser !== false,
+          ignoreFailureCap: true,
+          endFailureThreshold: maxNoGrowthRounds,
+          resetReachedEnd: round === 0 && args.trustCachedReachedEnd !== true,
+          maxRounds: browserMaxRounds,
+          timeoutMs: browserTimeoutMs,
+          includeConversations: true,
+          includeModalConversations: false,
+          includeSnapshot: false,
+          claimId: args.claimId || undefined,
+          releaseClaimOnOperationEnd: args.releaseClaimOnOperationEnd === true,
+          releaseClaimOnOperationTerminalOnly:
+            args.releaseClaimOnOperationTerminalOnly !== false,
+          releaseClaimOnSlowOperationMs:
+            args.releaseClaimOnSlowOperationMs ||
+            Math.max(browserTimeoutMs + 1000, commandTimeoutMs - 5000),
+          releaseClaimReason: args.releaseClaimReason || 'recent-chats-load-more-finished',
+        },
+        { timeoutMs: commandTimeoutMs },
+        args,
+      );
+    } catch (err) {
+      if (!isLoadMoreCommandTimeoutError(err)) throw err;
+      timedOut = true;
+      loadError = err?.message || String(err);
+      const elapsedMs = Date.now() - roundStartedAt;
+      loadTrace.push({
+        round: round + 1,
+        beforeCount,
         targetCount,
-        fastMode: true,
-        untilEnd: args.untilEndInBrowser !== false,
-        ignoreFailureCap: true,
-        endFailureThreshold: maxNoGrowthRounds,
-        resetReachedEnd: round === 0 && args.trustCachedReachedEnd !== true,
-        maxRounds: browserMaxRounds,
-        timeoutMs: browserTimeoutMs,
-        includeConversations: true,
-        includeModalConversations: false,
-        includeSnapshot: false,
-      },
-      { timeoutMs: commandTimeoutMs },
-      args,
-    );
+        afterCount: previousCount,
+        batchSize: adaptiveBatchSize,
+        adaptiveLoad,
+        delta: 0,
+        loadedAny: false,
+        grew: false,
+        reachedEnd,
+        timedOut: true,
+        noGrowthRounds,
+        browserTimeoutMs,
+        browserMaxRounds,
+        commandTimeoutMs,
+        attempts,
+        elapsedMs,
+        error: loadError,
+        browserTrace: [],
+      });
+      break;
+    }
     activeClient = command.client;
     const { result } = command;
 
@@ -5205,6 +5254,8 @@ const loadAllRecentChatsForClient = async (client, args = {}) => {
   }
 
   return {
+    ok: loadError ? false : true,
+    error: loadError,
     client: activeClient,
     attempted: roundsCompleted > 0,
     loadedAny,
@@ -9838,7 +9889,18 @@ const bridgeServer = createServer(async (req, res) => {
       let result = null;
       try {
         if (shouldTemporarilyClaimTab) {
-          claim = await ensureTabClaimForJob(client, args, args.countOnly ? 'GME Count' : 'GME List');
+          const temporaryClaimArgs = { ...args };
+          if (args.countOnly === true && !temporaryClaimArgs.ttlMs) {
+            temporaryClaimArgs.ttlMs = Math.max(
+              120_000,
+              Math.min(15 * 60_000, Number(args.loadMoreTimeoutMs || COMMAND_TIMEOUT_MS) + 60_000),
+            );
+          }
+          claim = await ensureTabClaimForJob(
+            client,
+            temporaryClaimArgs,
+            args.countOnly ? 'GME Count' : 'GME List',
+          );
           claimVisibleAtMs = claim ? Date.now() : null;
         }
         const operationArgs = claim?.claimId
@@ -9846,6 +9908,9 @@ const bridgeServer = createServer(async (req, res) => {
               ...args,
               claimId: claim.claimId,
               tabId: claim.tabId ?? args.tabId,
+              releaseClaimOnOperationEnd: shouldAutoReleaseTabClaim(args),
+              releaseClaimOnOperationTerminalOnly: true,
+              releaseClaimReason: 'recent-chats-load-more-finished',
             }
           : args;
         result = await listRecentChatsForClient(client, operationArgs);
