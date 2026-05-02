@@ -1,0 +1,65 @@
+description = "Sincroniza o vault Gemini/Obsidian conhecido com o Gemini Web, baixando apenas conversas novas ou faltantes."
+prompt = """
+Sincronize o vault local de conversas Gemini com o Gemini Web usando a skill
+`gemini-vault-sync` desta extensao.
+
+Argumentos do usuario: {{args}}
+
+Contrato:
+- Este comando deve resolver o fluxo inteiro. Nao apenas explique o plano.
+- Se `{{args}}` trouxer um caminho, use esse caminho como `vaultDir` e
+  `outputDir`.
+- Se `{{args}}` estiver vazio, use o vault correto ja conhecido pelo contexto
+  principal/GEMINI.md da sessao. Nao pergunte pelo caminho apenas porque o
+  usuario nao passou argumento.
+- So pergunte pelo caminho se nenhum vault puder ser inferido do contexto atual.
+- Nao liste todo o historico de conversas no chat.
+- Nao chame paginas de listagem enormes para decidir o que baixar.
+- Preferencia: use o binario CLI da extensao, porque ele mostra progresso no
+  terminal, consegue iniciar a bridge em modo `bridge-only` quando ela esta
+  fora, e evita polling MCP no chat.
+- Nao rode uma sequencia de `gemini_ready`/`gemini_tabs` antes da CLI. Isso
+  polui a UI com JSON e duplica o readiness que a CLI ja faz.
+- Se o usuario pediu visualmente uma UI/barra de progresso, execute o CLI com
+  `--tui` via shell interativo/pty quando disponivel. So prometa barra visivel
+  quando o executor realmente tiver TTY/PTY; em shell capturado a CLI cai para
+  `--plain` e avisa:
+  macOS/Linux:
+  `node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" sync "<vaultDir>" --tui`
+  Windows/PowerShell:
+  `node "$env:USERPROFILE\\.gemini\\extensions\\gemini-md-export\\bin\\gemini-md-export.mjs" sync "<vaultDir>" --tui`
+- Se voce for ler o resultado como agente, use `--plain` em vez de `--tui`; ele
+  termina com `RESULT_JSON`.
+- Para importar somente ausentes de forma explícita, use `export missing
+  "<vaultDir>" --plain`; para retomar relatório, use `export resume
+  "<reportFile>" --plain`.
+- Para descobrir flags/contrato antes de rodar, chame
+  `node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" sync --help`
+  (ou o caminho equivalente no Windows).
+- Se a CLI disser que ha varias abas Gemini, resolva ainda pela CLI:
+  `node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" tabs list --plain`
+  e depois `tabs claim --index <n> --plain`; repita o sync com
+  `--claim-id <claimId>`.
+- Se voce chamar `gemini_export` por engano, ele deve responder
+  `code: "use_cli"` com o comando exato. Rode esse comando no shell; nao espere
+  que o MCP inicie um job longo escondido.
+- Se o binario nao existir ou shell nao estiver disponivel, use `gemini_ready`
+  e `gemini_support` apenas para diagnosticar o ambiente e devolver uma proxima
+  acao concreta ao usuario.
+- Se existir `resumeReportFile`/`reportFile` de uma tentativa anterior no
+  contexto ou no retorno da tool, retome em vez de reiniciar do zero.
+- Mantenha Markdown e assets dentro do vault, nunca em Downloads como destino
+  planejado.
+- Use respostas compactas da tool por padrao; use `detail: "full"` somente se
+  houver erro ou diagnóstico necessário.
+- A resposta final deve ser curta e humana, com:
+  - status final;
+  - quantas conversas novas foram baixadas;
+  - quantas ja existiam/foram puladas quando a tool informar;
+  - falhas ou warnings de midia;
+  - caminho do relatorio;
+  - proxima acao somente se houver falha, sync parcial ou retomada pendente.
+- Nunca diga "sucesso" se o `RESULT_JSON` trouxer `status` diferente de
+  `completed`, ou se `fullHistoryRequested=true` e `fullHistoryVerified=false`.
+  Informe as falhas listadas em `failures` e o caminho do relatorio.
+"""

@@ -1,0 +1,70 @@
+{
+  "hooks": {
+    "AfterTool": [
+      {
+        "matcher": "^(gemini_chats|mcp_+gemini[-_]md[-_]export_+gemini[-_]chats)$",
+        "hooks": [
+          {
+            "name": "gemini-md-export-media-audit",
+            "description": "Warn the agent when one-off MCP chat downloads report media follow-up.",
+            "type": "command",
+            "command": "node \"${extensionPath}${/}scripts${/}hooks${/}gemini-md-export-hook.mjs\" after-tool",
+            "timeout": 3000
+          }
+        ]
+      },
+      {
+        "matcher": "^(run_shell_command|shell|Shell)$",
+        "hooks": [
+          {
+            "name": "gemini-md-export-cli-result-guard",
+            "description": "Stop CLI count/export failures from cascading into noisy MCP fallbacks.",
+            "type": "command",
+            "command": "node \"${extensionPath}${/}scripts${/}hooks${/}gemini-md-export-hook.mjs\" after-tool",
+            "timeout": 3000
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "name": "gemini-md-export-bridge-warmup",
+            "description": "Start the local bridge early without opening Chrome.",
+            "type": "command",
+            "command": "node \"${extensionPath}${/}scripts${/}hooks${/}gemini-md-export-hook.mjs\" session-start",
+            "timeout": 3500
+          }
+        ]
+      }
+    ],
+    "BeforeTool": [
+      {
+        "matcher": "^(gemini_(ready|tabs|chats|config|support)|mcp_+gemini[-_]md[-_]export_+gemini[-_](ready|tabs|chats|config|support))$",
+        "hooks": [
+          {
+            "name": "gemini-md-export-browser-ready",
+            "description": "Open and wait for Gemini web only before MCP tools that need a live tab.",
+            "type": "command",
+            "command": "node \"${extensionPath}${/}scripts${/}hooks${/}gemini-md-export-hook.mjs\" before-tool",
+            "timeout": 20000
+          }
+        ]
+      },
+      {
+        "matcher": "^(write_file|replace|run_shell_command|shell|edit|apply_patch)$",
+        "hooks": [
+          {
+            "name": "gemini-md-export-scope-guard",
+            "description": "Block forbidden Gemini scraping and media fallback implementation paths.",
+            "type": "command",
+            "command": "node \"${extensionPath}${/}scripts${/}hooks${/}gemini-md-export-hook.mjs\" before-tool",
+            "timeout": 3000
+          }
+        ]
+      }
+    ]
+  }
+}

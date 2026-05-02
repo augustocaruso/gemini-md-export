@@ -1,0 +1,41 @@
+description = "Audita e repara notas Gemini exportadas com conteudo possivelmente trocado."
+prompt = """
+Use o subagent `gemini-vault-repair` desta extensao para auditar e reparar notas
+Markdown exportadas do Gemini.
+
+Argumentos do usuario: {{args}}
+
+Contrato:
+- Se o usuario nao informou uma pasta/vault, pergunte antes de prosseguir.
+- Delegue a auditoria e reparo ao subagent `gemini-vault-repair`.
+- O subagent deve preferir o runner local
+  `${extensionPath}/scripts/vault-repair.mjs ...`, que executa auditoria,
+  reexport, comparacao, backup, reparo e relatorios. Para dry-run, usar
+  `--dry-run`. Para triagem rapida, usar `--quick-triage`.
+- Se o runner nao estiver disponivel, o subagent deve rodar o scanner local
+  `${extensionPath}/scripts/vault-repair-audit.mjs --include-notes --report ...`.
+- Para reparo serio, o subagent deve verificar cada raw export seguindo o
+  `chat_id`/link da nota e reexportando aquele chat pelo runner/CLI para
+  staging; o scanner local apenas monta a fila e destaca suspeitas.
+- Diferenca apenas no YAML/frontmatter nao e divergencia de conteudo. O reparo
+  de raw export deve comparar o corpo Markdown e preservar o YAML original
+  byte-for-byte, trocando somente o corpo quando houver contaminacao.
+- O subagent deve criar backup antes de sobrescrever e nunca sobrescrever nota
+  que tenha sinais de wiki/edicao humana automaticamente.
+- Se um chat errado virou nota wiki, a wiki tambem entra no escopo de reparo:
+  o subagent deve reexportar o raw correto, preservar/backupear a wiki atual e
+  criar um caso em `wiki-review/<chatId>.json` marcando
+  `wiki_repair_required`, em vez de fingir que o raw corrigido resolve a wiki.
+- Quando uma wiki for regenerada, reescrita ou consolidada com outras notas, a
+  nota final deve terminar com uma secao de fontes Gemini contendo a uniao
+  deduplicada de todos os links `https://gemini.google.com/app/<chatId>` que
+  inspiraram a nota. Nunca trocar uma lista multi-chat por apenas o ultimo link.
+- O subagent deve emitir um relatorio preliminar depois da auditoria e antes de
+  qualquer overwrite, e um relatorio final depois da verificacao/reparo.
+- O subagent nao deve chamar outro subagent. Se uma wiki precisar ser reescrita,
+  ele deve pedir ao agente principal para chamar o subagent escritor/arquitetura
+  de notas com o case file e o raw corrigido em staging.
+- A resposta final deve trazer contagens, caminhos de staging/backup/relatorio
+  e lista curta das notas wiki que precisam ser regeneradas/mescladas a partir
+  do raw corrigido.
+"""
