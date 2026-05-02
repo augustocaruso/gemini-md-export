@@ -903,6 +903,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === 'gemini-md-export/native-proxy-http') {
+    nativeHostRequest(
+      'proxyHttp',
+      {
+        bridgeUrl: message.bridgeUrl || 'http://127.0.0.1:47283',
+        path: message.path || '/',
+        method: message.method || 'GET',
+        payload: message.payload,
+        timeoutMs: message.timeoutMs || 10000,
+      },
+      {
+        timeoutMs: Math.max(
+          NATIVE_HOST_REQUEST_TIMEOUT_MS,
+          Number(message.timeoutMs || 10000) + 1200,
+        ),
+      },
+    ).then(sendResponse);
+    return true;
+  }
+
   if (message?.type === 'gemini-md-export/claim-tab') {
     applyTabClaim(message, sender).then(sendResponse);
     return true;

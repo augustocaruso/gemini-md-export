@@ -45,3 +45,36 @@ test('service worker expõe probe de native messaging sem acoplar ao fluxo princ
   assert.match(source, /gemini-md-export\/native-host-health/);
   assert.match(source, /nativeHost:\s*lastNativeHostProbe/);
 });
+
+test('content script prefere native proxy para bridgeRequest com fallback HTTP', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'userscript-shell.js'), 'utf-8');
+  assert.match(source, /bridgeTransportState/);
+  assert.match(source, /preferred:\s*'native'/);
+  assert.match(source, /gemini-md-export\/native-proxy-http/);
+  assert.match(source, /NATIVE_BRIDGE_TRANSPORT_COOLDOWN_MS/);
+  assert.match(source, /bridgeTransportState\.active\s*=\s*'http'/);
+});
+
+test('script renderiza manifesto native host com extension id informado', async () => {
+  const child = spawn(
+    process.execPath,
+    [
+      resolve(ROOT, 'scripts', 'native-host-manifest.mjs'),
+      '--extension-id',
+      'abcdefghijklmnopabcdefghijklmnop',
+      '--print',
+    ],
+    {
+      cwd: ROOT,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+  const [chunk] = await once(child.stdout, 'data');
+  const manifest = JSON.parse(chunk.toString('utf-8'));
+  assert.equal(manifest.name, 'com.augustocaruso.gemini_md_export');
+  assert.match(manifest.path, /gemini-md-export-native-host\.mjs$/);
+  assert.deepEqual(manifest.allowed_origins, [
+    'chrome-extension://abcdefghijklmnopabcdefghijklmnop/',
+  ]);
+  child.kill();
+});

@@ -403,6 +403,7 @@
   const BRIDGE_EVENTS_BASE_BACKOFF_MS = 500;
   const BRIDGE_EVENTS_MAX_BACKOFF_MS = 15000;
   const BRIDGE_HEARTBEAT_PING_MS = 30000;
+  const NATIVE_BRIDGE_TRANSPORT_COOLDOWN_MS = 60_000;
   const BRIDGE_SNAPSHOT_MIN_INTERVAL_MS = 1200;
   const BRIDGE_SNAPSHOT_MAX_INTERVAL_MS = 30000;
   const BRIDGE_PROTOCOL_CAPABILITIES = [
@@ -586,6 +587,13 @@
     lastCommandPollStartedAt: 0,
     lastCommandPollEndedAt: 0,
     lastCommandReceivedAt: 0,
+  };
+  const bridgeTransportState = {
+    preferred: 'native',
+    active: 'http',
+    nativeDisabledUntil: 0,
+    nativeLastOkAt: 0,
+    nativeLastError: null,
   };
   const MIN_FAST_POLL_BACKOFF_MS = 250;
 
@@ -2308,7 +2316,53 @@
     }
   };
 
+  const nativeBridgeRequest = async (
+    path,
+    { method = 'GET', payload, timeoutMs = 10000 } = {},
+  ) => {
+    if (!isExtensionContext || Date.now() < bridgeTransportState.nativeDisabledUntil) {
+      return null;
+    }
+
+    const response = await extensionSendMessage(
+      {
+        type: 'gemini-md-export/native-proxy-http',
+        bridgeUrl: BRIDGE_BASE_URL,
+        path,
+        method,
+        payload,
+        timeoutMs,
+      },
+      { timeoutMs: Math.max(1500, timeoutMs + 1800) },
+    );
+
+    if (!response?.ok) {
+      bridgeTransportState.nativeLastError =
+        response?.error || response?.code || 'native-proxy-unavailable';
+      bridgeTransportState.nativeDisabledUntil =
+        Date.now() + NATIVE_BRIDGE_TRANSPORT_COOLDOWN_MS;
+      return null;
+    }
+
+    bridgeTransportState.active = 'native';
+    bridgeTransportState.nativeLastOkAt = Date.now();
+    bridgeTransportState.nativeLastError = null;
+
+    if (response.status === 204) return { handled: true, value: null };
+    if (response.status && response.status >= 400) {
+      throw new Error(`bridge ${response.status}: ${response.text || response.status}`);
+    }
+    return {
+      handled: true,
+      value: response.data ?? null,
+    };
+  };
+
   const bridgeRequest = async (path, { method = 'GET', payload, timeoutMs = 10000 } = {}) => {
+    const nativeResult = await nativeBridgeRequest(path, { method, payload, timeoutMs });
+    if (nativeResult?.handled) return nativeResult.value;
+
+    bridgeTransportState.active = 'http';
     const response = await fetchWithTimeout(
       `${BRIDGE_BASE_URL}${path}`,
       {
@@ -7286,6 +7340,13 @@
         snapshotHash: state.bridgeSnapshotHash || null,
         lastBridgeSnapshotAt: state.lastBridgeSnapshotAt || null,
         tabIgnored: isTabIgnored(),
+        transport: {
+          preferred: bridgeTransportState.preferred,
+          active: bridgeTransportState.active,
+          nativeLastOkAt: bridgeTransportState.nativeLastOkAt || null,
+          nativeDisabledUntil: bridgeTransportState.nativeDisabledUntil || null,
+          nativeLastError: bridgeTransportState.nativeLastError || null,
+        },
       }),
       isTabIgnored: () => isTabIgnored(),
       setTabIgnored: (value) => setTabIgnored(value),

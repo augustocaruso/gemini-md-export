@@ -260,6 +260,10 @@ cpSync(
   resolve(ROOT, 'scripts', 'bridge-smoke.mjs'),
   resolve(geminiCliExtensionDir, 'scripts', 'bridge-smoke.mjs'),
 );
+cpSync(
+  resolve(ROOT, 'scripts', 'native-host-manifest.mjs'),
+  resolve(geminiCliExtensionDir, 'scripts', 'native-host-manifest.mjs'),
+);
 cpSync(extensionDir, resolve(geminiCliExtensionDir, 'browser-extension'), {
   recursive: true,
 });

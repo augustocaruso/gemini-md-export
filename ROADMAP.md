@@ -1327,7 +1327,8 @@ Rejeitar ou adiar se:
 
 ## v0.8.2 — Native host como transporte primário
 
-Status: condicionado ao spike `v0.8.1`.
+Status: implementada na versão `0.8.2` com native proxy preferencial e fallback
+HTTP/SSE.
 
 Objetivo: tornar native messaging o caminho preferencial extension <-> processo
 local, mantendo HTTP/SSE como fallback compatível.

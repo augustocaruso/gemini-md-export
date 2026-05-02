@@ -40,6 +40,7 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   const repairCommandPath = resolve(extensionDir, 'commands', 'exporter', 'repair-vault.toml');
   const repairAuditScriptPath = resolve(extensionDir, 'scripts', 'vault-repair-audit.mjs');
   const repairScriptPath = resolve(extensionDir, 'scripts', 'vault-repair.mjs');
+  const nativeHostManifestScriptPath = resolve(extensionDir, 'scripts', 'native-host-manifest.mjs');
   const hookScriptPath = resolve(
     extensionDir,
     'scripts',
@@ -71,6 +72,7 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.equal(existsSync(repairCommandPath), true);
   assert.equal(existsSync(repairAuditScriptPath), true);
   assert.equal(existsSync(repairScriptPath), true);
+  assert.equal(existsSync(nativeHostManifestScriptPath), true);
   assert.equal(existsSync(hookScriptPath), true);
 
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8'));
