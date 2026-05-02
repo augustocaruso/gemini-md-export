@@ -26,7 +26,7 @@ const usage = () => [
   'native-host-manifest',
   '',
   'Uso:',
-  '  node scripts/native-host-manifest.mjs --extension-id <id> [--browser chrome|edge|brave] [--install|--print]',
+  '  node scripts/native-host-manifest.mjs --extension-id <id> [--browser chrome|edge|brave|dia] [--install|--print]',
   '',
   'Gera o manifesto Native Messaging para o host com.augustocaruso.gemini_md_export.',
 ].join('\n');
@@ -51,6 +51,8 @@ const macNativeHostDir = () => {
       ? 'Microsoft Edge'
       : browser === 'brave'
         ? 'BraveSoftware/Brave-Browser'
+        : browser === 'dia'
+          ? 'Dia'
         : 'Google/Chrome';
   return resolve(homedir(), 'Library', 'Application Support', appName, 'NativeMessagingHosts');
 };
@@ -61,6 +63,9 @@ const windowsRegistryKey = () => {
   }
   if (browser === 'brave') {
     return `HKCU\\Software\\BraveSoftware\\Brave-Browser\\NativeMessagingHosts\\${HOST_NAME}`;
+  }
+  if (browser === 'dia') {
+    return `HKCU\\Software\\Dia\\NativeMessagingHosts\\${HOST_NAME}`;
   }
   return `HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\${HOST_NAME}`;
 };

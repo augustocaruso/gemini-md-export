@@ -1219,6 +1219,52 @@ deve encurtar ou fortalecer esse caminho:
 - `debugger`: diagnóstico e controle profundo de aba via Chrome DevTools
   Protocol, condicional e opt-in, não caminho padrão.
 
+### Atualização pós-investigação Claude/Playwright — 2026-05-02
+
+Status: diagnóstico registrado. Não implementar mudanças estruturais enquanto a
+`v0.8.5` estiver estável em campo.
+
+A comparação local com as extensões Claude e Playwright no Dia mostrou que a
+maior diferença não é estética nem timeout: é onde fica o controle.
+
+Achados:
+
+- Playwright é extensão Web Store (`location: 1`), sem content scripts no
+  manifest; o service worker controla abas via `chrome.debugger`, usa WebSocket
+  para relay e trata o tab group como estado operacional da sessão, limpando
+  grupos antigos quando o service worker reinicia.
+- Claude também é Web Store, com service worker forte, `offscreen`,
+  `nativeMessaging`, `debugger`, `webNavigation`, `alarms`, `sidePanel` e
+  `<all_urls>` para scripts de acessibilidade/indicador. O content script
+  específico de `claude.ai` é mínimo; o trabalho pesado fica extension-side.
+- O offscreen do Claude manda keepalive periódico para manter o service worker
+  acordado. Nosso offscreen atual é apenas diagnosticável/pingável; ainda não
+  é usado como keepalive real nem como coordenador persistente.
+- A extensão Gemini Markdown Export no Dia está carregada como unpacked
+  (`location: 4`) apontando para `~/.gemini/extensions/...`. Trocar arquivos
+  nesse diretório não garante que o runtime MV3 e os content scripts antigos
+  sejam substituídos imediatamente.
+- A permissão `nativeMessaging` já existe, mas o registro do host nativo é
+  template/repair manual e hoje cobre Chrome/Edge/Brave. No Dia, o manifest
+  nativo pode simplesmente não estar instalado, então a permissão pode existir
+  sem o transporte funcionar de verdade.
+- Nosso `content.js` ainda concentra scraping, bridge heartbeat/SSE, progresso,
+  inventário, comandos pesados, scroll e estado de operação. Isso cria uma
+  dependência forte demais de uma página Gemini viva, não ocupada e com content
+  script atualizado.
+
+Conclusão operacional:
+
+- Não mexer na `v0.8.5` só por ansiedade se ela estiver funcionando.
+- O próximo trabalho de confiabilidade não deve ser "aumentar timeout"; deve
+  mover autoridade para o service worker/background, completar o registro real
+  de native host por navegador e usar offscreen como keepalive/coordenador
+  quando isso for comprovadamente necessário.
+- `debugger` e WebSocket continuam possibilidades, mas com papéis diferentes:
+  `debugger` resolve inspeção/controle de aba; WebSocket resolve transporte. O
+  exemplo do Playwright só funciona bem porque o controle principal já está no
+  background, não dentro de um content script gigante.
+
 ## v0.8.0 — Self-heal com `scripting`
 
 Status: implementada na versão `0.8.0`.
@@ -1439,6 +1485,141 @@ Correção:
   `RESULT_JSON`; quem precisar parsear dados deve usar `--json` ou
   `--result-json` explicitamente.
 
+## v0.8.6 — Doctor de runtime, Dia e native host
+
+Status: implementada na versão `0.8.6`.
+
+Objetivo: transformar "a extensão carregou mesmo?" e "o native host existe
+nesse navegador?" em diagnósticos curtos e verificáveis, sem acionar MCP ruidoso
+nem abrir fallback automático.
+
+Motivação da investigação:
+
+- Claude e Playwright são Web Store (`location: 1`), com runtime gerenciado pelo
+  navegador. A nossa extensão é unpacked (`location: 4`), então o navegador pode
+  manter service worker/content script antigos depois de update local.
+- O host nativo do projeto existe, mas o registro é dependente do navegador e
+  ainda não cobre Dia como alvo explícito.
+- Quando o runtime carregado e os arquivos em disco divergem, aumentar timeout
+  só mascara o problema.
+
+Entregas propostas:
+
+- Criar um comando/fluxo `doctor` CLI-only que compare:
+  - versão/build dos arquivos em `~/.gemini/extensions/gemini-md-export`;
+  - versão/build reportada pelo runtime da extensão quando disponível;
+  - caminho real da extensão no perfil do navegador;
+  - `location`/tipo de instalação quando o perfil permitir leitura;
+  - native host instalado/não instalado por navegador.
+- Adicionar suporte explícito a Dia no gerador/repair de Native Messaging:
+  - caminho de `NativeMessagingHosts` correto para Dia;
+  - validação do `allowed_origins` com o ID real da extensão carregada;
+  - mensagem curta quando o host está ausente.
+- Produzir saída humana por padrão:
+  - sem `RESULT_JSON`;
+  - sem fallback MCP;
+  - se não der para confirmar, dizer exatamente o que não foi confirmado.
+- Registrar no relatório:
+  - `browser: dia|chrome|edge|brave`;
+  - `extensionId`;
+  - `extensionPath`;
+  - `nativeHostManifestPath`;
+  - `nativeHostStatus`;
+  - ação recomendada de uma linha.
+
+Critérios de aceite:
+
+- Em Dia, o doctor diz claramente se o native host está registrado no local que
+  o Dia lê.
+- O doctor diferencia arquivo atualizado de runtime antigo.
+- A recomendação nunca é "mate processos" ou "chame MCP" sem evidência.
+- A CLI falha curto se não conseguir diagnosticar, sem poluir a tela.
+
+## v0.8.7 — Offscreen keepalive e service worker estável
+
+Status: proposta. Não implementar enquanto a `v0.8.5` estiver estável, salvo
+aprovação explícita.
+
+Objetivo: usar o offscreen document como estabilizador real do service worker
+MV3, inspirado no padrão observado no Claude, sem mover scraping para fora do
+DOM do Gemini.
+
+Motivação da investigação:
+
+- O offscreen do Claude envia keepalive periódico para reduzir morte/sono do
+  service worker durante coordenação longa.
+- Nosso offscreen atual só responde ping; ele prova que a API está disponível,
+  mas não melhora o lifecycle.
+
+Entregas propostas:
+
+- Criar offscreen sob demanda quando houver operação longa ou conexão native em
+  uso.
+- Enviar keepalive leve para o service worker em intervalo configurável.
+- Encerrar offscreen quando idle para não criar processo persistente sem motivo.
+- Expor no doctor/status:
+  - `offscreen.active`;
+  - `offscreen.reason`;
+  - `lastKeepaliveAt`;
+  - `idleCloseAt`.
+- Medir antes/depois:
+  - quedas de comando;
+  - reconexões do service worker;
+  - tempo até primeira resposta após cold start.
+
+Critérios de aceite:
+
+- Menos perda de comando/heartbeat em export/count longo.
+- Sem uso perceptível quando idle.
+- Offscreen não vira UI invisível nem hospeda scraping.
+
+## v0.8.8 — Background-first tab broker
+
+Status: proposta. Não implementar enquanto a `v0.8.5` estiver estável, salvo
+aprovação explícita.
+
+Objetivo: fazer o service worker/background ser a fonte de verdade para abas,
+claims, versão carregada e lifecycle. O content script vira executor de DOM,
+não autoridade global do sistema.
+
+Motivação da investigação:
+
+- Playwright mantém conexão, tabs anexadas, tab group e cleanup no background.
+- Claude mantém grande parte do estado operacional fora da página.
+- Nosso content script ainda decide e reporta coisas demais; quando ele fica
+  stale/ocupado, a bridge perde confiança.
+
+Entregas propostas:
+
+- Criar registry extension-side de abas Gemini:
+  - tabId/windowId/url/status;
+  - versão/build do content script;
+  - claim ativa;
+  - operação pesada ativa;
+  - última injeção/reload.
+- O background deve:
+  - escolher/reusar aba antes de a CLI abrir nova;
+  - recarregar/reinjetar quando runtime divergir;
+  - liberar claims/grupos em fechamento, detach, reload e timeout;
+  - ignorar clientes sem tabId ou com build antigo;
+  - impedir que uma aba `/app` vazia vire falso total.
+- O content script deve:
+  - executar comandos DOM;
+  - reportar snapshots;
+  - aceitar token/generation do background;
+  - parar heartbeat quando superseded.
+- Manter tab group como indicador visual, mas com cleanup garantido no
+  background, inclusive após restart do service worker.
+
+Critérios de aceite:
+
+- CLI não precisa listar/claimar manualmente quando existe uma aba Gemini
+  recuperável.
+- Se houver múltiplas abas, a resposta é curta e humana, ou usa uma aba de
+  trabalho explicitamente marcada.
+- Claims/grupos somem ao final ou expiram de forma confiável.
+- Uma aba ocupada não pode produzir total falso.
+
 ## v0.9.0 — Spike condicional de `debugger`/CDP
 
 Status: possibilidade técnica de alto poder, no mesmo bloco de avaliação de
@@ -1447,6 +1628,12 @@ aprovação explícita separada.
 
 Objetivo: descobrir se `chrome.debugger`/Chrome DevTools Protocol resolveria
 problemas que `scripting` + native messaging + offscreen não resolvem.
+
+Nota da investigação: Playwright usa esse caminho como base de controle, não
+como fallback de content script. Ele anexa o debugger à aba, encaminha comandos
+CDP pelo background, agrupa abas controladas e faz detach/cleanup quando a
+conexão fecha. Se este projeto adotar `debugger`, o desenho deve seguir essa
+linha: controle no background, escopo explícito e detach previsível.
 
 ### Benefícios possíveis para este projeto
 
@@ -1464,6 +1651,10 @@ problemas que `scripting` + native messaging + offscreen não resolvem.
 - Debug de campo:
   - gerar um diagnóstico muito mais rico quando o DOM muda ou a página fica
     presa.
+- Controle de sessão:
+  - anexar apenas à aba Gemini reivindicada;
+  - observar navegação/reload sem depender do heartbeat do content script;
+  - remover tab group/badge/claim quando o debugger desconectar.
 
 ### Custos e riscos
 
@@ -1482,6 +1673,9 @@ Se aprovado, `debugger` deve começar como modo diagnóstico opt-in:
 - desabilitado por padrão;
 - ativado por flag/env/config local;
 - escopo limitado a `https://gemini.google.com/*`;
+- uma única aba reivindicada por sessão, salvo aprovação explícita para lote
+  multi-aba;
+- detach obrigatório ao final, em erro, timeout ou fechamento da conexão;
 - nunca usar para roubar cookies/tokens ou chamar APIs privadas;
 - nunca usar `<all_urls>` junto;
 - logs sanitizados.
@@ -1504,10 +1698,11 @@ Ele fica no roadmap como possibilidade condicionada, ao lado do spike de
 conexão persistente ou diagnóstico profundo de aba.
 
 Observação: WebSocket e `debugger` resolvem classes diferentes de problema.
-WebSocket é transporte; `debugger` é inspeção/controle da aba. Eles ficam juntos
-no roadmap porque ambos são opções mais poderosas, com mais custo operacional,
-que só devem entrar depois de medir o que `scripting` e native messaging não
-resolverem.
+WebSocket é transporte; `debugger` é inspeção/controle da aba. O exemplo do
+Playwright usa WebSocket porque o background já é o broker de sessão e o
+debugger já é o canal de controle da página. Reproduzir só o WebSocket mantendo
+o comando pesado dentro do content script provavelmente não resolveria o
+problema principal.
 
 ### Por quê
 
@@ -1545,36 +1740,38 @@ provavelmente mais um remendo.
 
 ## Ordem recomendada de implementação
 
-1. `v0.8.0 scripting self-heal`.
-2. Medir campo real: count/export após update/reload, aba existente, múltiplas
-   abas, service worker cold.
-3. `v0.8.1 nativeMessaging spike`.
-4. Decidir, com dados, entre:
-   - native host como transporte primário (`v0.8.2`);
-   - manter HTTP/SSE com melhorias;
-   - WebSocket spike (`v0.10.0`) se transporte for gargalo comprovado;
-   - debugger/CDP (`v0.9.0`) se o problema for diagnóstico/controle profundo da
-     aba, e não apenas transporte.
-5. `v0.8.3 offscreen` apenas se service worker continuar atrapalhando.
-6. Promover qualquer spike perigoso só com aceite explícito de permissão,
+Estado atual: `v0.8.5` funcionando em campo. Não mexer por mexer.
+
+1. Manter `v0.8.5` como baseline estável e coletar falhas reais.
+2. Se voltar problema de versão/runtime/native host, implementar primeiro
+   `v0.8.6 doctor de runtime, Dia e native host`.
+3. Se os sintomas forem service worker dormindo, comando perdido ou conexão
+   instável durante operação longa, implementar `v0.8.7 offscreen keepalive`.
+4. Se os sintomas forem aba errada, claim/grupo preso, content script stale ou
+   múltiplas abas ambíguas, implementar `v0.8.8 background-first tab broker`.
+5. Só depois avaliar `v0.9.0 debugger/CDP`, começando como modo diagnóstico
+   opt-in para uma aba reivindicada.
+6. Só avaliar `v0.10.0 WebSocket` se a medição mostrar gargalo real de
+   transporte depois que o background virou broker confiável.
+7. Promover qualquer spike perigoso só com aceite explícito de permissão,
    privacidade e rollback.
 
 ## Próximo passo proposto
 
-Implementar primeiro apenas `v0.8.0 scripting self-heal`.
+Não implementar nada estrutural agora se a `v0.8.5` continuar funcionando.
 
-Escopo inicial:
+Próximo passo somente de documentação/observação:
 
-- adicionar permissão `scripting`;
-- implementar ping/reinject em abas Gemini;
-- integrar em `/agent/ready` e CLI readiness;
-- testes de manifest/fonte;
-- release menor com nota clara de nova permissão.
+- manter a investigação Claude/Playwright registrada neste roadmap;
+- anotar qualquer falha real com versão/build, navegador, perfil e sintoma;
+- quando houver nova falha reproduzível, escolher a menor versão corretiva da
+  lista acima (`0.8.6`, `0.8.7` ou `0.8.8`) em vez de pular direto para
+  `debugger` ou WebSocket.
 
-Fora do primeiro PR/release:
+Fora do próximo passo:
 
-- native messaging;
-- offscreen;
-- debugger;
-- WebSocket;
-- mudanças em exportação Markdown.
+- mexer no fluxo de exportação que acabou de funcionar;
+- aumentar timeout como solução principal;
+- fallback MCP automático para contagem/exportação;
+- `debugger`;
+- WebSocket.

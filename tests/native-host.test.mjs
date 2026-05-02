@@ -78,3 +78,10 @@ test('script renderiza manifesto native host com extension id informado', async 
   ]);
   child.kill();
 });
+
+test('script conhece caminho Dia para native messaging no macOS', () => {
+  const source = readFileSync(resolve(ROOT, 'scripts', 'native-host-manifest.mjs'), 'utf-8');
+  assert.match(source, /chrome\|edge\|brave\|dia/);
+  assert.match(source, /browser === 'dia'\s*\?\s*'Dia'/);
+  assert.match(source, /Software\\\\Dia\\\\NativeMessagingHosts/);
+});

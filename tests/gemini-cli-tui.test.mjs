@@ -252,6 +252,26 @@ test('CLI expõe ajuda contextual para comandos e subcomandos', async () => {
   assert.match(chatsStdout.text(), /Total confirmado/);
 });
 
+test('CLI doctor --plain nao imprime RESULT_JSON sem pedido explicito', async () => {
+  const port = await getFreePort();
+  const stdout = captureStream();
+  const stderr = captureStream();
+  const run = await main(
+    [
+      'doctor',
+      '--bridge-url',
+      `http://127.0.0.1:${port}`,
+      '--no-start-bridge',
+      '--plain',
+    ],
+    { stdout, stderr },
+  );
+
+  assert.equal(run.exitCode, 3);
+  assert.match(stdout.text(), /NAO PRONTO:/);
+  assert.doesNotMatch(stdout.text(), /RESULT_JSON/);
+});
+
 test('CLI tabs list usa endpoint proprio sem preflight gemini_ready', async () => {
   await withServer((req, res, url) => {
     if (url.pathname === '/agent/tabs') {

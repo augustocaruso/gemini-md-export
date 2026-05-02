@@ -11,6 +11,7 @@ import {
   readBrowserLaunchState,
   writeBrowserLaunchState,
 } from '../src/browser-launch.mjs';
+import { buildLocalDoctorReport, normalizeBrowserKey } from '../src/browser-diagnostics.mjs';
 
 const DEFAULT_BRIDGE_URL = 'http://127.0.0.1:47283';
 const DEFAULT_POLL_MS = 1200;
@@ -88,6 +89,9 @@ const commonOptionHelp = () => [
   '  --bridge-start-wait-ms <ms> Quanto esperar a bridge iniciar. Default: 6000.',
   '  --bridge-keep-alive-ms <ms> Quanto a bridge iniciada pela CLI fica viva sem uso.',
   '  --no-exit-when-idle     Bridge iniciada pela CLI nao encerra sozinha por idle.',
+  '  --browser <name>         Navegador alvo: chrome, edge, brave ou dia.',
+  '  --profile-directory <name> Perfil Chromium. Default: Default.',
+  '  --extension-id <id>      ID conhecido da extensao carregada.',
   '  --ready-wait-ms <ms>     Quanto esperar a aba/extensao ficar pronta.',
   '  --client-id <id>         Escolhe uma aba Gemini pelo clientId.',
   '  --tab-id <id>            Escolhe uma aba Gemini pelo tabId do navegador.',
@@ -218,6 +222,7 @@ const doctorHelp = () =>
     '  gemini-md-export doctor [opcoes]',
     '',
     'Verifica se bridge, extensao Chrome e uma aba Gemini estao prontas.',
+    'Nao acorda o navegador nem faz fallback MCP; o objetivo e diagnostico curto.',
     '',
     ...outputModeHelp(),
     '',
@@ -552,6 +557,11 @@ const parseArgs = (argv) => {
       startBridge: true,
       extraRepairArgs: [],
       chatIds: [],
+      browser: normalizeBrowserKey(process.env.GEMINI_MCP_BROWSER || process.env.GME_BROWSER || 'chrome'),
+      profileDirectory:
+        process.env.GEMINI_MCP_CHROME_PROFILE_DIRECTORY ||
+        process.env.GME_CHROME_PROFILE_DIRECTORY ||
+        'Default',
       color: process.env.NO_COLOR ? false : true,
       wakeBrowser: true,
       selfHeal: true,
@@ -598,6 +608,9 @@ const parseArgs = (argv) => {
       out.flags.bridgeKeepAliveMs = Math.max(1000, Number(value()) || 15 * 60_000);
     else if (arg === '--ready-wait-ms') out.flags.readyWaitMs = Math.max(0, Number(value()) || 0);
     else if (arg === '--timeout-ms') out.flags.timeoutMs = Math.max(1000, Number(value()) || DEFAULT_TIMEOUT_MS);
+    else if (arg === '--browser') out.flags.browser = normalizeBrowserKey(value());
+    else if (arg === '--profile-directory') out.flags.profileDirectory = value();
+    else if (arg === '--extension-id') out.flags.extensionId = value();
     else if (arg === '--client-id') out.flags.clientId = value();
     else if (arg === '--tab-id') out.flags.tabId = value();
     else if (arg === '--claim-id') out.flags.claimId = value();
@@ -1454,27 +1467,100 @@ const runSync = async (parsed, streams = {}) => {
 const runDoctor = async (parsed, streams = {}) => {
   const ui = makeUi(parsed.flags, streams);
   warnTuiFallback(ui);
-  await ensureBridgeAvailable(parsed.flags, ui);
-  const ready = await readyWithCliWake(parsed.flags.bridgeUrl, parsed.flags, ui);
+  const local = buildLocalDoctorReport({
+    browser: parsed.flags.browser,
+    profileDirectory: parsed.flags.profileDirectory,
+    extensionId: parsed.flags.extensionId,
+    packageRoot: packageRoot(),
+    version: VERSION,
+  });
+  let bridge = null;
+  let ready = null;
+  let bridgeError = null;
+  try {
+    bridge = await ensureBridgeAvailable(parsed.flags, ui);
+    ready = await requestReadyStatus(
+      parsed.flags.bridgeUrl,
+      {
+        ...parsed.flags,
+        wakeBrowser: false,
+        selfHeal: false,
+        allowReload: false,
+      },
+      { waitMs: 0 },
+    );
+  } catch (err) {
+    bridgeError = err;
+  }
   const result = {
-    ok: ready.ready === true,
-    ready: ready.ready === true,
-    blockingIssue: ready.blockingIssue || null,
-    mode: ready.mode || null,
-    connectedClientCount: ready.connectedClientCount || 0,
-    selectableTabCount: ready.selectableTabCount || 0,
-    commandReadyClientCount: ready.commandReadyClientCount || 0,
+    ok: local.ok && ready?.ready === true,
+    localOk: local.ok,
+    ready: ready?.ready === true,
+    browser: local.browser,
+    profileDirectory: local.profileDirectory,
+    sourceVersion: local.sourceVersion,
+    loadedExtension: local.loadedExtension?.extension || null,
+    nativeHost: local.nativeHost,
+    bridge: bridge
+      ? {
+          ok: true,
+          bridgeRole: bridge.bridgeRole || null,
+          pid: bridge.pid || null,
+          version: bridge.version || null,
+          protocolVersion: bridge.protocolVersion || null,
+        }
+      : {
+          ok: false,
+          error: bridgeError?.message || null,
+        },
+    blockingIssue: ready?.blockingIssue || null,
+    mode: ready?.mode || null,
+    connectedClientCount: ready?.connectedClientCount || 0,
+    selectableTabCount: ready?.selectableTabCount || 0,
+    commandReadyClientCount: ready?.commandReadyClientCount || 0,
+    warnings: local.warnings,
     nextAction:
-      ready.ready === true
-        ? 'Bridge, extensao e aba Gemini parecem prontos.'
-        : ready.extensionReadiness?.nextAction?.message ||
-          ready.cliBrowserWake?.reason ||
-          ready.cliBrowserWake?.error ||
-          'Verifique a extensao Chrome.',
+      ready?.ready === true && local.ok
+        ? 'Bridge, extensao, native host e aba Gemini parecem prontos.'
+        : local.nextAction ||
+          ready?.extensionReadiness?.nextAction?.message ||
+          bridgeError?.message ||
+          'Verifique a extensao do navegador.',
   };
-  if (ui.format === 'json') ui.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
-  else ui.stdout.write(`${result.ok ? 'OK' : 'NAO PRONTO'}: ${result.nextAction}\nRESULT_JSON ${JSON.stringify(result)}\n`);
-  return { exitCode: result.ok ? EXIT.OK : EXIT.EXTENSION_UNREADY, result };
+  if (ui.format === 'json') {
+    ui.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+  } else if (ui.format === 'jsonl') {
+    ui.stdout.write(`${JSON.stringify({ type: 'result', result })}\n`);
+  } else {
+    const extension = result.loadedExtension;
+    ui.stdout.write(`${result.ok ? 'OK' : 'NAO PRONTO'}: ${result.nextAction}\n`);
+    ui.stdout.write(`Browser: ${result.browser} perfil=${result.profileDirectory}\n`);
+    ui.stdout.write(
+      `Extensao: ${
+        extension
+          ? `${extension.version || '?'} ${extension.locationKind || 'desconhecida'} id=${extension.id}`
+          : 'nao encontrada no perfil'
+      }\n`,
+    );
+    ui.stdout.write(
+      `Native host: ${result.nativeHost.status} em ${result.nativeHost.manifestPath}\n`,
+    );
+    ui.stdout.write(
+      `Bridge: ${result.bridge.ok ? 'ok' : `falhou - ${result.bridge.error || 'sem resposta'}`}\n`,
+    );
+    ui.stdout.write(
+      `Gemini Web: ${result.ready ? 'pronto' : `nao pronto${result.blockingIssue ? ` - ${result.blockingIssue}` : ''}`}\n`,
+    );
+    if (parsed.flags.resultJson === true) ui.stdout.write(`RESULT_JSON ${JSON.stringify(result)}\n`);
+  }
+  const exitCode = result.ok
+    ? EXIT.OK
+    : !result.bridge.ok
+      ? EXIT.BRIDGE_UNAVAILABLE
+      : result.ready && result.warnings.length > 0
+        ? EXIT.WARNINGS
+        : EXIT.EXTENSION_UNREADY;
+  return { exitCode, result };
 };
 
 const runBrowser = async (parsed, streams = {}) => {

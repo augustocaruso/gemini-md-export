@@ -280,6 +280,10 @@ cpSync(
   resolve(geminiCliExtensionDir, 'src', 'browser-launch.mjs'),
 );
 cpSync(
+  resolve(ROOT, 'src', 'browser-diagnostics.mjs'),
+  resolve(geminiCliExtensionDir, 'src', 'browser-diagnostics.mjs'),
+);
+cpSync(
   resolve(ROOT, 'src', 'recent-chats-policy.mjs'),
   resolve(geminiCliExtensionDir, 'src', 'recent-chats-policy.mjs'),
 );
