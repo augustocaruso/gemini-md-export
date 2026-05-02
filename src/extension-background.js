@@ -179,6 +179,43 @@ const setActionBadge = (tabId, text, color = '#188038') =>
 
 const clearActionBadge = (tabId) => setActionBadge(tabId, '');
 
+const cleanupStaleTabClaimVisuals = async (reason = 'stale-claim-cleanup') => {
+  const claims = await getTrackedTabClaims();
+  const entries = Object.entries(claims || {});
+  if (!entries.length) {
+    return { ok: true, reason, cleaned: 0 };
+  }
+
+  let cleaned = 0;
+  for (const [key, claim] of entries) {
+    const tabId = Number(key);
+    if (!Number.isInteger(tabId)) {
+      delete claims[key];
+      cleaned += 1;
+      continue;
+    }
+
+    const tab = await chromeGetTab(tabId);
+    if (tab && claim?.mode === 'tab-group' && claim.originalGroupId === TAB_GROUP_NONE) {
+      const stillOurGroup =
+        Number.isInteger(claim.groupId) &&
+        Number.isInteger(tab.groupId) &&
+        tab.groupId === claim.groupId;
+      if (stillOurGroup) {
+        await chromeUngroupTab(tabId);
+      }
+    }
+    if (tab) {
+      await clearActionBadge(tabId);
+    }
+    delete claims[key];
+    cleaned += 1;
+  }
+
+  await setTrackedTabClaims(claims);
+  return { ok: true, reason, cleaned };
+};
+
 const applyTabClaim = async (message, sender = {}) => {
   const tabId = sender.tab?.id;
   if (!Number.isInteger(tabId)) {
@@ -336,9 +373,11 @@ chrome.runtime.onInstalled.addListener((details) => {
     reason: details.reason,
     previousVersion: details.previousVersion || null,
   });
-  setTimeout(() => {
-    reloadGeminiTabs(`extension-${details.reason}`);
-  }, 500);
+  cleanupStaleTabClaimVisuals(`extension-${details.reason}`).finally(() => {
+    setTimeout(() => {
+      reloadGeminiTabs(`extension-${details.reason}`);
+    }, 500);
+  });
 });
 
 const reloadGeminiTabs = (reason = 'manual') =>
@@ -380,6 +419,7 @@ const consumePendingGeminiTabsReload = async () => {
   const pending = await storageGet(PENDING_GEMINI_TABS_RELOAD_KEY);
   if (!pending) return;
   await storageRemove(PENDING_GEMINI_TABS_RELOAD_KEY);
+  await cleanupStaleTabClaimVisuals(pending.reason || 'extension-self-reload');
   setTimeout(() => {
     reloadGeminiTabs(pending.reason || 'extension-self-reload');
   }, 500);
@@ -480,7 +520,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       expectedProtocolVersion: message.expectedProtocolVersion || null,
       expectedBuildStamp: message.expectedBuildStamp || null,
       requestedAt: new Date().toISOString(),
-    }).then(() => {
+    }).then(() => cleanupStaleTabClaimVisuals(message.reason || 'self-reload')).then(() => {
       sendResponse({ ok: true, reloading: true });
       setTimeout(() => {
         chrome.runtime.reload();

@@ -130,6 +130,10 @@ test('MCP implementa afinidade confiável por claim de aba', () => {
   assert.match(backgroundSource, /chrome\.tabs\.group/);
   assert.match(backgroundSource, /chrome\.tabGroups\.update/);
   assert.match(backgroundSource, /tab-already-in-user-group/);
+  assert.match(backgroundSource, /cleanupStaleTabClaimVisuals/);
+  assert.match(backgroundSource, /stillOurGroup/);
+  assert.match(backgroundSource, /chrome\.runtime\.onInstalled\.addListener/);
+  assert.match(backgroundSource, /message\?\.type === 'RELOAD_SELF'/);
   assert.match(buildSource, /'tabGroups'/);
 });
 
