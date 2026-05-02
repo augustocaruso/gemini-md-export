@@ -143,6 +143,28 @@ test('contagem usa DOM do sidebar quando counts do browser concordam', () => {
   });
 });
 
+test('contagem não promove DOM concordante quando caller bloqueia confirmação por DOM', () => {
+  const result = inferRecentChatsCountStatus(
+    {
+      page: {
+        kind: 'chat',
+        listedConversationCount: 13,
+        bridgeConversationCount: 13,
+        sidebarConversationCount: 13,
+      },
+    },
+    13,
+    {
+      allowDomCountConfirmation: false,
+    },
+  );
+
+  assert.equal(result.totalKnown, false);
+  assert.equal(result.totalCount, null);
+  assert.equal(result.countSource, 'unconfirmed');
+  assert.equal(result.countConfidence, 'partial');
+});
+
 test('contagem não promove parcial quando cache carregado diverge do DOM', () => {
   const result = inferRecentChatsCountStatus(
     {

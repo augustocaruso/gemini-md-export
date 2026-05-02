@@ -198,7 +198,7 @@ test('CLI --help na posicao inicial sai com sucesso', async () => {
   assert.equal(run.exitCode, 0);
   assert.match(stdout.text(), /Uso:/);
   assert.match(stdout.text(), /Exit codes:/);
-  assert.match(stdout.text(), /RESULT_JSON/);
+  assert.match(stdout.text(), /--json/);
   assert.match(stdout.text(), /export missing/);
   assert.match(stdout.text(), /export reexport/);
   assert.match(stdout.text(), /export notebook/);
@@ -249,7 +249,7 @@ test('CLI expõe ajuda contextual para comandos e subcomandos', async () => {
   assert.equal((await main(['chats', '--help'], { stdout: chatsStdout })).exitCode, 0);
   assert.match(chatsStdout.text(), /gemini-md-export chats/);
   assert.match(chatsStdout.text(), /chats count/);
-  assert.match(chatsStdout.text(), /totalKnown=true/);
+  assert.match(chatsStdout.text(), /Total confirmado/);
 });
 
 test('CLI tabs list usa endpoint proprio sem preflight gemini_ready', async () => {
@@ -287,13 +287,11 @@ test('CLI tabs list usa endpoint proprio sem preflight gemini_ready', async () =
     });
     assert.equal(run.exitCode, 0);
     assert.match(stdout.text(), /1 aba\(s\) Gemini conectada\(s\)/);
-    const resultLine = stdout
-      .text()
-      .split(/\r?\n/)
-      .find((line) => line.startsWith('RESULT_JSON '));
-    const result = JSON.parse(resultLine.replace('RESULT_JSON ', ''));
-    assert.equal(result.tabs[0].clientId, 'client-1');
-    assert.equal(result.tabs[0].listedConversationCount, 42);
+    assert.match(stdout.text(), /clientId=client-1/);
+    assert.match(stdout.text(), /conversas_visiveis=42/);
+    assert.doesNotMatch(stdout.text(), /RESULT_JSON/);
+    assert.equal(run.result.tabs[0].clientId, 'client-1');
+    assert.equal(run.result.tabs[0].listedConversationCount, 42);
     assert.equal(stderr.text(), '');
     assert.equal(requests.some((item) => item.pathname === '/agent/ready'), false);
   });
@@ -344,11 +342,8 @@ test('CLI chats count carrega ate o fim sem despejar lista no chat', async () =>
     assert.match(stdout.text(), /Bridge conectada/);
     assert.match(stdout.text(), /Carregando historico do Gemini/);
     assert.match(stdout.text(), /Total confirmado: 203 chat\(s\)/);
-    const resultLine = stdout
-      .text()
-      .split(/\r?\n/)
-      .find((line) => line.startsWith('RESULT_JSON '));
-    const result = JSON.parse(resultLine.replace('RESULT_JSON ', ''));
+    assert.doesNotMatch(stdout.text(), /RESULT_JSON/);
+    const result = run.result;
     assert.equal(result.totalKnown, true);
     assert.equal(result.totalCount, 203);
     assert.equal(result.countSource, 'browser_dom_count_match');
@@ -365,6 +360,45 @@ test('CLI chats count carrega ate o fim sem despejar lista no chat', async () =>
     assert.equal(countRequest.searchParams.get('maxNoGrowthRounds'), '2');
     assert.equal(countRequest.searchParams.get('loadMoreBrowserRounds'), '8');
     assert.equal(countRequest.searchParams.get('loadMoreBrowserTimeoutMs'), '12000');
+  });
+});
+
+test('CLI chats count --result-json reativa RESULT_JSON explicitamente', async () => {
+  await withServer((req, res, url) => {
+    if (url.pathname === '/agent/ready') {
+      sendJson(res, 200, {
+        ready: true,
+        mode: 'hot',
+        connectedClientCount: 1,
+        selectableTabCount: 1,
+        commandReadyClientCount: 1,
+      });
+      return;
+    }
+    if (url.pathname === '/agent/recent-chats') {
+      sendJson(res, 200, {
+        ok: true,
+        countStatus: 'complete',
+        countIsTotal: true,
+        totalKnown: true,
+        totalCount: 277,
+        knownLoadedCount: 277,
+        minimumKnownCount: 277,
+        conversations: [],
+      });
+      return;
+    }
+    sendJson(res, 404, { error: `not found: ${url.pathname}` });
+  }, async (bridgeUrl) => {
+    const stdout = captureStream();
+    const run = await main(
+      ['chats', 'count', '--bridge-url', bridgeUrl, '--plain', '--result-json'],
+      { stdout },
+    );
+
+    assert.equal(run.exitCode, 0);
+    assert.match(stdout.text(), /Total confirmado: 277 chat\(s\)/);
+    assert.match(stdout.text(), /RESULT_JSON /);
   });
 });
 
@@ -412,11 +446,8 @@ test('CLI chats count nao transforma contagem parcial em total', async () => {
     assert.equal(run.exitCode, 1);
     assert.match(stdout.text(), /Contagem parcial: pelo menos 73 chat\(s\)/);
     assert.match(stdout.text(), /aba do Gemini ja esta ocupada/);
-    const resultLine = stdout
-      .text()
-      .split(/\r?\n/)
-      .find((line) => line.startsWith('RESULT_JSON '));
-    const result = JSON.parse(resultLine.replace('RESULT_JSON ', ''));
+    assert.doesNotMatch(stdout.text(), /RESULT_JSON/);
+    const result = run.result;
     assert.equal(result.totalKnown, false);
     assert.equal(result.totalCount, null);
     assert.equal(result.minimumKnownCount, 73);
@@ -473,8 +504,8 @@ test('CLI chats count libera claim explicita sem imprimir JSON extra', async () 
     assert.match(stdout.text(), /Total confirmado: 277 chat\(s\)/);
     assert.equal(
       stdout.text().split(/\r?\n/).filter((line) => line.startsWith('RESULT_JSON ')).length,
-      1,
-      'release silencioso nao deve emitir segundo RESULT_JSON',
+      0,
+      'count plain nao deve emitir RESULT_JSON',
     );
     const releaseRequest = requests.find((item) => item.pathname === '/agent/release-tab');
     assert.ok(releaseRequest, 'deve liberar a claim depois da contagem');

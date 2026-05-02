@@ -94,11 +94,14 @@ export const inferRecentChatsCountStatus = (client, loadedCount, options = {}) =
   }
 
   const countEvidence = browserSidebarCountEvidenceGroups(client);
-  const confirmingGroup = countEvidence.find((group) => {
-    if (count <= 0 || group.evidence.length < 2) return false;
-    if (!group.evidence.some((item) => item.kind === 'sidebar')) return false;
-    return group.evidence.every((item) => item.count === count);
-  });
+  const confirmingGroup =
+    options.allowDomCountConfirmation === false
+      ? null
+      : countEvidence.find((group) => {
+          if (count <= 0 || group.evidence.length < 2) return false;
+          if (!group.evidence.some((item) => item.kind === 'sidebar')) return false;
+          return group.evidence.every((item) => item.count === count);
+        });
 
   if (confirmingGroup) {
     return {

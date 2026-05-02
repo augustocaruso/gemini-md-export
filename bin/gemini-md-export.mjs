@@ -64,9 +64,10 @@ const ANSI = {
 const outputModeHelp = () => [
   'Formatos de saida:',
   '  --tui     UI humana com barra de progresso ANSI. Use em terminal/pty.',
-  '  --plain   Linhas estaveis + RESULT_JSON final. Melhor para agentes.',
+  '  --plain   Linhas humanas estaveis, sem ANSI.',
   '  --json    JSON final puro, sem texto humano.',
   '  --jsonl   Eventos JSONL durante o progresso.',
+  '  --result-json  Acrescenta RESULT_JSON no --plain quando explicitamente necessario.',
 ];
 
 const exitCodeHelp = () => [
@@ -161,7 +162,7 @@ const usage = () =>
     'Dentro do Gemini CLI:',
     '  - Use TUI se o shell interativo/node-pty estiver ativo.',
     '  - Para export/sync, rode a CLI direto; evite despejar gemini_ready/gemini_tabs no chat.',
-    '  - Use --plain quando o agente precisar ler a saida sem ANSI e resumir pelo RESULT_JSON.',
+    '  - Use --plain para saida humana curta; use --json quando precisar parsear dados.',
     '',
     ...outputModeHelp(),
     '',
@@ -280,8 +281,8 @@ const chatsHelp = () =>
     '  gemini-md-export chats count [opcoes]',
     '',
     'Conta conversas carregaveis no sidebar sem imprimir a lista inteira.',
-    'A contagem so e total quando RESULT_JSON.totalKnown=true.',
-    'Se totalKnown=false, responda "pelo menos N" e nao "ao todo".',
+    'A contagem so e total quando a CLI imprimir "Total confirmado".',
+    'Se a CLI imprimir "Contagem parcial", responda "pelo menos N" e nao "ao todo".',
     '',
     'Opcoes:',
     '  --max-load-more-rounds <n>   Rodadas maximas para puxar historico.',
@@ -626,6 +627,7 @@ const parseArgs = (argv) => {
     else if (arg === '--plain') out.flags.format = 'plain';
     else if (arg === '--json') out.flags.format = 'json';
     else if (arg === '--jsonl') out.flags.format = 'jsonl';
+    else if (arg === '--result-json') out.flags.resultJson = true;
     else if (arg === '--no-color') out.flags.color = false;
     else if (arg === '--no-start-bridge') out.flags.startBridge = false;
     else if (arg === '--exit-when-idle') out.flags.bridgeExitWhenIdle = true;
@@ -1383,14 +1385,14 @@ const releaseCliClaimQuietly = async (flags = {}, reason, job = null) => {
   }
 };
 
-const writeStructuredResult = (ui, result, { label = null } = {}) => {
+const writeStructuredResult = (ui, result, { label = null, includeResultJson = true } = {}) => {
   if (ui.format === 'json') {
     ui.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
   } else if (ui.format === 'jsonl') {
     ui.stdout.write(`${JSON.stringify({ type: 'result', result })}\n`);
   } else {
     if (label) ui.stdout.write(`${label}\n`);
-    ui.stdout.write(`RESULT_JSON ${JSON.stringify(result)}\n`);
+    if (includeResultJson) ui.stdout.write(`RESULT_JSON ${JSON.stringify(result)}\n`);
   }
 };
 
@@ -1555,6 +1557,36 @@ const summarizeTabsCliResult = (action, result = {}) => {
   };
 };
 
+const tabsPlainLabel = (action, summary = {}) => {
+  if (action === 'list') {
+    const lines = [`${summary.connectedTabCount} aba(s) Gemini conectada(s).`];
+    for (const tab of summary.tabs || []) {
+      const title = tab.title ? ` - ${tab.title}` : '';
+      const chatInfo = tab.chatId ? ` chatId=${tab.chatId}` : '';
+      const countInfo =
+        tab.listedConversationCount !== null && tab.listedConversationCount !== undefined
+          ? ` conversas_visiveis=${tab.listedConversationCount}`
+          : '';
+      lines.push(
+        `${tab.index}. tabId=${tab.tabId ?? '-'} clientId=${tab.clientId || '-'}${chatInfo}${countInfo}${title}`,
+      );
+    }
+    if (summary.nextAction) lines.push(summary.nextAction.replace(/ --plain/g, ''));
+    return lines.join('\n');
+  }
+
+  if (action === 'claim' && summary.claim) {
+    return [
+      'tabs claim: ok',
+      `claimId=${summary.claim.claimId || '-'}`,
+      `tabId=${summary.claim.tabId ?? '-'}`,
+      `label=${summary.claim.label || '-'}`,
+    ].join('\n');
+  }
+
+  return summary.ok ? `tabs ${action}: ok` : `tabs ${action}: falhou`;
+};
+
 const runTabs = async (parsed, streams = {}) => {
   const action = parsed.positionals[0] || 'list';
   if (!['list', 'claim', 'release', 'reload'].includes(action)) {
@@ -1583,13 +1615,11 @@ const runTabs = async (parsed, streams = {}) => {
     { timeoutMs: action === 'reload' ? 30000 : 20000 },
   );
   const summary = summarizeTabsCliResult(action, result);
-  const label =
-    action === 'list'
-      ? `${summary.connectedTabCount} aba(s) Gemini conectada(s).`
-      : summary.ok
-        ? `tabs ${action}: ok`
-        : `tabs ${action}: falhou`;
-  writeStructuredResult(ui, summary, { label });
+  const label = tabsPlainLabel(action, summary);
+  writeStructuredResult(ui, summary, {
+    label,
+    includeResultJson: parsed.flags.resultJson === true,
+  });
   return { exitCode: summary.ok ? EXIT.OK : EXIT.EXTENSION_UNREADY, result: summary };
 };
 
@@ -1676,7 +1706,10 @@ const runChats = async (parsed, streams = {}) => {
     const label = result.totalKnown
       ? `Total confirmado: ${result.totalCount} chat(s).`
       : `Contagem parcial: pelo menos ${result.minimumKnownCount ?? result.knownLoadedCount ?? 0} chat(s).${partialReason ? ` Motivo: ${partialReason}` : ''}`;
-    writeStructuredResult(ui, result, { label });
+    writeStructuredResult(ui, result, {
+      label,
+      includeResultJson: parsed.flags.resultJson === true,
+    });
     return { exitCode: result.totalKnown ? EXIT.OK : EXIT.WARNINGS, result };
   } finally {
     await releaseCliClaimQuietly(parsed.flags, 'cli-chats-count-finished');

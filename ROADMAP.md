@@ -1418,6 +1418,27 @@ Critério de aceite: depois de atualizar/recarregar a extensão unpacked, a aba
 Gemini deve anunciar a mesma versão/build esperados pela bridge, sem exigir que
 o usuário descubra manualmente que precisa recarregar a página.
 
+## v0.8.5 — Hotfix de contagem e saída humana
+
+Status: implementada como correção da `0.8.4`.
+
+Problemas observados:
+
+- `chats count` podia promover `browser_dom_count_match` para total confirmado
+  mesmo quando `load-more-conversations` falhava porque a aba estava ocupada
+  com outro comando pesado. Sintoma: resposta falsa como "13 chats ao todo".
+- `tabs list`, `tabs claim` e `chats count --plain` ainda imprimiam
+  `RESULT_JSON`, poluindo a tela do usuário em fluxos simples.
+
+Correção:
+
+- quando a falha de carregamento indica `tab_operation_in_progress`/aba
+  ocupada, a contagem por DOM concordante fica bloqueada e a CLI deve retornar
+  contagem parcial/falha curta;
+- `tabs` e `chats count` em `--plain` passam a imprimir texto humano sem
+  `RESULT_JSON`; quem precisar parsear dados deve usar `--json` ou
+  `--result-json` explicitamente.
+
 ## v0.9.0 — Spike condicional de `debugger`/CDP
 
 Status: possibilidade técnica de alto poder, no mesmo bloco de avaliação de

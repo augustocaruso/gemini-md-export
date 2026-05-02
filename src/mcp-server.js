@@ -4979,8 +4979,12 @@ const listRecentChatsForClient = async (client, args = {}) => {
   const conversations = recentConversationsForClient(client);
   const page = conversations.slice(offset, offset + limit);
   const reachedEnd = loadMore?.reachedEnd === true || recentChatsReachedEndForClient(client);
+  const loadMoreBusy =
+    loadMore?.ok === false &&
+    isTransientTabBusyError({ message: loadMore.error, code: loadMore.code, data: loadMore.data });
   const countInference = inferRecentChatsCountStatus(client, conversations.length, {
     reachedEnd,
+    allowDomCountConfirmation: !loadMoreBusy,
   });
   const nextOffset = offset + page.length;
   const totalKnown = countInference.totalKnown === true;
