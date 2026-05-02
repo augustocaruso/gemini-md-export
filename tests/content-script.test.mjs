@@ -471,6 +471,11 @@ test('content script reporta diagnóstico de scroll ao puxar histórico', async 
   assert.match(source, /scrollAfter/);
   assert.match(source, /scrollInfoIsNearBottom/);
   assert.match(source, /traceConfirmsStableBottom/);
+  assert.match(source, /conversationTailSignature/);
+  assert.match(source, /traceConfirmsStableTail/);
+  assert.match(source, /beforeTail/);
+  assert.match(source, /afterTail/);
+  assert.match(source, /confirmedStableTail/);
   assert.match(source, /confirmedStableBottom/);
   assert.doesNotMatch(source, /loadOptions\.fastMode\s*&&\s*scrolledToBottom/);
   assert.match(source, /requiredEndFailures/);

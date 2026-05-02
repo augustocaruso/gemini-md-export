@@ -1617,6 +1617,33 @@
       return scrollInfoIsNearBottom(entry.scrollAfter);
     });
 
+  const conversationTailSignature = (items = collectConversationLinks(), size = 5) => {
+    const normalized = Array.isArray(items) ? items : [];
+    const tail = normalized.slice(-size).map((item) =>
+      [
+        item?.source || '',
+        item?.chatId || item?.id || '',
+        item?.url || '',
+        item?.title || '',
+        item?.timestamp || '',
+      ].join(':'),
+    );
+    return `${normalized.length}|${tail.join('|')}`;
+  };
+
+  const traceConfirmsStableTail = (trace) =>
+    trace.some((entry) => {
+      if (entry.loaded === true || entry.phase !== 'confirm-end') return false;
+      const beforeKnown = Number(entry.beforeKnown);
+      const afterKnown = Number(entry.afterKnown);
+      if (!Number.isFinite(beforeKnown) || beforeKnown <= 0 || beforeKnown !== afterKnown) {
+        return false;
+      }
+      if (!entry.beforeTail || entry.beforeTail !== entry.afterTail) return false;
+      if (entry.actionability?.receivingEvents === false) return false;
+      return true;
+    });
+
   const waitForSidebarConversationGrowth = (
     beforeCount,
     timeoutMs = 1800,
@@ -1683,6 +1710,7 @@
     let scrollContainerMatchedBy = null;
     const before = getConversationElementsForCurrentPage().length;
     const beforeKnown = collectBridgeConversationLinks().length;
+    const beforeTail = conversationTailSignature();
     const pickScrollContainer = (candidate, matchedBy) => {
       if (!scrollContainer && candidate) {
         scrollContainer = candidate;
@@ -1727,8 +1755,10 @@
           }),
           beforeVisible: before,
           beforeKnown,
+          beforeTail,
           afterVisible: before,
           afterKnown: beforeKnown,
+          afterTail: beforeTail,
           scrollBefore: describeScrollContainer(null),
           scrollAfter: describeScrollContainer(null),
         },
@@ -1772,6 +1802,7 @@
     const loaded = await growthPromise;
     await sleep(loadOptions.postLoadSettleMs);
     const afterKnown = collectBridgeConversationLinks().length;
+    const afterTail = conversationTailSignature();
     const afterVisible = getConversationElementsForCurrentPage().length;
     const grew =
       loaded ||
@@ -1784,8 +1815,10 @@
         reason: grew ? 'growth' : 'no-growth',
         beforeVisible: before,
         beforeKnown,
+        beforeTail,
         afterVisible,
         afterKnown,
+        afterTail,
         growthObserved: loaded,
         actionability: scrollerActionability,
         scrollBefore,
@@ -1872,6 +1905,7 @@
         }
         scrolledToBottom = isAtBottom(scroller) || traceConfirmsStableBottom(trace);
       }
+      const confirmedStableTail = !loaded && traceConfirmsStableTail(trace);
       const confirmedStableBottom =
         !loaded &&
         scrolledToBottom &&
@@ -1882,9 +1916,12 @@
             Number(entry.beforeKnown) === Number(entry.afterKnown) &&
             scrollInfoIsNearBottom(entry.scrollAfter),
         );
-      const requiredEndFailures = confirmedStableBottom ? 1 : endFailureThreshold;
+      const requiredEndFailures =
+        confirmedStableBottom || confirmedStableTail ? 1 : endFailureThreshold;
       state.reachedSidebarEnd =
-        !loaded && state.loadMoreFailures >= requiredEndFailures && scrolledToBottom;
+        !loaded &&
+        state.loadMoreFailures >= requiredEndFailures &&
+        (scrolledToBottom || confirmedStableTail);
       if (loaded) {
         state.reachedSidebarEnd = false;
       }
