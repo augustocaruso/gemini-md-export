@@ -403,6 +403,7 @@
   const BRIDGE_EVENTS_BASE_BACKOFF_MS = 500;
   const BRIDGE_EVENTS_MAX_BACKOFF_MS = 15000;
   const BRIDGE_HEARTBEAT_PING_MS = 30000;
+  const TAB_BROKER_REPORT_MIN_MS = 3000;
   const NATIVE_BRIDGE_TRANSPORT_COOLDOWN_MS = 60_000;
   const BRIDGE_SNAPSHOT_MIN_INTERVAL_MS = 1200;
   const BRIDGE_SNAPSHOT_MAX_INTERVAL_MS = 30000;
@@ -557,6 +558,7 @@
   });
   const notebookChatIdCache = new WeakMap();
   let notebookChatUrlCache = null;
+  let lastTabBrokerReportAt = 0;
   const bridgeState = {
     started: false,
     clientId: '',
@@ -1976,6 +1978,8 @@
       lastError: bridgeState.lastError || null,
     },
     tabIgnored: isTabIgnored(),
+    tabClaim: tabClaimSummary(),
+    activeTabOperation: activeTabOperationSummary(),
     runtimeGuard: (() => {
       try {
         const runtime = pageWindow[RUNTIME_GUARD_KEY] || null;
@@ -2261,6 +2265,7 @@
     }
     if (!claimId || !active?.claimId || active.claimId === claimId || response?.ok) {
       clearLocalTabClaim();
+      reportTabBrokerState('claim-released', { force: true });
     }
     return response || { ok: true, claimId: claimId || active?.claimId || null };
   };
@@ -2300,6 +2305,7 @@
     }
     scheduleTabClaimExpiry();
     markBridgeSnapshotDirty('tab-claim-applied');
+    reportTabBrokerState('claim-applied', { force: true });
   };
 
   const fetchWithTimeout = async (url, options = {}, timeoutMs = 10000) => {
@@ -3430,6 +3436,28 @@
     };
   };
 
+  const reportTabBrokerState = async (reason = 'heartbeat', { force = false } = {}) => {
+    if (!isExtensionContext) return null;
+    const now = Date.now();
+    if (!force && now - lastTabBrokerReportAt < TAB_BROKER_REPORT_MIN_MS) return null;
+    lastTabBrokerReportAt = now;
+    try {
+      return await extensionSendMessage(
+        {
+          type: 'gemini-md-export/tab-broker-update',
+          reason,
+          status: contentScriptRuntimeStatus(),
+          tabClaim: tabClaimSummary(),
+          activeTabOperation: activeTabOperationSummary(),
+        },
+        { timeoutMs: 1200 },
+      );
+    } catch (err) {
+      bridgeState.lastExtensionPingError = err?.message || String(err);
+      return null;
+    }
+  };
+
   const runWithTabOperationBackpressure = async (command, fn) => {
     if (!TAB_OPERATION_COMMAND_TYPES.has(command?.type)) {
       return fn();
@@ -3453,12 +3481,14 @@
       commandId: command.id || null,
       startedAt: Date.now(),
     };
+    reportTabBrokerState('operation-start', { force: true });
 
     try {
       return await fn();
     } finally {
       state.completedTabOperations += 1;
       state.activeTabOperation = null;
+      reportTabBrokerState('operation-end', { force: true });
     }
   };
 
@@ -6364,6 +6394,7 @@
 
     try {
       await refreshExtensionContext();
+      await reportTabBrokerState('heartbeat');
       const response = await bridgeRequest('/bridge/heartbeat', {
         method: 'POST',
         payload: buildBridgeHeartbeatPayload(),
@@ -7452,6 +7483,7 @@
     installContentScriptMessageListener();
     installDebugApi();
     restoreMcpProgressSnapshot();
+    reportTabBrokerState('bootstrap', { force: true });
     installExtensionBridge().catch((err) => {
       warn('Falha ao iniciar bridge da extensão.', err);
     });

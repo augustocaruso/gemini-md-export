@@ -1574,8 +1574,7 @@ Critérios de aceite:
 
 ## v0.8.8 — Background-first tab broker
 
-Status: proposta. Não implementar enquanto a `v0.8.5` estiver estável, salvo
-aprovação explícita.
+Status: implementada na versão `0.8.8`.
 
 Objetivo: fazer o service worker/background ser a fonte de verdade para abas,
 claims, versão carregada e lifecycle. O content script vira executor de DOM,

@@ -14,6 +14,7 @@ const NATIVE_HOST_NAME = 'com.augustocaruso.gemini_md_export';
 const NATIVE_HOST_REQUEST_TIMEOUT_MS = 2500;
 const OFFSCREEN_DOCUMENT_PATH = 'offscreen.html';
 const OFFSCREEN_IDLE_CLOSE_MS = 120_000;
+const TAB_BROKER_CLIENT_STALE_MS = 45_000;
 const CONTENT_SCRIPT_SELF_HEAL_COOLDOWN_MS = 10_000;
 const CONTENT_SCRIPT_POST_INJECT_PING_ATTEMPTS = 5;
 const CONTENT_SCRIPT_POST_INJECT_PING_DELAY_MS = 180;
@@ -34,6 +35,8 @@ let lastContentScriptSelfHeal = null;
 let lastNativeHostProbe = null;
 let lastOffscreenStatus = null;
 let offscreenIdleCloseTimer = 0;
+const tabBrokerRegistry = new Map();
+const tabClaimExpiryTimers = new Map();
 
 const clampText = (value, maxLength) =>
   String(value || '')
@@ -66,6 +69,7 @@ const extensionInfo = (sender = {}) => {
     selfHeal: lastContentScriptSelfHeal,
     nativeHost: lastNativeHostProbe,
     offscreen: lastOffscreenStatus,
+    tabBroker: summarizeTabBrokerRegistry({ currentTabId: tab?.id ?? null }),
   };
 };
 
@@ -126,6 +130,140 @@ const getTrackedTabClaims = async () => {
 };
 
 const setTrackedTabClaims = (claims) => storageSetKey(TAB_CLAIMS_STORAGE_KEY, claims || {});
+
+const clearTabClaimExpiryTimer = (tabId) => {
+  const key = String(tabId);
+  const timer = tabClaimExpiryTimers.get(key);
+  if (!timer) return;
+  clearTimeout(timer);
+  tabClaimExpiryTimers.delete(key);
+};
+
+const releaseTrackedTabClaimByTabId = async (
+  tabId,
+  { claimId = null, reason = 'background-release' } = {},
+) => {
+  if (!Number.isInteger(tabId)) return { ok: false, reason: 'tab-id-unavailable', tabId };
+  clearTabClaimExpiryTimer(tabId);
+  const claims = await getTrackedTabClaims();
+  const key = String(tabId);
+  const existing = claims[key] || null;
+  const requestedClaimId = clampText(claimId, 80);
+
+  if (existing?.claimId && requestedClaimId && existing.claimId !== requestedClaimId) {
+    return {
+      ok: false,
+      reason: 'claim-id-mismatch',
+      tabId,
+      activeClaimId: existing.claimId,
+      requestedClaimId,
+    };
+  }
+
+  let visual = { mode: existing?.mode || 'none', tabId, released: false, reason };
+  if (existing?.mode === 'tab-group' && existing.originalGroupId === TAB_GROUP_NONE) {
+    const ungrouped = await chromeUngroupTab(tabId);
+    visual = {
+      mode: 'tab-group',
+      tabId,
+      groupId: existing.groupId ?? null,
+      released: ungrouped.ok,
+      reason: ungrouped.reason || reason,
+    };
+  }
+
+  await clearActionBadge(tabId);
+  delete claims[key];
+  await setTrackedTabClaims(claims);
+  return {
+    ok: true,
+    tabId,
+    claimId: existing?.claimId || requestedClaimId || null,
+    visual,
+  };
+};
+
+const scheduleTabClaimExpiry = (tabId, claim = {}) => {
+  clearTabClaimExpiryTimer(tabId);
+  const expiresAt = Date.parse(claim.expiresAt || '');
+  if (!Number.isFinite(expiresAt)) return;
+  const delayMs = Math.max(0, expiresAt - Date.now());
+  const timer = setTimeout(() => {
+    tabClaimExpiryTimers.delete(String(tabId));
+    releaseTrackedTabClaimByTabId(tabId, {
+      claimId: claim.claimId || null,
+      reason: 'claim-expired',
+    });
+  }, delayMs);
+  tabClaimExpiryTimers.set(String(tabId), timer);
+};
+
+const pruneTabBrokerRegistry = () => {
+  const now = Date.now();
+  for (const [tabId, entry] of tabBrokerRegistry.entries()) {
+    if (now - Number(entry.updatedAtMs || 0) > TAB_BROKER_CLIENT_STALE_MS) {
+      tabBrokerRegistry.delete(tabId);
+    }
+  }
+};
+
+const summarizeTabBrokerRegistry = ({ currentTabId = null } = {}) => {
+  pruneTabBrokerRegistry();
+  const entries = Array.from(tabBrokerRegistry.values()).map((entry, index) => ({
+    index: index + 1,
+    tabId: entry.tabId,
+    windowId: entry.windowId,
+    url: entry.url,
+    title: entry.title,
+    chatId: entry.chatId,
+    version: entry.version,
+    protocolVersion: entry.protocolVersion,
+    buildStamp: entry.buildStamp,
+    tabClaim: entry.tabClaim || null,
+    activeTabOperation: entry.activeTabOperation || null,
+    isActiveTab: entry.isActiveTab === true,
+    updatedAt: entry.updatedAt,
+    staleAfterMs: TAB_BROKER_CLIENT_STALE_MS,
+    current: currentTabId !== null && entry.tabId === currentTabId,
+  }));
+  return {
+    ok: true,
+    staleAfterMs: TAB_BROKER_CLIENT_STALE_MS,
+    tabCount: entries.length,
+    busyTabCount: entries.filter((entry) => entry.activeTabOperation).length,
+    claimedTabCount: entries.filter((entry) => entry.tabClaim).length,
+    tabs: entries,
+  };
+};
+
+const updateTabBrokerRegistry = (message = {}, sender = {}) => {
+  const status = message.status || {};
+  const bridge = status.bridge || {};
+  const senderTab = sender.tab || {};
+  const tabId = Number(senderTab.id ?? bridge.tabId ?? status.tabId);
+  if (!Number.isInteger(tabId)) {
+    return { ok: false, reason: 'tab-id-unavailable' };
+  }
+  const now = Date.now();
+  const entry = {
+    tabId,
+    windowId: Number(senderTab.windowId ?? bridge.windowId ?? status.windowId) || null,
+    url: status.url || senderTab.url || null,
+    title: status.title || senderTab.title || null,
+    chatId: status.chatId || null,
+    version: status.version || status.extensionVersion || null,
+    protocolVersion: status.protocolVersion ?? null,
+    buildStamp: status.buildStamp || null,
+    tabClaim: message.tabClaim || status.tabClaim || null,
+    activeTabOperation: message.activeTabOperation || status.activeTabOperation || null,
+    isActiveTab: senderTab.active ?? bridge.isActiveTab ?? null,
+    updatedAt: new Date(now).toISOString(),
+    updatedAtMs: now,
+    reason: message.reason || 'content-script-update',
+  };
+  tabBrokerRegistry.set(tabId, entry);
+  return { ok: true, entry, broker: summarizeTabBrokerRegistry({ currentTabId: tabId }) };
+};
 
 const chromeGetTab = (tabId) =>
   new Promise((resolve) => {
@@ -792,7 +930,7 @@ const applyTabClaim = async (message, sender = {}) => {
 
   await setActionBadge(tabId, 'GME');
 
-  claims[String(tabId)] = {
+  const trackedClaim = {
     claimId,
     sessionId: clampText(message.sessionId, 120) || null,
     label,
@@ -806,13 +944,15 @@ const applyTabClaim = async (message, sender = {}) => {
     appliedAt: new Date().toISOString(),
     expiresAt: message.expiresAt || null,
   };
+  claims[String(tabId)] = trackedClaim;
   await setTrackedTabClaims(claims);
+  scheduleTabClaimExpiry(tabId, trackedClaim);
 
   return {
     ok: true,
     tabId,
     claimId,
-    sessionId: claims[String(tabId)].sessionId,
+    sessionId: trackedClaim.sessionId,
     label,
     color,
     visual,
@@ -825,43 +965,10 @@ const releaseTabClaim = async (message, sender = {}) => {
     return { ok: false, reason: 'sender-tab-unavailable' };
   }
 
-  const claims = await getTrackedTabClaims();
-  const key = String(tabId);
-  const existing = claims[key] || null;
-  const requestedClaimId = clampText(message.claimId, 80);
-
-  if (existing?.claimId && requestedClaimId && existing.claimId !== requestedClaimId) {
-    return {
-      ok: false,
-      reason: 'claim-id-mismatch',
-      tabId,
-      activeClaimId: existing.claimId,
-      requestedClaimId,
-    };
-  }
-
-  let visual = { mode: existing?.mode || 'none', tabId, released: false };
-  if (existing?.mode === 'tab-group' && existing.originalGroupId === TAB_GROUP_NONE) {
-    const ungrouped = await chromeUngroupTab(tabId);
-    visual = {
-      mode: 'tab-group',
-      tabId,
-      groupId: existing.groupId ?? null,
-      released: ungrouped.ok,
-      reason: ungrouped.reason || 'ungrouped',
-    };
-  }
-
-  await clearActionBadge(tabId);
-  delete claims[key];
-  await setTrackedTabClaims(claims);
-
-  return {
-    ok: true,
-    tabId,
-    claimId: existing?.claimId || requestedClaimId || null,
-    visual,
-  };
+  return releaseTrackedTabClaimByTabId(tabId, {
+    claimId: message.claimId || null,
+    reason: message.reason || 'content-script-release',
+  });
 };
 
 chrome.runtime.onInstalled.addListener((details) => {
@@ -967,10 +1074,28 @@ setTimeout(() => {
 }, 250);
 
 chrome.tabs?.onRemoved?.addListener?.((tabId) => {
+  tabBrokerRegistry.delete(tabId);
+  clearTabClaimExpiryTimer(tabId);
   getTrackedTabClaims().then((claims) => {
     if (!claims[String(tabId)]) return;
     delete claims[String(tabId)];
     setTrackedTabClaims(claims);
+  });
+});
+
+chrome.tabs?.onUpdated?.addListener?.((tabId, changeInfo = {}, tab = {}) => {
+  const existing = tabBrokerRegistry.get(tabId);
+  if (!existing) return;
+  const now = Date.now();
+  tabBrokerRegistry.set(tabId, {
+    ...existing,
+    url: changeInfo.url || tab.url || existing.url,
+    title: tab.title || existing.title,
+    isActiveTab: tab.active ?? existing.isActiveTab,
+    navigationStatus: changeInfo.status || existing.navigationStatus || null,
+    updatedAt: new Date(now).toISOString(),
+    updatedAtMs: now,
+    reason: changeInfo.status === 'loading' ? 'tab-loading' : 'tab-updated',
   });
 });
 
@@ -1149,6 +1274,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       idleCloseMs: message.idleCloseMs || OFFSCREEN_IDLE_CLOSE_MS,
     }).then(sendResponse);
     return true;
+  }
+
+  if (message?.type === 'gemini-md-export/tab-broker-update') {
+    sendResponse(updateTabBrokerRegistry(message, sender));
+    return false;
   }
 
   if (message?.type === 'gemini-md-export/claim-tab') {

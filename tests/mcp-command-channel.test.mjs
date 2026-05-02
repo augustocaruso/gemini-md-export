@@ -127,6 +127,14 @@ test('MCP implementa afinidade confiável por claim de aba', () => {
   assert.match(contentSource, /reason: 'extension-context-invalidated'/);
   assert.match(contentSource, /localOnly: true/);
   assert.match(contentSource, /TAB_CLAIM_TITLE_PREFIX_RE/);
+  assert.match(contentSource, /gemini-md-export\/tab-broker-update/);
+  assert.match(contentSource, /reportTabBrokerState\('operation-start'/);
+  assert.match(contentSource, /reportTabBrokerState\('claim-applied'/);
+  assert.match(backgroundSource, /tabBrokerRegistry = new Map/);
+  assert.match(backgroundSource, /summarizeTabBrokerRegistry/);
+  assert.match(backgroundSource, /message\?\.type === 'gemini-md-export\/tab-broker-update'/);
+  assert.match(backgroundSource, /scheduleTabClaimExpiry/);
+  assert.match(backgroundSource, /releaseTrackedTabClaimByTabId/);
   assert.match(backgroundSource, /chrome\.tabs\.group/);
   assert.match(backgroundSource, /chrome\.tabGroups\.update/);
   assert.match(backgroundSource, /tab-already-in-user-group/);
