@@ -1368,8 +1368,7 @@ local, mantendo HTTP/SSE como fallback compatível.
 
 ## v0.8.3 — Avaliar `offscreen`
 
-Status: condicionado a evidência de que o service worker MV3 dormir continua
-quebrando coordenação mesmo após `scripting`.
+Status: implementada na versão `0.8.3` como fundação diagnosticável sob demanda.
 
 Objetivo: usar um documento offscreen como contexto extension-side mais estável
 para tarefas de coordenação que não pertencem ao content script nem ao service

@@ -12,6 +12,7 @@ const CONTENT_SCRIPT_FILE = 'content.js';
 const CONTENT_SCRIPT_PING_TYPE = 'gemini-md-export/content-ping';
 const NATIVE_HOST_NAME = 'com.augustocaruso.gemini_md_export';
 const NATIVE_HOST_REQUEST_TIMEOUT_MS = 2500;
+const OFFSCREEN_DOCUMENT_PATH = 'offscreen.html';
 const CONTENT_SCRIPT_SELF_HEAL_COOLDOWN_MS = 10_000;
 const CONTENT_SCRIPT_POST_INJECT_PING_ATTEMPTS = 5;
 const CONTENT_SCRIPT_POST_INJECT_PING_DELAY_MS = 180;
@@ -29,6 +30,7 @@ const TAB_CLAIM_COLORS = new Set([
 const contentScriptSelfHealCooldowns = new Map();
 let lastContentScriptSelfHeal = null;
 let lastNativeHostProbe = null;
+let lastOffscreenStatus = null;
 
 const clampText = (value, maxLength) =>
   String(value || '')
@@ -60,6 +62,7 @@ const extensionInfo = (sender = {}) => {
     isActiveTab: tab?.active ?? null,
     selfHeal: lastContentScriptSelfHeal,
     nativeHost: lastNativeHostProbe,
+    offscreen: lastOffscreenStatus,
   };
 };
 
@@ -447,6 +450,130 @@ const probeNativeHost = async ({ reason = 'manual', timeoutMs = NATIVE_HOST_REQU
     durationMs: Math.max(0, Date.now() - startedAt),
   };
   return lastNativeHostProbe;
+};
+
+const offscreenReason = () => {
+  if (chrome.offscreen?.Reason?.WORKERS) return chrome.offscreen.Reason.WORKERS;
+  return 'WORKERS';
+};
+
+const hasOffscreenDocument = async () => {
+  if (!chrome.offscreen) {
+    return { ok: false, exists: false, reason: 'offscreen-api-unavailable' };
+  }
+  if (chrome.offscreen.hasDocument) {
+    return new Promise((resolve) => {
+      let settled = false;
+      const done = (value) => {
+        if (settled) return;
+        settled = true;
+        resolve(value);
+      };
+      try {
+        const maybePromise = chrome.offscreen.hasDocument((exists) => {
+          if (chrome.runtime.lastError) {
+            done({ ok: false, exists: false, reason: chrome.runtime.lastError.message });
+            return;
+          }
+          done({ ok: true, exists: !!exists });
+        });
+        if (maybePromise?.then) {
+          maybePromise.then(
+            (exists) => done({ ok: true, exists: !!exists }),
+            (err) => done({ ok: false, exists: false, reason: err?.message || String(err) }),
+          );
+        }
+      } catch (err) {
+        done({ ok: false, exists: false, reason: err?.message || String(err) });
+      }
+    });
+  }
+  return { ok: true, exists: false, reason: 'has-document-unavailable' };
+};
+
+const sendOffscreenPing = () =>
+  new Promise((resolve) => {
+    if (!chrome.runtime?.sendMessage) {
+      resolve({ ok: false, reason: 'runtime-message-unavailable' });
+      return;
+    }
+    chrome.runtime.sendMessage({ type: 'gemini-md-export/offscreen-ping' }, (response) => {
+      if (chrome.runtime.lastError) {
+        resolve({ ok: false, reason: chrome.runtime.lastError.message });
+        return;
+      }
+      resolve(response || { ok: false, reason: 'empty-offscreen-response' });
+    });
+  });
+
+const ensureOffscreenDocument = async ({ reason = 'manual' } = {}) => {
+  const startedAt = Date.now();
+  const current = await hasOffscreenDocument();
+  if (!current.ok) {
+    lastOffscreenStatus = {
+      ok: false,
+      status: 'unavailable',
+      reason,
+      error: current.reason || null,
+      checkedAt: new Date().toISOString(),
+      durationMs: Math.max(0, Date.now() - startedAt),
+    };
+    return lastOffscreenStatus;
+  }
+
+  let created = false;
+  if (!current.exists) {
+    try {
+      await chrome.offscreen.createDocument({
+        url: OFFSCREEN_DOCUMENT_PATH,
+        reasons: [offscreenReason()],
+        justification:
+          'Manter um contexto leve de coordenação para diagnosticar native messaging e filas da extensão.',
+      });
+      created = true;
+    } catch (err) {
+      lastOffscreenStatus = {
+        ok: false,
+        status: 'create-failed',
+        reason,
+        error: err?.message || String(err),
+        checkedAt: new Date().toISOString(),
+        durationMs: Math.max(0, Date.now() - startedAt),
+      };
+      return lastOffscreenStatus;
+    }
+  }
+
+  const ping = await sendOffscreenPing();
+  lastOffscreenStatus = {
+    ok: ping.ok === true,
+    status: ping.ok === true ? 'ready' : 'ping-failed',
+    reason,
+    created,
+    checkedAt: new Date().toISOString(),
+    durationMs: Math.max(0, Date.now() - startedAt),
+    document: ping.ok === true ? ping : null,
+    error: ping.ok === true ? null : ping.reason || ping.error || null,
+  };
+  return lastOffscreenStatus;
+};
+
+const closeOffscreenDocument = async ({ reason = 'manual' } = {}) => {
+  if (!chrome.offscreen?.closeDocument) {
+    return { ok: false, reason: 'offscreen-close-api-unavailable' };
+  }
+  try {
+    await chrome.offscreen.closeDocument();
+    lastOffscreenStatus = {
+      ok: true,
+      status: 'closed',
+      reason,
+      checkedAt: new Date().toISOString(),
+    };
+    return lastOffscreenStatus;
+  } catch (err) {
+    return { ok: false, reason: err?.message || String(err) };
+  }
 };
 
 const chromeGroupTab = (tabId) =>
@@ -920,6 +1047,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         ),
       },
     ).then(sendResponse);
+    return true;
+  }
+
+  if (message?.type === 'gemini-md-export/offscreen-status') {
+    const action = message.action || 'ensure';
+    if (action === 'close') {
+      closeOffscreenDocument({ reason: message.reason || 'content-script' }).then(sendResponse);
+      return true;
+    }
+    ensureOffscreenDocument({ reason: message.reason || 'content-script' }).then(sendResponse);
     return true;
   }
 

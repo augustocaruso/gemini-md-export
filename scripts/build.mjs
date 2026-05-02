@@ -148,7 +148,7 @@ const manifest = {
       run_at: 'document_idle',
     },
   ],
-  permissions: ['tabs', 'storage', 'tabGroups', 'scripting', 'nativeMessaging'],
+  permissions: ['tabs', 'storage', 'tabGroups', 'scripting', 'nativeMessaging', 'offscreen'],
   host_permissions: [
     'https://gemini.google.com/*',
     'https://lh3.google.com/*',
@@ -162,6 +162,8 @@ const manifest = {
 };
 
 writeFileSync(resolve(extensionDir, 'content.js'), extensionContent, 'utf-8');
+cpSync(resolve(ROOT, 'src', 'offscreen.html'), resolve(extensionDir, 'offscreen.html'));
+cpSync(resolve(ROOT, 'src', 'offscreen.js'), resolve(extensionDir, 'offscreen.js'));
 writeFileSync(
   resolve(extensionDir, 'background.js'),
   extensionBackgroundSrc

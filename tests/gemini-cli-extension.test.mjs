@@ -22,6 +22,8 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   const nativeHostPath = resolve(extensionDir, 'src', 'native-host.mjs');
   const bridgeVersionPath = resolve(extensionDir, 'bridge-version.json');
   const browserManifestPath = resolve(extensionDir, 'browser-extension', 'manifest.json');
+  const offscreenHtmlPath = resolve(extensionDir, 'browser-extension', 'offscreen.html');
+  const offscreenScriptPath = resolve(extensionDir, 'browser-extension', 'offscreen.js');
   const nativeHostBinPath = resolve(extensionDir, 'bin', 'gemini-md-export-native-host.mjs');
   const nativeManifestTemplatePath = resolve(
     extensionDir,
@@ -58,6 +60,8 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.equal(existsSync(nativeHostPath), true);
   assert.equal(existsSync(bridgeVersionPath), true);
   assert.equal(existsSync(browserManifestPath), true);
+  assert.equal(existsSync(offscreenHtmlPath), true);
+  assert.equal(existsSync(offscreenScriptPath), true);
   assert.equal(existsSync(nativeHostBinPath), true);
   assert.equal(existsSync(nativeManifestTemplatePath), true);
   assert.equal(existsSync(hooksConfigPath), true);
@@ -172,6 +176,7 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.ok(browserManifest.permissions.includes('tabGroups'));
   assert.ok(browserManifest.permissions.includes('scripting'));
   assert.ok(browserManifest.permissions.includes('nativeMessaging'));
+  assert.ok(browserManifest.permissions.includes('offscreen'));
   assert.equal(browserManifest.version, bridgeVersion.extensionVersion);
   assert.equal(typeof bridgeVersion.protocolVersion, 'number');
 
