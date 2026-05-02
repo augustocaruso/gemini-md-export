@@ -3329,7 +3329,7 @@ const clientHasOpenCommandChannel = (client) =>
   client?.commandPoll?.polling === true;
 
 const commandChannelReadyForClient = (client) =>
-  clientHasOpenCommandChannel(client) && !clientHasRecentCommandFailure(client);
+  clientHasOpenCommandChannel(client);
 
 const browserReadyBlockingIssue = ({
   allLiveClients = [],
@@ -5027,6 +5027,97 @@ const downloadConversationItemWithRetry = async (job, client, conversation, args
 const downloadChatForClient = async (client, args = {}) => {
   const conversation = resolveConversationRequest(client, args);
   return downloadConversationItemForClient(client, conversation, args);
+};
+
+const diagnosePageArtifactsForClient = async (client, args = {}) => {
+  let activeClient = client;
+  let openResult = null;
+  const requestedChatId =
+    stripGeminiPrefix(args.chatId) ||
+    extractChatIdFromUrl(args.url) ||
+    stripGeminiPrefix(args.id);
+  const shouldNavigate =
+    !!args.url ||
+    !!args.chatId ||
+    !!args.id ||
+    args.index !== undefined ||
+    args.title !== undefined;
+
+  if (shouldNavigate) {
+    const {
+      client: openedClient,
+      result,
+    } = await enqueueCommandWithClientRecovery(
+      activeClient,
+      'open-chat',
+      args,
+      { timeoutMs: normalizeWaitMs(args.openTimeoutMs, 60_000, 120_000) },
+      args,
+    );
+    activeClient = openedClient;
+    openResult = result;
+    if (!result?.ok) {
+      return {
+        ok: false,
+        action: 'diagnose_page',
+        requested: {
+          url: args.url || null,
+          chatId: requestedChatId || null,
+        },
+        client: summarizeClient(activeClient),
+        openChat: result || null,
+        error: result?.error || 'Não consegui abrir a conversa para diagnóstico.',
+      };
+    }
+  }
+
+  const {
+    client: diagnosedClient,
+    result,
+  } = await enqueueCommandWithClientRecovery(
+    activeClient,
+    'diagnose-artifacts',
+    {
+      includeFrameProbe: args.includeFrameProbe !== false,
+      includeHtml: args.includeHtml === true,
+      includeHtmlSample: args.includeHtmlSample === true || args.detail === 'full',
+      includeDomDiagnostics: args.includeDomDiagnostics === true || args.detail === 'full',
+      maxSampleLength: args.maxSampleLength,
+      maxListItems: args.maxListItems,
+    },
+    { timeoutMs: normalizeWaitMs(args.waitMs, 30_000, 120_000) },
+    args,
+  );
+  const artifacts = result?.artifacts || {};
+  const ok = result?.ok !== false && artifacts.ok !== false;
+  return {
+    ok,
+    action: 'diagnose_page',
+    requested: {
+      url: args.url || null,
+      chatId: requestedChatId || null,
+    },
+    client: summarizeClient(diagnosedClient),
+    openChat: openResult
+      ? {
+          ok: openResult.ok !== false,
+          conversation: openResult.conversation || null,
+          error: openResult.error || null,
+        }
+      : null,
+    page: {
+      url: artifacts.url || diagnosedClient.page?.url || null,
+      chatId: artifacts.chatId || diagnosedClient.page?.chatId || null,
+      title: artifacts.title || diagnosedClient.page?.title || null,
+      buildStamp: artifacts.buildStamp || diagnosedClient.buildStamp || null,
+    },
+    summary: artifacts.summary || null,
+    frameProbe: artifacts.frameProbe || null,
+    items: Array.isArray(artifacts.items) ? artifacts.items : [],
+    nextAction: artifacts.nextAction || null,
+    snapshot: result?.snapshot || null,
+    error: result?.error || artifacts.error || null,
+  };
 };
 
 const refreshClientConversations = async (client, args = {}) => {
@@ -8446,6 +8537,47 @@ const legacyRawTools = [
     },
   },
   {
+    name: 'gemini_diagnose_page',
+    description:
+      'Diagnostica a conversa/página Gemini atual ou indicada por URL, incluindo iframes de artefatos interativos renderizados no DOM visível.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ...clientSelectorProperties(),
+        url: {
+          type: 'string',
+          description: 'URL https://gemini.google.com/app/<chatId> a abrir antes do diagnóstico.',
+        },
+        chatId: {
+          type: 'string',
+          description: 'Chat ID hex da conversa a abrir antes do diagnóstico.',
+        },
+        includeFrameProbe: {
+          type: 'boolean',
+          description: 'Quando true ou omitido, tenta probe nos iframes via chrome.scripting.',
+        },
+        includeHtmlSample: {
+          type: 'boolean',
+          description: 'Inclui amostra curta do HTML legível do iframe. Default: false.',
+        },
+        includeHtml: {
+          type: 'boolean',
+          description: 'Inclui outerHTML curto dos iframes no DOM pai. Default: false.',
+        },
+        maxSampleLength: { type: 'integer', minimum: 0, maximum: 5000 },
+        maxListItems: { type: 'integer', minimum: 1, maximum: 60 },
+        waitMs: { type: 'integer', minimum: 1000, maximum: 120000 },
+        openTimeoutMs: { type: 'integer', minimum: 1000, maximum: 120000 },
+      },
+      additionalProperties: false,
+    },
+    call: async (args = {}) => {
+      const client = requireClient(args);
+      const result = await diagnosePageArtifactsForClient(client, args);
+      return toolTextResult(result, { isError: !result.ok });
+    },
+  },
+  {
     name: 'gemini_reload_gemini_tabs',
     description:
       'Recarrega abas abertas do Gemini conectadas à extensão. Útil como comando manual; após reload do card da extensão, o service worker já tenta fazer isso automaticamente.',
@@ -8503,6 +8635,7 @@ const LEGACY_BROWSER_DEPENDENT_TOOL_NAMES = new Set([
   'gemini_cache_status',
   'gemini_clear_cache',
   'gemini_open_chat',
+  'gemini_diagnose_page',
   'gemini_reload_gemini_tabs',
   'gemini_snapshot',
 ]);
@@ -8559,6 +8692,8 @@ const legacyToolReplacement = (name, args = {}) => {
           }),
         };
       }
+    case 'gemini_diagnose_page':
+      return { tool: 'gemini_chats', arguments: migrationArguments('diagnose_artifacts', args) };
     case 'gemini_download_chat':
       return {
         tool: 'gemini_chats',
@@ -8724,17 +8859,19 @@ const compactStructuredContent = (name, action, structured = {}) => {
       : Array.isArray(structured.chats)
         ? structured.chats
         : [];
-    const conversationPreviewLimit = structured.countOnly === true || structured.action === 'count'
-      ? 0
-      : structured.totalKnown === false
-        ? 10
-        : 50;
-    return {
-      ok: structured.ok !== false,
-      action,
-      source: structured.source || structured.page?.source || null,
-      client: compactClient(structured.client),
-      countStatus: structured.countStatus || structured.pagination?.countStatus || null,
+	    const conversationPreviewLimit = structured.countOnly === true || structured.action === 'count'
+	      ? 0
+	      : structured.totalKnown === false
+	        ? 10
+	        : 50;
+	    const artifactItems = Array.isArray(structured.items) ? structured.items : [];
+	    return {
+	      ok: structured.ok !== false,
+	      action,
+	      source: structured.source || structured.page?.source || null,
+	      client: compactClient(structured.client),
+	      page: structured.page || null,
+	      countStatus: structured.countStatus || structured.pagination?.countStatus || null,
       countIsTotal: structured.countIsTotal ?? structured.pagination?.countIsTotal ?? null,
       totalKnown: structured.totalKnown ?? structured.pagination?.totalKnown ?? null,
       totalCount: structured.totalCount ?? structured.pagination?.totalCount ?? null,
@@ -8756,15 +8893,36 @@ const compactStructuredContent = (name, action, structured = {}) => {
       pagination: structured.pagination || null,
       conversationPreviewCount: Math.min(conversations.length, conversationPreviewLimit),
       omittedConversationCount: Math.max(0, conversations.length - conversationPreviewLimit),
-      conversations: conversations.slice(0, conversationPreviewLimit).map((conversation, index) => ({
-        index: conversation.index ?? index + 1,
-        chatId: conversation.chatId || conversation.id || null,
-        title: conversation.title || null,
-        url: conversation.url || null,
-        source: conversation.source || null,
-      })),
-      nextAction: compactNextAction(structured.nextAction),
-    };
+	      conversations: conversations.slice(0, conversationPreviewLimit).map((conversation, index) => ({
+	        index: conversation.index ?? index + 1,
+	        chatId: conversation.chatId || conversation.id || null,
+	        title: conversation.title || null,
+	        url: conversation.url || null,
+	        source: conversation.source || null,
+	      })),
+	      artifactSummary: structured.summary || null,
+	      frameProbe: structured.frameProbe || null,
+	      artifactPreviewCount: Math.min(artifactItems.length, 10),
+	      omittedArtifactCount: Math.max(0, artifactItems.length - 10),
+	      artifacts: artifactItems.slice(0, 10).map((item) => ({
+	        id: item.id || null,
+	        kind: item.kind || null,
+	        role: item.role || null,
+	        turnIndex: item.turnIndex ?? null,
+	        srcKind: item.srcKind || null,
+	        host: item.host || null,
+	        pathname: item.pathname || null,
+	        visible: item.visible === true,
+	        parentDomReadable: item.parentDomReadable === true,
+	        frameProbeReadable: item.frameProbe?.htmlReadable === true,
+	        htmlExtractable: item.htmlExtractable === true,
+	        extractionMethod: item.extractionMethod || null,
+	        recommendedProbe: item.recommendedProbe || null,
+	        recommendedExport: item.recommendedExport || null,
+	        source: item.source || null,
+	      })),
+	      nextAction: compactNextAction(structured.nextAction),
+	    };
   }
 
   if (name === 'gemini_export' || name === 'gemini_job') {
@@ -9214,7 +9372,10 @@ const rawTools = [
     inputSchema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['list', 'count', 'current', 'open', 'download'] },
+        action: {
+          type: 'string',
+          enum: ['list', 'count', 'current', 'open', 'download', 'diagnose_artifacts'],
+        },
         source: { type: 'string', enum: ['recent', 'notebook'] },
         ...domainSelectorProperties(),
         limit: { type: 'integer', minimum: 1, maximum: 500 },
@@ -9234,6 +9395,13 @@ const rawTools = [
         title: { type: 'string' },
         outputDir: { type: 'string' },
         returnToOriginal: { type: 'boolean' },
+        includeFrameProbe: { type: 'boolean' },
+        includeHtmlSample: { type: 'boolean' },
+        includeHtml: { type: 'boolean' },
+        maxSampleLength: { type: 'integer', minimum: 0, maximum: 5000 },
+        maxListItems: { type: 'integer', minimum: 1, maximum: 60 },
+        waitMs: { type: 'integer', minimum: 1000, maximum: 120000 },
+        openTimeoutMs: { type: 'integer', minimum: 1000, maximum: 120000 },
         diagnostic: { type: 'boolean' },
         intent: { type: 'string', enum: ['diagnostic', 'small_page', 'one_off'] },
         detail: { type: 'string', enum: ['compact', 'full'] },
@@ -9269,15 +9437,17 @@ const rawTools = [
           ? 'gemini_get_current_chat'
           : action === 'open'
             ? 'gemini_open_chat'
-            : action === 'download'
-              ? source === 'notebook'
-                ? 'gemini_download_notebook_chat'
-                : 'gemini_download_chat'
-              : action === 'count'
-                ? 'gemini_list_recent_chats'
-              : source === 'notebook'
-                ? 'gemini_list_notebook_chats'
-                : 'gemini_list_recent_chats';
+            : action === 'diagnose_artifacts'
+              ? 'gemini_diagnose_page'
+              : action === 'download'
+                ? source === 'notebook'
+                  ? 'gemini_download_notebook_chat'
+                  : 'gemini_download_chat'
+                : action === 'count'
+                  ? 'gemini_list_recent_chats'
+                  : source === 'notebook'
+                    ? 'gemini_list_notebook_chats'
+                    : 'gemini_list_recent_chats';
       if (action === 'count') {
         legacyArgs.limit = 1;
         legacyArgs.offset = 0;
@@ -10332,6 +10502,36 @@ const bridgeServer = createServer(async (req, res) => {
         client: summarizeClient(client),
         ...result,
       });
+    } catch (err) {
+      sendAgentJson(res, 503, { error: err.message });
+    }
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/agent/diagnose-page') {
+    try {
+      const args = {
+        ...clientSelectorFromSearchParams(url.searchParams),
+        url: url.searchParams.get('url') || undefined,
+        chatId: url.searchParams.get('chatId') || undefined,
+        includeFrameProbe: parseOptionalBoolean(url.searchParams.get('includeFrameProbe')),
+        includeHtmlSample: parseOptionalBoolean(url.searchParams.get('includeHtmlSample')),
+        includeHtml: parseOptionalBoolean(url.searchParams.get('includeHtml')),
+        includeDomDiagnostics: parseOptionalBoolean(url.searchParams.get('includeDomDiagnostics')),
+        maxSampleLength: url.searchParams.has('maxSampleLength')
+          ? Number(url.searchParams.get('maxSampleLength'))
+          : undefined,
+        maxListItems: url.searchParams.has('maxListItems')
+          ? Number(url.searchParams.get('maxListItems'))
+          : undefined,
+        waitMs: url.searchParams.has('waitMs') ? Number(url.searchParams.get('waitMs')) : undefined,
+        openTimeoutMs: url.searchParams.has('openTimeoutMs')
+          ? Number(url.searchParams.get('openTimeoutMs'))
+          : undefined,
+      };
+      const client = requireClient(args);
+      const result = await diagnosePageArtifactsForClient(client, args);
+      sendAgentJson(res, result.ok ? 200 : 503, result);
     } catch (err) {
       sendAgentJson(res, 503, { error: err.message });
     }

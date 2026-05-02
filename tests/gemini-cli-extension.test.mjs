@@ -40,6 +40,12 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   ];
   const syncCommandPath = resolve(extensionDir, 'commands', 'sync.toml');
   const repairCommandPath = resolve(extensionDir, 'commands', 'exporter', 'repair-vault.toml');
+  const diagnosePageCommandPath = resolve(
+    extensionDir,
+    'commands',
+    'exporter',
+    'diagnose-page.toml',
+  );
   const repairAuditScriptPath = resolve(extensionDir, 'scripts', 'vault-repair-audit.mjs');
   const repairScriptPath = resolve(extensionDir, 'scripts', 'vault-repair.mjs');
   const nativeHostManifestScriptPath = resolve(extensionDir, 'scripts', 'native-host-manifest.mjs');
@@ -74,12 +80,14 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.equal(existsSync(repairAgentPath), true);
   assert.equal(existsSync(syncCommandPath), true);
   assert.equal(existsSync(repairCommandPath), true);
+  assert.equal(existsSync(diagnosePageCommandPath), true);
   assert.equal(existsSync(repairAuditScriptPath), true);
   assert.equal(existsSync(repairScriptPath), true);
   assert.equal(existsSync(nativeHostManifestScriptPath), true);
   assert.equal(existsSync(hookScriptPath), true);
 
   const manifest = JSON.parse(readFileSync(manifestPath, 'utf-8'));
+  const browserManifest = JSON.parse(readFileSync(browserManifestPath, 'utf-8'));
   assert.equal(manifest.contextFileName, 'GEMINI.md');
   assert.equal(manifest.hooks, undefined);
   assert.equal(manifest.agents, undefined);
@@ -93,6 +101,10 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
     'false',
   );
   assert.equal(manifest.mcpServers?.['gemini-md-export']?.cwd, undefined);
+  assert.ok(
+    browserManifest.host_permissions.includes('https://*.usercontent.goog/*'),
+    'browser extension precisa conseguir diagnosticar iframes scf.usercontent.goog',
+  );
 
   const hooksConfig = JSON.parse(readFileSync(hooksConfigPath, 'utf-8'));
   assert.ok(Array.isArray(hooksConfig.hooks?.AfterTool));
@@ -168,7 +180,6 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.match(repairCommand, /nao deve chamar outro subagent/);
   assert.match(repairCommand, /uniao\s+deduplicada/);
 
-  const browserManifest = JSON.parse(readFileSync(browserManifestPath, 'utf-8'));
   const bridgeVersion = JSON.parse(readFileSync(bridgeVersionPath, 'utf-8'));
   assert.ok(browserManifest.host_permissions.includes('https://lh3.google.com/*'));
   assert.ok(browserManifest.host_permissions.includes('https://*.googleusercontent.com/*'));

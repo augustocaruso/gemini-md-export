@@ -22,6 +22,7 @@ const DEFAULT_READY_REQUEST_TIMEOUT_MS = 60_000;
 const DEFAULT_EXISTING_TAB_RECONNECT_GRACE_MS = 8_000;
 const DEFAULT_TIMEOUT_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_COUNT_LOAD_MORE_TIMEOUT_MS = 15 * 60 * 1000;
+const DEFAULT_JOB_TIMEOUT_CLEANUP_MS = 45_000;
 const DEFAULT_COUNT_STATUS_INTERVAL_MS = 15_000;
 const DEFAULT_READY_STATUS_INTERVAL_MS = 15_000;
 const DEFAULT_COUNT_LOAD_MORE_BROWSER_TIMEOUT_MS = 30_000;
@@ -141,6 +142,7 @@ const usage = () =>
     'Comandos:',
     '  sync [vaultDir]       Sincroniza o vault com conversas novas/faltantes.',
     '  doctor                Verifica bridge, extensao Chrome e aba Gemini.',
+    '  diagnose page <url>   Diagnostica artefatos/iframes de uma conversa Gemini.',
     '  browser status        Mostra prontidao da bridge/extensao/abas.',
     '  tabs list|claim       Lista/reivindica abas Gemini pela CLI.',
     '  chats count           Conta chats carregaveis sem despejar lista no chat.',
@@ -160,6 +162,7 @@ const usage = () =>
     '  gemini-md-export sync "/path/to/vault" --tui',
     '  gemini-md-export sync "/path/to/vault" --plain',
     '  gemini-md-export doctor --plain',
+    '  gemini-md-export diagnose page "https://gemini.google.com/app/<chatId>" --plain',
     '  gemini-md-export tabs list --plain',
     '  gemini-md-export chats count --plain',
     '  gemini-md-export export missing "/path/to/vault" --plain',
@@ -233,6 +236,34 @@ const doctorHelp = () =>
     'Exemplos:',
     '  gemini-md-export doctor --plain',
     '  gemini-md-export doctor --json',
+  ].join('\n');
+
+const diagnoseHelp = () =>
+  [
+    'gemini-md-export diagnose page',
+    '',
+    'Uso:',
+    '  gemini-md-export diagnose page <url> [opcoes]',
+    '  gemini-md-export diagnose page --url <url> [opcoes]',
+    '',
+    'Abre/usa a conversa indicada e diagnostica iframes de artefatos interativos',
+    'visíveis no DOM do Gemini, sem salvar HTML nem contornar sandbox.',
+    '',
+    'Opcoes:',
+    '  --url <url>              URL https://gemini.google.com/app/<chatId>.',
+    '  --artifacts              Alias aceito; artefatos sao o foco deste diagnostico.',
+    '  --full                   Inclui amostras curtas de HTML quando o frame for legivel.',
+    '  --include-html-sample    Inclui amostra curta do HTML lido pelo probe.',
+    '  --include-html           Inclui outerHTML curto dos iframes no DOM pai.',
+    '  --no-frame-probe         Nao tenta probe via chrome.scripting nos iframes.',
+    '',
+    ...outputModeHelp(),
+    '',
+    ...commonOptionHelp(),
+    '',
+    'Exemplos:',
+    '  gemini-md-export diagnose page "https://gemini.google.com/app/46b61afe42a5956d" --plain',
+    '  gemini-md-export diagnose page --url "https://gemini.google.com/app/46b61afe42a5956d" --json',
   ].join('\n');
 
 const browserHelp = () =>
@@ -521,6 +552,7 @@ const helpForParsed = (parsed) => {
   if (!command) return usage();
   if (command === 'sync') return syncHelp();
   if (command === 'doctor') return doctorHelp();
+  if (command === 'diagnose') return diagnoseHelp();
   if (command === 'browser') return browserHelp();
   if (command === 'tabs') return tabsHelp();
   if (command === 'chats') return chatsHelp();
@@ -592,6 +624,7 @@ const parseArgs = (argv) => {
     else if (arg === '--version' || arg === '-v') out.flags.version = true;
     else if (arg === '--bridge-url') out.flags.bridgeUrl = value();
     else if (arg === '--vault-dir') out.flags.vaultDir = value();
+    else if (arg === '--url') out.flags.url = value();
     else if (arg === '--output-dir') out.flags.outputDir = value();
     else if (arg === '--resume-report-file' || arg === '--report-file')
       out.flags.resumeReportFile = value();
@@ -637,6 +670,14 @@ const parseArgs = (argv) => {
     else if (arg === '--confirm') out.flags.confirm = true;
     else if (arg === '--force') out.flags.force = true;
     else if (arg === '--wait-ms') out.flags.waitMs = Number(value());
+    else if (arg === '--artifacts') out.flags.artifacts = true;
+    else if (arg === '--full') {
+      out.flags.detail = 'full';
+      out.flags.includeHtmlSample = true;
+    }
+    else if (arg === '--include-html-sample') out.flags.includeHtmlSample = true;
+    else if (arg === '--include-html') out.flags.includeHtml = true;
+    else if (arg === '--no-frame-probe') out.flags.includeFrameProbe = false;
     else if (arg === '--audit-only' || arg === '--include-notes') out.flags.extraRepairArgs.push(arg);
     else if (arg === '--report') {
       const report = value();
@@ -1417,6 +1458,64 @@ const fetchJobStatus = async (bridgeUrl, jobId) =>
 const cancelJob = async (bridgeUrl, jobId) =>
   requestJson(bridgeUrl, appendParams('/agent/export-job-cancel', { jobId }), { timeoutMs: 20000 });
 
+const jobCleanupTimeoutMs = () =>
+  nonNegativeIntEnv(
+    process.env.GEMINI_MD_EXPORT_JOB_TIMEOUT_CLEANUP_MS,
+    DEFAULT_JOB_TIMEOUT_CLEANUP_MS,
+    180_000,
+  );
+
+const waitForJobTerminalQuietly = async (bridgeUrl, jobId, flags = {}) => {
+  const startedAt = Date.now();
+  const pollMs = Math.max(250, Math.min(2000, Number(flags.pollMs || DEFAULT_POLL_MS)));
+  const timeoutMs = jobCleanupTimeoutMs();
+  let lastJob = null;
+  while (Date.now() - startedAt <= timeoutMs) {
+    try {
+      lastJob = await fetchJobStatus(bridgeUrl, jobId);
+      if (TERMINAL_STATUSES.has(lastJob.status)) return lastJob;
+    } catch (err) {
+      return {
+        ...(lastJob || { jobId }),
+        cleanupStatusError: err?.message || String(err),
+      };
+    }
+    await sleep(pollMs);
+  }
+  return {
+    ...(lastJob || { jobId }),
+    cleanupTimedOut: true,
+    cleanupTimeoutMs: timeoutMs,
+  };
+};
+
+const cancelJobForTimeoutQuietly = async (flags, job, ui = null) => {
+  if (!job?.jobId || TERMINAL_STATUSES.has(job.status)) return job;
+  if (ui?.format && ui.format !== 'json' && ui.format !== 'jsonl') {
+    ui.stdout.write('Timeout do job; cancelando no navegador e liberando a aba antes de sair.\n');
+  }
+  try {
+    const cancelled = await cancelJob(flags.bridgeUrl, job.jobId);
+    const terminal = await waitForJobTerminalQuietly(flags.bridgeUrl, job.jobId, flags);
+    return {
+      ...(terminal || cancelled || job),
+      timeoutCancel: {
+        requested: true,
+        status: cancelled?.status || null,
+      },
+    };
+  } catch (err) {
+    return {
+      ...job,
+      timeoutCancel: {
+        requested: false,
+        error: err?.message || String(err),
+        code: err?.code || null,
+      },
+    };
+  }
+};
+
 const claimIdFromJob = (job = {}) => {
   const value = job || {};
   return value.tabClaimId || value.tabClaim?.claimId || value.serverClaim?.claimId || value.claim?.claimId || null;
@@ -1520,6 +1619,8 @@ const followJob = async (bridgeUrl, initialJob, flags, ui) => {
   }
 };
 
+const isJobTimeoutError = (err) => err?.code === 'job_timeout';
+
 const runSync = async (parsed, streams = {}) => {
   const flags = { ...parsed.flags };
   if (!flags.vaultDir && parsed.positionals[0]) flags.vaultDir = parsed.positionals[0];
@@ -1541,6 +1642,10 @@ const runSync = async (parsed, streams = {}) => {
     const result = emitResult(ui, finalJob);
     return { exitCode: exitCodeForJob(finalJob), result };
   } catch (err) {
+    if (isJobTimeoutError(err)) {
+      finalJob = await cancelJobForTimeoutQuietly(flags, err.data || finalJob || initialJob, ui);
+      err.data = finalJob;
+    }
     throw err;
   } finally {
     await releaseCliClaimQuietly(flags, 'cli-sync-finished', finalJob || initialJob);
@@ -1680,6 +1785,95 @@ const runBrowser = async (parsed, streams = {}) => {
   };
   writeStructuredResult(ui, result, {
     label: `${result.ok ? 'OK' : 'NAO PRONTO'}: ${result.nextAction}`,
+  });
+  return { exitCode: result.ok ? EXIT.OK : EXIT.EXTENSION_UNREADY, result };
+};
+
+const artifactStatusText = (item = {}) => {
+  if (item.htmlExtractable) {
+    return `HTML extraível (${item.extractionMethod || 'metodo desconhecido'})`;
+  }
+  if (item.recommendedProbe === 'chrome_scripting_frame') {
+    return item.frameProbe?.ok === false
+      ? 'frame remoto detectado; probe falhou'
+      : 'frame remoto detectado; HTML ainda não confirmado';
+  }
+  if (item.recommendedProbe === 'live_blob_fetch') return 'blob vivo; precisa tentativa dedicada';
+  return 'fallback';
+};
+
+const diagnosePlainLabel = (result = {}) => {
+  const lines = ['Diagnóstico da página Gemini'];
+  if (result.page?.chatId) lines.push(`Chat: ${result.page.chatId}`);
+  if (result.page?.title) lines.push(`Título: ${result.page.title}`);
+  if (result.page?.url) lines.push(`URL: ${result.page.url}`);
+  const summary = result.summary || {};
+  lines.push(`Artefatos detectados: ${summary.total ?? result.items?.length ?? 0}`);
+  lines.push(`HTML extraível: ${summary.htmlExtractable ?? 0}`);
+  if (result.frameProbe) {
+    lines.push(
+      `Probe de frames: ${result.frameProbe.ok ? 'ok' : 'falhou'}${
+        result.frameProbe.reason ? ` (${result.frameProbe.reason})` : ''
+      }`,
+    );
+  }
+  const items = Array.isArray(result.items) ? result.items : [];
+  for (const item of items.slice(0, 8)) {
+    lines.push('');
+    lines.push(`${item.id || 'artifact'} — ${item.kind || 'iframe'}`);
+    if (item.turnIndex) lines.push(`  Turno: ${item.role || 'desconhecido'} #${item.turnIndex}`);
+    lines.push(`  Origem: ${item.srcKind || 'desconhecida'}${item.host ? ` (${item.host})` : ''}`);
+    if (item.pathname) lines.push(`  Caminho: ${item.pathname}`);
+    lines.push(`  Estado: ${artifactStatusText(item)}`);
+    lines.push(`  Recomendação: ${item.recommendedExport || 'fallback_warning'}`);
+  }
+  if (items.length > 8) lines.push(`\n... ${items.length - 8} artefato(s) omitido(s) no resumo.`);
+  if (result.nextAction?.message) {
+    lines.push('');
+    lines.push(`Próximo passo: ${result.nextAction.message}`);
+  }
+  return lines.join('\n');
+};
+
+const runDiagnose = async (parsed, streams = {}) => {
+  const subcommand = parsed.positionals[0];
+  if (subcommand !== 'page') {
+    throw usageError('Uso: gemini-md-export diagnose page <url> [opcoes].');
+  }
+  const targetUrl = parsed.flags.url || parsed.positionals[1];
+  if (!targetUrl) throw usageError('Informe a URL da conversa Gemini.');
+  const chatIdMatch = String(targetUrl).match(/\/app\/([a-f0-9]{12,})/i);
+  if (!/^https:\/\/gemini\.google\.com\/app\//i.test(String(targetUrl)) || !chatIdMatch) {
+    throw usageError('A URL precisa ser https://gemini.google.com/app/<chatId>.');
+  }
+
+  const ui = makeUi(parsed.flags, streams);
+  warnTuiFallback(ui);
+  if (ui.format !== 'json' && ui.format !== 'jsonl') {
+    ui.stdout.write(`Conectando na bridge ${normalizeBridgeUrl(parsed.flags.bridgeUrl)}...\n`);
+  }
+  await ensureBridgeAvailable(parsed.flags, ui);
+  if (ui.format !== 'json' && ui.format !== 'jsonl') {
+    ui.stdout.write('Bridge conectada. Verificando Gemini Web...\n');
+  }
+  await ensureReady(parsed.flags.bridgeUrl, parsed.flags, ui);
+  const result = await requestJson(
+    parsed.flags.bridgeUrl,
+    appendParams('/agent/diagnose-page', {
+      url: targetUrl,
+      clientId: parsed.flags.clientId,
+      tabId: parsed.flags.tabId,
+      claimId: parsed.flags.claimId,
+      includeFrameProbe: parsed.flags.includeFrameProbe,
+      includeHtmlSample: parsed.flags.includeHtmlSample,
+      includeHtml: parsed.flags.includeHtml,
+      waitMs: parsed.flags.waitMs,
+    }),
+    { timeoutMs: Math.max(45_000, Number(parsed.flags.waitMs || 0) + 20_000) },
+  );
+  writeStructuredResult(ui, result, {
+    label: diagnosePlainLabel(result),
+    includeResultJson: parsed.flags.resultJson === true,
   });
   return { exitCode: result.ok ? EXIT.OK : EXIT.EXTENSION_UNREADY, result };
 };
@@ -1937,6 +2131,10 @@ const runExport = async (parsed, streams = {}) => {
     const result = emitResult(ui, finalJob);
     return { exitCode: exitCodeForJob(finalJob), result };
   } catch (err) {
+    if (isJobTimeoutError(err)) {
+      finalJob = await cancelJobForTimeoutQuietly(flags, err.data || finalJob || initialJob, ui);
+      err.data = finalJob;
+    }
     throw err;
   } finally {
     await releaseCliClaimQuietly(flags, `cli-export-${subcommand || 'job'}-finished`, finalJob || initialJob);
@@ -2052,6 +2250,7 @@ export const main = async (argv = process.argv.slice(2), streams = {}) => {
 
   if (parsed.command === 'sync') return runSync(parsed, streams);
   if (parsed.command === 'doctor') return runDoctor(parsed, streams);
+  if (parsed.command === 'diagnose') return runDiagnose(parsed, streams);
   if (parsed.command === 'browser') return runBrowser(parsed, streams);
   if (parsed.command === 'tabs') return runTabs(parsed, streams);
   if (parsed.command === 'chats') return runChats(parsed, streams);

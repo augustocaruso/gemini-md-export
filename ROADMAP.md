@@ -2024,6 +2024,60 @@ provavelmente mais um remendo.
 - Manter fallback HTTP/SSE.
 - Não introduzir servidor persistente extra se native messaging resolver melhor.
 
+## v0.8.20 — Diagnóstico de artefatos interativos do Gemini
+
+Status: implementada na versão `0.8.20`.
+
+Objetivo: diagnosticar artefatos interativos que o Gemini renderiza dentro de
+iframes remotos, como `gemini-code-immersive` em
+`*.scf.usercontent.goog`, antes de tentar salvá-los como HTML embutível no
+Obsidian.
+
+### Entregas aprovadas
+
+- Criar comando Gemini CLI `/exporter:diagnose-page <url>` apontando para o
+  binário local da extensão.
+- Criar subcomando CLI
+  `gemini-md-export diagnose page <url> --plain|--json`.
+- Expor uma ação curta de diagnóstico pela bridge/MCP para abrir a conversa
+  indicada e inspecionar artefatos da página atual.
+- No content script, listar iframes candidatos com URL, sandbox, allow,
+  dimensões, turno da conversa e estratégia recomendada.
+- No background MV3, usar `chrome.scripting.executeScript` em frames permitidos
+  para checar se o documento do iframe é legível pela extensão, sem usar
+  `chrome.debugger`, cookies, APIs privadas ou bypass de sandbox.
+- Incluir `https://*.usercontent.goog/*` nas permissões de host da extensão
+  para cobrir os iframes `scf.usercontent.goog` observados no Gemini.
+- Hotfix de confiabilidade: quando `sync`/`export` estoura timeout, a CLI
+  cancela o job no bridge, aguarda a operação terminar/cancelar e só então
+  libera a claim/indicador da aba.
+- Hotfix de readiness: timeout recente de comando continua aparecendo em
+  `bridgeHealth`, mas não transforma um canal SSE/long-poll aberto em
+  `command_channel_not_ready`.
+- Hotfix de claim fantasma: release por `tabId` também limpa a claim local do
+  content script alvo quando o servidor já esqueceu a claim.
+
+### Fora desta entrega
+
+- Salvar HTML do artefato como asset do Obsidian.
+- Reescrever o Markdown exportado para embutir `<iframe>`.
+- Contornar bloqueio cross-origin/sandbox quando o navegador não permitir
+  leitura legítima.
+- Usar Playwright/CDP/debugger no fluxo do usuário final.
+
+### Critérios de aceite
+
+- O comando informa quantos artefatos foram encontrados e, para cada um, se o
+  HTML parece extraível, opaco ou dependente de fallback.
+- Para iframe `gemini-code-immersive` em `usercontent.goog`, o relatório deve
+  distinguir leitura pelo DOM pai de leitura por probe de frame via extensão.
+- O output padrão é humano e curto; JSON completo fica disponível para debug.
+- Se a nova permissão de host ainda não estiver ativa no runtime do navegador,
+  o diagnóstico deve falhar de forma acionável, pedindo reload da extensão em
+  vez de sugerir scraping inseguro.
+- Timeout forçado de `sync`/`export` deve sair com erro honesto sem deixar
+  grupo/badge `GME` preso na aba.
+
 ## Ordem recomendada de implementação
 
 Estado atual: `v0.8.5` funcionando em campo. Não mexer por mexer.

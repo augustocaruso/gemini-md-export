@@ -52,6 +52,8 @@ Use bundled Agent Skills for detailed workflows: `gemini-vault-sync`,
 
 - `/sync`: sync the known vault with Gemini Web; an argument overrides the
   vault path from context.
+- `/exporter:diagnose-page`: diagnose interactive iframe artifacts in a single
+  Gemini conversation page without exporting or bypassing browser sandboxing.
 - `/exporter:repair-vault`: audit and repair contaminated raw exports/wiki
   cases.
 
@@ -69,8 +71,8 @@ and exits idle bridges unless `--no-exit-when-idle` is set.
   `node "$env:USERPROFILE\.gemini\extensions\gemini-md-export\bin\gemini-md-export.mjs" sync <vaultDir> --tui`
 - For agents, prefer `--plain`; it emits progress lines and final
   `RESULT_JSON`. Use `gemini-md-export --help` for flags.
-- CLI subcommands include `browser status`, `tabs list/claim/release/reload`,
-  `chats count`, `export recent`, `export missing`, `export resume`,
+- CLI subcommands include `browser status`, `diagnose page`,
+  `tabs list/claim/release/reload`, `chats count`, `export recent`, `export missing`, `export resume`,
   `export reexport`, `export notebook`, `job status`, `job cancel`,
   `export-dir get/set`, `cleanup stale-processes`, and `repair-vault`.
 - Automation: `--json` for final JSON only, `--jsonl` for events. Do not use

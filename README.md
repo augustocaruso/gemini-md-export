@@ -336,6 +336,18 @@ com `offset` (`0`, `50`, `100`...). Evite pedir centenas de conversas em uma
 única resposta do Gemini CLI. Para "quantos chats ao todo" e para exportar,
 rode a CLI; se ela falhar por timeout/conexão, responda a falha curta em vez de
 trocar para MCP.
+
+Para diagnosticar artefatos interativos renderizados em iframes, use a CLI:
+
+```bash
+gemini-md-export diagnose page "https://gemini.google.com/app/<chatId>" --plain
+```
+
+Dentro do Gemini CLI, o bundle também expõe
+`/exporter:diagnose-page <url>`. Esse diagnóstico apenas informa se o HTML do
+iframe parece legível pela extensão; ele não salva o artefato nem tenta burlar
+sandbox/cross-origin.
+
 Também não faça cleanup manual com `kill <pid>`/`pkill`/`taskkill` como
 fallback de contagem/exportação; diagnóstico e cleanup de processos só entram
 quando o usuário pedir diagnóstico explicitamente.

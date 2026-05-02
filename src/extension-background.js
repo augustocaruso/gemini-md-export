@@ -1249,6 +1249,7 @@ const fetchAsset = async (source) => {
 
   const isGoogleMediaHost =
     /(?:^|\.)googleusercontent\.com$/i.test(url.hostname) ||
+    /(?:^|\.)usercontent\.goog$/i.test(url.hostname) ||
     /(?:^|\.)google\.com$/i.test(url.hostname);
 
   const fetchWithCredentials = async (credentials) => {
@@ -1295,6 +1296,140 @@ const fetchAsset = async (source) => {
     contentBase64: arrayBufferToBase64(await blob.arrayBuffer()),
   };
 };
+
+const artifactFrameProbeScript = (options = {}) => {
+  const maxSampleLength = Math.max(0, Math.min(5000, Number(options.maxSampleLength || 1200)));
+  const includeHtmlSample = options.includeHtmlSample === true;
+  const maxListItems = Math.max(1, Math.min(60, Number(options.maxListItems || 25)));
+  const sample = (value, limit = maxSampleLength) => {
+    const text = String(value || '').replace(/\s+/g, ' ').trim();
+    return text.length > limit ? `${text.slice(0, Math.max(0, limit - 3))}...` : text;
+  };
+  const attr = (el, name) => el.getAttribute?.(name) || '';
+  const collect = (selector, mapFn) =>
+    Array.from(document.querySelectorAll(selector))
+      .slice(0, maxListItems)
+      .map((el) => {
+        try {
+          return mapFn(el);
+        } catch (err) {
+          return { error: err?.message || String(err) };
+        }
+      });
+  const hashText = (text) => {
+    let hash = 2166136261;
+    const source = String(text || '').slice(0, 200000);
+    for (let i = 0; i < source.length; i += 1) {
+      hash ^= source.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(16).padStart(8, '0');
+  };
+
+  try {
+    const html = document.documentElement?.outerHTML || '';
+    const bodyText = document.body?.innerText || document.body?.textContent || '';
+    const path = location.pathname || '';
+    const htmlLower = html.slice(0, 200000).toLowerCase();
+    return {
+      ok: true,
+      url: location.href,
+      origin: location.origin,
+      pathname: path,
+      title: document.title || '',
+      readyState: document.readyState || '',
+      contentType: document.contentType || '',
+      htmlReadable: !!html,
+      htmlLength: html.length,
+      htmlHash: hashText(html),
+      htmlSample: includeHtmlSample ? sample(html) : '',
+      textLength: bodyText.length,
+      textSample: sample(bodyText, Math.min(maxSampleLength, 800)),
+      scriptCount: document.scripts?.length || 0,
+      iframeCount: document.querySelectorAll('iframe').length,
+      linkCount: document.querySelectorAll('link[href]').length,
+      scripts: collect('script[src]', (el) => ({
+        src: attr(el, 'src'),
+        type: attr(el, 'type'),
+      })),
+      iframes: collect('iframe[src], iframe[srcdoc]', (el) => ({
+        src: attr(el, 'src'),
+        hasSrcdoc: !!attr(el, 'srcdoc'),
+        sandbox: attr(el, 'sandbox'),
+        allow: attr(el, 'allow'),
+      })),
+      links: collect('link[href]', (el) => ({
+        rel: attr(el, 'rel'),
+        href: attr(el, 'href'),
+      })),
+      artifactSignals: {
+        geminiCodeImmersive:
+          /\/gemini-code-immersive\//i.test(path) || htmlLower.includes('gemini-code-immersive'),
+        usercontentGoog: /(?:^|\.)usercontent\.goog$/i.test(location.hostname),
+        scfUsercontent: /(?:^|\.)scf\.usercontent\.goog$/i.test(location.hostname),
+      },
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      url: location.href,
+      origin: location.origin,
+      error: err?.message || String(err),
+      name: err?.name || null,
+    };
+  }
+};
+
+const probeArtifactFrames = (message = {}, sender = {}) =>
+  new Promise((resolve) => {
+    const tabId = Number(message.tabId || sender.tab?.id);
+    if (!Number.isInteger(tabId) || tabId <= 0) {
+      resolve({ ok: false, reason: 'tab-id-unavailable', tabId: null, frames: [] });
+      return;
+    }
+    if (!chrome.scripting?.executeScript) {
+      resolve({ ok: false, reason: 'scripting-api-unavailable', tabId, frames: [] });
+      return;
+    }
+
+    chrome.scripting.executeScript(
+      {
+        target: { tabId, allFrames: true },
+        func: artifactFrameProbeScript,
+        args: [
+          {
+            includeHtmlSample: message.includeHtmlSample === true,
+            maxSampleLength: message.maxSampleLength,
+            maxListItems: message.maxListItems,
+          },
+        ],
+      },
+      (results) => {
+        if (chrome.runtime.lastError) {
+          resolve({
+            ok: false,
+            reason: chrome.runtime.lastError.message,
+            tabId,
+            frames: [],
+          });
+          return;
+        }
+        const frames = Array.isArray(results)
+          ? results.map((entry) => ({
+              frameId: entry.frameId ?? null,
+              documentId: entry.documentId || null,
+              ...entry.result,
+            }))
+          : [];
+        resolve({
+          ok: true,
+          tabId,
+          frameCount: frames.length,
+          frames,
+        });
+      },
+    );
+  });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === 'gemini-md-export/ping') {
@@ -1432,6 +1567,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           error: err?.message || String(err),
         });
       });
+    return true;
+  }
+
+  if (message?.type === 'gemini-md-export/probe-artifact-frames') {
+    probeArtifactFrames(message, sender).then(sendResponse);
     return true;
   }
 

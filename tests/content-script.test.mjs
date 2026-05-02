@@ -622,6 +622,42 @@ test('exportPayload mantém warning quando lightbox não revela fonte legível',
   window.close();
 });
 
+test('diagnóstico de artefatos reconhece iframe gemini-code-immersive', { timeout: 4000 }, async () => {
+  const artifactUrl =
+    'https://0wcgetkp1eahjwzmi88js74uet1lmjex7g07o0e20idk5c0tdx-h903225159.scf.usercontent.goog/gemini-code-immersive/shim.html?origin=https%3A%2F%2Fgemini.google.com&cache=1';
+  const { dom, runtimeErrors } = createGeminiMediaDom(`
+    <user-query><div>crie um app pequeno</div></user-query>
+    <model-response>
+      <div>
+        <iframe
+          data-rect="10,20,640,480"
+          allow="xr-spatial-tracking; web-share"
+          sandbox="allow-pointer-lock allow-popups allow-forms allow-popups-to-escape-sandbox allow-downloads allow-scripts allow-same-origin"
+          src="${artifactUrl}">
+        </iframe>
+      </div>
+    </model-response>
+  `);
+  const { window } = dom;
+  const debug = await evaluateContentScript(window);
+  const result = await debug.artifacts({ includeFrameProbe: false });
+  const item = result.items[0];
+
+  assert.equal(result.summary.total, 1);
+  assert.equal(item.kind, 'gemini_code_immersive');
+  assert.equal(item.srcKind, 'remote_usercontent_goog');
+  assert.equal(item.host, '0wcgetkp1eahjwzmi88js74uet1lmjex7g07o0e20idk5c0tdx-h903225159.scf.usercontent.goog');
+  assert.equal(item.pathname, '/gemini-code-immersive/shim.html');
+  assert.equal(item.role, 'assistant');
+  assert.equal(item.turnIndex, 2);
+  assert.equal(item.extensionFrameProbePossible, true);
+  assert.equal(item.sandboxTokens.includes('allow-same-origin'), true);
+  assert.equal(result.frameProbe.reason, 'extension-context-unavailable');
+  assert.deepEqual(runtimeErrors, []);
+
+  window.close();
+});
+
 test('waitForChatToLoad aguarda DOM novo antes de liberar export', { timeout: 5000 }, async () => {
   const oldChatId = 'aaaaaaaaaaaa';
   const newChatId = 'bbbbbbbbbbbb';

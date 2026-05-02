@@ -775,6 +775,91 @@ test('CLI sync --plain destaca historico incompleto e falhas no RESULT_JSON', as
   });
 });
 
+test('CLI sync cancela job em timeout e libera claim visual da aba', async () => {
+  const claimedRunningJob = {
+    ...runningJob,
+    jobId: 'job-timeout-sync',
+    tabClaimId: 'claim-sync-timeout',
+    tabClaim: {
+      claimId: 'claim-sync-timeout',
+      tabId: 12345,
+      status: 'active',
+    },
+  };
+  let cancelRequested = false;
+
+  await withEnv({ GEMINI_MD_EXPORT_JOB_TIMEOUT_CLEANUP_MS: '250' }, async () => {
+    await withServer((req, res, url) => {
+      if (url.pathname === '/agent/ready') {
+        sendJson(res, 200, {
+          ready: true,
+          mode: 'hot',
+          connectedClientCount: 1,
+          selectableTabCount: 1,
+          commandReadyClientCount: 1,
+        });
+        return;
+      }
+      if (url.pathname === '/agent/sync-vault') {
+        sendJson(res, 202, claimedRunningJob);
+        return;
+      }
+      if (url.pathname === '/agent/export-job-status') {
+        sendJson(res, 200, cancelRequested
+          ? { ...claimedRunningJob, status: 'cancelled', phase: 'cancelled' }
+          : claimedRunningJob);
+        return;
+      }
+      if (url.pathname === '/agent/export-job-cancel') {
+        cancelRequested = true;
+        sendJson(res, 200, { ...claimedRunningJob, status: 'cancel_requested' });
+        return;
+      }
+      if (url.pathname === '/agent/release-tab') {
+        sendJson(res, 200, {
+          ok: true,
+          released: {
+            claimId: url.searchParams.get('claimId'),
+            tabId: Number(url.searchParams.get('tabId')),
+          },
+          visual: { ok: true },
+        });
+        return;
+      }
+      sendJson(res, 404, { error: `not found: ${url.pathname}` });
+    }, async (bridgeUrl, requests) => {
+      const stdout = captureStream();
+      const stderr = captureStream();
+      await assert.rejects(
+        () =>
+          main(
+            [
+              'sync',
+              '/vault/Gemini',
+              '--bridge-url',
+              bridgeUrl,
+              '--plain',
+              '--timeout-ms',
+              '20',
+              '--poll-ms',
+              '10',
+            ],
+            { stdout, stderr },
+          ),
+        /Timeout aguardando job job-timeout-sync/,
+      );
+
+      assert.match(stdout.text(), /cancelando no navegador e liberando a aba/);
+      assert.equal(stderr.text(), '');
+      assert.equal(requests.some((item) => item.pathname === '/agent/export-job-cancel'), true);
+      const release = requests.find((item) => item.pathname === '/agent/release-tab');
+      assert.ok(release);
+      assert.equal(release.searchParams.get('claimId'), 'claim-sync-timeout');
+      assert.equal(release.searchParams.get('tabId'), '12345');
+    });
+  });
+});
+
 test('CLI sync acorda Gemini Web pela propria CLI antes de exportar', async () => {
   const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-cli-launch-'));
   let readyCalls = 0;

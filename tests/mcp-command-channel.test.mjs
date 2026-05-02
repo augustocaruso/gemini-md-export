@@ -62,6 +62,8 @@ test('browser_status expõe saúde da bridge MCP/Chrome', () => {
   assert.match(source, /serviceWorker/);
   assert.match(source, /contentScript/);
   assert.match(source, /diagnostics/);
+  assert.match(source, /const commandChannelReadyForClient = \(client\) =>\s*clientHasOpenCommandChannel\(client\);/);
+  assert.match(source, /blockingIssue = 'command_timeout_recent'/);
 });
 
 test('MCP v0.5 lista somente as 7 tools públicas de domínio', () => {
@@ -140,6 +142,8 @@ test('MCP implementa afinidade confiável por claim de aba', () => {
   assert.match(contentSource, /command\.type === 'claim-tab'/);
   assert.match(contentSource, /command\.type === 'release-tab-claim'/);
   assert.match(contentSource, /command\.type === 'release-tab-claim-by-tab-id'/);
+  assert.match(contentSource, /requestedTabId === currentTabId/);
+  assert.match(contentSource, /claim-released-by-tab-id/);
   assert.match(contentSource, /isExtensionContextInvalidatedError/);
   assert.match(contentSource, /reason: 'extension-context-invalidated'/);
   assert.match(contentSource, /localOnly: true/);

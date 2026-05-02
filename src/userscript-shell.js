@@ -2097,6 +2097,283 @@
     };
   };
 
+  const ARTIFACT_IFRAME_SELECTOR = 'iframe';
+
+  const frameSandboxTokens = (el) => {
+    try {
+      if (el?.sandbox && typeof el.sandbox[Symbol.iterator] === 'function') {
+        return Array.from(el.sandbox);
+      }
+    } catch {
+      // Fallback para browsers/jsdom sem DOMTokenList iterável.
+    }
+    return String(el?.getAttribute?.('sandbox') || '')
+      .split(/\s+/)
+      .filter(Boolean);
+  };
+
+  const frameAllowTokens = (el) =>
+    String(el?.getAttribute?.('allow') || '')
+      .split(';')
+      .map((part) => part.trim())
+      .filter(Boolean);
+
+  const classifyArtifactFrameSource = (el) => {
+    const src = String(el?.getAttribute?.('src') || el?.src || '').trim();
+    const srcdoc = String(el?.getAttribute?.('srcdoc') || '');
+    if (srcdoc) return { srcKind: 'srcdoc', host: null, pathname: null };
+    if (!src) return { srcKind: 'empty', host: null, pathname: null };
+    if (/^data:text\/html/i.test(src)) return { srcKind: 'data_html', host: null, pathname: null };
+    if (/^data:/i.test(src)) return { srcKind: 'data', host: null, pathname: null };
+    if (/^blob:/i.test(src)) return { srcKind: 'blob', host: null, pathname: null };
+    try {
+      const url = new URL(src, location.href);
+      const host = url.hostname;
+      const pathname = url.pathname;
+      if (/(?:^|\.)usercontent\.goog$/i.test(host)) {
+        return { srcKind: 'remote_usercontent_goog', host, pathname };
+      }
+      if (/(?:^|\.)googleusercontent\.com$/i.test(host)) {
+        return { srcKind: 'remote_googleusercontent_com', host, pathname };
+      }
+      return { srcKind: url.origin === location.origin ? 'remote_same_origin' : 'remote_cross_origin', host, pathname };
+    } catch {
+      return { srcKind: 'unparseable', host: null, pathname: null };
+    }
+  };
+
+  const artifactKindForFrame = (el, sourceInfo) => {
+    const src = String(el?.getAttribute?.('src') || el?.src || '');
+    if (/\/gemini-code-immersive\//i.test(sourceInfo?.pathname || '') || /gemini-code-immersive/i.test(src)) {
+      return 'gemini_code_immersive';
+    }
+    if (/usercontent\.goog/i.test(src)) return 'usercontent_frame';
+    return 'iframe';
+  };
+
+  const probeParentFrameDocument = (el) => {
+    try {
+      const doc = el?.contentDocument || el?.contentWindow?.document || null;
+      const html = doc?.documentElement?.outerHTML || '';
+      return {
+        readable: !!html,
+        htmlLength: html.length,
+        title: doc?.title || '',
+        readyState: doc?.readyState || '',
+        error: null,
+      };
+    } catch (err) {
+      return {
+        readable: false,
+        htmlLength: 0,
+        title: '',
+        readyState: '',
+        error: err?.message || String(err),
+        errorName: err?.name || null,
+      };
+    }
+  };
+
+  const recommendedProbeForArtifact = (sourceInfo, parentProbe) => {
+    if (parentProbe?.readable) return 'parent_dom';
+    if (sourceInfo?.srcKind === 'srcdoc' || sourceInfo?.srcKind === 'data_html') return 'inline_html';
+    if (
+      sourceInfo?.srcKind === 'remote_usercontent_goog' ||
+      sourceInfo?.srcKind === 'remote_googleusercontent_com'
+    ) {
+      return 'chrome_scripting_frame';
+    }
+    if (sourceInfo?.srcKind === 'blob') return 'live_blob_fetch';
+    return 'fallback';
+  };
+
+  const artifactExportRecommendation = (item) => {
+    if (item.htmlExtractable) return 'html_asset';
+    if (item.recommendedProbe === 'chrome_scripting_frame') return 'reload_extension_or_frame_probe';
+    if (item.recommendedProbe === 'live_blob_fetch') return 'try_blob_fetch';
+    return 'fallback_warning';
+  };
+
+  const inspectArtifactElement = (el, { includeHtml = false } = {}) => {
+    const rect = visibleRect(el);
+    const turnNodes = Array.from(document.querySelectorAll('user-query, model-response'));
+    const turn = el.closest?.('user-query, model-response');
+    const source = String(el.getAttribute?.('src') || el.src || '');
+    const srcdoc = String(el.getAttribute?.('srcdoc') || '');
+    const sourceInfo = classifyArtifactFrameSource(el);
+    const parentProbe = probeParentFrameDocument(el);
+    const recommendedProbe = recommendedProbeForArtifact(sourceInfo, parentProbe);
+    const item = {
+      id: '',
+      kind: artifactKindForFrame(el, sourceInfo),
+      tag: el.tagName?.toLowerCase() || 'iframe',
+      role: turn ? roleOf(turn) : null,
+      inTurn: !!turn,
+      turnIndex: turn ? turnNodes.indexOf(turn) + 1 : null,
+      source,
+      srcKind: sourceInfo.srcKind,
+      host: sourceInfo.host,
+      pathname: sourceInfo.pathname,
+      hasSrcdoc: !!srcdoc,
+      srcdocLength: srcdoc.length,
+      allow: el.getAttribute?.('allow') || '',
+      allowTokens: frameAllowTokens(el),
+      sandbox: el.getAttribute?.('sandbox') || '',
+      sandboxTokens: frameSandboxTokens(el),
+      visible: !!rect,
+      rect: rect
+        ? {
+            x: Math.round(rect.x),
+            y: Math.round(rect.y),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height),
+          }
+        : null,
+      title: el.getAttribute?.('title') || '',
+      ariaLabel: el.getAttribute?.('aria-label') || '',
+      parentDomReadable: parentProbe.readable,
+      parentDomProbe: parentProbe,
+      recommendedProbe,
+      extensionFrameProbePossible:
+        recommendedProbe === 'chrome_scripting_frame' || sourceInfo.srcKind === 'remote_same_origin',
+      frameProbe: null,
+      htmlExtractable:
+        parentProbe.readable ||
+        sourceInfo.srcKind === 'srcdoc' ||
+        sourceInfo.srcKind === 'data_html',
+      extractionMethod: parentProbe.readable
+        ? 'parent_dom'
+        : sourceInfo.srcKind === 'srcdoc'
+          ? 'srcdoc'
+          : sourceInfo.srcKind === 'data_html'
+            ? 'data_html'
+            : null,
+      outerHTML: includeHtml ? compactOuterHtml(el) : '',
+    };
+    item.recommendedExport = artifactExportRecommendation(item);
+    return item;
+  };
+
+  const summarizeArtifactItems = (items) => {
+    const byKind = {};
+    const bySourceKind = {};
+    let htmlExtractable = 0;
+    let frameProbeReadable = 0;
+    let parentDomReadable = 0;
+    let opaque = 0;
+    items.forEach((item) => {
+      byKind[item.kind || 'unknown'] = (byKind[item.kind || 'unknown'] || 0) + 1;
+      bySourceKind[item.srcKind || 'unknown'] = (bySourceKind[item.srcKind || 'unknown'] || 0) + 1;
+      if (item.htmlExtractable) htmlExtractable += 1;
+      if (item.frameProbe?.htmlReadable) frameProbeReadable += 1;
+      if (item.parentDomReadable) parentDomReadable += 1;
+      if (!item.htmlExtractable) opaque += 1;
+    });
+    return {
+      total: items.length,
+      htmlExtractable,
+      frameProbeReadable,
+      parentDomReadable,
+      opaque,
+      byKind,
+      bySourceKind,
+    };
+  };
+
+  const mergeFrameProbeResults = (items, frameProbeResult) => {
+    if (!frameProbeResult?.ok || !Array.isArray(frameProbeResult.frames)) return items;
+    const byUrl = new Map();
+    frameProbeResult.frames.forEach((frame) => {
+      if (!frame?.url) return;
+      const list = byUrl.get(frame.url) || [];
+      list.push(frame);
+      byUrl.set(frame.url, list);
+    });
+
+    return items.map((item) => {
+      const candidates = byUrl.get(item.source) || [];
+      const frame = candidates.shift() || null;
+      if (candidates.length === 0) byUrl.delete(item.source);
+      const next = { ...item, frameProbe: frame };
+      if (frame?.htmlReadable) {
+        next.htmlExtractable = true;
+        next.extractionMethod = 'chrome_scripting_frame';
+      }
+      next.recommendedExport = artifactExportRecommendation(next);
+      return next;
+    });
+  };
+
+  const inspectArtifactDom = async (options = {}) => {
+    const allFrames = Array.from(document.querySelectorAll(ARTIFACT_IFRAME_SELECTOR));
+    const includeHtml = options.includeHtml === true && allFrames.length <= 30;
+    let items = allFrames.map((el, index) => ({
+      ...inspectArtifactElement(el, { includeHtml }),
+      id: `artifact-${String(index + 1).padStart(3, '0')}`,
+    }));
+    let frameProbeResult = null;
+    if (options.includeFrameProbe !== false && isExtensionContext) {
+      try {
+        frameProbeResult = await extensionSendMessage(
+          {
+            type: 'gemini-md-export/probe-artifact-frames',
+            includeHtmlSample: options.includeHtmlSample === true,
+            maxSampleLength: options.maxSampleLength || 1200,
+            maxListItems: options.maxListItems || 25,
+          },
+          { timeoutMs: 12000 },
+        );
+        items = mergeFrameProbeResults(items, frameProbeResult);
+      } catch (err) {
+        frameProbeResult = {
+          ok: false,
+          reason: err?.message || String(err),
+          frames: [],
+        };
+      }
+    }
+
+    return {
+      ok: true,
+      url: location.href,
+      chatId: currentChatId(),
+      title: scrapeTitle(),
+      buildStamp: BUILD_STAMP,
+      selector: ARTIFACT_IFRAME_SELECTOR,
+      frameProbe: frameProbeResult
+        ? {
+            ok: frameProbeResult.ok === true,
+            reason: frameProbeResult.reason || null,
+            tabId: frameProbeResult.tabId ?? null,
+            frameCount: frameProbeResult.frameCount ?? frameProbeResult.frames?.length ?? 0,
+          }
+        : {
+            ok: false,
+            reason: isExtensionContext ? 'not-requested' : 'extension-context-unavailable',
+            tabId: null,
+            frameCount: 0,
+          },
+      summary: summarizeArtifactItems(items),
+      items,
+      nextAction:
+        items.some((item) => item.htmlExtractable)
+          ? {
+              code: 'implement_html_asset_export',
+              message: 'Há artefato com HTML legível; próxima etapa é salvar HTML como asset e embedar no Obsidian.',
+            }
+          : items.some((item) => item.recommendedProbe === 'chrome_scripting_frame')
+            ? {
+                code: 'frame_probe_unavailable_or_blocked',
+                message:
+                  'Há iframe em usercontent.goog, mas o probe de frame não leu HTML. Recarregue a extensão se a permissão nova ainda não estiver ativa.',
+              }
+            : {
+                code: 'fallback_only',
+                message: 'Nenhum artefato HTML legível foi confirmado; manter fallback com aviso/link/screenshot.',
+              },
+    };
+  };
+
   const reportFailure = (message) => {
     const snapshot = debugSnapshot();
     warn(message, snapshot);
@@ -3644,6 +3921,22 @@
       };
     }
 
+    if (command.type === 'diagnose-artifacts') {
+      return {
+        ok: true,
+        artifacts: await inspectArtifactDom({
+          includeFrameProbe: command.args?.includeFrameProbe !== false,
+          includeHtml: command.args?.includeHtml === true,
+          includeHtmlSample: command.args?.includeHtmlSample === true,
+          maxSampleLength: command.args?.maxSampleLength,
+          maxListItems: command.args?.maxListItems,
+        }),
+        snapshot: debugSnapshot({
+          includeDomDiagnostics: command.args?.includeDomDiagnostics === true,
+        }),
+      };
+    }
+
     if (command.type === 'reload-page') {
       const delayMs = Math.max(0, Math.min(10_000, Number(command.args?.delayMs || 250)));
       setTimeout(() => {
@@ -3747,15 +4040,29 @@
     }
 
     if (command.type === 'release-tab-claim-by-tab-id') {
+      const requestedTabId = Number(command.args?.tabId);
+      const currentTabId = Number(bridgeState.tabId);
       const response = await extensionSendMessage(
         {
           type: 'gemini-md-export/release-tab-claim',
-          tabId: Number(command.args?.tabId),
+          tabId: requestedTabId,
           claimId: command.args?.claimId || null,
           reason: command.args?.reason || 'bridge-command-tab-id-release',
         },
         { timeoutMs: 5000 },
       );
+      const targetsThisTab =
+        Number.isInteger(requestedTabId) &&
+        Number.isInteger(currentTabId) &&
+        requestedTabId === currentTabId;
+      const claimMatches =
+        !command.args?.claimId ||
+        !state.tabClaim?.claimId ||
+        state.tabClaim.claimId === command.args.claimId;
+      if (targetsThisTab && claimMatches && response?.ok) {
+        clearLocalTabClaim();
+        reportTabBrokerState('claim-released-by-tab-id', { force: true });
+      }
       return response || { ok: false, reason: 'empty-release-response' };
     }
 
@@ -7462,6 +7769,7 @@
       notebookChatUrlCache: () => notebookChatUrlCacheSummary(),
       clearNotebookChatUrlCache: (notebookId) => clearNotebookChatUrlCache(notebookId),
       snapshot: debugSnapshot,
+      artifacts: (options = {}) => inspectArtifactDom(options),
       hydrateCurrentConversation: () => hydrateConversationToTop(document, window),
       exportPayload: () => buildExportPayload(document, location.href),
       conversationDomSignature: () => conversationDomSignature(document),

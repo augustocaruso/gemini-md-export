@@ -153,6 +153,7 @@ const manifest = {
     'https://gemini.google.com/*',
     'https://lh3.google.com/*',
     'https://*.googleusercontent.com/*',
+    'https://*.usercontent.goog/*',
     'http://127.0.0.1/*',
     'http://localhost/*',
   ],
