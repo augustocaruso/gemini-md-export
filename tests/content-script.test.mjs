@@ -705,6 +705,78 @@ test('diagnóstico de artefatos abre botão candidato antes de procurar iframe',
   window.close();
 });
 
+test('diagnóstico de artefatos ignora iframes técnicos escondidos', { timeout: 5000 }, async () => {
+  const { dom, runtimeErrors } = createGeminiMediaDom(`
+    <iframe src="/_/bscframe" data-rect="0,0,0,0"></iframe>
+    <iframe src="https://accounts.google.com/RotateCookiesPage?origin=https%3A%2F%2Fgemini.google.com" data-rect="0,0,0,0"></iframe>
+    <user-query><div>crie um app pequeno</div></user-query>
+    <model-response>
+      <button
+        aria-label="Open visualization"
+        data-test-id="mini-app-opt-in-button"
+        data-rect="10,20,240,44">Show me the visualization</button>
+    </model-response>
+  `);
+  const { window } = dom;
+  const debug = await evaluateContentScript(window);
+
+  const result = await debug.artifacts({
+    includeFrameProbe: false,
+    openArtifactLaunchers: false,
+  });
+
+  assert.equal(result.summary.total, 0);
+  assert.equal(result.summary.htmlExtractable, 0);
+  assert.equal(result.summary.launcherCount, 1);
+  assert.equal(result.nextAction.code, 'fallback_only');
+  assert.deepEqual(runtimeErrors, []);
+
+  window.close();
+});
+
+test('diagnóstico de artefatos prioriza botão próximo da viewport', { timeout: 5000 }, async () => {
+  const artifactUrl =
+    'https://0wcgetkp1eahjwzmi88js74uet1lmjex7g07o0e20idk5c0tdx-h903225159.scf.usercontent.goog/gemini-code-immersive/shim.html?origin=https%3A%2F%2Fgemini.google.com&cache=1';
+  const { dom, runtimeErrors } = createGeminiMediaDom(`
+    <user-query><div>crie um app pequeno</div></user-query>
+    <model-response id="answer">
+      <button
+        id="old-open-artifact"
+        aria-label="Open visualization"
+        data-test-id="mini-app-opt-in-button"
+        data-rect="10,-3000,260,44">Show me the visualization old</button>
+      <button
+        id="near-open-artifact"
+        aria-label="Open visualization"
+        data-test-id="mini-app-opt-in-button"
+        data-rect="10,120,260,44">Show me the visualization nearby</button>
+    </model-response>
+  `);
+  const { window } = dom;
+  const debug = await evaluateContentScript(window);
+  window.document.getElementById('near-open-artifact').addEventListener('click', () => {
+    const iframe = window.document.createElement('iframe');
+    iframe.setAttribute('data-rect', '10,180,640,480');
+    iframe.setAttribute('src', artifactUrl);
+    window.document.getElementById('answer').appendChild(iframe);
+  });
+
+  const result = await debug.artifacts({
+    includeFrameProbe: false,
+    openArtifactLaunchers: true,
+    closeOpenedLaunchers: false,
+    artifactOpenWaitMs: 1200,
+  });
+
+  assert.equal(result.launcherOpen.clicked[0].text, 'Show me the visualization nearby');
+  assert.equal(result.launcherOpen.clicked[0].ok, true);
+  assert.equal(result.summary.openedFrameCount, 1);
+  assert.equal(result.items[0].kind, 'gemini_code_immersive');
+  assert.deepEqual(runtimeErrors, []);
+
+  window.close();
+});
+
 test('waitForChatToLoad aguarda DOM novo antes de liberar export', { timeout: 5000 }, async () => {
   const oldChatId = 'aaaaaaaaaaaa';
   const newChatId = 'bbbbbbbbbbbb';

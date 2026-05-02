@@ -40,6 +40,19 @@ import {
   setClientJobProgress,
   TERMINAL_JOB_STATUSES,
 } from './job-progress-broadcast.mjs';
+import {
+  appendJobTraceEvent,
+  createJobTrace,
+  finalizeJobTrace,
+  readJobTraceTail,
+  summarizeJobTrace,
+  summarizeTraceEvents,
+} from './job-trace.mjs';
+import {
+  createTabSessionManager,
+  summarizeTabSession,
+} from './tab-session.mjs';
+import { decorateErrorWithTimeoutContext } from './timeout-diagnostics.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
@@ -62,6 +75,7 @@ const DEFAULT_EXPORT_DIR = process.env.GEMINI_MCP_EXPORT_DIR || resolve(homedir(
 const DIAGNOSTIC_DIR =
   process.env.GEMINI_MCP_DIAGNOSTIC_DIR || resolve(homedir(), '.gemini-md-export');
 const FLIGHT_RECORDER_FILE = resolve(DIAGNOSTIC_DIR, 'flight-recorder.jsonl');
+const JOB_TRACE_DIR = resolve(DIAGNOSTIC_DIR, 'job-traces');
 const FLIGHT_RECORDER_MAX_BYTES = Math.max(
   64 * 1024,
   Math.min(20 * 1024 * 1024, Number(process.env.GEMINI_MCP_FLIGHT_RECORDER_MAX_BYTES || 2 * 1024 * 1024)),
@@ -289,6 +303,7 @@ const pendingCommands = new Map();
 const exportJobs = new Map();
 const tabClaims = new Map();
 const sessionClaims = new Map();
+const tabSessionManager = createTabSessionManager();
 const CLI_BIN_PATH = resolve(ROOT, 'bin', 'gemini-md-export.mjs');
 let configuredExportDir = DEFAULT_EXPORT_DIR;
 let shuttingDown = false;
@@ -2547,6 +2562,11 @@ const enqueueCommand = (clientId, type, args = {}, options = {}) => {
       error.code = 'command_timeout';
       error.commandType = type;
       error.commandDispatched = !!pending.dispatchedAt;
+      decorateErrorWithTimeoutContext(error, {
+        layer: 'browser',
+        operation: type,
+        timeoutMs,
+      });
       markClientCommandTimeout(clientId, type, {
         dispatched: !!pending.dispatchedAt,
         code: 'command_timeout',
@@ -2573,6 +2593,11 @@ const enqueueCommand = (clientId, type, args = {}, options = {}) => {
         error.code = 'command_dispatch_timeout';
         error.commandType = type;
         error.commandDispatched = false;
+        decorateErrorWithTimeoutContext(error, {
+          layer: 'extension',
+          operation: type,
+          timeoutMs: dispatchTimeoutMs,
+        });
         markClientCommandTimeout(clientId, type, {
           dispatched: false,
           code: 'command_dispatch_timeout',
@@ -5714,6 +5739,108 @@ const ensureExportJobMetrics = (job) => {
   return job.metrics;
 };
 
+const appendExportJobTrace = (job, type, data = {}) =>
+  appendJobTraceEvent(job?.trace, type, {
+    status: job?.status || null,
+    phase: job?.phase || null,
+    completed: job?.completed ?? null,
+    requested: job?.requested ?? null,
+    clientId: job?.clientId || null,
+    tabClaimId: job?.tabClaimId || null,
+    tabSessionId: job?.tabSession?.sessionId || null,
+    ...data,
+  });
+
+const createExportJobTrace = (job, { purpose = 'export' } = {}) => {
+  job.trace = createJobTrace({
+    jobId: job.jobId,
+    directory: JOB_TRACE_DIR,
+    retentionPolicy: process.env.GEMINI_MCP_JOB_TRACE_RETENTION || 'on_failure',
+  });
+  appendExportJobTrace(job, 'job_created', {
+    type: job.type,
+    purpose,
+    outputDir: job.outputDir || null,
+  });
+  return job.trace;
+};
+
+const attachExportJobTabSession = (job, client, purpose) => {
+  job.tabSession = tabSessionManager.createSession({
+    client,
+    claim: claimForClient(client),
+    purpose,
+    jobId: job.jobId,
+  });
+  appendExportJobTrace(job, 'tab_session_created', {
+    tabSession: summarizeTabSession(job.tabSession),
+  });
+  return job.tabSession;
+};
+
+const recordExportJobCleanup = (job, step, result = {}) => {
+  if (!job?.tabSession) return null;
+  const summary = tabSessionManager.recordCleanup(job.tabSession, step, result);
+  appendExportJobTrace(job, 'tab_session_cleanup', {
+    step,
+    ok: result?.ok !== false,
+    code: result?.code || null,
+    error: result?.error || null,
+  });
+  return summary;
+};
+
+const finishExportJobTabSession = (job, reason) => {
+  if (!job?.tabSession) return null;
+  const summary = tabSessionManager.finishSession(job.tabSession, {
+    state: job.status === 'completed' ? 'released' : 'finished_with_attention',
+    reason,
+  });
+  appendExportJobTrace(job, 'tab_session_finished', {
+    tabSession: summary,
+  });
+  return summary;
+};
+
+const maybeTraceExportJobTransition = (job) => {
+  if (!job?.trace) return;
+  const stateKey = `${job.status || 'unknown'}:${job.phase || 'unknown'}`;
+  if (job._traceStateKey !== stateKey) {
+    job._traceStateKey = stateKey;
+    appendExportJobTrace(job, 'job_state', {
+      state: job.status || null,
+      phase: job.phase || null,
+    });
+  }
+  const currentKey = job.current
+    ? `${job.current.index || ''}:${job.current.chatId || ''}:${job.current.skippedExisting ? 'skip' : 'work'}`
+    : null;
+  if (currentKey && job._traceCurrentKey !== currentKey) {
+    job._traceCurrentKey = currentKey;
+    appendExportJobTrace(job, 'job_current', {
+      index: job.current.index ?? null,
+      chatId: job.current.chatId || null,
+      skippedExisting: job.current.skippedExisting === true,
+    });
+  }
+};
+
+const finalizeExportJobTrace = (job) => {
+  if (!job?.trace) return null;
+  appendExportJobTrace(job, 'job_finished', {
+    status: job.status || null,
+    phase: job.phase || null,
+    successCount: job.successCount || 0,
+    failureCount: job.failureCount || 0,
+    skippedCount: job.skippedCount || 0,
+    error: job.error || null,
+  });
+  return finalizeJobTrace(job.trace, {
+    status: job.status,
+    retainSuccess: process.env.GEMINI_MCP_RETAIN_SUCCESS_JOB_TRACE === 'true',
+  });
+};
+
 const recordJobTiming = (job, name, elapsedMs) => {
   const elapsed = Math.max(0, Math.round(Number(elapsedMs) || 0));
   const metrics = ensureExportJobMetrics(job);
@@ -5861,6 +5988,9 @@ const summarizeExportJob = (job) => ({
   autoReleaseTabClaim: job.autoReleaseTabClaim ?? null,
   tabClaimId: job.tabClaimId || null,
   tabClaimRelease: job.tabClaimRelease || null,
+  tabSession: summarizeTabSession(job.tabSession),
+  trace: summarizeJobTrace(job.trace),
+  traceFile: job.trace?.retained === false ? null : job.trace?.filePath || null,
   outputDir: job.outputDir,
   createdAt: job.createdAt,
   updatedAt: job.updatedAt,
@@ -5923,6 +6053,7 @@ const summarizeExportJob = (job) => ({
 
 const touchExportJob = (job) => {
   job.updatedAt = new Date().toISOString();
+  maybeTraceExportJobTransition(job);
 };
 
 const isTerminalExportJobStatus = (status) =>
@@ -6221,6 +6352,8 @@ const buildRecentChatsExportReport = (job, client, successes, failures) => ({
   loadMoreTimedOut: job.loadMoreTimedOut === true,
   loadMoreTrace: Array.isArray(job.loadMoreTrace) ? job.loadMoreTrace : [],
   metrics: summarizeExportJobMetrics(job, client, { includeConversations: true }),
+  tabSession: summarizeTabSession(job.tabSession),
+  trace: summarizeJobTrace(job.trace),
   progressMessage: exportJobProgressMessage(job),
   decisionSummary: exportJobDecisionSummary(job),
   nextAction: exportJobNextAction(job),
@@ -6343,6 +6476,8 @@ const buildDirectChatsExportReport = (job, client, successes, failures) => ({
   failureCount: failures.length,
   delayMs: job.delayMs,
   metrics: summarizeExportJobMetrics(job, client, { includeConversations: true }),
+  tabSession: summarizeTabSession(job.tabSession),
+  trace: summarizeJobTrace(job.trace),
   progressMessage: exportJobProgressMessage(job),
   decisionSummary: exportJobDecisionSummary(job),
   nextAction: exportJobNextAction(job),
@@ -6820,6 +6955,15 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
         job.failures.push(failure);
         job.failures = job.failures.slice(-20);
         job.failureCount = failures.length;
+        appendExportJobTrace(job, 'conversation_failed', {
+          index,
+          chatId: failure.chatId,
+          error: err.message,
+          code: err.code || null,
+          layer: err.layer || null,
+          operation: err.operation || null,
+          timeout: err.data?.timeout || null,
+        });
         recordJobCounter(job, 'failedConversations');
         if (/timeout|tempo esgotado/i.test(err.message)) {
           recordJobCounter(job, 'browserTimeouts');
@@ -6850,6 +6994,13 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
     job.status = 'failed';
     job.phase = 'failed';
     job.error = err.message;
+    appendExportJobTrace(job, 'job_error', {
+      error: err.message,
+      code: err.code || null,
+      layer: err.layer || null,
+      operation: err.operation || null,
+      timeout: err.data?.timeout || null,
+    });
     try {
       persistRecentChatsExportReport(job, client, successes, failures);
     } catch {
@@ -6888,6 +7039,9 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
       }
     }
     await autoReleaseTabClaimForJob(job, `job-${job.status || 'finished'}`);
+    recordExportJobCleanup(job, 'tab-claim-release', job.tabClaimRelease || { ok: true, reason: 'no-claim-release-needed' });
+    finishExportJobTabSession(job, `job-${job.status || 'finished'}`);
+    finalizeExportJobTrace(job);
     touchExportJob(job);
     try {
       if (job.reportFile) {
@@ -6986,6 +7140,8 @@ const startRecentChatsExportJob = (client, args = {}) => {
     skippedExisting: resume?.previousSkipped ? [...resume.previousSkipped] : [],
     failures: [],
   };
+  createExportJobTrace(job, { purpose: job.syncMode ? 'sync' : 'recent-export' });
+  attachExportJobTabSession(job, client, job.syncMode ? 'vault-sync' : 'recent-chats-export');
   exportJobs.set(job.jobId, job);
   void runRecentChatsExportJob(job, client, args);
   return summarizeExportJob(job);
@@ -7081,6 +7237,15 @@ const runDirectChatsExportJob = async (job, client, args = {}) => {
         job.failures.push(failure);
         job.failures = job.failures.slice(-20);
         job.failureCount = failures.length;
+        appendExportJobTrace(job, 'conversation_failed', {
+          index,
+          chatId: failure.chatId,
+          error: err.message,
+          code: err.code || null,
+          layer: err.layer || null,
+          operation: err.operation || null,
+          timeout: err.data?.timeout || null,
+        });
         recordJobCounter(job, 'failedConversations');
         if (/timeout|tempo esgotado/i.test(err.message)) {
           recordJobCounter(job, 'browserTimeouts');
@@ -7113,6 +7278,13 @@ const runDirectChatsExportJob = async (job, client, args = {}) => {
     job.status = 'failed';
     job.phase = 'failed';
     job.error = err.message;
+    appendExportJobTrace(job, 'job_error', {
+      error: err.message,
+      code: err.code || null,
+      layer: err.layer || null,
+      operation: err.operation || null,
+      timeout: err.data?.timeout || null,
+    });
     try {
       persistDirectChatsExportReport(job, client, successes, failures);
     } catch {
@@ -7141,6 +7313,9 @@ const runDirectChatsExportJob = async (job, client, args = {}) => {
       }
     }
     await autoReleaseTabClaimForJob(job, `job-${job.status || 'finished'}`);
+    recordExportJobCleanup(job, 'tab-claim-release', job.tabClaimRelease || { ok: true, reason: 'no-claim-release-needed' });
+    finishExportJobTabSession(job, `job-${job.status || 'finished'}`);
+    finalizeExportJobTrace(job);
     touchExportJob(job);
     try {
       if (job.reportFile) {
@@ -7201,6 +7376,8 @@ const startDirectChatsExportJob = (client, args = {}) => {
     recentSuccesses: [],
     failures: [],
   };
+  createExportJobTrace(job, { purpose: 'direct-reexport' });
+  attachExportJobTabSession(job, client, 'direct-chats-export');
   exportJobs.set(job.jobId, job);
   void runDirectChatsExportJob(job, client, args);
   return summarizeExportJob(job);
@@ -10422,6 +10599,31 @@ const bridgeServer = createServer(async (req, res) => {
       return;
     }
     sendAgentJson(res, 200, summarizeExportJob(job));
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/agent/export-job-trace') {
+    const jobId = url.searchParams.get('jobId');
+    const limit = Math.max(1, Math.min(1000, Number(url.searchParams.get('limit') || 200)));
+    const job = exportJobs.get(jobId);
+    if (!job) {
+      sendAgentJson(res, 404, { error: `Job não encontrado: ${jobId}` });
+      return;
+    }
+    const fileEvents = job.trace?.filePath ? readJobTraceTail(job.trace.filePath, limit) : [];
+    const events = fileEvents.length > 0
+      ? fileEvents
+      : Array.isArray(job.trace?.events)
+        ? job.trace.events.slice(-limit)
+        : [];
+    sendAgentJson(res, 200, {
+      ok: true,
+      jobId: job.jobId,
+      status: job.status,
+      trace: summarizeJobTrace(job.trace),
+      summary: summarizeTraceEvents(events),
+      events,
+    });
     return;
   }
 

@@ -1218,6 +1218,44 @@ test('CLI job status considera job em andamento como consulta bem-sucedida', asy
   });
 });
 
+test('CLI job trace consulta endpoint dedicado sem despejar MCP no chat', async () => {
+  const traceResult = {
+    ok: true,
+    jobId: 'job-1',
+    status: 'failed',
+    trace: { filePath: '/tmp/job-1.trace.jsonl', retained: true },
+    summary: { eventCount: 2, byType: { job_created: 1, job_error: 1 } },
+    events: [
+      { ts: '2026-05-02T00:00:00.000Z', type: 'job_created', data: { phase: 'queued' } },
+      {
+        ts: '2026-05-02T00:00:01.000Z',
+        type: 'job_error',
+        data: { error: 'Timeout', code: 'job_timeout', layer: 'job' },
+      },
+    ],
+  };
+  await withServer((req, res, url) => {
+    if (url.pathname === '/agent/export-job-trace') {
+      sendJson(res, 200, traceResult);
+      return;
+    }
+    sendJson(res, 404, { error: `not found: ${url.pathname}` });
+  }, async (bridgeUrl) => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+    const run = await main(['job', 'trace', 'job-1', '--bridge-url', bridgeUrl, '--plain'], {
+      stdout,
+      stderr,
+    });
+
+    assert.equal(run.exitCode, 0);
+    assert.match(stdout.text(), /Trace do job job-1/);
+    assert.match(stdout.text(), /job_error/);
+    assert.match(stdout.text(), /RESULT_JSON /);
+    assert.equal(stderr.text(), '');
+  });
+});
+
 test('CLI export missing inicia job com vaultDir e segue ate resultado final', async () => {
   await withServer(mockSyncServer(), async (bridgeUrl, requests) => {
     const stdout = captureStream();

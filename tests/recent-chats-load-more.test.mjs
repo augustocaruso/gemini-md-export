@@ -221,6 +221,21 @@ test('export total registra métricas de performance no status e relatório', ()
   assert.match(contentSource, /mediaCandidateCount/);
 });
 
+test('export jobs registram sessao de aba e trace sanitizado por job', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  assert.match(source, /createTabSessionManager/);
+  assert.match(source, /attachExportJobTabSession/);
+  assert.match(source, /recordExportJobCleanup/);
+  assert.match(source, /finishExportJobTabSession/);
+  assert.match(source, /createJobTrace/);
+  assert.match(source, /appendExportJobTrace/);
+  assert.match(source, /finalizeExportJobTrace/);
+  assert.match(source, /url\.pathname === '\/agent\/export-job-trace'/);
+  assert.match(source, /summarizeTraceEvents/);
+  assert.match(source, /traceFile/);
+  assert.match(source, /tabSession/);
+});
+
 test('export missing oferece UX guiada para importação completa do vault', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const jobBlock = source.match(

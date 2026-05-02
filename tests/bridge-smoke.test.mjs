@@ -44,6 +44,34 @@ test('bridge smoke valida healthz, snapshot, SSE, ready, clients e diagnostico s
   );
 });
 
+test('bridge smoke destrutivo exercita claim e release com cliente sintetico', () => {
+  const output = execFileSync(
+    process.execPath,
+    [SMOKE_SCRIPT, '--spawn', '--destructive-fixture', '--json'],
+    {
+      cwd: ROOT,
+      encoding: 'utf-8',
+      timeout: 25000,
+    },
+  );
+  const result = JSON.parse(output);
+  const destructive = result.checks.find(
+    (check) => check.name === 'destructive_fixture_claim_release',
+  );
+
+  assert.equal(result.ok, true);
+  assert.ok(destructive);
+  assert.equal(destructive.ok, true);
+  assert.equal(
+    destructive.value.commands.some((command) => command.type === 'claim-tab'),
+    true,
+  );
+  assert.equal(
+    destructive.value.commands.some((command) => command.type === 'release-tab-claim'),
+    true,
+  );
+});
+
 test('build publica bridge-smoke no bundle da extensao Gemini CLI', () => {
   assert.equal(
     existsSync(resolve(ROOT, 'dist', 'gemini-cli-extension', 'scripts', 'bridge-smoke.mjs')),

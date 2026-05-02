@@ -24,6 +24,7 @@
   /* __INLINE_EXTRACT_MODULE__ */
   /* __INLINE_NOTEBOOK_RETURN_PLAN__ */
   /* __INLINE_BATCH_SESSION_MODULE__ */
+  /* __INLINE_DOM_RUNNER_MODULE__ */
 
   // --- config -----------------------------------------------------------
 
@@ -111,6 +112,14 @@
     if (!(el instanceof Element)) return null;
     const rect = el.getBoundingClientRect();
     return rect.width > 0 && rect.height > 0 ? rect : null;
+  };
+  const viewportDistanceForRect = (rect) => {
+    if (!rect) return Number.POSITIVE_INFINITY;
+    const width = Math.max(0, window.innerWidth || document.documentElement?.clientWidth || 0);
+    const height = Math.max(0, window.innerHeight || document.documentElement?.clientHeight || 0);
+    const dx = rect.right < 0 ? -rect.right : rect.left > width ? rect.left - width : 0;
+    const dy = rect.bottom < 0 ? -rect.bottom : rect.top > height ? rect.top - height : 0;
+    return Math.hypot(dx, dy);
   };
   const controlLabel = (el) =>
     [
@@ -1704,6 +1713,16 @@
         scroller: null,
         detail: {
           reason: 'no-scroll-container',
+          actionability: describeDomActionability({
+            name: 'sidebar scroller',
+            count: 0,
+            attached: false,
+            visible: false,
+            stable: true,
+            enabled: true,
+            receivingEvents: false,
+            routeMatches: true,
+          }),
           beforeVisible: before,
           beforeKnown,
           afterVisible: before,
@@ -1720,6 +1739,20 @@
       beforeKnown,
     );
     const scrollBefore = describeScrollContainer(scrollContainer, scrollContainerMatchedBy);
+    const scrollerActionability = describeDomActionability({
+      name: 'sidebar scroller',
+      count: 1,
+      attached: scrollContainer.isConnected !== false,
+      visible: !!visibleRect(scrollContainer) || hasOverflow(scrollContainer),
+      stable: true,
+      enabled: true,
+      receivingEvents: true,
+      routeMatches: true,
+      details: {
+        matchedBy: scrollContainerMatchedBy,
+        hasOverflow: hasOverflow(scrollContainer),
+      },
+    });
     scrollContainer.scrollTop = scrollContainer.scrollHeight;
     scrollContainer.dispatchEvent(new Event('scroll', { bubbles: true }));
     await sleep(loadOptions.preScrollPauseMs);
@@ -1752,6 +1785,7 @@
         afterVisible,
         afterKnown,
         growthObserved: loaded,
+        actionability: scrollerActionability,
         scrollBefore,
         scrollAfter: describeScrollContainer(scrollContainer, scrollContainerMatchedBy),
       },
@@ -2169,7 +2203,16 @@
     return 'iframe';
   };
 
-  const artifactFrameElements = () => Array.from(document.querySelectorAll(ARTIFACT_IFRAME_SELECTOR));
+  const isArtifactFrameCandidate = (el) => {
+    const sourceInfo = classifyArtifactFrameSource(el);
+    const kind = artifactKindForFrame(el, sourceInfo);
+    if (kind !== 'iframe') return true;
+    if (visibleRect(el)) return true;
+    return sourceInfo.srcKind === 'srcdoc' || sourceInfo.srcKind === 'data_html' || sourceInfo.srcKind === 'blob';
+  };
+
+  const artifactFrameElements = () =>
+    Array.from(document.querySelectorAll(ARTIFACT_IFRAME_SELECTOR)).filter(isArtifactFrameCandidate);
 
   const elementArtifactText = (el) =>
     [
@@ -2257,7 +2300,15 @@
         const { score } = scoreArtifactLauncher(el);
         return score >= 4;
       })
-      .sort((a, b) => scoreArtifactLauncher(b).score - scoreArtifactLauncher(a).score)
+      .sort((a, b) => {
+        const scoreDelta = scoreArtifactLauncher(b).score - scoreArtifactLauncher(a).score;
+        if (scoreDelta) return scoreDelta;
+        const aRect = visibleRect(a);
+        const bRect = visibleRect(b);
+        const distanceDelta = viewportDistanceForRect(aRect) - viewportDistanceForRect(bRect);
+        if (distanceDelta) return distanceDelta;
+        return (aRect?.top ?? Number.POSITIVE_INFINITY) - (bRect?.top ?? Number.POSITIVE_INFINITY);
+      })
       .map((el, index) => ({
         ...inspectArtifactLauncherElement(el, { includeHtml }),
         id: `artifact-launcher-${String(index + 1).padStart(3, '0')}`,
@@ -2300,7 +2351,7 @@
   };
 
   const openArtifactLaunchersForDiagnosis = async (launchers, options = {}) => {
-    const maxOpen = Math.max(0, Math.min(3, Number(options.maxOpenArtifactLaunchers || 1)));
+    const maxOpen = Math.max(0, Math.min(3, Number(options.maxOpenArtifactLaunchers ?? 3)));
     const waitMs = Math.max(800, Math.min(15000, Number(options.artifactOpenWaitMs || 6000)));
     const beforeFrames = artifactFrameElements();
     const beforeSet = new Set(beforeFrames);
@@ -2314,7 +2365,25 @@
 
     for (const launcher of launchers.slice(0, maxOpen)) {
       const el = launcher.element;
-      if (!el || !visibleRect(el)) continue;
+      const actionability = describeDomActionability({
+        name: 'botão de artefato',
+        count: el ? 1 : 0,
+        attached: !!el?.isConnected,
+        visible: !!(el && visibleRect(el)),
+        stable: true,
+        enabled: !el?.disabled && el?.getAttribute?.('aria-disabled') !== 'true',
+        receivingEvents: true,
+        routeMatches: true,
+      });
+      if (!actionability.ok) {
+        clicked.push({
+          ...summarizeArtifactLauncher(launcher),
+          ok: false,
+          error: actionability.code || 'not_actionable',
+          actionability,
+        });
+        continue;
+      }
       const beforeCount = artifactFrameElements().length;
       try {
         try {
@@ -2323,7 +2392,7 @@
           // Scroll é só conforto visual.
         }
         el.click();
-        await waitForCondition(() => {
+        const observedFrames = await waitForCondition(() => {
           const frames = artifactFrameElements();
           const opened = frames.filter((frame) => !beforeSet.has(frame));
           if (opened.length > 0) return frames;
@@ -2334,13 +2403,23 @@
           return interesting.length > beforeInterestingCount ? frames : null;
         }, waitMs);
         await sleep(250);
+        const framesAfterClick = artifactFrameElements();
+        const openedForClick = framesAfterClick.filter((frame) => !beforeSet.has(frame)).length;
+        const interestingAfterClick = framesAfterClick.filter((frame) => {
+          const sourceInfo = classifyArtifactFrameSource(frame);
+          return artifactKindForFrame(frame, sourceInfo) !== 'iframe';
+        }).length;
+        const opened = !!observedFrames || openedForClick > 0 || interestingAfterClick > beforeInterestingCount;
         clicked.push({
           ...summarizeArtifactLauncher(launcher),
-          ok: true,
+          ok: opened,
           beforeFrameCount: beforeCount,
-          afterFrameCount: artifactFrameElements().length,
+          afterFrameCount: framesAfterClick.length,
+          openedFrameCount: openedForClick,
+          actionability,
+          ...(opened ? {} : { error: 'no_artifact_frame_after_click' }),
         });
-        break;
+        if (opened) break;
       } catch (err) {
         clicked.push({
           ...summarizeArtifactLauncher(launcher),

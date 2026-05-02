@@ -14,6 +14,10 @@ import {
   writeBrowserLaunchState,
 } from '../src/browser-launch.mjs';
 import { buildLocalDoctorReport, normalizeBrowserKey } from '../src/browser-diagnostics.mjs';
+import {
+  createLayeredTimeoutError,
+  decorateErrorWithTimeoutContext,
+} from '../src/timeout-diagnostics.mjs';
 
 const DEFAULT_BRIDGE_URL = 'http://127.0.0.1:47283';
 const DEFAULT_POLL_MS = 1200;
@@ -153,6 +157,7 @@ const usage = () =>
     '  export notebook       Exporta caderno Gemini carregado.',
     '  job status <jobId>    Consulta progresso de um job.',
     '  job cancel <jobId>    Cancela um job.',
+    '  job trace <jobId>     Resume o trace tecnico sanitizado de um job.',
     '  export-dir get|set    Consulta ou altera diretorio de export.',
     '  cleanup stale-processes Diagnostica/limpa processos antigos seguros.',
     '  repair-vault <path>   Executa reparo local de vault.',
@@ -167,6 +172,7 @@ const usage = () =>
     '  gemini-md-export chats count --plain',
     '  gemini-md-export export missing "/path/to/vault" --plain',
     '  gemini-md-export job status job-123 --json',
+    '  gemini-md-export job trace job-123 --plain',
     '',
     'Dentro do Gemini CLI:',
     '  - Use TUI se o shell interativo/node-pty estiver ativo.',
@@ -454,10 +460,12 @@ const jobHelp = () =>
     'Uso:',
     '  gemini-md-export job status <jobId> [opcoes]',
     '  gemini-md-export job cancel <jobId> [opcoes]',
+    '  gemini-md-export job trace <jobId> [opcoes]',
     '',
     'Subcomandos:',
     '  status   Consulta progresso/resultado de um job.',
     '  cancel   Solicita cancelamento de um job.',
+    '  trace    Resume o trace tecnico sanitizado de um job.',
     '',
     ...outputModeHelp(),
     '',
@@ -466,6 +474,7 @@ const jobHelp = () =>
     'Exemplos:',
     '  gemini-md-export job status job-123 --plain',
     '  gemini-md-export job cancel job-123 --plain',
+    '  gemini-md-export job trace job-123 --plain',
   ].join('\n');
 
 const jobStatusHelp = () =>
@@ -490,6 +499,21 @@ const jobCancelHelp = () =>
     '  gemini-md-export job cancel <jobId> [opcoes]',
     '',
     'Solicita cancelamento de um job em andamento.',
+    '',
+    ...outputModeHelp(),
+    '',
+    ...commonOptionHelp(),
+  ].join('\n');
+
+const jobTraceHelp = () =>
+  [
+    'gemini-md-export job trace',
+    '',
+    'Uso:',
+    '  gemini-md-export job trace <jobId> [opcoes]',
+    '',
+    'Mostra eventos tecnicos sanitizados do job: fases, timeouts, cleanup de aba e erros.',
+    'Nao inclui Markdown, prompts, respostas nem HTML por padrao.',
     '',
     ...outputModeHelp(),
     '',
@@ -567,6 +591,7 @@ const helpForParsed = (parsed) => {
   if (command === 'export') return exportHelp();
   if (command === 'job' && subcommand === 'status') return jobStatusHelp();
   if (command === 'job' && subcommand === 'cancel') return jobCancelHelp();
+  if (command === 'job' && subcommand === 'trace') return jobTraceHelp();
   if (command === 'job') return jobHelp();
   if (command === 'export-dir') return exportDirHelp();
   if (command === 'cleanup') return cleanupHelp();
@@ -763,9 +788,14 @@ const normalizeBridgeRequestError = (err) => {
   return err;
 };
 
-const requestJson = async (bridgeUrl, path, { timeoutMs = 15000, method = 'GET' } = {}) => {
+const requestJson = async (
+  bridgeUrl,
+  path,
+  { timeoutMs = 15000, method = 'GET', layer = 'bridge', operation = null } = {},
+) => {
   const url = new URL(path, `${normalizeBridgeUrl(bridgeUrl)}/`);
   const transport = url.protocol === 'https:' ? httpsRequest : httpRequest;
+  const operationName = operation || `${method} ${url.pathname}`;
 
   return new Promise((resolveRequest, rejectRequest) => {
     let settled = false;
@@ -788,7 +818,16 @@ const requestJson = async (bridgeUrl, path, { timeoutMs = 15000, method = 'GET' 
         response.on('data', (chunk) => {
           text += chunk;
         });
-        response.on('error', (err) => finish(rejectRequest, normalizeBridgeRequestError(err)));
+        response.on('error', (err) =>
+          finish(
+            rejectRequest,
+            decorateErrorWithTimeoutContext(normalizeBridgeRequestError(err), {
+              layer,
+              operation: operationName,
+              timeoutMs,
+            }),
+          ),
+        );
         response.on('end', () => {
           let json = null;
           try {
@@ -810,11 +849,25 @@ const requestJson = async (bridgeUrl, path, { timeoutMs = 15000, method = 'GET' 
     );
 
     req.setTimeout(timeoutMs, () => {
-      const timeout = new Error(`Timeout falando com a bridge em ${timeoutMs}ms.`);
-      timeout.code = 'bridge_timeout';
+      const timeout = createLayeredTimeoutError({
+        code: 'bridge_timeout',
+        message: `Timeout falando com a bridge em ${timeoutMs}ms (${operationName}).`,
+        layer,
+        operation: operationName,
+        timeoutMs,
+      });
       req.destroy(timeout);
     });
-    req.on('error', (err) => finish(rejectRequest, normalizeBridgeRequestError(err)));
+    req.on('error', (err) =>
+      finish(
+        rejectRequest,
+        decorateErrorWithTimeoutContext(normalizeBridgeRequestError(err), {
+          layer,
+          operation: operationName,
+          timeoutMs,
+        }),
+      ),
+    );
     req.end();
   });
 };
@@ -1040,6 +1093,7 @@ const summarizeForResultJson = (job = {}) => {
     status: job.status || null,
     jobId: job.jobId || null,
     reportFile: job.reportFile || decision.reportFile || null,
+    traceFile: job.traceFile || job.trace?.filePath || null,
     resumeCommand: decision.resumeCommand || job.resumeCommand || null,
     resumeCommandText: decision.resumeCommand?.text || job.resumeCommand?.text || null,
     webConversationCount: totals.webSeen,
@@ -1094,7 +1148,44 @@ const renderLinesForJob = (ui, job = {}, tick = 0) => {
     `${dim(ui, 'contas')} web=${totals.webSeen ?? '-'} existentes=${totals.existing ?? '-'} faltantes=${totals.missing ?? '-'} baixadas=${totals.downloaded} puladas=${totals.skipped}`,
     `${dim(ui, 'avisos')} ${warnings}`,
     job.reportFile ? `${dim(ui, 'relatorio')} ${job.reportFile}` : `${dim(ui, 'relatorio')} ainda nao gravado`,
+    job.traceFile || job.trace?.filePath
+      ? `${dim(ui, 'trace')} ${job.traceFile || job.trace?.filePath}`
+      : `${dim(ui, 'trace')} compacto/em memoria`,
   ];
+};
+
+const renderLinesForJobTrace = (traceResult = {}) => {
+  const summary = traceResult.summary || {};
+  const trace = traceResult.trace || {};
+  const lines = [
+    `Trace do job ${traceResult.jobId || '-'}: ${summary.eventCount || 0} evento(s)`,
+    `Status: ${traceResult.status || '-'}`,
+    `Arquivo: ${trace.filePath || 'nao retido em disco'}`,
+  ];
+  const byType = summary.byType || {};
+  const typeSummary = Object.entries(byType)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 12)
+    .map(([type, count]) => `${type}=${count}`)
+    .join(', ');
+  if (typeSummary) lines.push(`Tipos: ${typeSummary}`);
+  const events = Array.isArray(traceResult.events) ? traceResult.events : [];
+  for (const event of events.slice(-12)) {
+    const data = event.data || {};
+    const suffix = [
+      data.phase ? `fase=${data.phase}` : null,
+      data.state ? `status=${data.state}` : null,
+      data.index ? `#${data.index}` : null,
+      data.chatId ? `chat=${data.chatId}` : null,
+      data.code ? `code=${data.code}` : null,
+      data.layer ? `camada=${data.layer}` : null,
+      data.error ? `erro=${data.error}` : null,
+    ]
+      .filter(Boolean)
+      .join(' ');
+    lines.push(`- ${event.ts || '-'} ${event.type || 'event'}${suffix ? ` ${suffix}` : ''}`);
+  }
+  return lines;
 };
 
 const renderTui = (ui, job, tick) => {
@@ -1462,10 +1553,22 @@ const startExportJob = async (bridgeUrl, kind, flags) => {
 };
 
 const fetchJobStatus = async (bridgeUrl, jobId) =>
-  requestJson(bridgeUrl, appendParams('/agent/export-job-status', { jobId }), { timeoutMs: 20000 });
+  requestJson(bridgeUrl, appendParams('/agent/export-job-status', { jobId }), {
+    timeoutMs: 20000,
+    operation: 'job-status',
+  });
 
 const cancelJob = async (bridgeUrl, jobId) =>
-  requestJson(bridgeUrl, appendParams('/agent/export-job-cancel', { jobId }), { timeoutMs: 20000 });
+  requestJson(bridgeUrl, appendParams('/agent/export-job-cancel', { jobId }), {
+    timeoutMs: 20000,
+    operation: 'job-cancel',
+  });
+
+const fetchJobTrace = async (bridgeUrl, jobId) =>
+  requestJson(bridgeUrl, appendParams('/agent/export-job-trace', { jobId }), {
+    timeoutMs: 20000,
+    operation: 'job-trace',
+  });
 
 const jobCleanupTimeoutMs = () =>
   nonNegativeIntEnv(
@@ -1617,9 +1720,20 @@ const followJob = async (bridgeUrl, initialJob, flags, ui) => {
 
     if (TERMINAL_STATUSES.has(job.status)) return job;
     if (Date.now() - startedAt > flags.timeoutMs) {
-      const err = new Error(`Timeout aguardando job ${job.jobId}.`);
-      err.code = 'job_timeout';
-      err.data = job;
+      const err = createLayeredTimeoutError({
+        code: 'job_timeout',
+        message: `Timeout aguardando job ${job.jobId} (camada: job; limite: ${flags.timeoutMs}ms).`,
+        layer: 'job',
+        operation: 'follow-job',
+        timeoutMs: flags.timeoutMs,
+        elapsedMs: Date.now() - startedAt,
+        jobId: job.jobId,
+        traceFile: job.traceFile || job.trace?.filePath || null,
+      });
+      err.data = {
+        ...job,
+        timeout: err.data?.timeout || null,
+      };
       throw err;
     }
     await sleep(flags.pollMs);
@@ -2193,12 +2307,24 @@ const runExport = async (parsed, streams = {}) => {
 const runJob = async (parsed, streams = {}) => {
   const subcommand = parsed.positionals[0];
   const jobId = parsed.positionals[1];
-  if (!['status', 'cancel'].includes(subcommand) || !jobId) {
-    throw usageError('Uso: gemini-md-export job status|cancel <jobId>.');
+  if (!['status', 'cancel', 'trace'].includes(subcommand) || !jobId) {
+    throw usageError('Uso: gemini-md-export job status|cancel|trace <jobId>.');
   }
   const ui = makeUi(parsed.flags, streams);
   warnTuiFallback(ui);
   await ensureBridgeAvailable(parsed.flags, ui);
+  if (subcommand === 'trace') {
+    const trace = await fetchJobTrace(parsed.flags.bridgeUrl, jobId);
+    if (ui.format === 'json') {
+      ui.stdout.write(`${JSON.stringify(trace, null, 2)}\n`);
+    } else if (ui.format === 'jsonl') {
+      ui.stdout.write(`${JSON.stringify({ type: 'job_trace', trace })}\n`);
+    } else {
+      for (const line of renderLinesForJobTrace(trace)) ui.stdout.write(`${stripAnsi(line)}\n`);
+      ui.stdout.write(`RESULT_JSON ${JSON.stringify(trace)}\n`);
+    }
+    return { exitCode: trace.ok === false ? EXIT.JOB_FAILED : EXIT.OK, result: trace };
+  }
   const job = subcommand === 'cancel' ? await cancelJob(parsed.flags.bridgeUrl, jobId) : await fetchJobStatus(parsed.flags.bridgeUrl, jobId);
   if (ui.format === 'json') {
     ui.stdout.write(`${JSON.stringify(job, null, 2)}\n`);

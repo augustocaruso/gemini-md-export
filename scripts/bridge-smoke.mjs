@@ -26,6 +26,7 @@ const parseArgs = (argv) => {
     port: null,
     bridgeUrl: null,
     timeoutMs: 8000,
+    destructiveFixture: false,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -54,6 +55,10 @@ const parseArgs = (argv) => {
       out.timeoutMs = Number(argv[++i]);
       continue;
     }
+    if (arg === '--destructive-fixture') {
+      out.destructiveFixture = true;
+      continue;
+    }
     if (arg === '--help' || arg === '-h') {
       out.help = true;
       continue;
@@ -72,9 +77,11 @@ const usage = () =>
     'Uso:',
     '  node scripts/bridge-smoke.mjs --spawn [--json]',
     '  node scripts/bridge-smoke.mjs --bridge-url http://127.0.0.1:47283 [--json]',
+    '  node scripts/bridge-smoke.mjs --spawn --destructive-fixture [--json]',
     '',
     'O smoke isolado nao exige login no Gemini: ele cria um cliente sintetico',
     'da extensao e valida healthz, snapshot, SSE events, ready, clients, diagnostics e diagnostico.',
+    '--destructive-fixture tambem exercita claim/release de aba com comandos sinteticos.',
     '',
   ].join('\n');
 
@@ -182,6 +189,101 @@ const readSseHello = async (bridgeUrl, clientId, timeoutMs) => {
   }
 };
 
+const pollCommand = async (bridgeUrl, clientId, timeoutMs) => {
+  try {
+    const value = await requestJson(
+      bridgeUrl,
+      `/bridge/command?clientId=${encodeURIComponent(clientId)}`,
+      { timeoutMs },
+    );
+    return value?.command || null;
+  } catch (err) {
+    if (err?.name === 'AbortError' || /aborted/i.test(err?.message || '')) return null;
+    throw err;
+  }
+};
+
+const postCommandResult = async (bridgeUrl, commandId, result, timeoutMs) =>
+  requestJson(bridgeUrl, '/bridge/command-result', {
+    method: 'POST',
+    timeoutMs,
+    body: { commandId, result },
+  });
+
+const syntheticCommandResult = (command, expectedChromeExtension, tabId) => {
+  if (command.type === 'get-extension-info') {
+    return {
+      ok: true,
+      version: expectedChromeExtension.extensionVersion,
+      extensionVersion: expectedChromeExtension.extensionVersion,
+      protocolVersion: expectedChromeExtension.protocolVersion,
+      buildStamp: expectedChromeExtension.buildStamp || 'smoke-test',
+      manifestVersion: 3,
+      tabId,
+      windowId: 9001,
+      contentScript: true,
+      serviceWorker: true,
+      source: 'bridge-smoke-fixture',
+    };
+  }
+  if (command.type === 'claim-tab') {
+    return {
+      ok: true,
+      visual: {
+        mode: 'fixture-tab-group',
+        tabId,
+        groupId: 9001,
+        color: command.args?.color || 'blue',
+        label: command.args?.label || 'GME Smoke',
+        reason: 'bridge-smoke-fixture',
+      },
+    };
+  }
+  if (command.type === 'release-tab-claim' || command.type === 'release-tab-claim-by-tab-id') {
+    return {
+      ok: true,
+      visual: {
+        mode: 'fixture-release',
+        tabId: command.args?.tabId || tabId,
+        reason: command.args?.reason || 'bridge-smoke-fixture',
+      },
+    };
+  }
+  return {
+    ok: false,
+    reason: `unexpected-command:${command.type}`,
+  };
+};
+
+const driveSyntheticCommands = async (
+  bridgeUrl,
+  clientId,
+  expectedChromeExtension,
+  tabId,
+  untilPromise,
+  timeoutMs,
+) => {
+  let settled = false;
+  untilPromise.then(
+    () => {
+      settled = true;
+    },
+    () => {
+      settled = true;
+    },
+  );
+  const handled = [];
+  const startedAt = Date.now();
+  while (!settled && Date.now() - startedAt < timeoutMs) {
+    const command = await pollCommand(bridgeUrl, clientId, Math.min(1500, timeoutMs));
+    if (!command) continue;
+    const result = syntheticCommandResult(command, expectedChromeExtension, tabId);
+    handled.push({ type: command.type, ok: result.ok !== false });
+    await postCommandResult(bridgeUrl, command.id, result, timeoutMs);
+  }
+  return handled;
+};
+
 const runCheck = async (checks, name, fn) => {
   const startedAt = Date.now();
   try {
@@ -200,6 +302,7 @@ const runSmoke = async (options) => {
   const spawned = options.spawn ? spawnBridge(port) : null;
   const checks = [];
   const clientId = `bridge-smoke-${process.pid}-${Date.now()}`;
+  const tabId = 9000 + (process.pid % 1000);
   let expectedChromeExtension = {
     extensionVersion: pkg.version,
     protocolVersion: bridgeVersion.protocolVersion,
@@ -237,6 +340,9 @@ const runSmoke = async (options) => {
           extensionVersion: expectedChromeExtension.extensionVersion,
           protocolVersion: expectedChromeExtension.protocolVersion,
           buildStamp: expectedChromeExtension.buildStamp || 'smoke-test',
+          tabId,
+          windowId: 9001,
+          isActiveTab: true,
           capabilities: ['snapshot', 'events'],
           page: {
             url: 'https://gemini.google.com/app',
@@ -274,6 +380,9 @@ const runSmoke = async (options) => {
           extensionVersion: expectedChromeExtension.extensionVersion,
           protocolVersion: expectedChromeExtension.protocolVersion,
           buildStamp: expectedChromeExtension.buildStamp || 'smoke-test',
+          tabId,
+          windowId: 9001,
+          isActiveTab: true,
           capabilities: ['snapshot', 'events'],
           snapshotHash: 'smoke-empty',
           commandPoll: { polling: true },
@@ -302,6 +411,9 @@ const runSmoke = async (options) => {
           extensionVersion: expectedChromeExtension.extensionVersion,
           protocolVersion: expectedChromeExtension.protocolVersion,
           buildStamp: expectedChromeExtension.buildStamp || 'smoke-test',
+          tabId,
+          windowId: 9001,
+          isActiveTab: true,
           capabilities: ['snapshot', 'events'],
           snapshotHash: 'smoke-empty',
           commandPoll: { polling: true },
@@ -389,6 +501,52 @@ const runSmoke = async (options) => {
         primaryVersion: structured.primaryBridge?.version || null,
       };
     });
+
+    if (options.destructiveFixture) {
+      await runCheck(checks, 'destructive_fixture_claim_release', async () => {
+        const claimPromise = requestJson(
+          bridgeUrl,
+          `/agent/tabs?action=claim&clientId=${encodeURIComponent(clientId)}&label=GME%20Smoke&color=blue&ttlMs=120000&openIfMissing=false&allowReload=false`,
+          { timeoutMs: options.timeoutMs },
+        );
+        const claimCommands = await driveSyntheticCommands(
+          bridgeUrl,
+          clientId,
+          expectedChromeExtension,
+          tabId,
+          claimPromise,
+          options.timeoutMs,
+        );
+        const claim = await claimPromise;
+        if (!claim.ok || !claim.claim?.claimId) {
+          throw new Error('claim sintetica nao retornou claimId');
+        }
+
+        const releasePromise = requestJson(
+          bridgeUrl,
+          `/agent/tabs?action=release&claimId=${encodeURIComponent(claim.claim.claimId)}&reason=bridge-smoke-fixture`,
+          { timeoutMs: options.timeoutMs },
+        );
+        const releaseCommands = await driveSyntheticCommands(
+          bridgeUrl,
+          clientId,
+          expectedChromeExtension,
+          tabId,
+          releasePromise,
+          options.timeoutMs,
+        );
+        const release = await releasePromise;
+        if (release.ok !== true) {
+          throw new Error(release.error || 'release sintetico falhou');
+        }
+        return {
+          claimId: claim.claim.claimId,
+          claimVisual: claim.visual?.visual || claim.visual || null,
+          releaseVisual: release.visual || null,
+          commands: [...claimCommands, ...releaseCommands],
+        };
+      });
+    }
 
     return {
       ok: checks.every((item) => item.ok),

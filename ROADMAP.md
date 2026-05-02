@@ -2086,6 +2086,169 @@ Obsidian.
 - Timeout forçado de `sync`/`export` deve sair com erro honesto sem deixar
   grupo/badge `GME` preso na aba.
 
+## v0.8.22–v0.8.26 — Confiabilidade inspirada no Playwright
+
+Status: implementação inicial concluída em `0.8.26`.
+
+Objetivo: parar de tratar o Gemini Web como "um content script esperto no DOM"
+e passar a tratá-lo como um alvo controlado por runtime, lifecycle, contratos
+de ação e trace. A inspiração aqui é a arquitetura operacional do Playwright:
+contextos isolados, locators com auto-wait, actionability checks, strictness,
+timeouts por camada, trace e teardown previsível.
+
+### Princípios copiados do Playwright
+
+- **Contexto isolado → `TabSession`**: cada operação longa deve ter uma sessão
+  canônica no background/service worker com `tabId`, `claimId`, `epoch`,
+  `owner`, `activeOperation`, `lease`, `cleanupState` e `lastKnownClient`.
+  O content script vira executor descartável, não dono da verdade.
+- **Locator + auto-wait → DOM runner com pós-condições**: comandos de DOM não
+  devem depender de `sleep` cego. Cada passo deve re-resolver o alvo e esperar
+  uma condição objetiva: sidebar pronta, contagem cresceu, fim confirmado,
+  conversa hidratada, operação ativa encerrada.
+- **Actionability checks**: antes de clicar, rolar, abrir modal ou exportar,
+  validar visibilidade, estabilidade, rota, chat esperado e ausência de operação
+  concorrente na aba.
+- **Strict mode**: se houver múltiplas abas/clientes/sidebars compatíveis sem
+  claim inequívoca, falhar curto com candidatos. Nada de escolher uma aba por
+  "parece a mais recente" durante operação longa.
+- **Trace retido em falha**: assim como Playwright usa trace para flake, cada
+  job deve gravar um flight recorder legível por CLI: criação de claim, epoch,
+  comandos enviados, heartbeats, snapshots, scroll rounds, cancelamento,
+  release visual e post-check.
+- **Timeouts por camada**: separar timeout global do job, timeout de comando,
+  timeout de actionability, timeout de assertion/pós-condição e timeout de
+  cleanup. Erro deve dizer qual camada morreu.
+- **Teardown verificável**: a ordem de encerramento deve ser fixa e auditável:
+  cancelar operação pesada, aguardar terminal/cancelled, limpar claim local,
+  limpar visual no background, remover claim server-side e confirmar
+  `claims: []`.
+
+### v0.8.22 — `TabSession` background-first
+
+Entregas:
+
+- [x] Criar `TabSession` como fonte canônica de ownership no background:
+  `sessionId`, `claimId`, `tabId`, `epoch`, `owner`, `status`, `leaseUntil`,
+  `activeOperation`, `cleanupState`.
+- [x] O MCP/bridge deve anexar jobs longos a uma `TabSession`, não apenas a um client
+  antigo do content script.
+- [x] Recarregar aba ou extensão cria novo `epoch`; comandos antigos não podem
+  completar uma sessão nova.
+- [ ] Heartbeat/snapshot do content script ainda precisa atualizar a sessão se o `epoch` bater.
+- [x] `release-tab` passa a ser auditado no cleanup da sessão: limpar storage do background, estado
+  local do content script e visual do navegador, depois confirmar.
+
+Critérios de aceite:
+
+- Depois de reload da aba no meio de uma operação, comando antigo não pode
+  liberar/alterar sessão nova por engano.
+- `tabs list --plain` mostra sessões, epochs e claims sem JSON gigante.
+- Se o servidor esquecer uma claim mas a aba ainda reportar claim local, o
+  próximo release por `tabId` limpa ambos os lados.
+
+### v0.8.23 — DOM runner com locators e auto-wait
+
+Entregas:
+
+- [x] Introduzir helpers tipo locator/actionability para alvos do Gemini:
+  `sidebar`, `conversationRows`, `topBar`, `artifactFrame`, `artifactLauncher`,
+  `currentConversation`.
+- [x] Cada helper deve produzir diagnóstico curto quando falha.
+- [ ] Re-resolver todos os alvos críticos no momento da ação ainda precisa ser expandido.
+- [ ] Substituir sleeps soltos em todos os fluxos críticos por pós-condições:
+  `expectSidebarReady`, `expectCountAtLeast`, `expectCountStable`,
+  `expectEndConfirmed`, `expectChatHydrated`, `expectNoActiveOperation`.
+- [x] Padronizar erro de actionability: alvo ausente, invisível, instável,
+  ocupado, rota errada, chat errado ou timeout.
+
+Critérios de aceite:
+
+- Lazy-load de histórico deve terminar por condição explícita, não por "não
+  carregou mais agora".
+- Quando o fim do sidebar foi confirmado pelo DOM/counts, a mensagem visual
+  deve dizer fim confirmado, não "ainda não confirmei".
+- Falha de locator deve gerar um resumo legível e um snapshot técnico opcional
+  no flight recorder, sem despejar JSON no chat.
+
+### v0.8.24 — Flight recorder e trace de jobs
+
+Entregas:
+
+- [x] Criar trace por job em arquivo local (`Downloads` ou pasta de suporte):
+  `jobId.trace.jsonl` ou formato compacto equivalente.
+- [x] Gravar eventos de lifecycle:
+  session criada, client attach/detach, epoch mudou, comando enviado,
+  comando recebido, resultado, timeout, cancel, release, cleanup verificado.
+- [x] Gravar eventos de DOM já disponíveis no job:
+  rota, chatId, contagem carregada, reachedEnd, scroller usado, rodadas de
+  lazy-load, motivo de parada.
+- [x] CLI `job trace <jobId>` resume o trace em
+  português curto.
+- [x] Por padrão, reter trace completo só em falha/timeout/cancelamento. Em sucesso,
+  manter apenas resumo curto no relatório.
+
+Critérios de aceite:
+
+- Toda falha `command_channel_not_ready`, `client_not_found`, timeout de
+  comando ou claim presa deve apontar para um trace.
+- O trace deve explicar se a falha foi transporte, lifecycle, DOM, timeout de
+  actionability, múltiplas abas ou cleanup.
+- Nenhum trace deve imprimir conteúdo sensível da conversa por padrão.
+
+### v0.8.25 — Timeouts por camada e erros acionáveis
+
+Entregas:
+
+- [x] Definir contexto nomeado para:
+  `jobTimeout`, `readyTimeout`, `actionTimeout`, `assertionTimeout`,
+  `commandDispatchTimeout`, `commandResultTimeout`, `cleanupTimeout`.
+- [x] Erros públicos da CLI passam a carregar `layer`, `operation`, `elapsedMs`,
+  `timeoutMs`, `sessionId`, `tabId`, `claimId` e `traceFile` quando existir.
+- [ ] Remover todas as mensagens genéricas do tipo "timeout falando com a bridge" quando a
+  causa real já é conhecida por camada.
+- [x] `command_timeout_recent` continua como sinal de saúde/degradação, mas
+  não deve bloquear readiness se há canal de comando aberto e sessão nova.
+
+Critérios de aceite:
+
+- Um timeout de scroll não pode ser reportado como falha de bridge.
+- Um timeout de cleanup deve dizer se a claim server-side, local ou visual foi
+  a parte que falhou.
+- A CLI deve parar curto quando falha, sem fallback MCP automático.
+
+### v0.8.26 — Teste destrutivo de integração
+
+Entregas:
+
+- [x] Criar smoke destrutivo opt-in que roda contra fixture controlada:
+  criar claim, responder comandos sintéticos e liberar claim.
+- [ ] Expandir o smoke destrutivo para aba Gemini real:
+  iniciar job, matar bridge, recarregar aba, reiniciar bridge, cancelar job e
+  verificar cleanup.
+- [x] Criar modo fixture/mock para CI local sem depender de login Gemini, cobrindo
+  pelo menos lifecycle de sessão, release por `tabId` e stale client.
+- [ ] Expandir o teste para falhar se sobrar:
+  - claim server-side;
+  - claim local reportada pelo content script;
+  - Tab Group/badge `GME`;
+  - operação ativa fantasma;
+  - client antigo aceitando comando novo.
+
+Critérios de aceite:
+
+- O teste reproduz a classe de falhas que motivou a `0.8.20/0.8.21`.
+- O teste passa repetidamente em pelo menos 5 execuções locais seguidas.
+- Quando falha, deixa trace e resumo humano suficientes para corrigir sem
+  recorrer a JSON de MCP no chat.
+
+### Fora desta trilha
+
+- Usar `chrome.debugger` como solução principal.
+- Trocar HTTP/SSE por WebSocket antes de provar gargalo de transporte.
+- Automatizar scraping por API privada/cookies do Gemini.
+- Abrir múltiplas abas automaticamente para paralelismo sem ownership explícito.
+
 ## Ordem recomendada de implementação
 
 Estado atual: `v0.8.5` funcionando em campo. Não mexer por mexer.
@@ -2103,6 +2266,8 @@ Estado atual: `v0.8.5` funcionando em campo. Não mexer por mexer.
    transporte depois que o background virou broker confiável.
 7. Promover qualquer spike perigoso só com aceite explícito de permissão,
    privacidade e rollback.
+8. Para a próxima onda de confiabilidade, priorizar a trilha
+   `v0.8.22–v0.8.26` antes de aumentar timeout ou trocar transporte.
 
 ## Próximo passo proposto
 

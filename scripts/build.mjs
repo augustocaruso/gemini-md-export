@@ -37,6 +37,7 @@ const notebookReturnPlanSrc = readFileSync(
   'utf-8',
 );
 const batchSessionSrc = readFileSync(resolve(ROOT, 'src/batch-session.mjs'), 'utf-8');
+const domRunnerSrc = readFileSync(resolve(ROOT, 'src/dom-runner.mjs'), 'utf-8');
 const shellSrc = readFileSync(resolve(ROOT, 'src/userscript-shell.js'), 'utf-8');
 const extensionBackgroundSrc = readFileSync(
   resolve(ROOT, 'src/extension-background.js'),
@@ -62,10 +63,15 @@ const inlineableBatchSession = batchSessionSrc
   .replace(/^export\s+const\s+/gm, 'const ')
   .replace(/^export\s+function\s+/gm, 'function ')
   .replace(/^export\s+\{[^}]*\};?\s*$/gm, '');
+const inlineableDomRunner = domRunnerSrc
+  .replace(/^export\s+const\s+/gm, 'const ')
+  .replace(/^export\s+function\s+/gm, 'function ')
+  .replace(/^export\s+\{[^}]*\};?\s*$/gm, '');
 
 const extractMarker = '/* __INLINE_EXTRACT_MODULE__ */';
 const notebookReturnPlanMarker = '/* __INLINE_NOTEBOOK_RETURN_PLAN__ */';
 const batchSessionMarker = '/* __INLINE_BATCH_SESSION_MODULE__ */';
+const domRunnerMarker = '/* __INLINE_DOM_RUNNER_MODULE__ */';
 if (!shellSrc.includes(extractMarker)) {
   console.error(`[build] marker "${extractMarker}" não encontrado em userscript-shell.js`);
   process.exit(1);
@@ -78,6 +84,10 @@ if (!shellSrc.includes(notebookReturnPlanMarker)) {
 }
 if (!shellSrc.includes(batchSessionMarker)) {
   console.error(`[build] marker "${batchSessionMarker}" não encontrado em userscript-shell.js`);
+  process.exit(1);
+}
+if (!shellSrc.includes(domRunnerMarker)) {
+  console.error(`[build] marker "${domRunnerMarker}" não encontrado em userscript-shell.js`);
   process.exit(1);
 }
 
@@ -93,6 +103,10 @@ const batchSessionBanner =
   '  // ============================================================\n' +
   '  // Inlined from src/batch-session.mjs (auto-generated — do not edit)\n' +
   '  // ============================================================\n';
+const domRunnerBanner =
+  '  // ============================================================\n' +
+  '  // Inlined from src/dom-runner.mjs (auto-generated — do not edit)\n' +
+  '  // ============================================================\n';
 const inlinedExtract =
   extractBanner + inlineable.split('\n').map((l) => (l ? '  ' + l : l)).join('\n');
 const inlinedNotebookReturnPlan =
@@ -101,6 +115,9 @@ const inlinedNotebookReturnPlan =
 const inlinedBatchSession =
   batchSessionBanner +
   inlineableBatchSession.split('\n').map((l) => (l ? '  ' + l : l)).join('\n');
+const inlinedDomRunner =
+  domRunnerBanner +
+  inlineableDomRunner.split('\n').map((l) => (l ? '  ' + l : l)).join('\n');
 
 // Carimbo de build curto (YYYYMMDD-HHMM) — ajuda a confirmar visualmente
 // se a extensão/userscript carregado é a versão recém-compilada (útil quando
@@ -113,6 +130,7 @@ const output = shellSrc
   .replace(extractMarker, inlinedExtract)
   .replace(notebookReturnPlanMarker, inlinedNotebookReturnPlan)
   .replace(batchSessionMarker, inlinedBatchSession)
+  .replace(domRunnerMarker, inlinedDomRunner)
   .replace(/__VERSION__/g, pkg.version)
   .replace(/__EXTENSION_PROTOCOL_VERSION__/g, String(bridgeVersion.protocolVersion))
   .replace(/__BUILD_STAMP__/g, buildStamp);
