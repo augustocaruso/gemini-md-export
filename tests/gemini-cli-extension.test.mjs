@@ -158,6 +158,7 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.ok(browserManifest.host_permissions.includes('https://*.googleusercontent.com/*'));
   assert.ok(browserManifest.permissions.includes('storage'));
   assert.ok(browserManifest.permissions.includes('tabGroups'));
+  assert.ok(browserManifest.permissions.includes('scripting'));
   assert.equal(browserManifest.version, bridgeVersion.extensionVersion);
   assert.equal(typeof bridgeVersion.protocolVersion, 'number');
 

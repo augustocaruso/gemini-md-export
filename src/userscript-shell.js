@@ -374,6 +374,29 @@
     typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const BRIDGE_BASE_URL =
     pageWindow.__GEMINI_MCP_BRIDGE_URL || 'http://127.0.0.1:47283';
+  const RUNTIME_GUARD_KEY = '__geminiMdExportModernRuntime';
+  const existingRuntime = pageWindow[RUNTIME_GUARD_KEY];
+  if (
+    existingRuntime?.buildStamp === BUILD_STAMP &&
+    Number(existingRuntime?.protocolVersion) === Number(EXTENSION_PROTOCOL_VERSION)
+  ) {
+    return;
+  }
+  try {
+    if (existingRuntime && existingRuntime.buildStamp !== BUILD_STAMP) {
+      existingRuntime.supersededAt = Date.now();
+      existingRuntime.supersededBy = BUILD_STAMP;
+    }
+    pageWindow[RUNTIME_GUARD_KEY] = {
+      version: SCRIPT_VERSION,
+      extensionVersion: SCRIPT_VERSION,
+      protocolVersion: EXTENSION_PROTOCOL_VERSION,
+      buildStamp: BUILD_STAMP,
+      installedAt: Date.now(),
+    };
+  } catch {
+    // Se a página bloquear escrita no window, seguimos sem o guard.
+  }
   const BRIDGE_HEARTBEAT_MS = 8000;
   const BRIDGE_POLL_TIMEOUT_MS = 30000;
   const BRIDGE_POLL_ERROR_BACKOFF_MS = 250;
@@ -1917,6 +1940,67 @@
       },
       batchExportSession: loadBatchExportSession(),
     };
+  };
+
+  let contentScriptMessageListenerInstalled = false;
+
+  const contentScriptRuntimeStatus = () => ({
+    ok: true,
+    contentScript: true,
+    version: SCRIPT_VERSION,
+    extensionVersion: SCRIPT_VERSION,
+    protocolVersion: EXTENSION_PROTOCOL_VERSION,
+    buildStamp: BUILD_STAMP,
+    url: location.href,
+    pathname: location.pathname,
+    chatId: extractChatId(location.pathname),
+    notebookId: currentNotebookId(),
+    title: document.title || '',
+    bridge: {
+      started: bridgeState.started,
+      clientId: bridgeState.clientId || null,
+      tabId: bridgeState.tabId ?? null,
+      windowId: bridgeState.windowId ?? null,
+      isActiveTab: bridgeState.isActiveTab ?? null,
+      lastHeartbeatAt: bridgeState.lastHeartbeatAt || null,
+      eventsConnected: bridgeState.eventsConnected,
+      polling: bridgeState.polling,
+      lastError: bridgeState.lastError || null,
+    },
+    tabIgnored: isTabIgnored(),
+    runtimeGuard: (() => {
+      try {
+        const runtime = pageWindow[RUNTIME_GUARD_KEY] || null;
+        return runtime
+          ? {
+              version: runtime.version || null,
+              protocolVersion: runtime.protocolVersion ?? null,
+              buildStamp: runtime.buildStamp || null,
+              installedAt: runtime.installedAt || null,
+              supersededAt: runtime.supersededAt || null,
+              supersededBy: runtime.supersededBy || null,
+            }
+          : null;
+      } catch {
+        return null;
+      }
+    })(),
+  });
+
+  const installContentScriptMessageListener = () => {
+    if (
+      contentScriptMessageListenerInstalled ||
+      typeof chrome === 'undefined' ||
+      !chrome.runtime?.onMessage?.addListener
+    ) {
+      return;
+    }
+    chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+      if (message?.type !== 'gemini-md-export/content-ping') return false;
+      sendResponse(contentScriptRuntimeStatus());
+      return false;
+    });
+    contentScriptMessageListenerInstalled = true;
   };
 
   const compactOuterHtml = (el, maxLength = 1200) => {
@@ -7304,6 +7388,7 @@
 
   const bootstrap = () => {
     if (!document.body) return;
+    installContentScriptMessageListener();
     installDebugApi();
     restoreMcpProgressSnapshot();
     installExtensionBridge().catch((err) => {

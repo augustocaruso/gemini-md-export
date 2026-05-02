@@ -1162,3 +1162,378 @@ Só migrar para WebSocket se os dados da `v0.3.2` mostrarem que o transporte é
 gargalo real ou fonte recorrente de ordering/timeout que HTTP/SSE não resolve
 com backoff, snapshot e comandos idempotentes. A decisão é independente da
 migração CLI-first: a CLI pode continuar usando a mesma bridge local.
+
+## Roadmap R2 — Extensão mais confiável, menos fricção
+
+Status: proposta para aprovação. Não implementar sem aprovação explícita da fase
+ou spike correspondente.
+
+Nota de nomenclatura: `R2` significa segunda versão deste roadmap/proposta de
+direção. Não significa "versão 2.0 da extensão" nem implica que a extensão já
+tenha atingido uma `v1` de produto.
+
+As entregas abaixo usam versões planejadas da extensão a partir de `v0.8.0`.
+Essas versões são rótulos de release pretendidos, não fases abstratas.
+
+Objetivo: parar de tratar timeouts/reloads/claims como falhas isoladas e atacar
+a causa estrutural: a extensão atual opera com permissões conservadoras demais
+para o nível de confiabilidade esperado. O R2 deve aumentar capacidade
+operacional de forma progressiva, com cada permissão justificada por um ganho
+mensurável e com rollback claro.
+
+### Princípios
+
+- Confiabilidade primeiro: contagem/exportação deve funcionar sem o usuário
+  precisar descobrir estado interno de Chrome, service worker, bridge ou aba.
+- Permissão mínima, mas não permissão fraca: pedir poderes novos quando eles
+  reduzem atrito real e são usados de forma auditável.
+- Nada de fallback MCP ruidoso para fluxo normal: CLI/TUI continua sendo o
+  caminho usuário-final; MCP fica diagnóstico/controle explícito.
+- Toda mudança de permissão exige:
+  - texto de motivo no roadmap/README;
+  - teste de build/manifest;
+  - checklist manual Chrome/Edge;
+  - plano de rollback.
+- `debugger` e `<all_urls>` continuam fora do caminho principal até prova
+  contrária. Se entrarem, entram por spike isolado e opt-in.
+
+### Hipótese central
+
+Hoje a extensão depende de uma sequência frágil:
+
+```text
+CLI -> bridge HTTP localhost -> extensão MV3/service worker -> content script
+   -> DOM vivo do Gemini -> heartbeat/SSE/snapshot/comando
+```
+
+Quando uma peça está velha, dormindo ou não injetada, o usuário vê timeout. O R2
+deve encurtar ou fortalecer esse caminho:
+
+- `scripting`: reparar/injetar content script em abas Gemini já abertas;
+- `nativeMessaging`: trocar ou complementar localhost por canal nativo
+  extension <-> host local;
+- `offscreen`: manter tarefas de coordenação do lado da extensão quando o MV3
+  service worker dormir atrapalhar;
+- `WebSocket`: alternativa de transporte se HTTP/SSE provar perda de ordering,
+  evento ou comando em jobs longos;
+- `debugger`: diagnóstico e controle profundo de aba via Chrome DevTools
+  Protocol, condicional e opt-in, não caminho padrão.
+
+## v0.8.0 — Self-heal com `scripting`
+
+Status: implementada na versão `0.8.0`.
+
+Objetivo: a extensão conseguir reparar abas Gemini já abertas depois de update,
+reload, content script stale ou ausência de heartbeat, sem depender de o usuário
+recarregar manualmente a página.
+
+### Permissão nova
+
+- `scripting`.
+
+### Entregas
+
+- Adicionar `scripting` ao manifest gerado por `scripts/build.mjs`.
+- Criar no service worker uma rotina `ensureContentScript(tabId)`:
+  - localizar abas `https://gemini.google.com/*`;
+  - enviar ping para content script;
+  - se não responder, executar `chrome.scripting.executeScript` com
+    `content.js` na aba;
+  - aguardar heartbeat/snapshot curto;
+  - retornar diagnóstico compacto.
+- Integrar self-heal em:
+  - reload/update da extensão;
+  - `/agent/ready`;
+  - claim/list/count/export antes de abrir nova aba;
+  - comando CLI `browser status`.
+- Diferenciar estados:
+  - aba inexistente;
+  - content script ausente;
+  - content script antigo/build mismatch;
+  - content script vivo, mas canal de comandos parado;
+  - DOM Gemini não pronto.
+- Evitar loop:
+  - cooldown por tabId/buildStamp;
+  - limite de tentativas por readiness;
+  - não reinjetar enquanto uma operação pesada da aba está ativa.
+- Expor logs úteis:
+  - `selfHeal.injected: true/false`;
+  - `selfHeal.reason`;
+  - `buildStampBefore/After`;
+  - `heartbeatAfterMs`.
+
+### Critérios de aceite
+
+- Depois de atualizar a extensão, uma aba Gemini já aberta volta a responder sem
+  reload manual na maioria dos casos.
+- A CLI não abre aba nova se já há aba Gemini recuperável.
+- `quantos chats` não deve falhar por content script ausente/stale sem ao menos
+  tentar reinjeção por `scripting`.
+- Testes de fonte garantem presença de `scripting`, `executeScript` e cooldown.
+- Teste manual: abrir Gemini, atualizar extensão, rodar `chats count --plain` e
+  confirmar que a aba antiga é reaproveitada.
+
+## v0.8.1 — Spike de `nativeMessaging`
+
+Status: pesquisa aprovada somente se `v0.8.0` não resolver o atrito principal ou
+se a bridge localhost continuar gerando timeout recorrente.
+
+Objetivo: avaliar se um host nativo registrado no Chrome/Edge reduz a fragilidade
+do transporte local em comparação com HTTP/SSE em `127.0.0.1`.
+
+### Permissão nova
+
+- `nativeMessaging`.
+
+### Perguntas do spike
+
+- O canal native messaging reduz timeouts de conexão inicial?
+- Ele elimina conflito de porta `47283` ou apenas troca por problemas de
+  registro do host nativo?
+- Funciona de forma aceitável em macOS e Windows com instalação via Gemini CLI?
+- O host consegue reaproveitar o mesmo código do MCP/bridge sem duplicação?
+- Como ficam logs, diagnóstico, updates e rollback?
+
+### Protótipo
+
+- Criar host nativo mínimo `gemini-md-export-native-host`:
+  - protocolo JSON length-prefixed do Chrome;
+  - comandos: `ping`, `healthz`, `ready`, `startBridge`, `proxyHttp`;
+  - sem exportação real no primeiro spike.
+- Criar instaladores/registro:
+  - macOS: manifest em NativeMessagingHosts;
+  - Windows: registry key + manifest.
+- Criar fallback:
+  - se native host não existir, usar bridge HTTP atual;
+  - nunca quebrar instalações antigas.
+- Medir:
+  - tempo de conexão inicial;
+  - taxa de falha em update/reload;
+  - qualidade das mensagens de erro.
+
+### Critérios de decisão
+
+Adotar native messaging se pelo menos dois forem verdade:
+
+- reduz timeouts iniciais de readiness em cenário real;
+- elimina conflitos recorrentes de porta/processo;
+- simplifica o lifecycle da bridge para usuário final;
+- permite diagnóstico melhor sem despejar JSON no agente.
+
+Rejeitar ou adiar se:
+
+- instalação/registro ficar mais frágil que localhost;
+- troubleshooting em Windows piorar;
+- exigir permissões/processos persistentes demais sem ganho claro.
+
+## v0.8.2 — Native host como transporte primário
+
+Status: condicionado ao spike `v0.8.1`.
+
+Objetivo: tornar native messaging o caminho preferencial extension <-> processo
+local, mantendo HTTP/SSE como fallback compatível.
+
+### Entregas
+
+- Definir protocolo `native-bridge-v1`:
+  - request/response com `id`;
+  - eventos de progresso;
+  - cancelamento;
+  - heartbeat;
+  - erro estruturado.
+- Reusar o core existente:
+  - `mcp-server.js` e `bridge-server.js` não devem divergir em regra de
+    negócio;
+  - comandos browser-dependent continuam passando pelo content script.
+- Atualizar CLI:
+  - detectar native host disponível;
+  - usar host para health/readiness quando possível;
+  - cair para HTTP quando host não estiver registrado.
+- Atualizar diagnóstico:
+  - mostrar `transport: native|http`;
+  - mostrar caminho do host/manifest;
+  - mostrar erro de registro quando houver.
+- Atualizar instaladores:
+  - instalar/validar host nativo;
+  - reparar registro;
+  - remover host antigo no uninstall/repair.
+
+### Critérios de aceite
+
+- Fluxos `chats count`, `export recent`, `sync` e `browser status` funcionam
+  com native host e com fallback HTTP.
+- Sem porta ocupada para o caminho native.
+- Mensagens de erro de registro são claras e curtas.
+- Usuário consegue voltar para HTTP sem reinstalar tudo.
+
+## v0.8.3 — Avaliar `offscreen`
+
+Status: condicionado a evidência de que o service worker MV3 dormir continua
+quebrando coordenação mesmo após `scripting`.
+
+Objetivo: usar um documento offscreen como contexto extension-side mais estável
+para tarefas de coordenação que não pertencem ao content script nem ao service
+worker efêmero.
+
+### Permissão nova
+
+- `offscreen`.
+
+### Possíveis usos
+
+- Manter fila/coordenação de mensagens enquanto service worker acorda/dorme.
+- Fazer ponte com native messaging ou WebSocket se o service worker se mostrar
+  instável para conexões longas.
+- Persistir estado operacional leve durante exportações longas.
+
+### Restrições
+
+- Offscreen document não deve virar UI invisível opaca.
+- Não mover scraping para offscreen; scraping continua no DOM visível do Gemini.
+- Criar apenas quando necessário e fechar quando idle.
+
+### Critérios de aceite
+
+- Evidência antes/depois mostrando menos perda de comando/heartbeat.
+- Sem aumento perceptível de consumo quando idle.
+- Diagnóstico mostra se offscreen está ativo e por quê.
+
+## v0.9.0 — Spike condicional de `debugger`/CDP
+
+Status: possibilidade técnica de alto poder, no mesmo bloco de avaliação de
+transporte/diagnóstico que WebSocket. Não implementar no fluxo principal sem
+aprovação explícita separada.
+
+Objetivo: descobrir se `chrome.debugger`/Chrome DevTools Protocol resolveria
+problemas que `scripting` + native messaging + offscreen não resolvem.
+
+### Benefícios possíveis para este projeto
+
+- Inspeção mais forte de aba:
+  - saber se a aba carregou, navegou, travou ou está em lifecycle estranho;
+  - coletar sinais de rede/console/runtime sem depender do content script.
+- Automação de recuperação:
+  - recarregar/navegar/avaliar script via CDP em casos em que content script
+    não entra;
+  - detectar frame/contexto correto do Gemini com mais precisão.
+- Instrumentação:
+  - observar eventos de rede, WebSocket/fetch do próprio Gemini e erros de
+    runtime;
+  - medir carregamento real da página.
+- Debug de campo:
+  - gerar um diagnóstico muito mais rico quando o DOM muda ou a página fica
+    presa.
+
+### Custos e riscos
+
+- Permissão assustadora: Chrome mostra "Access the page debugger backend".
+- Pode conflitar com DevTools aberto ou outras ferramentas de debug.
+- Aumenta muito a responsabilidade de privacidade: CDP pode observar tráfego,
+  runtime e estado da página.
+- Maior risco de parecer automação invasiva do Gemini, mesmo sem usar APIs
+  privadas.
+- Pode quebrar com mudanças de política do Chrome/loja/perfil corporativo.
+
+### Regra de uso
+
+Se aprovado, `debugger` deve começar como modo diagnóstico opt-in:
+
+- desabilitado por padrão;
+- ativado por flag/env/config local;
+- escopo limitado a `https://gemini.google.com/*`;
+- nunca usar para roubar cookies/tokens ou chamar APIs privadas;
+- nunca usar `<all_urls>` junto;
+- logs sanitizados.
+
+### Critérios de decisão
+
+Só promover além de spike se:
+
+- `scripting` e native messaging não resolverem readiness/recovery;
+- CDP provar ganho claro em reproduções reais;
+- o usuário aceitar explicitamente o tradeoff de permissão.
+
+## v0.10.0 — Spike condicional de WebSocket
+
+Status: não recomendado como primeiro passo.
+
+Resposta curta: não precisamos implementar WebSocket agora para começar o R2.
+Ele fica no roadmap como possibilidade condicionada, ao lado do spike de
+`debugger`/CDP, para quando os dados mostrarem que o gargalo é transporte,
+conexão persistente ou diagnóstico profundo de aba.
+
+Observação: WebSocket e `debugger` resolvem classes diferentes de problema.
+WebSocket é transporte; `debugger` é inspeção/controle da aba. Eles ficam juntos
+no roadmap porque ambos são opções mais poderosas, com mais custo operacional,
+que só devem entrar depois de medir o que `scripting` e native messaging não
+resolverem.
+
+### Por quê
+
+O problema atual parece mais ligado a lifecycle/injeção/permissão:
+
+- content script stale ou ausente;
+- service worker MV3 acordando/dormindo;
+- bridge/aba sem canal de comandos pronto;
+- update/reload de extensão;
+- aba existente não reaproveitada.
+
+WebSocket troca o transporte, mas não injeta content script, não repara aba
+stale e não registra host nativo. Portanto, WebSocket antes de `scripting` seria
+provavelmente mais um remendo.
+
+### Quando WebSocket pode entrar
+
+- Se o transporte HTTP/SSE continuar gerando ordering ruim, timeout de comando
+  entregue ou perda de evento depois de `scripting`.
+- Se native messaging for rejeitado e ainda precisarmos de canal bidirecional
+  mais simples que SSE + POST.
+- Se o service worker/content script conseguir manter conexão de forma estável
+  no Chrome alvo.
+
+### Critérios de aceite para spike WebSocket
+
+- Comparar HTTP/SSE vs WebSocket em:
+  - reconexão depois de reload da extensão;
+  - comandos longos;
+  - progresso de job;
+  - aba navegando entre chats;
+  - perda/duplicação de mensagens.
+- Manter fallback HTTP/SSE.
+- Não introduzir servidor persistente extra se native messaging resolver melhor.
+
+## Ordem recomendada de implementação
+
+1. `v0.8.0 scripting self-heal`.
+2. Medir campo real: count/export após update/reload, aba existente, múltiplas
+   abas, service worker cold.
+3. `v0.8.1 nativeMessaging spike`.
+4. Decidir, com dados, entre:
+   - native host como transporte primário (`v0.8.2`);
+   - manter HTTP/SSE com melhorias;
+   - WebSocket spike (`v0.10.0`) se transporte for gargalo comprovado;
+   - debugger/CDP (`v0.9.0`) se o problema for diagnóstico/controle profundo da
+     aba, e não apenas transporte.
+5. `v0.8.3 offscreen` apenas se service worker continuar atrapalhando.
+6. Promover qualquer spike perigoso só com aceite explícito de permissão,
+   privacidade e rollback.
+
+## Próximo passo proposto
+
+Implementar primeiro apenas `v0.8.0 scripting self-heal`.
+
+Escopo inicial:
+
+- adicionar permissão `scripting`;
+- implementar ping/reinject em abas Gemini;
+- integrar em `/agent/ready` e CLI readiness;
+- testes de manifest/fonte;
+- release menor com nota clara de nova permissão.
+
+Fora do primeiro PR/release:
+
+- native messaging;
+- offscreen;
+- debugger;
+- WebSocket;
+- mudanças em exportação Markdown.

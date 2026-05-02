@@ -7,6 +7,12 @@ const EXTENSION_PROTOCOL_VERSION = Number('__EXTENSION_PROTOCOL_VERSION__');
 const PENDING_GEMINI_TABS_RELOAD_KEY = 'gemini-md-export.pendingGeminiTabsReload';
 const TAB_CLAIMS_STORAGE_KEY = 'gemini-md-export.tabClaims.v1';
 const TAB_GROUP_NONE = -1;
+const GEMINI_TAB_URL_PATTERN = 'https://gemini.google.com/*';
+const CONTENT_SCRIPT_FILE = 'content.js';
+const CONTENT_SCRIPT_PING_TYPE = 'gemini-md-export/content-ping';
+const CONTENT_SCRIPT_SELF_HEAL_COOLDOWN_MS = 10_000;
+const CONTENT_SCRIPT_POST_INJECT_PING_ATTEMPTS = 5;
+const CONTENT_SCRIPT_POST_INJECT_PING_DELAY_MS = 180;
 const TAB_CLAIM_COLORS = new Set([
   'grey',
   'blue',
@@ -18,6 +24,8 @@ const TAB_CLAIM_COLORS = new Set([
   'cyan',
   'orange',
 ]);
+const contentScriptSelfHealCooldowns = new Map();
+let lastContentScriptSelfHeal = null;
 
 const clampText = (value, maxLength) =>
   String(value || '')
@@ -47,8 +55,21 @@ const extensionInfo = (sender = {}) => {
     tabId: tab?.id ?? null,
     windowId: tab?.windowId ?? null,
     isActiveTab: tab?.active ?? null,
+    selfHeal: lastContentScriptSelfHeal,
   };
 };
+
+const currentRuntimeInfo = () => {
+  const manifest = chrome.runtime.getManifest();
+  return {
+    extensionVersion: manifest.version,
+    version: manifest.version,
+    protocolVersion: EXTENSION_PROTOCOL_VERSION,
+    buildStamp: '__BUILD_STAMP__',
+  };
+};
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const storageGet = (key) =>
   new Promise((resolve) => {
@@ -110,6 +131,230 @@ const chromeGetTab = (tabId) =>
       resolve(tab || null);
     });
   });
+
+const chromeQueryGeminiTabs = () =>
+  new Promise((resolve) => {
+    if (!chrome.tabs?.query) {
+      resolve({ ok: false, reason: 'tabs-query-api-unavailable', tabs: [] });
+      return;
+    }
+    chrome.tabs.query({ url: GEMINI_TAB_URL_PATTERN }, (tabs = []) => {
+      if (chrome.runtime.lastError) {
+        resolve({
+          ok: false,
+          reason: chrome.runtime.lastError.message,
+          tabs: [],
+        });
+        return;
+      }
+      resolve({ ok: true, tabs });
+    });
+  });
+
+const chromeSendTabMessage = (tabId, message, { timeoutMs = 1500 } = {}) =>
+  new Promise((resolve) => {
+    if (!chrome.tabs?.sendMessage || !Number.isInteger(tabId)) {
+      resolve({ ok: false, reason: 'tabs-send-message-api-unavailable' });
+      return;
+    }
+
+    let settled = false;
+    let timer = 0;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
+    timer = setTimeout(() => {
+      finish({ ok: false, reason: 'content-script-ping-timeout' });
+    }, timeoutMs);
+
+    chrome.tabs.sendMessage(tabId, message, (response) => {
+      if (chrome.runtime.lastError) {
+        finish({ ok: false, reason: chrome.runtime.lastError.message });
+        return;
+      }
+      finish({ ok: true, response: response || null });
+    });
+  });
+
+const pingContentScript = (tabId, { timeoutMs = 1500 } = {}) =>
+  chromeSendTabMessage(
+    tabId,
+    {
+      type: CONTENT_SCRIPT_PING_TYPE,
+      expected: currentRuntimeInfo(),
+    },
+    { timeoutMs },
+  );
+
+const contentScriptMatchesCurrentRuntime = (response) => {
+  const expected = currentRuntimeInfo();
+  return (
+    response?.ok === true &&
+    Number(response.protocolVersion) === Number(expected.protocolVersion) &&
+    String(response.extensionVersion || response.version || '') ===
+      String(expected.extensionVersion) &&
+    String(response.buildStamp || '') === String(expected.buildStamp || '')
+  );
+};
+
+const chromeExecuteContentScript = (tabId) =>
+  new Promise((resolve) => {
+    if (!chrome.scripting?.executeScript || !Number.isInteger(tabId)) {
+      resolve({ ok: false, reason: 'scripting-api-unavailable' });
+      return;
+    }
+
+    chrome.scripting.executeScript(
+      {
+        target: { tabId },
+        files: [CONTENT_SCRIPT_FILE],
+      },
+      (results) => {
+        if (chrome.runtime.lastError) {
+          resolve({ ok: false, reason: chrome.runtime.lastError.message });
+          return;
+        }
+        resolve({ ok: true, resultCount: Array.isArray(results) ? results.length : 0 });
+      },
+    );
+  });
+
+const waitForContentScriptAfterInjection = async (tabId) => {
+  let lastPing = null;
+  for (let attempt = 1; attempt <= CONTENT_SCRIPT_POST_INJECT_PING_ATTEMPTS; attempt += 1) {
+    await sleep(CONTENT_SCRIPT_POST_INJECT_PING_DELAY_MS);
+    lastPing = await pingContentScript(tabId, { timeoutMs: 1200 });
+    if (contentScriptMatchesCurrentRuntime(lastPing.response)) {
+      return {
+        ok: true,
+        attempt,
+        ping: lastPing,
+      };
+    }
+  }
+  return {
+    ok: false,
+    attempt: CONTENT_SCRIPT_POST_INJECT_PING_ATTEMPTS,
+    ping: lastPing,
+  };
+};
+
+const ensureContentScriptForTab = async (tab, options = {}) => {
+  const tabId = Number(tab?.id);
+  const force = options.force === true;
+  const reason = options.reason || 'self-heal';
+  if (!Number.isInteger(tabId)) {
+    return { ok: false, reason: 'tab-id-unavailable', tabId: null };
+  }
+
+  const before = await pingContentScript(tabId);
+  if (contentScriptMatchesCurrentRuntime(before.response)) {
+    return {
+      ok: true,
+      status: 'already-current',
+      reason,
+      tabId,
+      url: tab.url || null,
+      injected: false,
+      before: before.response,
+    };
+  }
+
+  const now = Date.now();
+  const cooldown = contentScriptSelfHealCooldowns.get(tabId);
+  if (!force && cooldown && now - cooldown.at < CONTENT_SCRIPT_SELF_HEAL_COOLDOWN_MS) {
+    return {
+      ok: false,
+      status: 'cooldown',
+      reason,
+      tabId,
+      url: tab.url || null,
+      injected: false,
+      before: before.response || null,
+      pingError: before.reason || null,
+      cooldownMs: CONTENT_SCRIPT_SELF_HEAL_COOLDOWN_MS - (now - cooldown.at),
+    };
+  }
+
+  contentScriptSelfHealCooldowns.set(tabId, {
+    at: now,
+    reason,
+    buildStamp: currentRuntimeInfo().buildStamp,
+  });
+
+  const injected = await chromeExecuteContentScript(tabId);
+  if (!injected.ok) {
+    return {
+      ok: false,
+      status: 'inject-failed',
+      reason,
+      tabId,
+      url: tab.url || null,
+      injected: false,
+      before: before.response || null,
+      pingError: before.reason || null,
+      injectError: injected.reason || null,
+    };
+  }
+
+  const after = await waitForContentScriptAfterInjection(tabId);
+  return {
+    ok: after.ok,
+    status: after.ok ? 'injected-current' : 'injected-unconfirmed',
+    reason,
+    tabId,
+    url: tab.url || null,
+    injected: true,
+    before: before.response || null,
+    pingError: before.reason || null,
+    after: after.ping?.response || null,
+    afterError: after.ping?.reason || null,
+    attempts: after.attempt,
+    buildStampBefore: before.response?.buildStamp || null,
+    buildStampAfter: after.ping?.response?.buildStamp || null,
+  };
+};
+
+const selfHealGeminiTabs = async ({ reason = 'self-heal', force = false } = {}) => {
+  const startedAt = Date.now();
+  const queried = await chromeQueryGeminiTabs();
+  if (!queried.ok) {
+    lastContentScriptSelfHeal = {
+      ok: false,
+      reason,
+      status: 'query-failed',
+      error: queried.reason || null,
+      at: new Date().toISOString(),
+    };
+    return lastContentScriptSelfHeal;
+  }
+
+  const results = [];
+  for (const tab of queried.tabs) {
+    results.push(await ensureContentScriptForTab(tab, { reason, force }));
+  }
+
+  const injected = results.filter((item) => item.injected).length;
+  const current = results.filter((item) => item.ok).length;
+  const failed = results.filter((item) => !item.ok && item.status !== 'cooldown').length;
+  lastContentScriptSelfHeal = {
+    ok: failed === 0,
+    reason,
+    status: failed === 0 ? 'ok' : 'partial',
+    at: new Date().toISOString(),
+    durationMs: Math.max(0, Date.now() - startedAt),
+    tabCount: queried.tabs.length,
+    current,
+    injected,
+    failed,
+    results,
+  };
+  console.log('[gemini-md-export/ext]', 'self-heal content script', lastContentScriptSelfHeal);
+  return lastContentScriptSelfHeal;
+};
 
 const chromeGroupTab = (tabId) =>
   new Promise((resolve) => {
@@ -375,9 +620,21 @@ chrome.runtime.onInstalled.addListener((details) => {
   });
   cleanupStaleTabClaimVisuals(`extension-${details.reason}`).finally(() => {
     setTimeout(() => {
-      reloadGeminiTabs(`extension-${details.reason}`);
+      selfHealGeminiTabs({
+        reason: `extension-${details.reason}`,
+        force: true,
+      });
     }, 500);
   });
+});
+
+chrome.runtime.onStartup?.addListener?.(() => {
+  setTimeout(() => {
+    selfHealGeminiTabs({
+      reason: 'browser-startup',
+      force: false,
+    });
+  }, 800);
 });
 
 const reloadGeminiTabs = (reason = 'manual') =>
@@ -421,7 +678,10 @@ const consumePendingGeminiTabsReload = async () => {
   await storageRemove(PENDING_GEMINI_TABS_RELOAD_KEY);
   await cleanupStaleTabClaimVisuals(pending.reason || 'extension-self-reload');
   setTimeout(() => {
-    reloadGeminiTabs(pending.reason || 'extension-self-reload');
+    selfHealGeminiTabs({
+      reason: pending.reason || 'extension-self-reload',
+      force: true,
+    });
   }, 500);
 };
 
@@ -531,6 +791,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message?.type === 'gemini-md-export/reload-gemini-tabs') {
     reloadGeminiTabs(message.reason || 'content-script').then(sendResponse);
+    return true;
+  }
+
+  if (message?.type === 'gemini-md-export/self-heal-gemini-tabs') {
+    selfHealGeminiTabs({
+      reason: message.reason || 'content-script',
+      force: message.force === true,
+    }).then(sendResponse);
     return true;
   }
 
