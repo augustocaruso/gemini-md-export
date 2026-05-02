@@ -110,6 +110,8 @@ test('contagem longa aplica claim visual temporaria na aba', () => {
   assert.match(block, /claimId: claim\.claimId/);
   assert.match(block, /recent-chats-list-finished/);
   assert.match(block, /tabClaimRelease/);
+  assert.match(source, /waitForContinuationClient\(\s*\{\s*clientId: claim\.clientId/);
+  assert.match(source, /claimId,\s*tabId: claim\.tabId/);
 });
 
 test('jobs renovam claim existente para recriar indicador visual ausente', () => {

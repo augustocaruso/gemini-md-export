@@ -1955,10 +1955,18 @@ const removeClient = (clientId) => {
   clients.delete(clientId);
 };
 
+const hasPendingCommandForClient = (clientId) =>
+  Array.from(pendingCommands.values()).some((pending) => pending.clientId === clientId);
+
 const cleanupStaleClients = () => {
   const now = Date.now();
   for (const [clientId, client] of clients.entries()) {
     if (now - client.lastSeenAt <= CLIENT_STALE_MS) continue;
+    if (hasPendingCommandForClient(clientId)) {
+      client.lastSeenAt = now;
+      client.lastSeenAtExtendedByCommandAt = new Date(now).toISOString();
+      continue;
+    }
     removeClient(clientId);
   }
 };
@@ -2512,6 +2520,11 @@ const resolveCommand = (commandId, result) => {
   clearTimeout(pending.timer);
   if (pending.dispatchTimer) clearTimeout(pending.dispatchTimer);
   pendingCommands.delete(commandId);
+  const client = clients.get(pending.clientId);
+  if (client) {
+    client.lastSeenAt = Date.now();
+    client.lastCommandResultAt = new Date().toISOString();
+  }
   recordFlightEvent('command_resolved', {
     commandId,
     clientId: pending.clientId,
@@ -2963,7 +2976,24 @@ const releaseTabClaim = async (args = {}) => {
   }
 
   let visual = null;
-  const client = liveClientForClaim(claim);
+  let client = liveClientForClaim(claim);
+  if (!client) {
+    const recoveredClient = await waitForContinuationClient(
+      {
+        clientId: claim.clientId,
+        tabId: claim.tabId,
+        sessionId: claim.sessionId,
+      },
+      {
+        claimId,
+        tabId: claim.tabId,
+        sessionId: claim.sessionId,
+      },
+    );
+    client = isLiveClient(clients.get(recoveredClient?.clientId))
+      ? clients.get(recoveredClient.clientId)
+      : null;
+  }
   if (client) {
     try {
       visual = await enqueueCommand(
@@ -4796,11 +4826,11 @@ const resolveContinuationClient = (client, args = {}) => {
 const waitForContinuationClient = async (client, args = {}, waitMs = RECENT_CHATS_CLIENT_RECOVERY_WAIT_MS) => {
   const startedAt = Date.now();
   let recovered = resolveContinuationClient(client, args);
-  if (recovered?.clientId && recovered.clientId !== client?.clientId) return recovered;
+  if (recovered?.clientId && isLiveClient(clients.get(recovered.clientId))) return recovered;
   while (Date.now() - startedAt < waitMs) {
     await sleep(500);
     recovered = resolveContinuationClient(client, args);
-    if (recovered?.clientId && recovered.clientId !== client?.clientId) return recovered;
+    if (recovered?.clientId && isLiveClient(clients.get(recovered.clientId))) return recovered;
   }
   return recovered;
 };
@@ -4819,7 +4849,7 @@ const enqueueCommandWithClientRecovery = async (
   } catch (err) {
     if (!isRecoverableClientDisconnectError(err)) throw err;
     const recoveredClient = await waitForContinuationClient(activeClient, selector);
-    if (!recoveredClient?.clientId || recoveredClient.clientId === activeClient?.clientId) {
+    if (!recoveredClient?.clientId || !isLiveClient(clients.get(recoveredClient.clientId))) {
       throw err;
     }
     const result = await enqueueCommand(recoveredClient.clientId, type, commandArgs, options);

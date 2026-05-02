@@ -1690,6 +1690,32 @@ Critérios de aceite:
 - A CLI continua sem fallback MCP e sem despejar JSON salvo quando
   `--result-json` não foi pedido.
 
+## v0.8.12 — Hotfix de cliente vivo e liberação consistente de claim
+
+Status: implementada na versão `0.8.12`.
+
+Objetivo: corrigir a falha em que uma contagem longa podia concluir um comando
+do browser depois de mais de 45s, mas o MCP já tinha marcado o cliente como
+stale. Isso derrubava a rodada seguinte com "Cliente ... não encontrado" e
+podia deixar o indicador visual da aba preso.
+
+Entregas:
+
+- Não remover cliente como stale enquanto há comando pesado pendente para ele.
+- Atualizar `lastSeenAt` quando chega `/bridge/command-result`, mesmo que o
+  próximo heartbeat ainda não tenha rodado.
+- Ao liberar claim, aguardar/reachar a mesma aba por `claimId`/`tabId` antes
+  de desistir do comando que remove tab group/badge.
+
+Critérios de aceite:
+
+- `chats count --plain` não deve abortar entre rodadas apenas porque um
+  `load-more-conversations` demorou mais que `CLIENT_STALE_MS`.
+- O tab group/badge temporário da contagem deve ser removido no `finally` após
+  sucesso, parcial ou erro recuperável.
+- O resultado continua honesto: sem total confirmado quando o fim do sidebar
+  não foi comprovado.
+
 ## v0.9.0 — Spike condicional de `debugger`/CDP
 
 Status: possibilidade técnica de alto poder, no mesmo bloco de avaliação de
