@@ -13,6 +13,7 @@ const CONTENT_SCRIPT_PING_TYPE = 'gemini-md-export/content-ping';
 const NATIVE_HOST_NAME = 'com.augustocaruso.gemini_md_export';
 const NATIVE_HOST_REQUEST_TIMEOUT_MS = 2500;
 const OFFSCREEN_DOCUMENT_PATH = 'offscreen.html';
+const OFFSCREEN_IDLE_CLOSE_MS = 120_000;
 const CONTENT_SCRIPT_SELF_HEAL_COOLDOWN_MS = 10_000;
 const CONTENT_SCRIPT_POST_INJECT_PING_ATTEMPTS = 5;
 const CONTENT_SCRIPT_POST_INJECT_PING_DELAY_MS = 180;
@@ -32,6 +33,7 @@ const contentScriptSelfHealCooldowns = new Map();
 let lastContentScriptSelfHeal = null;
 let lastNativeHostProbe = null;
 let lastOffscreenStatus = null;
+let offscreenIdleCloseTimer = 0;
 
 const clampText = (value, maxLength) =>
   String(value || '')
@@ -507,7 +509,28 @@ const sendOffscreenPing = () =>
     });
   });
 
-const ensureOffscreenDocument = async ({ reason = 'manual' } = {}) => {
+const clearOffscreenIdleTimer = () => {
+  if (!offscreenIdleCloseTimer) return;
+  clearTimeout(offscreenIdleCloseTimer);
+  offscreenIdleCloseTimer = 0;
+};
+
+const scheduleOffscreenIdleClose = ({ reason = 'idle', idleCloseMs = OFFSCREEN_IDLE_CLOSE_MS } = {}) => {
+  clearOffscreenIdleTimer();
+  const ms = Math.max(0, Number(idleCloseMs) || 0);
+  if (!ms) return null;
+  const idleCloseAt = new Date(Date.now() + ms).toISOString();
+  offscreenIdleCloseTimer = setTimeout(() => {
+    offscreenIdleCloseTimer = 0;
+    closeOffscreenDocument({ reason: `${reason}-idle` });
+  }, ms);
+  return idleCloseAt;
+};
+
+const ensureOffscreenDocument = async ({
+  reason = 'manual',
+  idleCloseMs = OFFSCREEN_IDLE_CLOSE_MS,
+} = {}) => {
   const startedAt = Date.now();
   const current = await hasOffscreenDocument();
   if (!current.ok) {
@@ -546,20 +569,26 @@ const ensureOffscreenDocument = async ({ reason = 'manual' } = {}) => {
   }
 
   const ping = await sendOffscreenPing();
+  const idleCloseAt = scheduleOffscreenIdleClose({ reason, idleCloseMs });
   lastOffscreenStatus = {
     ok: ping.ok === true,
     status: ping.ok === true ? 'ready' : 'ping-failed',
     reason,
     created,
+    active: true,
+    idleCloseAt,
     checkedAt: new Date().toISOString(),
     durationMs: Math.max(0, Date.now() - startedAt),
     document: ping.ok === true ? ping : null,
+    lastKeepaliveAt: ping.lastKeepaliveAt || null,
+    keepaliveCount: ping.keepaliveCount ?? null,
     error: ping.ok === true ? null : ping.reason || ping.error || null,
   };
   return lastOffscreenStatus;
 };
 
 const closeOffscreenDocument = async ({ reason = 'manual' } = {}) => {
+  clearOffscreenIdleTimer();
   if (!chrome.offscreen?.closeDocument) {
     return { ok: false, reason: 'offscreen-close-api-unavailable' };
   }
@@ -569,6 +598,7 @@ const closeOffscreenDocument = async ({ reason = 'manual' } = {}) => {
       ok: true,
       status: 'closed',
       reason,
+      active: false,
       checkedAt: new Date().toISOString(),
     };
     return lastOffscreenStatus;
@@ -1050,30 +1080,61 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === 'gemini-md-export/native-host-health') {
-    probeNativeHost({
-      reason: message.reason || 'content-script',
-      timeoutMs: message.timeoutMs || NATIVE_HOST_REQUEST_TIMEOUT_MS,
-    }).then(sendResponse);
+    ensureOffscreenDocument({
+      reason: message.reason || 'native-host-health',
+      idleCloseMs: message.idleCloseMs || OFFSCREEN_IDLE_CLOSE_MS,
+    })
+      .then(() =>
+        probeNativeHost({
+          reason: message.reason || 'content-script',
+          timeoutMs: message.timeoutMs || NATIVE_HOST_REQUEST_TIMEOUT_MS,
+        }),
+      )
+      .then(sendResponse);
     return true;
   }
 
   if (message?.type === 'gemini-md-export/native-proxy-http') {
-    nativeHostRequest(
-      'proxyHttp',
-      {
-        bridgeUrl: message.bridgeUrl || 'http://127.0.0.1:47283',
-        path: message.path || '/',
-        method: message.method || 'GET',
-        payload: message.payload,
-        timeoutMs: message.timeoutMs || 10000,
-      },
-      {
-        timeoutMs: Math.max(
-          NATIVE_HOST_REQUEST_TIMEOUT_MS,
-          Number(message.timeoutMs || 10000) + 1200,
+    ensureOffscreenDocument({
+      reason: message.reason || 'native-proxy-http',
+      idleCloseMs: message.idleCloseMs || OFFSCREEN_IDLE_CLOSE_MS,
+    })
+      .then(() =>
+        nativeHostRequest(
+          'proxyHttp',
+          {
+            bridgeUrl: message.bridgeUrl || 'http://127.0.0.1:47283',
+            path: message.path || '/',
+            method: message.method || 'GET',
+            payload: message.payload,
+            timeoutMs: message.timeoutMs || 10000,
+          },
+          {
+            timeoutMs: Math.max(
+              NATIVE_HOST_REQUEST_TIMEOUT_MS,
+              Number(message.timeoutMs || 10000) + 1200,
+            ),
+          },
         ),
-      },
-    ).then(sendResponse);
+      )
+      .then(sendResponse);
+    return true;
+  }
+
+  if (message?.type === 'gemini-md-export/offscreen-keepalive') {
+    lastOffscreenStatus = {
+      ...(lastOffscreenStatus || {}),
+      ok: true,
+      status: 'keepalive',
+      active: true,
+      reason: lastOffscreenStatus?.reason || 'offscreen-keepalive',
+      checkedAt: new Date().toISOString(),
+      startedAt: message.startedAt || null,
+      uptimeMs: message.uptimeMs ?? null,
+      lastKeepaliveAt: message.lastKeepaliveAt || new Date().toISOString(),
+      keepaliveCount: message.keepaliveCount ?? null,
+    };
+    sendResponse({ ok: true });
     return true;
   }
 
@@ -1083,7 +1144,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       closeOffscreenDocument({ reason: message.reason || 'content-script' }).then(sendResponse);
       return true;
     }
-    ensureOffscreenDocument({ reason: message.reason || 'content-script' }).then(sendResponse);
+    ensureOffscreenDocument({
+      reason: message.reason || 'content-script',
+      idleCloseMs: message.idleCloseMs || OFFSCREEN_IDLE_CLOSE_MS,
+    }).then(sendResponse);
     return true;
   }
 

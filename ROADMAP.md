@@ -1537,8 +1537,7 @@ Critérios de aceite:
 
 ## v0.8.7 — Offscreen keepalive e service worker estável
 
-Status: proposta. Não implementar enquanto a `v0.8.5` estiver estável, salvo
-aprovação explícita.
+Status: implementada na versão `0.8.7`.
 
 Objetivo: usar o offscreen document como estabilizador real do service worker
 MV3, inspirado no padrão observado no Claude, sem mover scraping para fora do

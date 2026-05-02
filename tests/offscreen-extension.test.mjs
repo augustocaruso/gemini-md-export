@@ -12,6 +12,9 @@ test('service worker cria offscreen sob demanda e expõe diagnóstico', () => {
   assert.match(source, /chrome\.offscreen\.createDocument/);
   assert.match(source, /gemini-md-export\/offscreen-status/);
   assert.match(source, /gemini-md-export\/offscreen-ping/);
+  assert.match(source, /gemini-md-export\/offscreen-keepalive/);
+  assert.match(source, /OFFSCREEN_IDLE_CLOSE_MS/);
+  assert.match(source, /scheduleOffscreenIdleClose/);
   assert.match(source, /offscreen:\s*lastOffscreenStatus/);
 });
 
@@ -21,6 +24,8 @@ test('offscreen document responde ping sem tocar no DOM do Gemini', () => {
 
   assert.match(html, /offscreen\.js/);
   assert.match(script, /gemini-md-export\/offscreen-ping/);
+  assert.match(script, /KEEPALIVE_INTERVAL_MS\s*=\s*20_000/);
+  assert.match(script, /gemini-md-export\/offscreen-keepalive/);
   assert.doesNotMatch(script, /gemini\.google\.com/);
   assert.doesNotMatch(script, /querySelector/);
 });
