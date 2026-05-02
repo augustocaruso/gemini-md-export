@@ -500,6 +500,18 @@ test('content script mantém dock MCP durante navegação e sem prefixo de fase'
   assert.doesNotMatch(source, /labelEl\.textContent = `\$\{.*phase.*:/);
 });
 
+test('content script hidrata conversa gigante com orçamento adaptativo', async () => {
+  const source = await readFile(new URL('../src/userscript-shell.js', import.meta.url), 'utf8');
+
+  assert.match(source, /HYDRATION_MAX_TOTAL_MS = 10 \* 60 \* 1000/);
+  assert.match(source, /HYDRATION_STALL_TIMEOUT_MS = 45000/);
+  assert.match(source, /conversationHydrationLooksLarge/);
+  assert.match(source, /topHydrationConfirmationMs/);
+  assert.match(source, /lastProgressAt/);
+  assert.match(source, /hydrationMaxTotalMs/);
+  assert.match(source, /hydrationStallTimeoutMs/);
+});
+
 test('content script explica fallback para Downloads e warnings de mídia', async () => {
   const source = await readFile(new URL('../src/userscript-shell.js', import.meta.url), 'utf8');
   assert.match(source, /Vou cair em Downloads/);

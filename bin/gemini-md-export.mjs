@@ -128,6 +128,10 @@ const jobOptionHelp = () => [
   '  --load-more-browser-rounds <n> Rodadas internas no navegador por comando.',
   '  --load-more-browser-timeout-ms <ms> Timeout do carregamento no navegador.',
   '  --load-more-timeout-ms <ms>  Timeout total do comando de carregamento.',
+  '  --hydration-timeout-ms <ms>  Limite para hidratar uma conversa gigante.',
+  '  --hydration-stall-ms <ms>    Desiste se a conversa nao crescer por esse tempo.',
+  '  --hydration-wait-ms <ms>     Espera por cada leva nova de turns.',
+  '  --export-browser-timeout-ms <ms> Timeout do comando de export no navegador.',
   '  --refresh                    Forca refresh/carregamento.',
   '  --no-refresh                 Usa cache quando possivel.',
   '  --poll-ms <ms>               Intervalo de polling. Default: 1200.',
@@ -667,6 +671,14 @@ const parseArgs = (argv) => {
     else if (arg === '--load-more-browser-timeout-ms')
       out.flags.loadMoreBrowserTimeoutMs = Number(value());
     else if (arg === '--load-more-timeout-ms') out.flags.loadMoreTimeoutMs = Number(value());
+    else if (arg === '--hydration-timeout-ms' || arg === '--hydration-max-total-ms')
+      out.flags.hydrationMaxTotalMs = Number(value());
+    else if (arg === '--hydration-stall-ms') out.flags.hydrationStallTimeoutMs = Number(value());
+    else if (arg === '--hydration-wait-ms') out.flags.hydrationLoadWaitMs = Number(value());
+    else if (arg === '--hydration-top-settle-ms') out.flags.hydrationTopSettleMs = Number(value());
+    else if (arg === '--hydration-max-attempts') out.flags.hydrationMaxAttempts = Number(value());
+    else if (arg === '--export-browser-timeout-ms' || arg === '--browser-command-timeout-ms')
+      out.flags.exportBrowserTimeoutMs = Number(value());
     else if (arg === '--refresh') out.flags.refresh = true;
     else if (arg === '--no-refresh') out.flags.refresh = false;
     else if (arg === '--poll-ms') out.flags.pollMs = Math.max(250, Number(value()) || DEFAULT_POLL_MS);
@@ -771,6 +783,15 @@ const loadMoreParamsFromFlags = (flags = {}) => ({
   loadMoreBrowserRounds: flags.loadMoreBrowserRounds,
   loadMoreBrowserTimeoutMs: flags.loadMoreBrowserTimeoutMs,
   loadMoreTimeoutMs: flags.loadMoreTimeoutMs,
+});
+
+const hydrationParamsFromFlags = (flags = {}) => ({
+  hydrationMaxTotalMs: flags.hydrationMaxTotalMs,
+  hydrationStallTimeoutMs: flags.hydrationStallTimeoutMs,
+  hydrationLoadWaitMs: flags.hydrationLoadWaitMs,
+  hydrationTopSettleMs: flags.hydrationTopSettleMs,
+  hydrationMaxAttempts: flags.hydrationMaxAttempts,
+  exportBrowserTimeoutMs: flags.exportBrowserTimeoutMs,
 });
 
 const normalizeBridgeRequestError = (err) => {
@@ -1503,6 +1524,7 @@ const startExportJob = async (bridgeUrl, kind, flags) => {
     limit: flags.maxChats,
     batchSize: flags.batchSize,
     ...loadMoreParamsFromFlags(flags),
+    ...hydrationParamsFromFlags(flags),
     refresh: flags.refresh,
     startIndex: flags.startIndex,
     delayMs: flags.delayMs,

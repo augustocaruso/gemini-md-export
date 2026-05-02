@@ -72,9 +72,11 @@
   const BUILD_STAMP = '__BUILD_STAMP__';
   const FRAME_TIMEOUT_MS = 45000;
   const CONVERSATION_CONTAINER_SELECTOR = 'div.conversation-container';
-  const HYDRATION_LOAD_WAIT_MS = 2000;
-  const HYDRATION_MAX_TOTAL_MS = 30000;
-  const HYDRATION_MAX_ATTEMPTS = 100;
+  const HYDRATION_LOAD_WAIT_MS = 2500;
+  const HYDRATION_TOP_SETTLE_MS = 8000;
+  const HYDRATION_STALL_TIMEOUT_MS = 45000;
+  const HYDRATION_MAX_TOTAL_MS = 10 * 60 * 1000;
+  const HYDRATION_MAX_ATTEMPTS = 900;
   const PROGRESS_MIN_VISIBLE_MS = 900;
   // Container da área de ações da conversa (canto superior direito, mesma
   // linha do avatar e do kebab). `top-bar-actions` é o custom element
@@ -4546,7 +4548,9 @@
     if (command.type === 'get-current-chat') {
       return {
         ok: true,
-        payload: await collectExportForCurrentConversation(),
+        payload: await collectExportForCurrentConversation({
+          hydration: normalizeHydrationOptions(command.args || {}),
+        }),
       };
     }
 
@@ -4592,6 +4596,7 @@
         payload = await collectExportForConversation(targetItem, {
           preferDirectNotebookReturn: command.args?.notebookReturnMode === 'direct',
           preserveNotebookContext: true,
+          hydration: normalizeHydrationOptions(command.args || {}),
         });
       } catch (err) {
         return {
@@ -4731,6 +4736,50 @@
     target.dispatchEvent(new win.Event('scroll', { bubbles: true }));
   };
 
+  const boundedHydrationMs = (value, fallback, min, max) => {
+    const parsed = Number(value ?? fallback);
+    const safe = Number.isFinite(parsed) ? parsed : fallback;
+    return Math.max(min, Math.min(max, safe));
+  };
+
+  const normalizeHydrationOptions = (options = {}) => {
+    const maxTotalMs = boundedHydrationMs(
+      options.maxTotalMs ?? options.hydrationMaxTotalMs ?? options.hydrationTimeoutMs,
+      HYDRATION_MAX_TOTAL_MS,
+      5000,
+      30 * 60 * 1000,
+    );
+    return {
+      loadWaitMs: boundedHydrationMs(
+        options.loadWaitMs ?? options.hydrationLoadWaitMs,
+        HYDRATION_LOAD_WAIT_MS,
+        500,
+        30_000,
+      ),
+      topSettleMs: boundedHydrationMs(
+        options.topSettleMs ?? options.hydrationTopSettleMs,
+        HYDRATION_TOP_SETTLE_MS,
+        1000,
+        60_000,
+      ),
+      stallTimeoutMs: boundedHydrationMs(
+        options.stallTimeoutMs ?? options.hydrationStallTimeoutMs,
+        HYDRATION_STALL_TIMEOUT_MS,
+        5000,
+        maxTotalMs,
+      ),
+      maxTotalMs,
+      maxAttempts: Math.max(
+        1,
+        Math.min(
+          5000,
+          Number(options.maxAttempts ?? options.hydrationMaxAttempts ?? HYDRATION_MAX_ATTEMPTS) ||
+            HYDRATION_MAX_ATTEMPTS,
+        ),
+      ),
+    };
+  };
+
   const countConversationContainers = (scroller, doc) => {
     const inScroller = scroller?.querySelectorAll?.(CONVERSATION_CONTAINER_SELECTOR).length || 0;
     if (inScroller > 0) return inScroller;
@@ -4746,23 +4795,84 @@
     return String(first?.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 240);
   };
 
+  const conversationHydrationState = (scroller, doc, scrollTarget, win) => {
+    const scrollElement = scrollTarget === win ? doc.body || doc.documentElement : scroller;
+    return {
+      containerCount: countConversationContainers(scroller, doc),
+      turnDomCount: conversationDomTurnCount(doc),
+      firstSignature: firstConversationSignature(scroller, doc),
+      domSignature: conversationDomSignature(doc),
+      scrollTop: getScrollTop(scrollTarget, win),
+      scrollHeight: Math.round(scrollElement?.scrollHeight || 0),
+      clientHeight: Math.round(scrollElement?.clientHeight || win.innerHeight || 0),
+    };
+  };
+
+  const conversationHydrationChanged = (before, after) =>
+    !!before &&
+    !!after &&
+    (after.containerCount > before.containerCount ||
+      after.turnDomCount > before.turnDomCount ||
+      after.firstSignature !== before.firstSignature ||
+      after.domSignature !== before.domSignature ||
+      after.scrollHeight > before.scrollHeight + 4);
+
+  const conversationHydrationLooksLarge = (state) =>
+    Number(state?.turnDomCount || 0) >= 80 ||
+    Number(state?.containerCount || 0) >= 80 ||
+    Number(state?.scrollHeight || 0) >= 30000;
+
+  const topHydrationConfirmationMs = (state, { loadWaitMs, topSettleMs }) =>
+    conversationHydrationLooksLarge(state)
+      ? topSettleMs
+      : Math.min(topSettleMs, Math.max(1200, loadWaitMs));
+
+  const nudgeConversationTop = async (scrollTarget, scrollElement, doc, win) => {
+    try {
+      const top = getScrollTop(scrollTarget, win);
+      setScrollTop(scrollTarget, win, Math.max(0, top + 96));
+      await sleep(80);
+      setScrollTop(scrollTarget, win, 0);
+    } catch {
+      // Nudge é só para acordar lazy-load; falha aqui não deve abortar export.
+    }
+
+    try {
+      const wheel = new win.WheelEvent('wheel', {
+        bubbles: true,
+        cancelable: true,
+        deltaY: -900,
+      });
+      (scrollElement || doc).dispatchEvent(wheel);
+    } catch {
+      // Ambientes de teste/hosts antigos podem não expor WheelEvent.
+    }
+  };
+
   const hydrateConversationToTop = async (
     doc,
     win,
-    {
-      loadWaitMs = HYDRATION_LOAD_WAIT_MS,
-      maxTotalMs = HYDRATION_MAX_TOTAL_MS,
-      maxAttempts = HYDRATION_MAX_ATTEMPTS,
-    } = {},
+    options = {},
   ) => {
+    const {
+      loadWaitMs,
+      topSettleMs,
+      stallTimeoutMs,
+      maxTotalMs,
+      maxAttempts,
+    } = normalizeHydrationOptions(options);
     const { el: scroller, matchedBy } = getGeminiScrollHost(doc, win);
     const scrollTarget = getScrollTarget(scroller, doc, win);
     const scrollElement = scrollTarget === win ? doc.body || doc.documentElement : scroller;
     const startedAt = Date.now();
+    let lastProgressAt = startedAt;
     let attempts = 0;
     let reachedTop = false;
     let timedOut = false;
+    let stalled = false;
+    let finalReason = null;
     let lastContainerCount = countConversationContainers(scroller, doc);
+    let lastTurnDomCount = conversationDomTurnCount(doc);
 
     if (!scrollElement || scrollElement.scrollHeight <= scrollElement.clientHeight + 4) {
       const turns = scrapeTurns(doc);
@@ -4774,59 +4884,114 @@
           attempts,
           reachedTop: true,
           timedOut: false,
+          stalled: false,
+          finalReason: 'not-scrollable',
+          loadWaitMs,
+          topSettleMs,
+          stallTimeoutMs,
+          maxTotalMs,
+          maxAttempts,
           conversationContainers: lastContainerCount,
+          turnDomCount: conversationDomTurnCount(doc),
           turnsAfterHydration: turns.length,
           elapsedMs: Date.now() - startedAt,
         },
       };
     }
 
-    const waitForHydrationChange = async (beforeCount, beforeSignature) => {
+    const waitForHydrationChange = async (beforeState, waitMs) => {
       const waitStartedAt = Date.now();
-      let count = beforeCount;
-      let signature = beforeSignature;
-      while (Date.now() - waitStartedAt < loadWaitMs) {
+      let state = beforeState;
+      while (Date.now() - waitStartedAt < waitMs) {
         await sleep(100);
-        count = countConversationContainers(scroller, doc);
-        signature = firstConversationSignature(scroller, doc);
-        if (count > beforeCount || signature !== beforeSignature) {
-          return { count, signature, changed: true };
+        state = conversationHydrationState(scroller, doc, scrollTarget, win);
+        if (conversationHydrationChanged(beforeState, state)) {
+          return { state, changed: true };
         }
       }
-      return { count, signature, changed: false };
+      return {
+        state: conversationHydrationState(scroller, doc, scrollTarget, win),
+        changed: false,
+      };
     };
 
     while (attempts < maxAttempts) {
       if (Date.now() - startedAt > maxTotalMs) {
         timedOut = true;
+        finalReason = 'max-total-time';
+        break;
+      }
+      if (Date.now() - lastProgressAt > stallTimeoutMs) {
+        stalled = true;
+        finalReason = 'no-dom-growth';
         break;
       }
 
       attempts += 1;
-      const beforeCount = countConversationContainers(scroller, doc);
-      const beforeSignature = firstConversationSignature(scroller, doc);
-      const beforeTop = getScrollTop(scrollTarget, win);
+      const beforeState = conversationHydrationState(scroller, doc, scrollTarget, win);
+      const beforeTop = beforeState.scrollTop;
 
       if (beforeTop <= 2 && attempts > 1) {
-        const finalCheck = await waitForHydrationChange(beforeCount, beforeSignature);
-        lastContainerCount = finalCheck.count;
+        await nudgeConversationTop(scrollTarget, scrollElement, doc, win);
+        const finalCheck = await waitForHydrationChange(
+          beforeState,
+          topHydrationConfirmationMs(beforeState, { loadWaitMs, topSettleMs }),
+        );
+        lastContainerCount = finalCheck.state.containerCount;
+        lastTurnDomCount = finalCheck.state.turnDomCount;
         if (!finalCheck.changed) {
           reachedTop = true;
+          finalReason = 'stable-at-top';
           break;
         }
+        lastProgressAt = Date.now();
+        options.onProgress?.({
+          attempts,
+          elapsedMs: Date.now() - startedAt,
+          state: finalCheck.state,
+        });
+        await sleep(50);
+        continue;
       }
 
       setScrollTop(scrollTarget, win, 0);
-      const growth = await waitForHydrationChange(beforeCount, beforeSignature);
-      lastContainerCount = growth.count;
+      const growth = await waitForHydrationChange(beforeState, loadWaitMs);
+      lastContainerCount = growth.state.containerCount;
+      lastTurnDomCount = growth.state.turnDomCount;
 
-      const afterTop = getScrollTop(scrollTarget, win);
-      if (!growth.changed && afterTop <= 2) {
-        reachedTop = true;
-        break;
+      if (growth.changed) {
+        lastProgressAt = Date.now();
+        options.onProgress?.({
+          attempts,
+          elapsedMs: Date.now() - startedAt,
+          state: growth.state,
+        });
+      } else if (growth.state.scrollTop <= 2) {
+        await nudgeConversationTop(scrollTarget, scrollElement, doc, win);
+        const confirmation = await waitForHydrationChange(
+          growth.state,
+          topHydrationConfirmationMs(growth.state, { loadWaitMs, topSettleMs }),
+        );
+        lastContainerCount = confirmation.state.containerCount;
+        lastTurnDomCount = confirmation.state.turnDomCount;
+        if (!confirmation.changed) {
+          reachedTop = true;
+          finalReason = 'stable-at-top-after-scroll';
+          break;
+        }
+        lastProgressAt = Date.now();
+        options.onProgress?.({
+          attempts,
+          elapsedMs: Date.now() - startedAt,
+          state: confirmation.state,
+        });
       }
 
       await sleep(50);
+    }
+
+    if (!reachedTop && !timedOut && !stalled && attempts >= maxAttempts) {
+      finalReason = 'max-attempts';
     }
 
     const turns = scrapeTurns(doc);
@@ -4838,7 +5003,16 @@
         attempts,
         reachedTop,
         timedOut,
+        stalled,
+        finalReason,
+        loadWaitMs,
+        topSettleMs,
+        stallTimeoutMs,
+        maxTotalMs,
+        maxAttempts,
+        lastProgressElapsedMs: Date.now() - lastProgressAt,
         conversationContainers: lastContainerCount,
+        turnDomCount: lastTurnDomCount,
         turnsAfterHydration: turns.length,
         scrollTop: getScrollTop(scrollTarget, win),
         scrollHeight: scrollElement?.scrollHeight || null,
@@ -5222,11 +5396,31 @@
 
   const collectExportForCurrentConversation = async (options = {}) => {
     const hydrationStartedAt = Date.now();
-    const hydrated = await hydrateConversationToTop(document, window);
+    const hydrated = await hydrateConversationToTop(document, window, {
+      ...(options.hydration || {}),
+      onProgress: ({ state: hydrationState, elapsedMs }) => {
+        if (state.progress) {
+          updateExportProgress({
+            current: 0,
+            label: `Hidratando conversa... ${
+              hydrationState.turnDomCount || hydrationState.containerCount || 0
+            } turnos vistos`,
+            phase: `hidratação ${Math.round(elapsedMs / 1000)}s`,
+          });
+        }
+        options.hydration?.onProgress?.({ state: hydrationState, elapsedMs });
+      },
+    });
     const hydrateDomMs = Date.now() - hydrationStartedAt;
     if (!hydrated.stats.reachedTop || hydrated.stats.timedOut) {
+      const reason =
+        hydrated.stats.timedOut
+          ? `timeout de ${Math.round(hydrated.stats.maxTotalMs / 1000)}s`
+          : hydrated.stats.stalled
+            ? `sem progresso por ${Math.round(hydrated.stats.stallTimeoutMs / 1000)}s`
+            : hydrated.stats.finalReason || 'fim nao confirmado';
       throw new Error(
-        `Nao consegui carregar o inicio da conversa com seguranca antes de exportar (scroller: ${hydrated.stats.matchedBy}, tentativas: ${hydrated.stats.attempts}). Recarregue a aba e tente novamente.`,
+        `Nao consegui carregar o inicio da conversa com seguranca antes de exportar (${reason}; scroller: ${hydrated.stats.matchedBy}; tentativas: ${hydrated.stats.attempts}; turnos vistos: ${hydrated.stats.turnDomCount || hydrated.stats.turnsAfterHydration || 0}). Recarregue a aba e tente novamente.`,
       );
     }
     const payload = await buildExportPayload(document, location.href, {
@@ -5275,6 +5469,7 @@
       previousChatId: navigation?.previousChatId || '',
       previousSignature: navigation?.previousSignature || '',
       navigation: navigation || null,
+      hydration: options.hydration || null,
       metrics: {
         timings: {
           openConversationMs,
@@ -8106,7 +8301,7 @@
       clearNotebookChatUrlCache: (notebookId) => clearNotebookChatUrlCache(notebookId),
       snapshot: debugSnapshot,
       artifacts: (options = {}) => inspectArtifactDom(options),
-      hydrateCurrentConversation: () => hydrateConversationToTop(document, window),
+      hydrateCurrentConversation: (options = {}) => hydrateConversationToTop(document, window, options),
       exportPayload: () => buildExportPayload(document, location.href),
       conversationDomSignature: () => conversationDomSignature(document),
       waitForChatToLoadForDebug: (targetChatId, options = {}) =>

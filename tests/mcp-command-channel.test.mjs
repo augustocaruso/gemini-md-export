@@ -16,6 +16,19 @@ test('MCP não espera timeout longo quando comando não é entregue à aba', () 
   assert.match(source, /clearTimeout\(pending\.dispatchTimer\)/);
 });
 
+test('MCP dá timeout maior e knobs de hidratação para export de conversa gigante', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+
+  assert.match(source, /DEFAULT_EXPORT_HYDRATION_MAX_TOTAL_MS = 10 \* 60_000/);
+  assert.match(source, /EXPORT_COMMAND_TIMEOUT_MS/);
+  assert.match(source, /const exportHydrationArgs = \(args = \{\}\) =>/);
+  assert.match(source, /hydrationMaxTotalMs/);
+  assert.match(source, /hydrationStallTimeoutMs/);
+  assert.match(source, /exportCommandTimeoutMs/);
+  assert.match(source, /'get-chat-by-id'[\s\S]*\.\.\.hydrationArgs/);
+  assert.match(source, /\{ timeoutMs: commandTimeoutMs \}/);
+});
+
 test('MCP protocolo v2 usa SSE para comandos e snapshot separado', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const contentSource = readFileSync(resolve(ROOT, 'src', 'userscript-shell.js'), 'utf-8');

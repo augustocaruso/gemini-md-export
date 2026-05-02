@@ -116,6 +116,13 @@ const COMMAND_CHANNEL_FAILURE_COOLDOWN_MS = Math.max(
 const LONG_POLL_TIMEOUT_MS = 25_000;
 const SSE_KEEPALIVE_MS = Number(process.env.GEMINI_MCP_SSE_KEEPALIVE_MS || 15_000);
 const COMMAND_TIMEOUT_MS = Number(process.env.GEMINI_MCP_COMMAND_TIMEOUT_MS || 180_000);
+const DEFAULT_EXPORT_HYDRATION_LOAD_WAIT_MS = 2500;
+const DEFAULT_EXPORT_HYDRATION_TOP_SETTLE_MS = 8000;
+const DEFAULT_EXPORT_HYDRATION_STALL_TIMEOUT_MS = 45_000;
+const DEFAULT_EXPORT_HYDRATION_MAX_TOTAL_MS = 10 * 60_000;
+const EXPORT_COMMAND_TIMEOUT_MS = Number(
+  process.env.GEMINI_MCP_EXPORT_COMMAND_TIMEOUT_MS || 15 * 60_000,
+);
 const COMMAND_DISPATCH_TIMEOUT_MS = Number(
   process.env.GEMINI_MCP_COMMAND_DISPATCH_TIMEOUT_MS || 20_000,
 );
@@ -2790,6 +2797,57 @@ const normalizeWaitMs = (value, fallback, max = 30_000) => {
   return Math.max(0, Math.min(max, safe));
 };
 
+const normalizeExportWaitMs = (value, fallback, min = 0, max = 45 * 60_000) => {
+  const parsed = Number(value ?? fallback);
+  const safe = Number.isFinite(parsed) ? parsed : fallback;
+  return Math.max(min, Math.min(max, safe));
+};
+
+const exportHydrationArgs = (args = {}) => {
+  const hydrationMaxTotalMs = normalizeExportWaitMs(
+    args.hydrationMaxTotalMs ?? args.hydrationTimeoutMs,
+    DEFAULT_EXPORT_HYDRATION_MAX_TOTAL_MS,
+    5000,
+    30 * 60_000,
+  );
+  return {
+    hydrationLoadWaitMs: normalizeExportWaitMs(
+      args.hydrationLoadWaitMs,
+      DEFAULT_EXPORT_HYDRATION_LOAD_WAIT_MS,
+      500,
+      30_000,
+    ),
+    hydrationTopSettleMs: normalizeExportWaitMs(
+      args.hydrationTopSettleMs,
+      DEFAULT_EXPORT_HYDRATION_TOP_SETTLE_MS,
+      1000,
+      60_000,
+    ),
+    hydrationStallTimeoutMs: normalizeExportWaitMs(
+      args.hydrationStallTimeoutMs,
+      DEFAULT_EXPORT_HYDRATION_STALL_TIMEOUT_MS,
+      5000,
+      hydrationMaxTotalMs,
+    ),
+    hydrationMaxTotalMs,
+    hydrationMaxAttempts: Math.max(
+      1,
+      Math.min(5000, Number(args.hydrationMaxAttempts || 900) || 900),
+    ),
+  };
+};
+
+const exportCommandTimeoutMs = (args = {}) => {
+  const hydration = exportHydrationArgs(args);
+  const fallback = Math.max(EXPORT_COMMAND_TIMEOUT_MS, hydration.hydrationMaxTotalMs + 90_000);
+  return normalizeExportWaitMs(
+    args.exportBrowserTimeoutMs ?? args.browserCommandTimeoutMs,
+    fallback,
+    30_000,
+    45 * 60_000,
+  );
+};
+
 const normalizeReloadWaitMs = (value, fallback, max = 120_000) => {
   const parsed = Number(value ?? fallback);
   const safe = Number.isFinite(parsed) ? parsed : fallback;
@@ -4852,6 +4910,8 @@ const resolveNotebookConversationRequest = (client, args = {}) => {
 
 const downloadConversationItemForClient = async (client, conversation, args = {}) => {
   const commandStartedAt = Date.now();
+  const hydrationArgs = exportHydrationArgs(args);
+  const commandTimeoutMs = exportCommandTimeoutMs(args);
   const command = await enqueueCommandWithClientRecovery(
     client,
     'get-chat-by-id',
@@ -4859,8 +4919,9 @@ const downloadConversationItemForClient = async (client, conversation, args = {}
       item: conversation,
       returnToOriginal: args.returnToOriginal !== false,
       notebookReturnMode: args.notebookReturnMode || null,
+      ...hydrationArgs,
     },
-    {},
+    { timeoutMs: commandTimeoutMs },
     args,
   );
   const activeClient = command.client;
@@ -5513,6 +5574,39 @@ const parseOptionalBoolean = (value) => {
   if (value === 'false' || value === '0') return false;
   return undefined;
 };
+
+const firstDefined = (...values) => values.find((value) => value !== undefined && value !== null);
+
+const exportBrowserArgsFromSearchParams = (searchParams, body = {}) => ({
+  hydrationMaxTotalMs: firstDefined(
+    body.hydrationMaxTotalMs,
+    body.hydrationTimeoutMs,
+    searchParams.get('hydrationMaxTotalMs'),
+    searchParams.get('hydrationTimeoutMs'),
+  ),
+  hydrationLoadWaitMs: firstDefined(
+    body.hydrationLoadWaitMs,
+    searchParams.get('hydrationLoadWaitMs'),
+  ),
+  hydrationTopSettleMs: firstDefined(
+    body.hydrationTopSettleMs,
+    searchParams.get('hydrationTopSettleMs'),
+  ),
+  hydrationStallTimeoutMs: firstDefined(
+    body.hydrationStallTimeoutMs,
+    searchParams.get('hydrationStallTimeoutMs'),
+  ),
+  hydrationMaxAttempts: firstDefined(
+    body.hydrationMaxAttempts,
+    searchParams.get('hydrationMaxAttempts'),
+  ),
+  exportBrowserTimeoutMs: firstDefined(
+    body.exportBrowserTimeoutMs,
+    body.browserCommandTimeoutMs,
+    searchParams.get('exportBrowserTimeoutMs'),
+    searchParams.get('browserCommandTimeoutMs'),
+  ),
+});
 
 const withTimeout = (promise, timeoutMs) =>
   new Promise((resolve, reject) => {
@@ -10466,6 +10560,7 @@ const bridgeServer = createServer(async (req, res) => {
           loadMoreBrowserRounds: url.searchParams.get('loadMoreBrowserRounds') || undefined,
           loadMoreBrowserTimeoutMs: url.searchParams.get('loadMoreBrowserTimeoutMs') || undefined,
           loadMoreTimeoutMs: url.searchParams.get('loadMoreTimeoutMs') || undefined,
+          ...exportBrowserArgsFromSearchParams(url.searchParams),
           skipExisting: parseOptionalBoolean(url.searchParams.get('skipExisting')),
           autoReleaseClaim: parseOptionalBoolean(url.searchParams.get('autoReleaseClaim')),
         }),
@@ -10504,6 +10599,7 @@ const bridgeServer = createServer(async (req, res) => {
           loadMoreBrowserRounds: url.searchParams.get('loadMoreBrowserRounds') || undefined,
           loadMoreBrowserTimeoutMs: url.searchParams.get('loadMoreBrowserTimeoutMs') || undefined,
           loadMoreTimeoutMs: url.searchParams.get('loadMoreTimeoutMs') || undefined,
+          ...exportBrowserArgsFromSearchParams(url.searchParams),
           skipExisting: true,
           autoReleaseClaim: parseOptionalBoolean(url.searchParams.get('autoReleaseClaim')),
         }),
@@ -10540,6 +10636,7 @@ const bridgeServer = createServer(async (req, res) => {
           loadMoreBrowserRounds: url.searchParams.get('loadMoreBrowserRounds') || undefined,
           loadMoreBrowserTimeoutMs: url.searchParams.get('loadMoreBrowserTimeoutMs') || undefined,
           loadMoreTimeoutMs: url.searchParams.get('loadMoreTimeoutMs') || undefined,
+          ...exportBrowserArgsFromSearchParams(url.searchParams),
           skipExisting: true,
           autoReleaseClaim: parseOptionalBoolean(url.searchParams.get('autoReleaseClaim')),
         }),
@@ -10580,6 +10677,7 @@ const bridgeServer = createServer(async (req, res) => {
           chatIds,
           items,
           delayMs: body.delayMs || url.searchParams.get('delayMs') || undefined,
+          ...exportBrowserArgsFromSearchParams(url.searchParams, body),
           autoReleaseClaim: parseOptionalBoolean(
             body.autoReleaseClaim ?? url.searchParams.get('autoReleaseClaim'),
           ),
@@ -10663,8 +10761,17 @@ const bridgeServer = createServer(async (req, res) => {
 
   if (req.method === 'GET' && url.pathname === '/agent/current-chat') {
     try {
-      const client = requireClient(clientSelectorFromSearchParams(url.searchParams));
-      const result = await enqueueCommand(client.clientId, 'get-current-chat');
+      const args = {
+        ...clientSelectorFromSearchParams(url.searchParams),
+        ...exportBrowserArgsFromSearchParams(url.searchParams),
+      };
+      const client = requireClient(args);
+      const result = await enqueueCommand(
+        client.clientId,
+        'get-current-chat',
+        exportHydrationArgs(args),
+        { timeoutMs: exportCommandTimeoutMs(args) },
+      );
       sendAgentJson(res, 200, {
         client: summarizeClient(client),
         ...result,
@@ -10683,6 +10790,7 @@ const bridgeServer = createServer(async (req, res) => {
         chatId: url.searchParams.get('chatId') || undefined,
         outputDir: url.searchParams.get('outputDir') || undefined,
         returnToOriginal: url.searchParams.get('returnToOriginal') !== 'false',
+        ...exportBrowserArgsFromSearchParams(url.searchParams),
       };
       const client = requireClient(args);
       const result = await downloadChatForClient(client, args);
@@ -10702,6 +10810,7 @@ const bridgeServer = createServer(async (req, res) => {
         title: url.searchParams.get('title') || undefined,
         outputDir: url.searchParams.get('outputDir') || undefined,
         returnToOriginal: url.searchParams.get('returnToOriginal') !== 'false',
+        ...exportBrowserArgsFromSearchParams(url.searchParams),
       };
       const client = requireNotebookClient(args);
       const result = await downloadNotebookChatForClient(client, args);
@@ -10721,6 +10830,7 @@ const bridgeServer = createServer(async (req, res) => {
           ? Number(url.searchParams.get('startIndex'))
           : undefined,
         limit: url.searchParams.has('limit') ? Number(url.searchParams.get('limit')) : undefined,
+        ...exportBrowserArgsFromSearchParams(url.searchParams),
         autoReleaseClaim: parseOptionalBoolean(url.searchParams.get('autoReleaseClaim')),
       };
       const client = requireNotebookClient(args);

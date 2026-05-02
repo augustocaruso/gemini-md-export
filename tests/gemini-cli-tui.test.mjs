@@ -1290,6 +1290,12 @@ test('CLI export reexport e notebook usam endpoints diretos da bridge', async ()
             'abc123abc123',
             '--output-dir',
             '/vault/staging',
+            '--hydration-timeout-ms',
+            '900000',
+            '--hydration-stall-ms',
+            '60000',
+            '--export-browser-timeout-ms',
+            '960000',
             '--bridge-url',
             bridgeUrl,
             '--plain',
@@ -1315,6 +1321,9 @@ test('CLI export reexport e notebook usam endpoints diretos da bridge', async ()
     const reexportRequest = requests.find((item) => item.pathname === '/agent/reexport-chats');
     assert.equal(reexportRequest.searchParams.get('chatId'), 'abc123abc123');
     assert.equal(reexportRequest.searchParams.get('outputDir'), '/vault/staging');
+    assert.equal(reexportRequest.searchParams.get('hydrationMaxTotalMs'), '900000');
+    assert.equal(reexportRequest.searchParams.get('hydrationStallTimeoutMs'), '60000');
+    assert.equal(reexportRequest.searchParams.get('exportBrowserTimeoutMs'), '960000');
 
     const notebookRequest = requests.find((item) => item.pathname === '/agent/export-notebook');
     assert.equal(notebookRequest.searchParams.get('startIndex'), '2');
