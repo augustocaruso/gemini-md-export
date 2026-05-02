@@ -52,8 +52,8 @@ Use bundled Agent Skills for detailed workflows: `gemini-vault-sync`,
 
 - `/sync`: sync the known vault with Gemini Web; an argument overrides the
   vault path from context.
-- `/exporter:diagnose-page`: diagnose interactive iframe artifacts in a single
-  Gemini conversation page without exporting or bypassing browser sandboxing.
+- `/exporter:diagnose-page`: diagnose artifact iframes without export/bypass;
+  may click a strong artifact button, then close it and release the tab claim.
 - `/exporter:repair-vault`: audit and repair contaminated raw exports/wiki
   cases.
 

@@ -703,6 +703,82 @@ test('CLI --keep-claim preserva claim explicita', async () => {
   });
 });
 
+test('CLI diagnose page abre artefatos e pede liberação da claim no endpoint', async () => {
+  await withServer((req, res, url) => {
+    if (url.pathname === '/agent/ready') {
+      sendJson(res, 200, {
+        ready: true,
+        mode: 'hot',
+        connectedClientCount: 1,
+        selectableTabCount: 1,
+        commandReadyClientCount: 1,
+      });
+      return;
+    }
+    if (url.pathname === '/agent/diagnose-page') {
+      sendJson(res, 200, {
+        ok: true,
+        page: {
+          chatId: '46b61afe42a5956d',
+          url: url.searchParams.get('url'),
+          title: 'Artefato',
+        },
+        summary: {
+          total: 1,
+          launcherCount: 1,
+          clickedLauncherCount: 1,
+          htmlExtractable: 1,
+        },
+        launcherOpen: {
+          close: { ok: true },
+        },
+        items: [
+          {
+            id: 'artifact-001',
+            kind: 'gemini_code_immersive',
+            srcKind: 'remote_usercontent_goog',
+            htmlExtractable: true,
+            recommendedExport: 'html_asset',
+          },
+        ],
+        tabClaimRelease: {
+          ok: true,
+          released: { claimId: 'claim-123' },
+        },
+      });
+      return;
+    }
+    sendJson(res, 404, { error: `not found: ${url.pathname}` });
+  }, async (bridgeUrl, requests) => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+    const run = await main(
+      [
+        'diagnose',
+        'page',
+        'https://gemini.google.com/app/46b61afe42a5956d',
+        '--bridge-url',
+        bridgeUrl,
+        '--claim-id',
+        'claim-123',
+        '--plain',
+      ],
+      { stdout, stderr },
+    );
+
+    assert.equal(run.exitCode, 0);
+    assert.match(stdout.text(), /Botões candidatos: 1; abertos: 1/);
+    assert.match(stdout.text(), /Superfície aberta: fechada após o diagnóstico/);
+    assert.match(stdout.text(), /Claim da aba: liberada/);
+    const diagnoseRequest = requests.find((item) => item.pathname === '/agent/diagnose-page');
+    assert.ok(diagnoseRequest);
+    assert.equal(diagnoseRequest.searchParams.get('claimId'), 'claim-123');
+    assert.equal(diagnoseRequest.searchParams.get('releaseClaimOnOperationEnd'), 'true');
+    assert.equal(requests.some((item) => item.pathname === '/agent/release-tab'), false);
+    assert.equal(stderr.text(), '');
+  });
+});
+
 test('CLI sync --plain emite progresso estavel e RESULT_JSON final', async () => {
   await withServer(mockSyncServer(), async (bridgeUrl, requests) => {
     const stdout = captureStream();

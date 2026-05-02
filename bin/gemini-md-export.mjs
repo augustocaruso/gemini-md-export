@@ -256,6 +256,9 @@ const diagnoseHelp = () =>
     '  --include-html-sample    Inclui amostra curta do HTML lido pelo probe.',
     '  --include-html           Inclui outerHTML curto dos iframes no DOM pai.',
     '  --no-frame-probe         Nao tenta probe via chrome.scripting nos iframes.',
+    '  --no-open-artifacts      Nao clica em botoes candidatos para abrir artefatos.',
+    '  --keep-artifact-open     Nao tenta fechar a superficie aberta apos diagnosticar.',
+    '  --artifact-open-wait-ms <ms> Tempo para aguardar iframe apos clique.',
     '',
     ...outputModeHelp(),
     '',
@@ -678,6 +681,12 @@ const parseArgs = (argv) => {
     else if (arg === '--include-html-sample') out.flags.includeHtmlSample = true;
     else if (arg === '--include-html') out.flags.includeHtml = true;
     else if (arg === '--no-frame-probe') out.flags.includeFrameProbe = false;
+    else if (arg === '--open-artifacts') out.flags.openArtifactLaunchers = true;
+    else if (arg === '--no-open-artifacts') out.flags.openArtifactLaunchers = false;
+    else if (arg === '--keep-artifact-open') out.flags.closeOpenedLaunchers = false;
+    else if (arg === '--close-artifact') out.flags.closeOpenedLaunchers = true;
+    else if (arg === '--max-open-artifacts') out.flags.maxOpenArtifactLaunchers = Number(value());
+    else if (arg === '--artifact-open-wait-ms') out.flags.artifactOpenWaitMs = Number(value());
     else if (arg === '--audit-only' || arg === '--include-notes') out.flags.extraRepairArgs.push(arg);
     else if (arg === '--report') {
       const report = value();
@@ -1809,6 +1818,12 @@ const diagnosePlainLabel = (result = {}) => {
   if (result.page?.url) lines.push(`URL: ${result.page.url}`);
   const summary = result.summary || {};
   lines.push(`Artefatos detectados: ${summary.total ?? result.items?.length ?? 0}`);
+  if (summary.launcherCount) {
+    lines.push(
+      `Botões candidatos: ${summary.launcherCount}` +
+        (summary.clickedLauncherCount ? `; abertos: ${summary.clickedLauncherCount}` : ''),
+    );
+  }
   lines.push(`HTML extraível: ${summary.htmlExtractable ?? 0}`);
   if (result.frameProbe) {
     lines.push(
@@ -1828,6 +1843,26 @@ const diagnosePlainLabel = (result = {}) => {
     lines.push(`  Recomendação: ${item.recommendedExport || 'fallback_warning'}`);
   }
   if (items.length > 8) lines.push(`\n... ${items.length - 8} artefato(s) omitido(s) no resumo.`);
+  const launchers = Array.isArray(result.launchers) ? result.launchers : [];
+  if (items.length === 0 && launchers.length > 0) {
+    lines.push('');
+    lines.push('Botões candidatos encontrados:');
+    for (const launcher of launchers.slice(0, 5)) {
+      lines.push(
+        `  ${launcher.id || 'launcher'} — ${launcher.text || launcher.ariaLabel || launcher.dataTestId || 'sem texto'}`,
+      );
+    }
+  }
+  if (result.launcherOpen?.close) {
+    lines.push(
+      `Superfície aberta: ${result.launcherOpen.close.ok ? 'fechada após o diagnóstico' : 'não consegui fechar automaticamente'}`,
+    );
+  }
+  if (result.tabClaimRelease) {
+    lines.push(
+      `Claim da aba: ${result.tabClaimRelease.ok === false ? 'não consegui liberar automaticamente' : 'liberada'}`,
+    );
+  }
   if (result.nextAction?.message) {
     lines.push('');
     lines.push(`Próximo passo: ${result.nextAction.message}`);
@@ -1857,25 +1892,38 @@ const runDiagnose = async (parsed, streams = {}) => {
     ui.stdout.write('Bridge conectada. Verificando Gemini Web...\n');
   }
   await ensureReady(parsed.flags.bridgeUrl, parsed.flags, ui);
-  const result = await requestJson(
-    parsed.flags.bridgeUrl,
-    appendParams('/agent/diagnose-page', {
-      url: targetUrl,
-      clientId: parsed.flags.clientId,
-      tabId: parsed.flags.tabId,
-      claimId: parsed.flags.claimId,
-      includeFrameProbe: parsed.flags.includeFrameProbe,
-      includeHtmlSample: parsed.flags.includeHtmlSample,
-      includeHtml: parsed.flags.includeHtml,
-      waitMs: parsed.flags.waitMs,
-    }),
-    { timeoutMs: Math.max(45_000, Number(parsed.flags.waitMs || 0) + 20_000) },
-  );
-  writeStructuredResult(ui, result, {
-    label: diagnosePlainLabel(result),
-    includeResultJson: parsed.flags.resultJson === true,
-  });
-  return { exitCode: result.ok ? EXIT.OK : EXIT.EXTENSION_UNREADY, result };
+  let result = null;
+  try {
+    result = await requestJson(
+      parsed.flags.bridgeUrl,
+      appendParams('/agent/diagnose-page', {
+        url: targetUrl,
+        clientId: parsed.flags.clientId,
+        tabId: parsed.flags.tabId,
+        claimId: parsed.flags.claimId,
+        includeFrameProbe: parsed.flags.includeFrameProbe,
+        includeHtmlSample: parsed.flags.includeHtmlSample,
+        includeHtml: parsed.flags.includeHtml,
+        openArtifactLaunchers: parsed.flags.openArtifactLaunchers,
+        closeOpenedLaunchers: parsed.flags.closeOpenedLaunchers,
+        maxOpenArtifactLaunchers: parsed.flags.maxOpenArtifactLaunchers,
+        artifactOpenWaitMs: parsed.flags.artifactOpenWaitMs,
+        releaseClaimOnOperationEnd: parsed.flags.autoReleaseClaim !== false,
+        autoReleaseClaim: parsed.flags.autoReleaseClaim,
+        waitMs: parsed.flags.waitMs,
+      }),
+      { timeoutMs: Math.max(45_000, Number(parsed.flags.waitMs || 0) + 20_000) },
+    );
+    writeStructuredResult(ui, result, {
+      label: diagnosePlainLabel(result),
+      includeResultJson: parsed.flags.resultJson === true,
+    });
+    return { exitCode: result.ok ? EXIT.OK : EXIT.EXTENSION_UNREADY, result };
+  } finally {
+    if (!result?.tabClaimRelease && parsed.flags.claimId && parsed.flags.autoReleaseClaim !== false) {
+      await releaseCliClaimQuietly(parsed.flags, 'cli-diagnose-finished', result);
+    }
+  }
 };
 
 const compactTabForCli = (client = {}, index = null) => ({

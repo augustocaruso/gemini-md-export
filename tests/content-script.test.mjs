@@ -658,6 +658,53 @@ test('diagnóstico de artefatos reconhece iframe gemini-code-immersive', { timeo
   window.close();
 });
 
+test('diagnóstico de artefatos abre botão candidato antes de procurar iframe', { timeout: 5000 }, async () => {
+  const artifactUrl =
+    'https://0wcgetkp1eahjwzmi88js74uet1lmjex7g07o0e20idk5c0tdx-h903225159.scf.usercontent.goog/gemini-code-immersive/shim.html?origin=https%3A%2F%2Fgemini.google.com&cache=1';
+  const { dom, runtimeErrors } = createGeminiMediaDom(`
+    <user-query><div>crie um app pequeno</div></user-query>
+    <model-response id="answer">
+      <button
+        id="open-artifact"
+        aria-label="Abrir artefato interativo"
+        data-test-id="artifact-open-button"
+        data-rect="10,20,180,44">Abrir</button>
+    </model-response>
+  `);
+  const { window } = dom;
+  const debug = await evaluateContentScript(window);
+  window.document.getElementById('open-artifact').addEventListener('click', () => {
+    const iframe = window.document.createElement('iframe');
+    iframe.setAttribute('data-rect', '10,80,640,480');
+    iframe.setAttribute('allow', 'xr-spatial-tracking; web-share');
+    iframe.setAttribute(
+      'sandbox',
+      'allow-pointer-lock allow-popups allow-forms allow-popups-to-escape-sandbox allow-downloads allow-scripts allow-same-origin',
+    );
+    iframe.setAttribute('src', artifactUrl);
+    window.document.getElementById('answer').appendChild(iframe);
+  });
+
+  const result = await debug.artifacts({
+    includeFrameProbe: false,
+    openArtifactLaunchers: true,
+    closeOpenedLaunchers: false,
+    artifactOpenWaitMs: 1200,
+  });
+  const item = result.items[0];
+
+  assert.equal(result.summary.launcherCount, 1);
+  assert.equal(result.summary.clickedLauncherCount, 1);
+  assert.equal(result.summary.openedFrameCount, 1);
+  assert.equal(result.launcherOpen.clicked[0].ok, true);
+  assert.equal(result.summary.total, 1);
+  assert.equal(item.kind, 'gemini_code_immersive');
+  assert.equal(item.srcKind, 'remote_usercontent_goog');
+  assert.deepEqual(runtimeErrors, []);
+
+  window.close();
+});
+
 test('waitForChatToLoad aguarda DOM novo antes de liberar export', { timeout: 5000 }, async () => {
   const oldChatId = 'aaaaaaaaaaaa';
   const newChatId = 'bbbbbbbbbbbb';

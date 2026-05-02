@@ -2024,9 +2024,9 @@ provavelmente mais um remendo.
 - Manter fallback HTTP/SSE.
 - Não introduzir servidor persistente extra se native messaging resolver melhor.
 
-## v0.8.20 — Diagnóstico de artefatos interativos do Gemini
+## v0.8.21 — Diagnóstico de artefatos interativos do Gemini
 
-Status: implementada na versão `0.8.20`.
+Status: implementada na versão `0.8.21`.
 
 Objetivo: diagnosticar artefatos interativos que o Gemini renderiza dentro de
 iframes remotos, como `gemini-code-immersive` em
@@ -2043,6 +2043,11 @@ Obsidian.
   indicada e inspecionar artefatos da página atual.
 - No content script, listar iframes candidatos com URL, sandbox, allow,
   dimensões, turno da conversa e estratégia recomendada.
+- Detectar botões candidatos de artefato ainda fechado, clicar apenas em
+  candidato forte para materializar o iframe, diagnosticar e tentar fechar a
+  superfície aberta depois.
+- Liberar a claim/indicador visual da aba ao terminar o diagnóstico, salvo
+  quando o usuário passar `--keep-claim`.
 - No background MV3, usar `chrome.scripting.executeScript` em frames permitidos
   para checar se o documento do iframe é legível pela extensão, sem usar
   `chrome.debugger`, cookies, APIs privadas ou bypass de sandbox.
@@ -2072,6 +2077,9 @@ Obsidian.
 - Para iframe `gemini-code-immersive` em `usercontent.goog`, o relatório deve
   distinguir leitura pelo DOM pai de leitura por probe de frame via extensão.
 - O output padrão é humano e curto; JSON completo fica disponível para debug.
+- Quando o artefato estiver atrás de um botão/preview, o diagnóstico deve
+  relatar quantos launchers encontrou, se clicou em algum e se algum iframe
+  apareceu depois do clique.
 - Se a nova permissão de host ainda não estiver ativa no runtime do navegador,
   o diagnóstico deve falhar de forma acionável, pedindo reload da extensão em
   vez de sugerir scraping inseguro.

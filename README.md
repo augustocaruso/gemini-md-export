@@ -345,7 +345,9 @@ gemini-md-export diagnose page "https://gemini.google.com/app/<chatId>" --plain
 
 Dentro do Gemini CLI, o bundle também expõe
 `/exporter:diagnose-page <url>`. Esse diagnóstico apenas informa se o HTML do
-iframe parece legível pela extensão; ele não salva o artefato nem tenta burlar
+iframe parece legível pela extensão; se o artefato ainda estiver fechado atrás
+de um botão, a CLI tenta abrir um candidato forte, diagnosticar o iframe e
+fechar a superfície aberta. Ela não salva o artefato nem tenta burlar
 sandbox/cross-origin.
 
 Também não faça cleanup manual com `kill <pid>`/`pkill`/`taskkill` como

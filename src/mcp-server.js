@@ -5029,6 +5029,31 @@ const downloadChatForClient = async (client, args = {}) => {
   return downloadConversationItemForClient(client, conversation, args);
 };
 
+const releaseDiagnoseTabClaimIfNeeded = async (client, args = {}, reason = 'diagnose-page-finished') => {
+  if (!shouldAutoReleaseTabClaim(args)) return null;
+  const claimId =
+    args.claimId ||
+    (args.releaseClaimOnOperationEnd === true
+      ? claimForClient(client)?.claimId || claimForSession(args.sessionId || args._proxySessionId)?.claimId
+      : null);
+  if (!claimId) return null;
+  try {
+    return await releaseTabClaim({
+      claimId,
+      tabId: args.tabId ?? client?.tabId,
+      sessionId: args.sessionId || args._proxySessionId,
+      reason,
+    });
+  } catch (err) {
+    return {
+      ok: false,
+      claimId,
+      error: err?.message || String(err),
+      code: err?.code || null,
+    };
+  }
+};
+
 const diagnosePageArtifactsForClient = async (client, args = {}) => {
   let activeClient = client;
   let openResult = null;
@@ -5057,6 +5082,11 @@ const diagnosePageArtifactsForClient = async (client, args = {}) => {
     activeClient = openedClient;
     openResult = result;
     if (!result?.ok) {
+      const tabClaimRelease = await releaseDiagnoseTabClaimIfNeeded(
+        activeClient,
+        args,
+        'diagnose-page-open-failed',
+      );
       return {
         ok: false,
         action: 'diagnose_page',
@@ -5066,6 +5096,7 @@ const diagnosePageArtifactsForClient = async (client, args = {}) => {
         },
         client: summarizeClient(activeClient),
         openChat: result || null,
+        tabClaimRelease,
         error: result?.error || 'Não consegui abrir a conversa para diagnóstico.',
       };
     }
@@ -5084,12 +5115,21 @@ const diagnosePageArtifactsForClient = async (client, args = {}) => {
       includeDomDiagnostics: args.includeDomDiagnostics === true || args.detail === 'full',
       maxSampleLength: args.maxSampleLength,
       maxListItems: args.maxListItems,
+      openArtifactLaunchers: args.openArtifactLaunchers !== false,
+      closeOpenedLaunchers: args.closeOpenedLaunchers !== false,
+      maxOpenArtifactLaunchers: args.maxOpenArtifactLaunchers,
+      artifactOpenWaitMs: args.artifactOpenWaitMs,
     },
     { timeoutMs: normalizeWaitMs(args.waitMs, 30_000, 120_000) },
     args,
   );
   const artifacts = result?.artifacts || {};
   const ok = result?.ok !== false && artifacts.ok !== false;
+  const tabClaimRelease = await releaseDiagnoseTabClaimIfNeeded(
+    diagnosedClient,
+    args,
+    'diagnose-page-finished',
+  );
   return {
     ok,
     action: 'diagnose_page',
@@ -5113,8 +5153,11 @@ const diagnosePageArtifactsForClient = async (client, args = {}) => {
     },
     summary: artifacts.summary || null,
     frameProbe: artifacts.frameProbe || null,
+    launcherOpen: artifacts.launcherOpen || null,
+    launchers: Array.isArray(artifacts.launchers) ? artifacts.launchers : [],
     items: Array.isArray(artifacts.items) ? artifacts.items : [],
     nextAction: artifacts.nextAction || null,
+    tabClaimRelease,
     snapshot: result?.snapshot || null,
     error: result?.error || artifacts.error || null,
   };
@@ -8564,6 +8607,24 @@ const legacyRawTools = [
           type: 'boolean',
           description: 'Inclui outerHTML curto dos iframes no DOM pai. Default: false.',
         },
+        openArtifactLaunchers: {
+          type: 'boolean',
+          description:
+            'Quando true ou omitido, tenta clicar em um botão forte de artefato antes de procurar iframe.',
+        },
+        closeOpenedLaunchers: {
+          type: 'boolean',
+          description: 'Quando true ou omitido, tenta fechar a superfície de artefato aberta no diagnóstico.',
+        },
+        maxOpenArtifactLaunchers: { type: 'integer', minimum: 0, maximum: 3 },
+        artifactOpenWaitMs: { type: 'integer', minimum: 800, maximum: 15000 },
+        releaseClaimOnOperationEnd: {
+          type: 'boolean',
+          description:
+            'Quando true ou omitido neste diagnóstico, libera a claim visual da aba ao terminar. Use false para manter.',
+        },
+        autoReleaseClaim: { type: 'boolean' },
+        keepClaim: { type: 'boolean' },
         maxSampleLength: { type: 'integer', minimum: 0, maximum: 5000 },
         maxListItems: { type: 'integer', minimum: 1, maximum: 60 },
         waitMs: { type: 'integer', minimum: 1000, maximum: 120000 },
@@ -8573,7 +8634,10 @@ const legacyRawTools = [
     },
     call: async (args = {}) => {
       const client = requireClient(args);
-      const result = await diagnosePageArtifactsForClient(client, args);
+      const result = await diagnosePageArtifactsForClient(client, {
+        releaseClaimOnOperationEnd: args.releaseClaimOnOperationEnd !== false,
+        ...args,
+      });
       return toolTextResult(result, { isError: !result.ok });
     },
   },
@@ -8865,6 +8929,7 @@ const compactStructuredContent = (name, action, structured = {}) => {
 	        ? 10
 	        : 50;
 	    const artifactItems = Array.isArray(structured.items) ? structured.items : [];
+	    const artifactLaunchers = Array.isArray(structured.launchers) ? structured.launchers : [];
 	    return {
 	      ok: structured.ok !== false,
 	      action,
@@ -8902,6 +8967,20 @@ const compactStructuredContent = (name, action, structured = {}) => {
 	      })),
 	      artifactSummary: structured.summary || null,
 	      frameProbe: structured.frameProbe || null,
+	      launcherOpen: structured.launcherOpen || null,
+	      launcherPreviewCount: Math.min(artifactLaunchers.length, 5),
+	      omittedLauncherCount: Math.max(0, artifactLaunchers.length - 5),
+	      launchers: artifactLaunchers.slice(0, 5).map((item) => ({
+	        id: item.id || null,
+	        role: item.role || null,
+	        turnIndex: item.turnIndex ?? null,
+	        score: item.score ?? null,
+	        signals: item.signals || [],
+	        text: item.text || null,
+	        ariaLabel: item.ariaLabel || null,
+	        dataTestId: item.dataTestId || null,
+	        visible: item.visible === true,
+	      })),
 	      artifactPreviewCount: Math.min(artifactItems.length, 10),
 	      omittedArtifactCount: Math.max(0, artifactItems.length - 10),
 	      artifacts: artifactItems.slice(0, 10).map((item) => ({
@@ -9398,6 +9477,13 @@ const rawTools = [
         includeFrameProbe: { type: 'boolean' },
         includeHtmlSample: { type: 'boolean' },
         includeHtml: { type: 'boolean' },
+        openArtifactLaunchers: { type: 'boolean' },
+        closeOpenedLaunchers: { type: 'boolean' },
+        maxOpenArtifactLaunchers: { type: 'integer', minimum: 0, maximum: 3 },
+        artifactOpenWaitMs: { type: 'integer', minimum: 800, maximum: 15000 },
+        releaseClaimOnOperationEnd: { type: 'boolean' },
+        autoReleaseClaim: { type: 'boolean' },
+        keepClaim: { type: 'boolean' },
         maxSampleLength: { type: 'integer', minimum: 0, maximum: 5000 },
         maxListItems: { type: 'integer', minimum: 1, maximum: 60 },
         waitMs: { type: 'integer', minimum: 1000, maximum: 120000 },
@@ -10517,7 +10603,19 @@ const bridgeServer = createServer(async (req, res) => {
         includeFrameProbe: parseOptionalBoolean(url.searchParams.get('includeFrameProbe')),
         includeHtmlSample: parseOptionalBoolean(url.searchParams.get('includeHtmlSample')),
         includeHtml: parseOptionalBoolean(url.searchParams.get('includeHtml')),
+        openArtifactLaunchers: parseOptionalBoolean(url.searchParams.get('openArtifactLaunchers')),
+        closeOpenedLaunchers: parseOptionalBoolean(url.searchParams.get('closeOpenedLaunchers')),
+        releaseClaimOnOperationEnd:
+          parseOptionalBoolean(url.searchParams.get('releaseClaimOnOperationEnd')) !== false,
+        autoReleaseClaim: parseOptionalBoolean(url.searchParams.get('autoReleaseClaim')),
+        keepClaim: parseOptionalBoolean(url.searchParams.get('keepClaim')),
         includeDomDiagnostics: parseOptionalBoolean(url.searchParams.get('includeDomDiagnostics')),
+        maxOpenArtifactLaunchers: url.searchParams.has('maxOpenArtifactLaunchers')
+          ? Number(url.searchParams.get('maxOpenArtifactLaunchers'))
+          : undefined,
+        artifactOpenWaitMs: url.searchParams.has('artifactOpenWaitMs')
+          ? Number(url.searchParams.get('artifactOpenWaitMs'))
+          : undefined,
         maxSampleLength: url.searchParams.has('maxSampleLength')
           ? Number(url.searchParams.get('maxSampleLength'))
           : undefined,

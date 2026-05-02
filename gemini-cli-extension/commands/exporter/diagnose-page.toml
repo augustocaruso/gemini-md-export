@@ -10,6 +10,8 @@ Contrato:
   Se não houver URL, peça apenas esse link.
 - Este comando é diagnóstico: não exporte, não salve HTML e não altere notas do
   Obsidian.
+- A CLI pode clicar em um botão candidato de artefato para materializar o
+  iframe, depois tenta fechar a superfície aberta e liberar claim visual da aba.
 - Use o binário local da extensão, não Playwright/CDP/debugger:
   macOS/Linux:
   `node "${extensionPath}/bin/gemini-md-export.mjs" diagnose page "<url>" --plain`

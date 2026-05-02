@@ -2098,6 +2098,24 @@
   };
 
   const ARTIFACT_IFRAME_SELECTOR = 'iframe';
+  const ARTIFACT_LAUNCHER_SELECTOR = [
+    'model-response button',
+    'model-response [role="button"]',
+    'model-response a[href]',
+    'model-response a[role="button"]',
+    '[data-test-id*="artifact" i]',
+    '[data-test-id*="immersive" i]',
+    '[aria-label*="artifact" i]',
+    '[aria-label*="artefato" i]',
+    '[aria-label*="interactive" i]',
+    '[aria-label*="interativo" i]',
+  ].join(',');
+  const ARTIFACT_LAUNCHER_STRONG_RE =
+    /(artifact|artefato|immersive|gemini-code|usercontent\.goog|scf\.usercontent|interactive|interativo)/i;
+  const ARTIFACT_LAUNCHER_WEAK_RE =
+    /(preview|prévia|previsuali|visualizar|abrir|open|launch|run|executar|app|aplicativo|canvas|code|c[oó]digo)/i;
+  const ARTIFACT_LAUNCHER_NEGATIVE_RE =
+    /(gemini-md-export|exportar markdown|share|compartilhar|more options|open menu|menu|fechar|close|copy|copiar|editar|edit|like|dislike|regenerar|retry|ouvir|listen|download)/i;
 
   const frameSandboxTokens = (el) => {
     try {
@@ -2149,6 +2167,211 @@
     }
     if (/usercontent\.goog/i.test(src)) return 'usercontent_frame';
     return 'iframe';
+  };
+
+  const artifactFrameElements = () => Array.from(document.querySelectorAll(ARTIFACT_IFRAME_SELECTOR));
+
+  const elementArtifactText = (el) =>
+    [
+      el?.getAttribute?.('data-test-id'),
+      el?.getAttribute?.('aria-label'),
+      el?.getAttribute?.('title'),
+      el?.getAttribute?.('href'),
+      el?.getAttribute?.('class'),
+      el?.id,
+      normalizeWhitespace(el?.textContent || '').slice(0, 240),
+    ]
+      .filter(Boolean)
+      .join(' ');
+
+  const normalizeArtifactLauncherElement = (el) =>
+    el?.closest?.('button,[role="button"],a[href],a[role="button"]') || el;
+
+  const scoreArtifactLauncher = (el) => {
+    if (!el || el.id === BUTTON_ID || el.closest?.(`#${MODAL_ID},#${MENU_ID},#${BUTTON_SLOT_ID}`)) {
+      return { score: -100, signals: [] };
+    }
+    const turn = el.closest?.('model-response');
+    const text = elementArtifactText(el);
+    const signals = [];
+    let score = turn ? 2 : 0;
+    if (visibleRect(el)) score += 1;
+    if (ARTIFACT_LAUNCHER_STRONG_RE.test(text)) {
+      score += 5;
+      signals.push('strong-text');
+    }
+    if (ARTIFACT_LAUNCHER_WEAK_RE.test(text)) {
+      score += 2;
+      signals.push('open-preview-text');
+    }
+    if (el.querySelector?.('iframe,canvas,img,svg')) {
+      score += 1;
+      signals.push('rich-control');
+    }
+    if (ARTIFACT_LAUNCHER_NEGATIVE_RE.test(text)) {
+      score -= 7;
+      signals.push('negative-ui-control');
+    }
+    return { score, signals };
+  };
+
+  const inspectArtifactLauncherElement = (el, { includeHtml = false } = {}) => {
+    const rect = visibleRect(el);
+    const turnNodes = Array.from(document.querySelectorAll('user-query, model-response'));
+    const turn = el.closest?.('user-query, model-response');
+    const { score, signals } = scoreArtifactLauncher(el);
+    return {
+      id: '',
+      kind: 'artifact_launcher',
+      tag: el.tagName?.toLowerCase() || null,
+      role: turn ? roleOf(turn) : null,
+      inTurn: !!turn,
+      turnIndex: turn ? turnNodes.indexOf(turn) + 1 : null,
+      score,
+      signals,
+      text: normalizeWhitespace(el.textContent || '').slice(0, 240),
+      ariaLabel: el.getAttribute?.('aria-label') || '',
+      title: el.getAttribute?.('title') || '',
+      dataTestId: el.getAttribute?.('data-test-id') || '',
+      href: el.getAttribute?.('href') || '',
+      visible: !!rect,
+      rect: rect
+        ? {
+            x: Math.round(rect.x),
+            y: Math.round(rect.y),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height),
+          }
+        : null,
+      outerHTML: includeHtml ? compactOuterHtml(el) : '',
+    };
+  };
+
+  const findArtifactLaunchers = ({ includeHtml = false } = {}) => {
+    const seen = new Set();
+    return Array.from(document.querySelectorAll(ARTIFACT_LAUNCHER_SELECTOR))
+      .map(normalizeArtifactLauncherElement)
+      .filter((el) => {
+        if (!el || seen.has(el)) return false;
+        seen.add(el);
+        const { score } = scoreArtifactLauncher(el);
+        return score >= 4;
+      })
+      .sort((a, b) => scoreArtifactLauncher(b).score - scoreArtifactLauncher(a).score)
+      .map((el, index) => ({
+        ...inspectArtifactLauncherElement(el, { includeHtml }),
+        id: `artifact-launcher-${String(index + 1).padStart(3, '0')}`,
+        element: el,
+      }));
+  };
+
+  const summarizeArtifactLauncher = (launcher) => {
+    const { element: _element, outerHTML: _outerHTML, ...summary } = launcher || {};
+    return summary;
+  };
+
+  const closeOpenedArtifactSurface = async (previousActiveElement) => {
+    const closeButton = Array.from(
+      document.querySelectorAll(
+        [
+          'button[aria-label*="Close" i]',
+          'button[aria-label*="Fechar" i]',
+          'button[aria-label*="Dismiss" i]',
+          'button[data-test-id*="close" i]',
+          '[role="button"][aria-label*="Close" i]',
+          '[role="button"][aria-label*="Fechar" i]',
+          '[mat-dialog-close]',
+        ].join(','),
+      ),
+    ).find((el) => visibleRect(el) && !el.closest?.(`#${MODAL_ID},#${MENU_ID}`));
+
+    if (closeButton) {
+      closeButton.click();
+    } else {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    }
+    await sleep(160);
+    try {
+      previousActiveElement?.focus?.({ preventScroll: true });
+    } catch {
+      // Melhor esforço para devolver o foco sem interferir no diagnóstico.
+    }
+  };
+
+  const openArtifactLaunchersForDiagnosis = async (launchers, options = {}) => {
+    const maxOpen = Math.max(0, Math.min(3, Number(options.maxOpenArtifactLaunchers || 1)));
+    const waitMs = Math.max(800, Math.min(15000, Number(options.artifactOpenWaitMs || 6000)));
+    const beforeFrames = artifactFrameElements();
+    const beforeSet = new Set(beforeFrames);
+    const beforeInterestingCount = beforeFrames.filter((frame) => {
+      const sourceInfo = classifyArtifactFrameSource(frame);
+      return artifactKindForFrame(frame, sourceInfo) !== 'iframe';
+    }).length;
+    const previousActiveElement = document.activeElement;
+    const clicked = [];
+    let closed = null;
+
+    for (const launcher of launchers.slice(0, maxOpen)) {
+      const el = launcher.element;
+      if (!el || !visibleRect(el)) continue;
+      const beforeCount = artifactFrameElements().length;
+      try {
+        try {
+          el.scrollIntoView?.({ block: 'center', inline: 'center' });
+        } catch {
+          // Scroll é só conforto visual.
+        }
+        el.click();
+        await waitForCondition(() => {
+          const frames = artifactFrameElements();
+          const opened = frames.filter((frame) => !beforeSet.has(frame));
+          if (opened.length > 0) return frames;
+          const interesting = frames.filter((frame) => {
+            const sourceInfo = classifyArtifactFrameSource(frame);
+            return artifactKindForFrame(frame, sourceInfo) !== 'iframe';
+          });
+          return interesting.length > beforeInterestingCount ? frames : null;
+        }, waitMs);
+        await sleep(250);
+        clicked.push({
+          ...summarizeArtifactLauncher(launcher),
+          ok: true,
+          beforeFrameCount: beforeCount,
+          afterFrameCount: artifactFrameElements().length,
+        });
+        break;
+      } catch (err) {
+        clicked.push({
+          ...summarizeArtifactLauncher(launcher),
+          ok: false,
+          beforeFrameCount: beforeCount,
+          afterFrameCount: artifactFrameElements().length,
+          error: err?.message || String(err),
+        });
+      }
+    }
+
+    const afterFrames = artifactFrameElements();
+    const openedFrameCount = afterFrames.filter((frame) => !beforeSet.has(frame)).length;
+    return {
+      attempted: launchers.length > 0 && maxOpen > 0,
+      clicked,
+      beforeFrameCount: beforeFrames.length,
+      afterFrameCount: afterFrames.length,
+      openedFrameCount,
+      close: async () => {
+        if (!clicked.some((item) => item.ok) || options.closeOpenedLaunchers === false) return null;
+        try {
+          await closeOpenedArtifactSurface(previousActiveElement);
+          closed = { ok: true };
+        } catch (err) {
+          closed = { ok: false, error: err?.message || String(err) };
+        }
+        return closed;
+      },
+      closed: () => closed,
+    };
   };
 
   const probeParentFrameDocument = (el) => {
@@ -2305,7 +2528,15 @@
   };
 
   const inspectArtifactDom = async (options = {}) => {
-    const allFrames = Array.from(document.querySelectorAll(ARTIFACT_IFRAME_SELECTOR));
+    const initialLaunchers = findArtifactLaunchers({
+      includeHtml: options.includeHtml === true,
+    });
+    let launcherOpenResult = null;
+    if (options.openArtifactLaunchers !== false && initialLaunchers.length > 0) {
+      launcherOpenResult = await openArtifactLaunchersForDiagnosis(initialLaunchers, options);
+    }
+
+    const allFrames = artifactFrameElements();
     const includeHtml = options.includeHtml === true && allFrames.length <= 30;
     let items = allFrames.map((el, index) => ({
       ...inspectArtifactElement(el, { includeHtml }),
@@ -2333,7 +2564,13 @@
       }
     }
 
-    return {
+    const launchers = initialLaunchers.map(summarizeArtifactLauncher);
+    const summary = summarizeArtifactItems(items);
+    summary.launcherCount = launchers.length;
+    summary.clickedLauncherCount = launcherOpenResult?.clicked?.filter((item) => item.ok).length || 0;
+    summary.openedFrameCount = launcherOpenResult?.openedFrameCount || 0;
+
+    const payload = {
       ok: true,
       url: location.href,
       chatId: currentChatId(),
@@ -2353,7 +2590,17 @@
             tabId: null,
             frameCount: 0,
           },
-      summary: summarizeArtifactItems(items),
+      launcherOpen: launcherOpenResult
+        ? {
+            attempted: launcherOpenResult.attempted,
+            clicked: launcherOpenResult.clicked,
+            beforeFrameCount: launcherOpenResult.beforeFrameCount,
+            afterFrameCount: launcherOpenResult.afterFrameCount,
+            openedFrameCount: launcherOpenResult.openedFrameCount,
+          }
+        : null,
+      summary,
+      launchers,
       items,
       nextAction:
         items.some((item) => item.htmlExtractable)
@@ -2369,9 +2616,15 @@
               }
             : {
                 code: 'fallback_only',
-                message: 'Nenhum artefato HTML legível foi confirmado; manter fallback com aviso/link/screenshot.',
+                message: launchers.length
+                  ? 'Há botão candidato de artefato, mas nenhum iframe/HTML legível foi confirmado após a tentativa de abrir.'
+                  : 'Nenhum artefato HTML legível foi confirmado; manter fallback com aviso/link/screenshot.',
               },
     };
+    if (launcherOpenResult) {
+      payload.launcherOpen.close = await launcherOpenResult.close();
+    }
+    return payload;
   };
 
   const reportFailure = (message) => {
@@ -3930,6 +4183,10 @@
           includeHtmlSample: command.args?.includeHtmlSample === true,
           maxSampleLength: command.args?.maxSampleLength,
           maxListItems: command.args?.maxListItems,
+          openArtifactLaunchers: command.args?.openArtifactLaunchers !== false,
+          closeOpenedLaunchers: command.args?.closeOpenedLaunchers !== false,
+          maxOpenArtifactLaunchers: command.args?.maxOpenArtifactLaunchers,
+          artifactOpenWaitMs: command.args?.artifactOpenWaitMs,
         }),
         snapshot: debugSnapshot({
           includeDomDiagnostics: command.args?.includeDomDiagnostics === true,
