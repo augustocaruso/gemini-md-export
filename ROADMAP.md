@@ -1275,8 +1275,7 @@ recarregar manualmente a página.
 
 ## v0.8.1 — Spike de `nativeMessaging`
 
-Status: pesquisa aprovada somente se `v0.8.0` não resolver o atrito principal ou
-se a bridge localhost continuar gerando timeout recorrente.
+Status: implementada na versão `0.8.1` como spike de infraestrutura.
 
 Objetivo: avaliar se um host nativo registrado no Chrome/Edge reduz a fragilidade
 do transporte local em comparação com HTTP/SSE em `127.0.0.1`.

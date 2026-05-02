@@ -10,6 +10,8 @@ const TAB_GROUP_NONE = -1;
 const GEMINI_TAB_URL_PATTERN = 'https://gemini.google.com/*';
 const CONTENT_SCRIPT_FILE = 'content.js';
 const CONTENT_SCRIPT_PING_TYPE = 'gemini-md-export/content-ping';
+const NATIVE_HOST_NAME = 'com.augustocaruso.gemini_md_export';
+const NATIVE_HOST_REQUEST_TIMEOUT_MS = 2500;
 const CONTENT_SCRIPT_SELF_HEAL_COOLDOWN_MS = 10_000;
 const CONTENT_SCRIPT_POST_INJECT_PING_ATTEMPTS = 5;
 const CONTENT_SCRIPT_POST_INJECT_PING_DELAY_MS = 180;
@@ -26,6 +28,7 @@ const TAB_CLAIM_COLORS = new Set([
 ]);
 const contentScriptSelfHealCooldowns = new Map();
 let lastContentScriptSelfHeal = null;
+let lastNativeHostProbe = null;
 
 const clampText = (value, maxLength) =>
   String(value || '')
@@ -56,6 +59,7 @@ const extensionInfo = (sender = {}) => {
     windowId: tab?.windowId ?? null,
     isActiveTab: tab?.active ?? null,
     selfHeal: lastContentScriptSelfHeal,
+    nativeHost: lastNativeHostProbe,
   };
 };
 
@@ -354,6 +358,95 @@ const selfHealGeminiTabs = async ({ reason = 'self-heal', force = false } = {}) 
   };
   console.log('[gemini-md-export/ext]', 'self-heal content script', lastContentScriptSelfHeal);
   return lastContentScriptSelfHeal;
+};
+
+const randomRequestId = () => {
+  try {
+    return crypto.randomUUID();
+  } catch {
+    return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  }
+};
+
+const nativeHostRequest = (command, payload = {}, { timeoutMs = NATIVE_HOST_REQUEST_TIMEOUT_MS } = {}) =>
+  new Promise((resolve) => {
+    if (!chrome.runtime?.connectNative) {
+      resolve({ ok: false, code: 'native_messaging_unavailable' });
+      return;
+    }
+
+    const id = randomRequestId();
+    let settled = false;
+    let port = null;
+    let timer = 0;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try {
+        port?.disconnect?.();
+      } catch {
+        // ignore stale native port
+      }
+      resolve(value);
+    };
+
+    try {
+      port = chrome.runtime.connectNative(NATIVE_HOST_NAME);
+    } catch (err) {
+      finish({
+        ok: false,
+        code: 'native_host_connect_failed',
+        error: err?.message || String(err),
+      });
+      return;
+    }
+
+    timer = setTimeout(() => {
+      finish({ ok: false, code: 'native_host_timeout', timeoutMs });
+    }, timeoutMs);
+
+    port.onMessage.addListener((message) => {
+      if (message?.id !== id) return;
+      finish(message || { ok: false, code: 'native_host_empty_response' });
+    });
+
+    port.onDisconnect.addListener(() => {
+      if (settled) return;
+      finish({
+        ok: false,
+        code: 'native_host_disconnected',
+        error: chrome.runtime.lastError?.message || null,
+      });
+    });
+
+    try {
+      port.postMessage({
+        id,
+        command,
+        payload,
+        extension: currentRuntimeInfo(),
+      });
+    } catch (err) {
+      finish({
+        ok: false,
+        code: 'native_host_post_failed',
+        error: err?.message || String(err),
+      });
+    }
+  });
+
+const probeNativeHost = async ({ reason = 'manual', timeoutMs = NATIVE_HOST_REQUEST_TIMEOUT_MS } = {}) => {
+  const startedAt = Date.now();
+  const result = await nativeHostRequest('ping', {}, { timeoutMs });
+  lastNativeHostProbe = {
+    ...result,
+    hostName: NATIVE_HOST_NAME,
+    reason,
+    checkedAt: new Date().toISOString(),
+    durationMs: Math.max(0, Date.now() - startedAt),
+  };
+  return lastNativeHostProbe;
 };
 
 const chromeGroupTab = (tabId) =>
@@ -798,6 +891,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     selfHealGeminiTabs({
       reason: message.reason || 'content-script',
       force: message.force === true,
+    }).then(sendResponse);
+    return true;
+  }
+
+  if (message?.type === 'gemini-md-export/native-host-health') {
+    probeNativeHost({
+      reason: message.reason || 'content-script',
+      timeoutMs: message.timeoutMs || NATIVE_HOST_REQUEST_TIMEOUT_MS,
     }).then(sendResponse);
     return true;
   }

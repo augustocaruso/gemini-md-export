@@ -148,7 +148,7 @@ const manifest = {
       run_at: 'document_idle',
     },
   ],
-  permissions: ['tabs', 'storage', 'tabGroups', 'scripting'],
+  permissions: ['tabs', 'storage', 'tabGroups', 'scripting', 'nativeMessaging'],
   host_permissions: [
     'https://gemini.google.com/*',
     'https://lh3.google.com/*',
@@ -289,6 +289,14 @@ cpSync(
   resolve(ROOT, 'src', 'job-progress-broadcast.mjs'),
   resolve(geminiCliExtensionDir, 'src', 'job-progress-broadcast.mjs'),
 );
+cpSync(resolve(ROOT, 'src', 'native-host.mjs'), resolve(geminiCliExtensionDir, 'src', 'native-host.mjs'));
+if (existsSync(resolve(ROOT, 'native-messaging'))) {
+  cpSync(
+    resolve(ROOT, 'native-messaging'),
+    resolve(geminiCliExtensionDir, 'native-messaging'),
+    { recursive: true },
+  );
+}
 
 console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'gemini-extension.json')}`);
 console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'GEMINI.md')}`);
@@ -312,3 +320,7 @@ if (existsSync(resolve(geminiCliExtensionDir, 'bin'))) {
 console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'browser-extension')}`);
 console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'src', 'mcp-server.js')}`);
 console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'src', 'bridge-server.js')}`);
+console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'src', 'native-host.mjs')}`);
+if (existsSync(resolve(geminiCliExtensionDir, 'native-messaging'))) {
+  console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'native-messaging')}`);
+}

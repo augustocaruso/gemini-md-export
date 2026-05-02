@@ -1,11 +1,12 @@
 {
   "name": "gemini-md-export",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "Userscript para exportar conversas do Gemini web como Markdown com frontmatter.",
   "type": "module",
   "private": true,
   "bin": {
-    "gemini-md-export": "./bin/gemini-md-export.mjs"
+    "gemini-md-export": "./bin/gemini-md-export.mjs",
+    "gemini-md-export-native-host": "./bin/gemini-md-export-native-host.mjs"
   },
   "scripts": {
     "test": "npm run build && node --test tests/*.test.mjs",

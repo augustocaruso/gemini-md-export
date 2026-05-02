@@ -19,8 +19,15 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   const guardPath = resolve(extensionDir, 'src', 'chrome-extension-guard.mjs');
   const browserLaunchPath = resolve(extensionDir, 'src', 'browser-launch.mjs');
   const jobProgressBroadcastPath = resolve(extensionDir, 'src', 'job-progress-broadcast.mjs');
+  const nativeHostPath = resolve(extensionDir, 'src', 'native-host.mjs');
   const bridgeVersionPath = resolve(extensionDir, 'bridge-version.json');
   const browserManifestPath = resolve(extensionDir, 'browser-extension', 'manifest.json');
+  const nativeHostBinPath = resolve(extensionDir, 'bin', 'gemini-md-export-native-host.mjs');
+  const nativeManifestTemplatePath = resolve(
+    extensionDir,
+    'native-messaging',
+    'com.augustocaruso.gemini_md_export.template.json',
+  );
   const hooksConfigPath = resolve(extensionDir, 'hooks', 'hooks.json');
   const repairAgentPath = resolve(extensionDir, 'agents', 'gemini-vault-repair.md');
   const skillNames = [
@@ -47,8 +54,11 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.equal(existsSync(guardPath), true);
   assert.equal(existsSync(browserLaunchPath), true);
   assert.equal(existsSync(jobProgressBroadcastPath), true);
+  assert.equal(existsSync(nativeHostPath), true);
   assert.equal(existsSync(bridgeVersionPath), true);
   assert.equal(existsSync(browserManifestPath), true);
+  assert.equal(existsSync(nativeHostBinPath), true);
+  assert.equal(existsSync(nativeManifestTemplatePath), true);
   assert.equal(existsSync(hooksConfigPath), true);
   for (const skillName of skillNames) {
     assert.equal(existsSync(resolve(extensionDir, 'skills', skillName, 'SKILL.md')), true);
@@ -159,6 +169,7 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.ok(browserManifest.permissions.includes('storage'));
   assert.ok(browserManifest.permissions.includes('tabGroups'));
   assert.ok(browserManifest.permissions.includes('scripting'));
+  assert.ok(browserManifest.permissions.includes('nativeMessaging'));
   assert.equal(browserManifest.version, bridgeVersion.extensionVersion);
   assert.equal(typeof bridgeVersion.protocolVersion, 'number');
 
