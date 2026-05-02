@@ -3466,6 +3466,12 @@ const requireRecentChatsClient = (selector = {}) => {
   }
   const commandReadyClients = liveClients.filter(commandChannelReadyForClient);
   const selectableClients = commandReadyClients.length > 0 ? commandReadyClients : liveClients;
+
+  if (selector.preferActive === true) {
+    const activeClients = selectableClients.filter((client) => client.isActiveTab === true);
+    if (activeClients.length === 1) return activeClients[0];
+  }
+
   const usefulRecentClients = selectableClients.filter(
     (client) => recentConversationCountForClient(client) > 0 || !!client.page?.chatId,
   );
@@ -3474,11 +3480,6 @@ const requireRecentChatsClient = (selector = {}) => {
   const sessionClaim = claimForSession(normalized.sessionId);
   const sessionClaimClient = liveClientForClaim(sessionClaim);
   if (sessionClaimClient) return sessionClaimClient;
-
-  if (selector.preferActive === true) {
-    const activeClients = candidateClients.filter((client) => client.isActiveTab === true);
-    if (activeClients.length === 1) return activeClients[0];
-  }
 
   if (candidateClients.length > 1) {
     throw ambiguousTabsError(candidateClients, normalized);

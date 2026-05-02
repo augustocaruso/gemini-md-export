@@ -1741,6 +1741,28 @@ Critérios de aceite:
 - Se nenhuma aba aceitar comandos, a CLI deve falhar curto e com erro honesto,
   sem fallback MCP.
 
+## v0.8.14 — Hotfix de preferência pela aba ativa comandável
+
+Status: implementada na versão `0.8.14`.
+
+Objetivo: evitar que `chats count --plain` escolha uma aba de conversa em
+segundo plano só porque ela tem `chatId`/cache, quando já existe uma aba Gemini
+ativa e saudável capaz de abrir/carregar o sidebar.
+
+Entregas:
+
+- Em listagem/contagem recente com `preferActive=true`, selecionar a única aba
+  ativa e comandável antes de aplicar o ranking por cache de conversas.
+- Manter o ranking por cache/`chatId` para fluxos sem preferência explícita por
+  aba ativa.
+
+Critérios de aceite:
+
+- Contagem iniciada pela CLI usa a aba Gemini ativa quando ela tem canal de
+  comando saudável.
+- Abas em segundo plano com `chatId` não devem receber `claim-tab` por padrão
+  se a aba ativa está pronta.
+
 ## v0.9.0 — Spike condicional de `debugger`/CDP
 
 Status: possibilidade técnica de alto poder, no mesmo bloco de avaliação de
