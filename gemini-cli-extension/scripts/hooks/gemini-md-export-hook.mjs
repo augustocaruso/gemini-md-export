@@ -41,7 +41,16 @@ const BLOCK_REASON =
   'Bloqueado pelo gemini-md-export: este caminho esta fora do escopo combinado. Use DOM atual, data/blob, fetch permitido, bridge/background existente ou lightbox controlado; se nao houver bytes legiveis, mantenha um warning honesto.';
 
 const PROCESS_KILL_BLOCK_REASON =
-  'Bloqueado pelo gemini-md-export: nao mate processos manualmente com kill -9/pkill/taskkill. Se o usuario pediu diagnostico, use primeiro a CLI/diagnostico de processos com dry-run e so encerre alvo seguro com confirmacao explicita.';
+  'Bloqueado pelo gemini-md-export: nao mate processos manualmente com kill/pkill/killall/taskkill. Se o usuario pediu diagnostico, use primeiro a CLI/diagnostico de processos com dry-run e so encerre alvo seguro com confirmacao explicita.';
+
+const CLEANUP_PREFLIGHT_BLOCK_REASON =
+  'Bloqueado pelo gemini-md-export: cleanup stale-processes nao e preflight de contagem/exportacao. Rode a CLI de contagem/exportacao diretamente; se ela falhar, responda a falha curta. Diagnostico/cleanup so entram quando o usuario pedir isso explicitamente.';
+
+const CLI_FAILURE_RE =
+  /timeout falando com a bridge|gemini web ainda nao esta pronto|gemini web ainda não esta pronto|gemini web ainda não está pronto|extension_version_mismatch|no_connected_clients|bridge local nao respondeu|bridge local não respondeu/i;
+
+const CLI_USER_FACING_RE =
+  /(chats count|export recent|export missing|sync|export resume|export reexport|export notebook|cleanup stale-processes|cleanup-stale-processes)/i;
 
 const MEDIA_WARNING_RE =
   /\[!warning\]\s*M[ií]dia n[aã]o importada|M[ií]dia n[aã]o exportada|media n(?:ao|ão) importad/i;
@@ -1480,19 +1489,7 @@ const hasBrowserBridgeProblem = (value) => {
 const hasCliCountOrExportFailure = (value) => {
   const text = collectText(value).join('\n').toLowerCase();
   if (!/gemini-md-export(?:\.mjs)?/.test(text)) return false;
-  if (!/(chats count|export recent|export missing|sync|export resume|export reexport|export notebook)/.test(text)) {
-    return false;
-  }
-  return (
-    text.includes('timeout falando com a bridge') ||
-    text.includes('gemini web ainda nao esta pronto') ||
-    text.includes('gemini web ainda não esta pronto') ||
-    text.includes('gemini web ainda não está pronto') ||
-    text.includes('extension_version_mismatch') ||
-    text.includes('no_connected_clients') ||
-    text.includes('bridge local nao respondeu') ||
-    text.includes('bridge local não respondeu')
-  );
+  return CLI_FAILURE_RE.test(text) && CLI_USER_FACING_RE.test(text);
 };
 
 const analyzeToolResponse = (response) => {
@@ -1540,14 +1537,14 @@ const afterTool = (input) => {
       `A tool ${toolName || 'gemini-md-export'} gerou warning de midia e mediaFileCount=0. Trate isso como falha real de importacao de imagens, nao como sucesso parcial.`,
     );
   }
-  if (analysis.bridgeProblem) {
+  if (analysis.bridgeProblem && !analysis.cliCountOrExportFailure) {
     notes.push(
       'A resposta sugere problema de bridge/extensao do navegador. Antes de repetir a mesma exportacao ou pedir acao manual, cheque gemini_ready { action: "status", diagnostic: true }: ele tenta auto-reload da extensao stale. Se o problema for modo proxy/porta ocupada, use gemini_support { action: "processes" } antes de cleanup ou restart manual. Se houver abas conectadas mas presas, use gemini_tabs { action: "reload", intent: "tab_management" }. Reload manual do card da extensao e ultimo recurso.',
     );
   }
   if (analysis.cliCountOrExportFailure) {
     notes.push(
-      'A CLI gemini-md-export falhou no caminho de contagem/exportacao. Pare aqui e responda a falha curta ao usuario; nao chame gemini_ready, gemini_tabs, gemini_chats nem gemini_support como fallback, a menos que o usuario peca diagnostico explicitamente depois da falha.',
+      'A CLI gemini-md-export falhou no caminho de contagem/exportacao. Pare aqui e responda a falha curta ao usuario; nao chame gemini_ready, gemini_tabs, gemini_chats nem gemini_support como fallback, nao rode cleanup stale-processes e nao recomende kill/pkill/taskkill, a menos que o usuario peca diagnostico explicitamente depois da falha.',
     );
   }
 
@@ -1601,7 +1598,17 @@ const forbiddenReason = (input) => {
     return BLOCK_REASON;
   }
 
-  if (/\bkill\s+-9\b|\bpkill\b|\bkillall\b|\btaskkill(?:\.exe)?\b[\s\S]{0,120}\s\/f\b/.test(text)) {
+  if (
+    /\bgemini-md-export(?:\.mjs)?\b[\s\S]{0,240}\bcleanup\s+stale-processes\b/.test(text) ||
+    /\bcleanup-stale-processes\b/.test(text)
+  ) {
+    return CLEANUP_PREFLIGHT_BLOCK_REASON;
+  }
+
+  if (
+    /\b(?:sudo\s+)?kill\s+(?:-[a-z0-9]+\s+)?\d{2,}\b/.test(text) ||
+    /\bpkill\b|\bkillall\b|\btaskkill(?:\.exe)?\b/.test(text)
+  ) {
     return PROCESS_KILL_BLOCK_REASON;
   }
 

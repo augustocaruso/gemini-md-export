@@ -86,6 +86,10 @@ const TAB_CLAIM_DEFAULT_TTL_MS = Math.max(
   60_000,
   Math.min(24 * 60 * 60_000, Number(process.env.GEMINI_MCP_TAB_CLAIM_TTL_MS || 45 * 60_000)),
 );
+const TAB_CLAIM_MIN_VISIBLE_MS = Math.max(
+  0,
+  Math.min(15_000, Number(process.env.GEMINI_MCP_TAB_CLAIM_MIN_VISIBLE_MS || 5000)),
+);
 const TAB_CLAIM_COLORS = ['green', 'blue', 'yellow', 'purple', 'cyan', 'orange', 'pink'];
 const TAB_CLAIM_LABEL_PREFIX = 'GME';
 const CLIENT_DEGRADED_HEARTBEAT_MS = Number(
@@ -2877,6 +2881,20 @@ const releaseTabClaim = async (args = {}) => {
 const shouldAutoReleaseTabClaim = (args = {}) =>
   args.autoReleaseClaim !== false && args.keepClaim !== true;
 
+const tabClaimMinVisibleMs = (args = {}) => {
+  const parsed = Number(args.claimMinVisibleMs ?? TAB_CLAIM_MIN_VISIBLE_MS);
+  if (!Number.isFinite(parsed) || parsed < 0) return TAB_CLAIM_MIN_VISIBLE_MS;
+  return Math.min(15_000, parsed);
+};
+
+const waitForTabClaimMinimumVisibility = async (claimedAtMs, args = {}) => {
+  if (!claimedAtMs) return;
+  const remainingMs = tabClaimMinVisibleMs(args) - (Date.now() - claimedAtMs);
+  if (remainingMs > 0) {
+    await sleep(remainingMs);
+  }
+};
+
 const autoReleaseTabClaimForJob = async (job, reason) => {
   if (!job?.autoReleaseTabClaim || !job.tabClaimId || job.tabClaimRelease) {
     return job?.tabClaimRelease || null;
@@ -2900,10 +2918,14 @@ const autoReleaseTabClaimForJob = async (job, reason) => {
 const ensureTabClaimForJob = async (client, args = {}, label = 'GME Job') => {
   const sessionId = normalizeSessionId(args.sessionId || args._proxySessionId);
   const existingSessionClaim = claimForSession(sessionId);
-  if (existingSessionClaim?.clientId === client.clientId) {
+  if (existingSessionClaim?.clientId === client.clientId && args.renewExistingClaim === false) {
     return summarizeTabClaim(existingSessionClaim);
   }
-  if (args.autoClaim === false) return null;
+  if (args.autoClaim === false) {
+    return existingSessionClaim?.clientId === client.clientId
+      ? summarizeTabClaim(existingSessionClaim)
+      : null;
+  }
   const result = await claimTabForClient(client, {
     ...args,
     sessionId,
@@ -9427,7 +9449,9 @@ const bridgeServer = createServer(async (req, res) => {
         refresh: parseOptionalBoolean(url.searchParams.get('refresh')),
         untilEnd: parseOptionalBoolean(url.searchParams.get('untilEnd')),
         countOnly: parseOptionalBoolean(url.searchParams.get('countOnly')),
+        autoClaim: parseOptionalBoolean(url.searchParams.get('autoClaim')),
         autoReleaseClaim: parseOptionalBoolean(url.searchParams.get('autoReleaseClaim')),
+        claimMinVisibleMs: url.searchParams.get('claimMinVisibleMs') || undefined,
         maxLoadMoreRounds: url.searchParams.get('maxLoadMoreRounds') || undefined,
         loadMoreRounds: url.searchParams.get('loadMoreRounds') || undefined,
         loadMoreAttempts: url.searchParams.get('loadMoreAttempts') || undefined,
@@ -9439,15 +9463,18 @@ const bridgeServer = createServer(async (req, res) => {
       const shouldTemporarilyClaimTab =
         (args.countOnly === true || args.untilEnd === true) && args.autoClaim !== false;
       let claim = null;
+      let claimVisibleAtMs = null;
       let result = null;
       try {
         if (shouldTemporarilyClaimTab) {
           claim = await ensureTabClaimForJob(client, args, args.countOnly ? 'GME Count' : 'GME List');
+          claimVisibleAtMs = claim ? Date.now() : null;
         }
         result = await listRecentChatsForClient(client, args);
         if (claim) result.tabClaim = claim;
       } finally {
         if (claim?.claimId && shouldAutoReleaseTabClaim(args)) {
+          await waitForTabClaimMinimumVisibility(claimVisibleAtMs, args);
           const tabClaimRelease = await releaseTabClaim({
             claimId: claim.claimId,
             reason: 'recent-chats-list-finished',

@@ -131,6 +131,11 @@ the concise CLI failure. Do not activate diagnostics, call MCP fallback tools,
 or kill processes unless the user explicitly asks for diagnostics after the
 failure.
 
+Do not run `cleanup stale-processes` before count/export. It creates noisy
+process JSON and is diagnostic-only. After a count/export timeout, do not
+suggest `kill <pid>`; report the timeout plainly and wait for the user's next
+instruction.
+
 MCP now enforces this: `gemini_chats` count/download returns a short
 `use_cli_only` refusal, and `gemini_ready`/`gemini_tabs`/`gemini_chats` require
 explicit diagnostic/control intent for browser-facing calls. Do not bypass that

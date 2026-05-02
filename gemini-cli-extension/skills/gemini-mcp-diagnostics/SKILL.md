@@ -69,9 +69,11 @@ Only clean up after inspecting the plan:
   has been tried or the loaded extension is too old to self-reload.
 - In proxy mode, prefer diagnostics over killing processes. The primary bridge
   may be valid.
-- Never run raw `kill -9`, `pkill`, `killall`, or `taskkill /F` as a shortcut.
+- Never run raw `kill <pid>`, `pkill`, `killall`, or `taskkill` as a shortcut.
   Process cleanup must go through the exporter diagnostics/dry-run path and
   requires explicit user confirmation.
+- `cleanup stale-processes` is not a preflight for normal count/export. Use it
+  only after the user asks for diagnostics or cleanup explicitly.
 - Keep normal output compact. Use `detail: "full"` only for root-cause work.
 - Browser-facing MCP tools require explicit diagnostic/control intent. Use
   `diagnostic: true` for `gemini_ready` and `intent: "tab_management"` for

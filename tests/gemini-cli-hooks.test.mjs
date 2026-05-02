@@ -239,12 +239,26 @@ test('BeforeTool bloqueia kill manual de processos', () => {
     hook_event_name: 'BeforeTool',
     tool_name: 'run_shell_command',
     tool_input: {
-      command: 'kill -9 12345 67890',
+      command: 'kill 12345',
     },
   });
 
   assert.equal(output.decision, 'deny');
   assert.match(output.reason, /nao mate processos manualmente/);
+});
+
+test('BeforeTool bloqueia cleanup stale-processes como preflight de export', () => {
+  const output = runHook('before-tool', {
+    hook_event_name: 'BeforeTool',
+    tool_name: 'run_shell_command',
+    tool_input: {
+      command:
+        'node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" cleanup stale-processes --plain && node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" export recent --max-chats 10 --plain',
+    },
+  });
+
+  assert.equal(output.decision, 'deny');
+  assert.match(output.reason, /cleanup stale-processes nao e preflight/);
 });
 
 test('hooks.json aplica guardrail em ferramentas que podem editar', () => {
@@ -291,6 +305,24 @@ test('AfterTool de shell manda parar depois de falha da CLI', () => {
   assert.equal(output.suppressOutput, true);
   assert.match(output.hookSpecificOutput.additionalContext, /Pare aqui/);
   assert.match(output.hookSpecificOutput.additionalContext, /nao chame gemini_ready/);
+  assert.doesNotMatch(output.hookSpecificOutput.additionalContext, /cheque gemini_ready/);
+});
+
+test('AfterTool manda parar depois de cleanup seguido de timeout da CLI', () => {
+  const output = runHook('after-tool', {
+    hook_event_name: 'AfterTool',
+    tool_name: 'run_shell_command',
+    tool_response: {
+      stdout:
+        'node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" cleanup stale-processes --plain\n{"cleanupPlan":{"eligible":false,"reason":"primary_healthy"}}\nTimeout falando com a bridge em 15000ms.',
+    },
+  });
+
+  assert.equal(output.suppressOutput, true);
+  assert.match(output.hookSpecificOutput.additionalContext, /Pare aqui/);
+  assert.match(output.hookSpecificOutput.additionalContext, /nao rode cleanup stale-processes/);
+  assert.match(output.hookSpecificOutput.additionalContext, /nao recomende kill/);
+  assert.doesNotMatch(output.hookSpecificOutput.additionalContext, /cheque gemini_ready/);
 });
 
 test('BeforeTool falha aberto para chamada normal', () => {

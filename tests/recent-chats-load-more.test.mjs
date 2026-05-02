@@ -100,8 +100,18 @@ test('contagem longa aplica claim visual temporaria na aba', () => {
   assert.ok(block, '/agent/recent-chats deve existir');
   assert.match(block, /shouldTemporarilyClaimTab/);
   assert.match(block, /ensureTabClaimForJob\(client, args, args\.countOnly \? 'GME Count' : 'GME List'\)/);
+  assert.match(block, /claimVisibleAtMs = claim \? Date\.now\(\) : null/);
+  assert.match(block, /waitForTabClaimMinimumVisibility\(claimVisibleAtMs, args\)/);
   assert.match(block, /recent-chats-list-finished/);
   assert.match(block, /tabClaimRelease/);
+});
+
+test('jobs renovam claim existente para recriar indicador visual ausente', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const block = source.match(/const ensureTabClaimForJob = async[\s\S]*?\n};/)?.[0];
+  assert.ok(block, 'ensureTabClaimForJob deve existir');
+  assert.match(block, /args\.renewExistingClaim === false/);
+  assert.match(block, /claimTabForClient\(client/);
 });
 
 test('export all incompleto vira aviso em vez de sucesso silencioso', () => {

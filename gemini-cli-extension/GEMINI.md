@@ -106,6 +106,10 @@ and exits idle bridges unless `--no-exit-when-idle` is set.
   activate diagnostics, call `gemini_ready`/`gemini_tabs`/`gemini_support`, or
   kill processes unless the user explicitly asks for diagnostics after that
   failure.
+- Never run `cleanup stale-processes` before a normal count/export attempt.
+  Cleanup is diagnostic-only and is not a recovery step for "quantos chats" or
+  "baixe conversas". Do not recommend `kill <pid>` as a next step after a CLI
+  timeout.
 - Do not ask for manual Chrome extension reload before trying
   `gemini_ready { "action": "status", "diagnostic": true, "selfHeal": true, "allowReload": true }`,
   unless the loaded extension is too old to support self-heal.
