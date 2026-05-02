@@ -1401,21 +1401,21 @@ const environmentNextAction = ({ processDiagnostics, clients, matchingClients })
     return {
       code: 'no_gemini_tab_connected',
       message:
-        'Abra uma aba do Gemini Web ou rode gemini_ready { action: "status" } para tentar acordar o navegador e reconectar a extensão.',
+        'Abra uma aba do Gemini Web ou rode gemini_ready { action: "status", diagnostic: true } para tentar acordar o navegador e reconectar a extensão.',
     };
   }
   if (!matchingClients.length) {
     return {
       code: 'extension_version_mismatch',
       message:
-        'A extensão Chrome conectada não bate com a versão/protocolo/build esperados. Rode gemini_ready { action: "status" } para tentar self-heal antes de pedir reload manual.',
+        'A extensão Chrome conectada não bate com a versão/protocolo/build esperados. Rode gemini_ready { action: "status", diagnostic: true } para tentar self-heal antes de pedir reload manual.',
     };
   }
   const unhealthy = matchingClients.find((client) => client.bridgeHealth?.blockingIssue);
   if (unhealthy) {
     return {
       code: unhealthy.bridgeHealth.blockingIssue,
-      message: unhealthy.bridgeHealth.action || 'Rode gemini_ready { action: "status" } para diagnóstico da aba.',
+      message: unhealthy.bridgeHealth.action || 'Rode gemini_ready { action: "status", diagnostic: true } para diagnóstico da aba.',
     };
   }
   return {
@@ -2933,19 +2933,19 @@ const buildBridgeHealth = (client, now = Date.now()) => {
   if (!versionMatches) {
     status = 'version_mismatch';
     blockingIssue = 'extension_version_mismatch';
-    action = 'Rode gemini_ready { action: "status" } para tentar recarregar a extensão automaticamente.';
+    action = 'Rode gemini_ready { action: "status", diagnostic: true } para tentar recarregar a extensão automaticamente.';
   } else if (heartbeatAgeMs === null || heartbeatAgeMs > CLIENT_STALE_MS) {
     status = 'stale';
     blockingIssue = 'stale_client';
-    action = 'Recarregue a aba do Gemini ou chame gemini_ready { action: "status" } para reconectar.';
+    action = 'Recarregue a aba do Gemini ou chame gemini_ready { action: "status", diagnostic: true } para reconectar.';
   } else if (!eventStreamConnected && !longPollConnected && pagePolling !== true) {
     status = 'command_channel_stuck';
     blockingIssue = 'command_channel_stuck';
-    action = 'Use gemini_tabs { action: "reload" } se a aba estiver aberta mas não aceitar comandos.';
+    action = 'Use gemini_tabs { action: "reload", intent: "tab_management" } se a aba estiver aberta mas não aceitar comandos.';
   } else if (heartbeatAgeMs > CLIENT_DEGRADED_HEARTBEAT_MS) {
     status = 'degraded';
     blockingIssue = 'heartbeat_delayed';
-    action = 'Aguarde alguns segundos; se persistir, rode gemini_ready { action: "status" }.';
+    action = 'Aguarde alguns segundos; se persistir, rode gemini_ready { action: "status", diagnostic: true }.';
   }
 
   return {
@@ -6979,7 +6979,7 @@ const legacyRawTools = [
             ? {
                 code: 'no_gemini_tab_connected',
                 message:
-                  'Abra uma aba do Gemini ou chame gemini_tabs { action: "list", openIfMissing: true }.',
+                  'Abra uma aba do Gemini ou chame gemini_tabs { action: "list", intent: "tab_management", openIfMissing: true }.',
               }
             : liveClients.length === 1
               ? {
@@ -6992,7 +6992,7 @@ const legacyRawTools = [
               : {
                   code: 'choose_tab',
                   message:
-                    'Escolha uma aba por index/clientId/tabId e chame gemini_tabs { action: "claim" }.',
+                    'Escolha uma aba por index/clientId/tabId e chame gemini_tabs { action: "claim", intent: "tab_management" }.',
                 },
       });
     },
@@ -8464,11 +8464,142 @@ const cliFirstExportResult = (action, args = {}) => {
   };
 };
 
+const PUBLIC_MCP_INTENTS = new Set(['diagnostic', 'tab_management', 'small_page', 'one_off']);
+
+const publicMcpIntent = (args = {}) => {
+  const intent = String(args.intent || '').trim();
+  if (args.diagnostic === true) return intent || 'diagnostic';
+  if (PUBLIC_MCP_INTENTS.has(intent)) return intent;
+  return null;
+};
+
+const hasExplicitPublicMcpIntent = (args = {}) => !!publicMcpIntent(args);
+
+const buildCliCountCommand = (args = {}) => {
+  const bridgeUrl = `http://${cli.host}:${cli.port}`;
+  const commandArgs = [CLI_BIN_PATH, 'chats', 'count'];
+  addCliFlag(commandArgs, '--client-id', args.clientId);
+  addCliFlag(commandArgs, '--tab-id', args.tabId);
+  addCliFlag(commandArgs, '--claim-id', args.claimId);
+  addCliFlag(commandArgs, '--load-more-browser-rounds', args.loadMoreBrowserRounds);
+  addCliFlag(commandArgs, '--load-more-browser-timeout-ms', args.loadMoreBrowserTimeoutMs);
+  addCliFlag(commandArgs, '--load-more-timeout-ms', args.loadMoreTimeoutMs);
+  addCliFlag(commandArgs, '--bridge-url', bridgeUrl);
+  commandArgs.push('--plain');
+  return {
+    command: process.execPath,
+    args: commandArgs,
+    cwd: homedir(),
+    commandLine: [process.execPath, ...commandArgs].map(shellQuote).join(' '),
+  };
+};
+
+const buildCliTabsCommand = (action, args = {}) => {
+  const bridgeUrl = `http://${cli.host}:${cli.port}`;
+  const commandArgs = [CLI_BIN_PATH, 'tabs', action || 'list'];
+  addCliFlag(commandArgs, '--index', args.index);
+  addCliFlag(commandArgs, '--client-id', args.clientId);
+  addCliFlag(commandArgs, '--tab-id', args.tabId);
+  addCliFlag(commandArgs, '--claim-id', args.claimId);
+  addCliFlag(commandArgs, '--ttl-ms', args.ttlMs);
+  addCliFlag(commandArgs, '--label', args.label);
+  if (args.force === true) commandArgs.push('--force');
+  addCliFlag(commandArgs, '--bridge-url', bridgeUrl);
+  commandArgs.push('--plain');
+  return {
+    command: process.execPath,
+    args: commandArgs,
+    cwd: homedir(),
+    commandLine: [process.execPath, ...commandArgs].map(shellQuote).join(' '),
+  };
+};
+
+const buildCliReexportCommand = (args = {}) => {
+  const bridgeUrl = `http://${cli.host}:${cli.port}`;
+  const commandArgs = [CLI_BIN_PATH, 'export', 'reexport'];
+  for (const chatId of chatIdsFromExportArgs(args)) commandArgs.push('--chat-id', chatId);
+  addCliFlag(commandArgs, '--output-dir', args.outputDir);
+  addCliFlag(commandArgs, '--client-id', args.clientId);
+  addCliFlag(commandArgs, '--tab-id', args.tabId);
+  addCliFlag(commandArgs, '--claim-id', args.claimId);
+  addCliFlag(commandArgs, '--bridge-url', bridgeUrl);
+  commandArgs.push('--plain');
+  return {
+    command: process.execPath,
+    args: commandArgs,
+    cwd: homedir(),
+    commandLine: [process.execPath, ...commandArgs].map(shellQuote).join(' '),
+    missingArguments: chatIdsFromExportArgs(args).length === 0 ? ['chatId'] : [],
+  };
+};
+
+const publicMcpBlockedResult = ({ tool, action, code, reason, cliCommand = null, guidance = null }) =>
+  toolTextResult(
+    {
+      ok: false,
+      status: 'blocked',
+      code,
+      tool,
+      action,
+      reason,
+      cli: cliCommand,
+      command: cliCommand?.command || null,
+      args: cliCommand?.args || null,
+      cwd: cliCommand?.cwd || null,
+      guidance,
+      nextAction: cliCommand
+        ? {
+            code: 'run_cli_command',
+            message: guidance || 'Rode o comando CLI retornado. Nao use fallback MCP para esta tarefa.',
+            command: cliCommand,
+          }
+        : {
+            code: 'explicit_mcp_intent_required',
+            message:
+              guidance ||
+              'Esta tool MCP so roda com diagnostic=true ou intent explicito. Para contagem/exportacao, use a CLI.',
+          },
+    },
+    { isError: true },
+  );
+
+const publicMcpDiagnosticRequiredResult = (tool, action, args = {}) =>
+  publicMcpBlockedResult({
+    tool,
+    action,
+    code: 'explicit_mcp_intent_required',
+    reason:
+      'MCP ficou reservado para diagnostico/controle explicito. Chamadas normais de usuario devem usar a CLI para evitar JSON grande e disputa de aba.',
+    cliCommand:
+      tool === 'gemini_chats' && (action === 'count' || args.untilEnd === true || args.countOnly === true)
+        ? buildCliCountCommand(args)
+        : tool === 'gemini_tabs' && ['list', 'claim', 'release', 'reload'].includes(action)
+          ? buildCliTabsCommand(action, args)
+          : null,
+    guidance:
+      tool === 'gemini_ready'
+        ? 'Se for diagnostico real, chame gemini_ready com diagnostic=true ou intent="diagnostic". Para contar/exportar, rode a CLI diretamente.'
+        : tool === 'gemini_tabs'
+          ? 'Para fluxo normal, use gemini-md-export tabs ... --plain. Se for diagnostico/controle MCP deliberado, passe diagnostic=true ou intent="tab_management".'
+          : 'Para contagem/exportacao, use a CLI. Para uma pagina pequena deliberada, passe diagnostic=true ou intent="small_page".',
+  });
+
+const publicMcpCliOnlyResult = (tool, action, cliCommand, reason) =>
+  publicMcpBlockedResult({
+    tool,
+    action,
+    code: 'use_cli_only',
+    reason,
+    cliCommand,
+    guidance:
+      'Pare aqui e rode a CLI. Se ela falhar por timeout/conexao, responda a falha curta; nao chame gemini_ready/gemini_tabs/gemini_chats como fallback.',
+  });
+
 const rawTools = [
   {
     name: 'gemini_ready',
     description:
-      'Checa prontidão do bridge/extensão/abas Gemini. Use detail="full" apenas para diagnóstico rico.',
+      'Diagnóstico explícito do bridge/extensão/abas Gemini. Para evitar JSON ruidoso, exige diagnostic=true ou intent="diagnostic".',
     inputSchema: {
       type: 'object',
       properties: {
@@ -8484,12 +8615,17 @@ const rawTools = [
         allowReload: { type: 'boolean' },
         reloadWaitMs: { type: 'number' },
         diagnostics: { type: 'boolean' },
+        diagnostic: { type: 'boolean' },
+        intent: { type: 'string', enum: ['diagnostic'] },
         detail: { type: 'string', enum: ['compact', 'full'] },
       },
       additionalProperties: false,
     },
     call: async (args = {}) => {
       const action = args.action === 'status' ? 'status' : 'check';
+      if (!hasExplicitPublicMcpIntent(args)) {
+        return publicMcpDiagnosticRequiredResult('gemini_ready', action, args);
+      }
       return callLegacyToolCompacted(
         'gemini_ready',
         action,
@@ -8501,7 +8637,7 @@ const rawTools = [
   {
     name: 'gemini_tabs',
     description:
-      'Lista, reivindica, libera ou recarrega abas Gemini conectadas. Use para evitar trabalhar na aba errada.',
+      'Controle explícito/diagnóstico de abas Gemini. Para fluxo normal de contagem/exportação, use a CLI tabs; MCP exige diagnostic=true ou intent="tab_management".',
     inputSchema: {
       type: 'object',
       properties: {
@@ -8522,12 +8658,17 @@ const rawTools = [
         waitMs: { type: 'number' },
         allowReload: { type: 'boolean' },
         delayMs: { type: 'integer', minimum: 0, maximum: 10000 },
+        diagnostic: { type: 'boolean' },
+        intent: { type: 'string', enum: ['diagnostic', 'tab_management'] },
         detail: { type: 'string', enum: ['compact', 'full'] },
       },
       additionalProperties: false,
     },
     call: async (args = {}) => {
       const action = args.action || 'list';
+      if (action !== 'release' && !hasExplicitPublicMcpIntent(args)) {
+        return publicMcpDiagnosticRequiredResult('gemini_tabs', action, args);
+      }
       const legacyName =
         action === 'claim'
           ? 'gemini_claim_tab'
@@ -8542,7 +8683,7 @@ const rawTools = [
   {
     name: 'gemini_chats',
     description:
-      'Lista, conta, abre, obtém ou baixa conversas do Gemini. Para histórico inteiro/exportação, use a CLI; se reachedEnd/countIsTotal não for true, nunca trate loadedCount como total.',
+      'Operações MCP deliberadas em chats. Contagem total e download/exportação são CLI-only; list/current/open exigem diagnostic=true ou intent="small_page"/"one_off".',
     inputSchema: {
       type: 'object',
       properties: {
@@ -8566,6 +8707,8 @@ const rawTools = [
         title: { type: 'string' },
         outputDir: { type: 'string' },
         returnToOriginal: { type: 'boolean' },
+        diagnostic: { type: 'boolean' },
+        intent: { type: 'string', enum: ['diagnostic', 'small_page', 'one_off'] },
         detail: { type: 'string', enum: ['compact', 'full'] },
       },
       additionalProperties: false,
@@ -8573,6 +8716,25 @@ const rawTools = [
     call: async (args = {}) => {
       const action = args.action || 'list';
       const source = args.source === 'notebook' ? 'notebook' : 'recent';
+      if (action === 'count' || args.untilEnd === true || args.countOnly === true) {
+        return publicMcpCliOnlyResult(
+          'gemini_chats',
+          'count',
+          buildCliCountCommand(args),
+          'Contagem total e carregamento ate o fim devem rodar pela CLI. MCP nao e fallback para "quantos chats ao todo".',
+        );
+      }
+      if (action === 'download') {
+        return publicMcpCliOnlyResult(
+          'gemini_chats',
+          action,
+          buildCliReexportCommand(args),
+          'Download/exportacao de chat pelo MCP foi bloqueado para evitar jobs escondidos, JSON grande e claims presas. Use a CLI.',
+        );
+      }
+      if (!hasExplicitPublicMcpIntent(args)) {
+        return publicMcpDiagnosticRequiredResult('gemini_chats', action, args);
+      }
       const legacyArgs = { ...args };
       if (source === 'notebook') legacyArgs.notebook = true;
       const legacyName =

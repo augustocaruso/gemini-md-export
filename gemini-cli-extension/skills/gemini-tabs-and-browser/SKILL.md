@@ -20,7 +20,7 @@ Use this skill whenever tab identity matters.
 List tabs:
 
 ```json
-{ "tool": "gemini_tabs", "arguments": { "action": "list", "openIfMissing": true } }
+{ "tool": "gemini_tabs", "arguments": { "action": "list", "intent": "tab_management", "openIfMissing": true } }
 ```
 
 Claim one tab:
@@ -30,6 +30,7 @@ Claim one tab:
   "tool": "gemini_tabs",
   "arguments": {
     "action": "claim",
+    "intent": "tab_management",
     "index": 1,
     "label": "GME",
     "force": true
@@ -46,12 +47,15 @@ Release when done:
 Reload Gemini tabs after extension self-reload or stale content script:
 
 ```json
-{ "tool": "gemini_tabs", "arguments": { "action": "reload" } }
+{ "tool": "gemini_tabs", "arguments": { "action": "reload", "intent": "tab_management" } }
 ```
 
 ## Guardrails
 
 - If multiple tabs are present, claim before listing/exporting.
+- For count/export flows, prefer CLI `tabs list/claim --plain`. MCP tab
+  operations are for deliberate diagnostics/control and require
+  `intent: "tab_management"`.
 - If a requested chat belongs to a specific tab, use `chatId`, `tabId`,
   `windowId`, `clientId`, or `claimId`.
 - Do not simulate the tab indicator with in-page borders or overlays.

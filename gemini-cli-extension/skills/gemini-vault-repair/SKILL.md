@@ -37,7 +37,7 @@ creates backups, and writes a report.
 Before browser work:
 
 ```json
-{ "tool": "gemini_ready", "arguments": { "action": "status" } }
+{ "tool": "gemini_ready", "arguments": { "action": "status", "diagnostic": true } }
 ```
 
 For known suspect IDs, prefer the runner above or the CLI:
@@ -49,12 +49,21 @@ node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" export
 MCP `gemini_export` is CLI-first in v0.7.0 and should return `code: "use_cli"`
 instead of starting hidden long jobs.
 
-For one-off checks only:
+For one-off checks, stay CLI-first:
+
+```bash
+node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" export reexport --chat-id "<chatId>" --output-dir "/path/to/staging" --plain
+```
+
+`gemini_chats` download is intentionally blocked in the public MCP surface and
+returns `use_cli_only`; do not bypass it with another MCP tool.
+
+For a tiny read-only smoke check, `gemini_chats` requires explicit intent:
 
 ```json
 {
   "tool": "gemini_chats",
-  "arguments": { "action": "download", "chatId": "<chatId>", "outputDir": "/path/to/staging" }
+  "arguments": { "action": "current", "intent": "one_off" }
 }
 ```
 

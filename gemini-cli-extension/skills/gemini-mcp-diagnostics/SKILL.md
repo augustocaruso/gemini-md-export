@@ -13,7 +13,7 @@ timeouts, stale Chrome extension builds, and Windows process cleanup.
 1. Check the compact ready state:
 
 ```json
-{ "tool": "gemini_ready", "arguments": { "action": "check" } }
+{ "tool": "gemini_ready", "arguments": { "action": "check", "diagnostic": true } }
 ```
 
 2. If not ready or stale, run full status with self-heal:
@@ -23,6 +23,7 @@ timeouts, stale Chrome extension builds, and Windows process cleanup.
   "tool": "gemini_ready",
   "arguments": {
     "action": "status",
+    "diagnostic": true,
     "selfHeal": true,
     "allowReload": true,
     "detail": "full"
@@ -64,4 +65,7 @@ Only clean up after inspecting the plan:
 - In proxy mode, prefer diagnostics over killing processes. The primary bridge
   may be valid.
 - Keep normal output compact. Use `detail: "full"` only for root-cause work.
+- Browser-facing MCP tools require explicit diagnostic/control intent. Use
+  `diagnostic: true` for `gemini_ready` and `intent: "tab_management"` for
+  deliberate tab operations.
 - Explain dates/build stamps concretely when comparing versions.

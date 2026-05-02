@@ -68,7 +68,7 @@ let diagnosticState = {
 const BROWSER_DEPENDENT_EXPORTER_TOOL_ACTIONS = {
   gemini_ready: new Set(['status']),
   gemini_tabs: new Set(['list', 'claim', 'reload']),
-  gemini_chats: new Set(['list', 'current', 'open', 'download']),
+  gemini_chats: new Set(['list', 'current', 'open']),
   gemini_config: new Set(['cache_status', 'clear_cache']),
   gemini_support: new Set(['snapshot']),
 };
@@ -82,11 +82,18 @@ const DEFAULT_EXPORTER_TOOL_ACTION = {
   gemini_support: 'diagnose',
 };
 
+const EXPLICIT_MCP_INTENTS = new Set(['diagnostic', 'tab_management', 'small_page', 'one_off']);
+
 const normalizeExporterToolName = (toolName) =>
   String(toolName || '')
     .replace(/^mcp__gemini[-_]md[-_]export__/, '')
     .replace(/^mcp[_-]gemini[_-]md[_-]export[_-]/, '')
     .replace(/^gemini-md-export[_-]/, '');
+
+const hasExplicitMcpIntent = (toolInput) => {
+  const intent = String(toolInput?.intent || '').trim();
+  return toolInput?.diagnostic === true || EXPLICIT_MCP_INTENTS.has(intent);
+};
 
 const isBrowserDependentExporterTool = (input) => {
   const normalized = normalizeExporterToolName(getToolName(input));
@@ -94,6 +101,9 @@ const isBrowserDependentExporterTool = (input) => {
   const allowedActions = BROWSER_DEPENDENT_EXPORTER_TOOL_ACTIONS[toolName];
   if (!allowedActions) return false;
   const toolInput = getToolInput(input);
+  if (['gemini_ready', 'gemini_tabs', 'gemini_chats'].includes(toolName) && !hasExplicitMcpIntent(toolInput)) {
+    return false;
+  }
   const action = String(toolInput?.action || DEFAULT_EXPORTER_TOOL_ACTION[toolName] || '').replace(
     /-/g,
     '_',
@@ -300,7 +310,7 @@ const browserNameFromLaunch = (launch) =>
   launch?.browserName || launch?.plan?.browserName || launch?.browserKey || 'navegador';
 
 const manualBrowserRecoveryMessage =
-  'Rode gemini_ready { action: "status" } para acionar o auto-reload da extensao; se houver abas conectadas mas travadas, use gemini_tabs { action: "reload" }. Recarregar o card em chrome://extensions ou edge://extensions e o ultimo recurso.';
+  'Rode gemini_ready { action: "status", diagnostic: true } para acionar o auto-reload da extensao; se houver abas conectadas mas travadas, use gemini_tabs { action: "reload", intent: "tab_management" }. Recarregar o card em chrome://extensions ou edge://extensions e o ultimo recurso.';
 
 const systemMessageForConnectWait = (connectWait, launch, { reusedLaunch = false } = {}) => {
   const browserName = browserNameFromLaunch(launch);
@@ -1053,7 +1063,7 @@ const prelaunchBrowserDetached = async (input) => {
       sessionId,
       bridgeStatus,
     });
-    return `Gemini Exporter: o bridge MCP local nao respondeu (${bridgeReasonText(bridgeStatus)}); nao abri o navegador as cegas. Reinicie o Gemini CLI ou rode gemini_ready { action: "status" } de novo depois que o MCP subir.`;
+    return `Gemini Exporter: o bridge MCP local nao respondeu (${bridgeReasonText(bridgeStatus)}); nao abri o navegador as cegas. Reinicie o Gemini CLI ou rode gemini_ready { action: "status", diagnostic: true } de novo depois que o MCP subir.`;
   }
 
   const launch = buildWindowsBrowserStartCommand();
@@ -1508,7 +1518,7 @@ const afterTool = (input) => {
   }
   if (analysis.bridgeProblem) {
     notes.push(
-      'A resposta sugere problema de bridge/extensao do navegador. Antes de repetir a mesma exportacao ou pedir acao manual, cheque gemini_ready { action: "status" }: ele tenta auto-reload da extensao stale. Se o problema for modo proxy/porta ocupada, use gemini_support { action: "processes" } antes de cleanup ou restart manual. Se houver abas conectadas mas presas, use gemini_tabs { action: "reload" }. Reload manual do card da extensao e ultimo recurso.',
+      'A resposta sugere problema de bridge/extensao do navegador. Antes de repetir a mesma exportacao ou pedir acao manual, cheque gemini_ready { action: "status", diagnostic: true }: ele tenta auto-reload da extensao stale. Se o problema for modo proxy/porta ocupada, use gemini_support { action: "processes" } antes de cleanup ou restart manual. Se houver abas conectadas mas presas, use gemini_tabs { action: "reload", intent: "tab_management" }. Reload manual do card da extensao e ultimo recurso.',
     );
   }
 

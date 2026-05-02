@@ -73,7 +73,7 @@ Use MCP for control-plane checks, not for starting long sync/export jobs.
 Check readiness:
 
 ```json
-{ "tool": "gemini_ready", "arguments": { "action": "check" } }
+{ "tool": "gemini_ready", "arguments": { "action": "check", "diagnostic": true } }
 ```
 
 If you accidentally call `gemini_export` for `sync`, `missing`, `recent`,
@@ -83,7 +83,8 @@ Do not poll `gemini_job` unless a CLI/bridge response has already returned a
 real `jobId`.
 
 Use CLI `tabs list/claim` before the CLI sync/export when tab identity is
-ambiguous. Use `gemini_tabs` only when shell access is unavailable. Use
+ambiguous. Use `gemini_tabs` only when shell access is unavailable, and pass
+`intent: "tab_management"` when you do. Use
 `gemini_support` when the bridge/extension is slow, stale, or disconnected.
 Use `detail: "full"` only for root-cause debugging.
 
@@ -123,6 +124,11 @@ the end of the Gemini sidebar was not confirmed.
 If the CLI returns a partial count, stop there. Do not call `gemini_chats`,
 `gemini_ready`, or `gemini_tabs` as a fallback for the same count request; that
 adds noisy JSON tool cards and can contend with the same browser tab.
+
+MCP now enforces this: `gemini_chats` count/download returns a short
+`use_cli_only` refusal, and `gemini_ready`/`gemini_tabs`/`gemini_chats` require
+explicit diagnostic/control intent for browser-facing calls. Do not bypass that
+guard.
 
 If the CLI reports multiple Gemini tabs, stay in the CLI path:
 `gemini-md-export tabs list --plain`, then

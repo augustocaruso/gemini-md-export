@@ -264,7 +264,7 @@ regenerated from the corrected source.
 ## Repair Flow
 
 1. Confirm browser/MCP health with `mcp_gemini-md-export_gemini_ready`
-   using `action: "status"`.
+   using `action: "status"` and `diagnostic: true`.
    This is a hard preflight, not a courtesy check. The status tool self-heals by
    default: it can request browser-extension reload when version/build are
    stale. Continue only when the tool returns `ready=true`, at least one
@@ -301,22 +301,21 @@ regenerated from the corrected source.
      `wikiFooterGeminiSourceLinks`, `wikiFooterMissingSourceLinks`, and
      `requiredFinalGeminiSourceLinks` so later rewrite/consolidation steps can
      append every source chat link at the end of the final wiki note.
-   - If it is a raw export, prefer one background job for the raw-export queue:
-     call `mcp_gemini-md-export_gemini_export` with:
+   - If it is a raw export, prefer the CLI reexport command for the
+     raw-export queue:
+     `gemini-md-export export reexport --chat-id <id> --output-dir <staging> --plain`.
+     If shell access is unavailable, call `mcp_gemini-md-export_gemini_export`
+     to obtain its `code: "use_cli"` command and report that command to the
+     parent instead of starting a hidden MCP job.
+     Pass:
      - `action` = `reexport`;
      - `items` carrying `chatId`, `title`, and `sourcePath`;
      - `outputDir` = staging directory.
-     Poll `mcp_gemini-md-export_gemini_job` with `action: "status"` by `jobId` until the
-     job reaches `completed`, `completed_with_errors`, `failed`, or
-     `cancelled`. This is the default path for Windows and for more than three
-     raw exports because it avoids dozens of long synchronous tool calls.
-   - Only use `mcp_gemini-md-export_gemini_chats` with `action: "download"`
-     for a single spot-check or fallback when reexport is unavailable. If you
-     do call it, pass:
-     - `action` = `download`;
-     - `chatId`;
-     - `outputDir` = staging directory;
-     - `returnToOriginal=false`.
+     Do not poll `mcp_gemini-md-export_gemini_job` unless an older bridge has
+     actually returned a real `jobId`.
+   - Do not use `mcp_gemini-md-export_gemini_chats` with `action: "download"`.
+     The public MCP surface now returns `use_cli_only` for downloads so repair
+     does not create hidden long jobs, noisy JSON, or stuck claims.
    - Verify the staged file:
      - filename is `<chatId>.md`;
      - frontmatter `chat_id` equals expected chatId;
@@ -381,12 +380,11 @@ Stop and ask for direction when:
 ## Performance Rules
 
 - Do not list hundreds of chats in Gemini CLI.
-- Do not ask for `gemini_chats { action: "list" }` unless you need a small smoke test.
-- Prefer `gemini_export { action: "reexport" }` for known suspect chatIds; it runs as a
-  background job, writes a report, and is safer on slow Windows browsers than
-  repeated `gemini_chats { action: "download" }` calls.
-- `gemini_chats { action: "download" }` by direct `chatId` is still valid for one-off checks;
-  this extension supports navigating by direct Gemini URL when the chat is not
-  loaded in the sidebar.
+- Do not ask for `gemini_chats { action: "list" }` unless you need a small
+  smoke test; if you do, pass `intent: "small_page"`.
+- Prefer CLI `export reexport` for known suspect chatIds. MCP `gemini_export`
+  is a command handoff, not a hidden long job.
+- `gemini_chats { action: "download" }` is not valid anymore in the public MCP
+  surface; it returns `use_cli_only`.
 - Process in small batches or a single background job and report progress by
   counts, not by dumping file contents.

@@ -334,7 +334,7 @@ test('BeforeTool abre Gemini pelo launcher PowerShell quando nao ha cliente cone
       {
         hook_event_name: 'BeforeTool',
         tool_name: 'mcp_gemini-md-export_gemini_ready',
-        tool_input: { action: 'status' },
+        tool_input: { action: 'status', diagnostic: true },
       },
       {
         GEMINI_MCP_HOOK_PLATFORM: 'win32',
@@ -382,7 +382,7 @@ test('BeforeTool normaliza prefixo MCP com underscores duplos', async () => {
       {
         hook_event_name: 'BeforeTool',
         tool_name: 'mcp__gemini_md_export__gemini_ready',
-        tool_input: { action: 'status' },
+        tool_input: { action: 'status', diagnostic: true },
       },
       {
         GEMINI_MCP_HOOK_PLATFORM: 'win32',
@@ -428,7 +428,7 @@ test('BeforeTool espera a aba Gemini conectar depois de abrir pelo hook', async 
       {
         hook_event_name: 'BeforeTool',
         tool_name: 'mcp_gemini-md-export_gemini_ready',
-        tool_input: { action: 'status' },
+        tool_input: { action: 'status', diagnostic: true },
       },
       {
         GEMINI_MCP_HOOK_PLATFORM: 'win32',
@@ -496,7 +496,7 @@ test('BeforeTool nao abre segunda aba durante launch em progresso', async () => 
         hook_event_name: 'BeforeTool',
         session_id: 'session-a',
         tool_name: 'mcp_gemini-md-export_gemini_chats',
-        tool_input: {},
+        tool_input: { intent: 'small_page' },
       },
       {
         GEMINI_MCP_HOOK_PLATFORM: 'win32',
@@ -531,7 +531,7 @@ test('BeforeTool nao abre browser as cegas quando bridge esta inalcançavel', as
         hook_event_name: 'BeforeTool',
         session_id: 'session-a',
         tool_name: 'mcp_gemini-md-export_gemini_ready',
-        tool_input: { action: 'status' },
+        tool_input: { action: 'status', diagnostic: true },
       },
       {
         GEMINI_MCP_HOOK_PLATFORM: 'win32',
@@ -576,7 +576,7 @@ test('BeforeTool timeout de conexao sai antes do hard exit da CLI', async () => 
       {
         hook_event_name: 'BeforeTool',
         tool_name: 'mcp_gemini-md-export_gemini_ready',
-        tool_input: { action: 'status' },
+        tool_input: { action: 'status', diagnostic: true },
       },
       {
         GEMINI_MCP_HOOK_PLATFORM: 'win32',
@@ -668,7 +668,7 @@ test('BeforeTool nao abre nova aba quando Gemini ja esta conectado', async () =>
       {
         hook_event_name: 'BeforeTool',
         tool_name: 'mcp_gemini-md-export_gemini_chats',
-        tool_input: {},
+        tool_input: { intent: 'small_page' },
       },
       {
         GEMINI_MCP_HOOK_PLATFORM: 'win32',
@@ -711,7 +711,7 @@ test('BeforeTool nao abre aba duplicada quando ha client conectado mas nao pront
       {
         hook_event_name: 'BeforeTool',
         tool_name: 'mcp_gemini-md-export_gemini_chats',
-        tool_input: {},
+        tool_input: { intent: 'small_page' },
       },
       {
         GEMINI_MCP_HOOK_PLATFORM: 'win32',
@@ -755,7 +755,7 @@ test('BeforeTool cai para /agent/clients quando bridge antigo nao tem /agent/rea
       {
         hook_event_name: 'BeforeTool',
         tool_name: 'mcp_gemini-md-export_gemini_chats',
-        tool_input: {},
+        tool_input: { intent: 'small_page' },
       },
       {
         GEMINI_MCP_HOOK_PLATFORM: 'win32',
@@ -865,11 +865,13 @@ test('hook emite JSON valido mesmo com stdin invalido', () => {
   assert.doesNotThrow(() => JSON.parse(result.stdout), result.stdout);
 });
 
-test('BeforeTool considera gemini_ready como tool que acorda o navegador', () => {
+test('BeforeTool so acorda navegador para gemini_ready com intencao explicita', () => {
   const hookSource = readFileSync(hookPath, 'utf-8');
 
   assert.match(hookSource, /gemini_ready/);
   assert.match(hookSource, /gemini_ready:\s+new Set\(\['status'\]\)/);
+  assert.match(hookSource, /hasExplicitMcpIntent/);
+  assert.match(hookSource, /\['gemini_ready', 'gemini_tabs', 'gemini_chats'\]/);
   assert.doesNotMatch(hookSource, /gemini_export:\s+new Set/);
   assert.match(hookSource, /open-gemini-restore-focus\.ps1/);
   assert.match(hookSource, /SetForegroundWindow/);

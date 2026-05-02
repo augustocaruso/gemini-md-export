@@ -135,9 +135,10 @@ Na extensão do Gemini CLI, o hook `SessionStart` faz apenas warmup da bridge:
 consulta `/healthz` e, se necessário, inicia a bridge local em modo
 `bridge-only` sem abrir Chrome/Gemini. O hook `BeforeTool` ficou estreito: ele
 só tenta acordar o navegador para ferramentas MCP pequenas que realmente leem
-ou alteram uma aba (`gemini_ready status`, `gemini_tabs`, `gemini_chats` e
-ações explícitas de cache/snapshot). Ele não roda para `gemini_export` nem
-`gemini_job`; export/sync longo é responsabilidade da CLI.
+ou alteram uma aba quando a chamada traz intenção explícita
+(`diagnostic: true`, `intent: "tab_management"` ou `intent: "small_page"`).
+Ele não roda para `gemini_export`, `gemini_job` nem chamadas MCP acidentais;
+export/sync longo é responsabilidade da CLI.
 
 A CLI empacotada é quem acorda o navegador para jobs longos. Antes de
 `sync`/`export`, ela garante a bridge, chama `/agent/ready` com
@@ -151,11 +152,12 @@ O MCP também deve ficar silencioso por padrão. Checagens internas de
 versão/protocolo, reload e wake do navegador só aparecem no terminal com
 `GEMINI_MCP_DEBUG=true` ou `GEMINI_MCP_LOG_LEVEL=info`; no uso normal, as
 tools retornam JSON compacto e diagnóstico detalhado fica nos status/relatórios.
-`gemini_ready { action: "status" }` inclui `extensionReadiness`, separando service worker,
-content script, aba Gemini, build stamp esperado/em execução, resultado do
-reload automático e diagnóstico do top-bar. Só peça reload manual do card da
-extensão unpacked quando `extensionReadiness.reload.manualReloadRequired=true`
-ou quando o status indicar perfil/pasta errados após o self-heal automático.
+`gemini_ready { action: "status", diagnostic: true }` inclui
+`extensionReadiness`, separando service worker, content script, aba Gemini,
+build stamp esperado/em execução, resultado do reload automático e diagnóstico
+do top-bar. Só peça reload manual do card da extensão unpacked quando
+`extensionReadiness.reload.manualReloadRequired=true` ou quando o status indicar
+perfil/pasta errados após o self-heal automático.
 
 Use `GEMINI_MCP_BROWSER=edge` ou `chrome`/`brave`/`dia` para fixar o navegador.
 O argumento `--profile-directory` só é enviado quando
@@ -175,7 +177,8 @@ __geminiMdExportDebug.findTopBar()
 __geminiMdExportDebug.openExportModal()
 ```
 
-Confira se `buildStamp` bate com o esperado em `gemini_ready { action: "status" }`, se
+Confira se `buildStamp` bate com o esperado em
+`gemini_ready { action: "status", diagnostic: true }`, se
 `findTopBar().matchedBy` não é `null` numa conversa e se o modal consegue
 trocar destino/salvar via bridge. Se o MCP estiver ausente, o fallback esperado
 é Downloads com aviso em português no modal/toast.
@@ -300,8 +303,9 @@ Chamadas diretas aos nomes antigos retornam `code: "tool_renamed"` com o
 comando novo exato em `replacement`.
 
 Chamadas MCP de export/sync longo retornam `code: "use_cli"` com
-`command`, `args` e `cwd` para o agente executar a CLI diretamente. O MCP não
-inicia job longo escondido por baixo da tool.
+`command`, `args` e `cwd` para o agente executar a CLI diretamente. Contagem
+total e download/exportação via `gemini_chats` retornam `code: "use_cli_only"`.
+O MCP não inicia job longo escondido por baixo da tool.
 
 A extensão Gemini CLI também empacota Agent Skills em
 `skills/<nome>/SKILL.md`. O `GEMINI.md` do bundle fica curto e roteia para:
@@ -314,23 +318,24 @@ A extensão Gemini CLI também empacota Agent Skills em
 - `gemini-tabs-and-browser` para múltiplas abas, claim visual e abertura
   confiável do Gemini Web.
 
-Quando houver mais de uma aba Gemini conectada, chame
-`gemini_tabs { action: "list" }` e depois
-`gemini_tabs { action: "claim" }` com `clientId`, `tabId` ou `index`. A claim prende a
-sessão MCP/CLI naquela aba; sem claim ou seletor explícito, tools de listagem e
-export retornam `ambiguous_gemini_tabs` em vez de escolher a aba ativa por
-acidente. O indicador visual usa Tab Group nativo do Chrome/Edge quando
-possível, não overlay dentro da página Gemini. Se a aba já estiver em um grupo
-do usuário, a extensão preserva esse grupo e usa badge/prefixo de título como
-fallback.
+Quando houver mais de uma aba Gemini conectada em fluxo de contagem/exportação,
+use a CLI: `gemini-md-export tabs list --plain` e depois
+`gemini-md-export tabs claim --index <n> --plain`. Para diagnóstico MCP
+deliberado, chame `gemini_tabs { action: "list", intent: "tab_management" }` e
+depois `gemini_tabs { action: "claim", intent: "tab_management" }` com
+`clientId`, `tabId` ou `index`. A claim prende a sessão MCP/CLI naquela aba;
+sem claim ou seletor explícito, tools de listagem e export retornam
+`ambiguous_gemini_tabs` em vez de escolher a aba ativa por acidente. O indicador
+visual usa Tab Group nativo do Chrome/Edge quando possível, não overlay dentro
+da página Gemini. Se a aba já estiver em um grupo do usuário, a extensão
+preserva esse grupo e usa badge/prefixo de título como fallback.
 
-Para listas pequenas, `gemini_chats { action: "list" }` é paginada. Use `limit` como
-tamanho da página e avance com `offset` (`0`, `50`, `100`...). O MCP carrega
-mais histórico conforme necessário e retorna `pagination` com `nextOffset`,
-`loadedCount`, `reachedEnd` e `canLoadMore`. Evite pedir centenas de conversas
-em uma única resposta do Gemini CLI; peça páginas de 25-50 itens e continue até
-`reachedEnd=true` ou uma página vazia. A listagem paginada tem teto defensivo de
-1000 conversas por sessão.
+Para listas pequenas de diagnóstico, `gemini_chats { action: "list",
+intent: "small_page" }` é paginada. Use `limit` como tamanho da página e avance
+com `offset` (`0`, `50`, `100`...). Evite pedir centenas de conversas em uma
+única resposta do Gemini CLI. Para "quantos chats ao todo" e para exportar,
+rode a CLI; se ela falhar por timeout/conexão, responda a falha curta em vez de
+trocar para MCP.
 
 Exports longos gravam relatório JSON incremental. Se
 `gemini-md-export export recent`, `export missing` ou `sync` for interrompido,
