@@ -15,6 +15,8 @@ import {
 const DEFAULT_BRIDGE_URL = 'http://127.0.0.1:47283';
 const DEFAULT_POLL_MS = 1200;
 const DEFAULT_READY_WAIT_MS = 30_000;
+const DEFAULT_READY_REQUEST_TIMEOUT_MS = 15_000;
+const DEFAULT_EXISTING_TAB_RECONNECT_GRACE_MS = 8_000;
 const DEFAULT_TIMEOUT_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_COUNT_LOAD_MORE_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_COUNT_STATUS_INTERVAL_MS = 15_000;
@@ -712,7 +714,7 @@ const requestReadyStatus = async (bridgeUrl, flags, { waitMs = 0 } = {}) =>
       allowReload: flags.allowReload,
       clientId: flags.clientId,
     }),
-    { timeoutMs: Math.max(5000, waitMs + 5000) },
+    { timeoutMs: Math.max(DEFAULT_READY_REQUEST_TIMEOUT_MS, waitMs + 5000) },
   );
 
 const packageRoot = () => resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -1185,12 +1187,37 @@ const readyWithCliWake = async (bridgeUrl, flags, ui) => {
   let ready = await requestReadyStatus(bridgeUrl, flags, { waitMs: 0 });
   let cliBrowserWake = null;
   if (ready.ready !== true) {
-    cliBrowserWake = await wakeBrowserFromCli(flags, ui, ready);
-    if (flags.readyWaitMs > 0) {
-      if (ui.format !== 'json' && ui.format !== 'jsonl') {
-        ui.stdout.write(`Aguardando a extensao conectar (${formatDuration(flags.readyWaitMs)})...\n`);
+    if (shouldWakeBrowserForReady(ready)) {
+      const existingTabGraceMs = Math.min(
+        Math.max(0, Number(flags.readyWaitMs || 0)),
+        nonNegativeIntEnv(
+          process.env.GEMINI_MD_EXPORT_EXISTING_TAB_GRACE_MS,
+          DEFAULT_EXISTING_TAB_RECONNECT_GRACE_MS,
+          30_000,
+        ),
+      );
+      if (existingTabGraceMs > 0) {
+        if (ui.format !== 'json' && ui.format !== 'jsonl') {
+          ui.stdout.write(
+            `Aguardando aba Gemini existente reconectar (${formatDuration(existingTabGraceMs)})...\n`,
+          );
+        }
+        const reconnected = await requestReadyStatus(bridgeUrl, flags, {
+          waitMs: existingTabGraceMs,
+        });
+        if (reconnected.ready === true || !shouldWakeBrowserForReady(reconnected)) {
+          ready = reconnected;
+        }
       }
-      ready = await requestReadyStatus(bridgeUrl, flags, { waitMs: flags.readyWaitMs });
+    }
+    if (ready.ready !== true) {
+      cliBrowserWake = await wakeBrowserFromCli(flags, ui, ready);
+      if (flags.readyWaitMs > 0) {
+        if (ui.format !== 'json' && ui.format !== 'jsonl') {
+          ui.stdout.write(`Aguardando a extensao conectar (${formatDuration(flags.readyWaitMs)})...\n`);
+        }
+        ready = await requestReadyStatus(bridgeUrl, flags, { waitMs: flags.readyWaitMs });
+      }
     }
   }
   return {
@@ -1613,6 +1640,7 @@ const runChats = async (parsed, streams = {}) => {
             refresh: parsed.flags.refresh,
             ...countLoadMoreParams,
             loadMoreTimeoutMs: countTimeoutMs,
+            autoReleaseClaim: parsed.flags.autoReleaseClaim,
             clientId: parsed.flags.clientId,
             tabId: parsed.flags.tabId,
             claimId: parsed.flags.claimId,

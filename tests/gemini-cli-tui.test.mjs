@@ -610,6 +610,7 @@ test('CLI sync acorda Gemini Web pela propria CLI antes de exportar', async () =
       {
         GEMINI_MD_EXPORT_CLI_BROWSER_LAUNCH_DRY_RUN: 'true',
         GEMINI_MCP_HOOK_STATE_DIR: tmpRoot,
+        GEMINI_MD_EXPORT_EXISTING_TAB_GRACE_MS: '0',
       },
       async () => {
         await withServer((req, res, url) => {
@@ -673,6 +674,71 @@ test('CLI sync acorda Gemini Web pela propria CLI antes de exportar', async () =
   }
 });
 
+test('CLI espera aba Gemini existente reconectar antes de abrir nova aba', async () => {
+  const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-cli-existing-tab-'));
+  let readyCalls = 0;
+  try {
+    await withEnv(
+      {
+        GEMINI_MD_EXPORT_CLI_BROWSER_LAUNCH_DRY_RUN: 'true',
+        GEMINI_MCP_HOOK_STATE_DIR: tmpRoot,
+        GEMINI_MD_EXPORT_EXISTING_TAB_GRACE_MS: '300',
+      },
+      async () => {
+        await withServer((req, res, url) => {
+          if (url.pathname === '/agent/ready') {
+            readyCalls += 1;
+            const ready = readyCalls >= 2;
+            sendJson(res, 200, {
+              ready,
+              connectedClientCount: ready ? 1 : 0,
+              selectableTabCount: ready ? 1 : 0,
+              commandReadyClientCount: ready ? 1 : 0,
+              blockingIssue: ready ? null : 'no_connected_clients',
+            });
+            return;
+          }
+          if (url.pathname === '/agent/sync-vault') {
+            sendJson(res, 202, completedJob);
+            return;
+          }
+          sendJson(res, 404, { error: `not found: ${url.pathname}` });
+        }, async (bridgeUrl, requests) => {
+          const stdout = captureStream();
+          const stderr = captureStream();
+          const run = await main(
+            [
+              'sync',
+              '/vault/Gemini',
+              '--bridge-url',
+              bridgeUrl,
+              '--plain',
+              '--ready-wait-ms',
+              '300',
+              '--poll-ms',
+              '10',
+            ],
+            { stdout, stderr },
+          );
+
+          assert.equal(run.exitCode, 0);
+          assert.match(stdout.text(), /Aguardando aba Gemini existente reconectar \(1s\)/);
+          assert.doesNotMatch(stdout.text(), /Abrindo Gemini Web em background/);
+          assert.equal(existsSync(resolve(tmpRoot, 'hook-browser-launch.json')), false);
+          assert.equal(stderr.text(), '');
+
+          const readyRequests = requests.filter((item) => item.pathname === '/agent/ready');
+          assert.equal(readyRequests.length, 2);
+          assert.equal(readyRequests[0].searchParams.get('waitMs'), '0');
+          assert.equal(readyRequests[1].searchParams.get('waitMs'), '300');
+        });
+      },
+    );
+  } finally {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
 test('CLI sync reaproveita launch em andamento para evitar aba duplicada', async () => {
   const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-cli-launch-'));
   writeFileSync(
@@ -688,7 +754,12 @@ test('CLI sync reaproveita launch em andamento para evitar aba duplicada', async
   );
   let readyCalls = 0;
   try {
-    await withEnv({ GEMINI_MCP_HOOK_STATE_DIR: tmpRoot }, async () => {
+    await withEnv(
+      {
+        GEMINI_MCP_HOOK_STATE_DIR: tmpRoot,
+        GEMINI_MD_EXPORT_EXISTING_TAB_GRACE_MS: '0',
+      },
+      async () => {
       await withServer((req, res, url) => {
         if (url.pathname === '/agent/ready') {
           readyCalls += 1;

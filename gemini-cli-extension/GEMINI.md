@@ -101,6 +101,11 @@ and exits idle bridges unless `--no-exit-when-idle` is set.
 - After a partial CLI count, do not retry with `gemini_chats`,
   `gemini_ready`, or `gemini_tabs`. That creates noisy JSON tool cards and can
   lock the same Gemini tab. Report the partial count instead.
+- After a failed CLI count/export caused by timeout, connection, readiness, or
+  `extension_version_mismatch`, stop and report the short CLI failure. Do not
+  activate diagnostics, call `gemini_ready`/`gemini_tabs`/`gemini_support`, or
+  kill processes unless the user explicitly asks for diagnostics after that
+  failure.
 - Do not ask for manual Chrome extension reload before trying
   `gemini_ready { "action": "status", "diagnostic": true, "selfHeal": true, "allowReload": true }`,
   unless the loaded extension is too old to support self-heal.

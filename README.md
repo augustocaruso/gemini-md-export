@@ -336,6 +336,9 @@ com `offset` (`0`, `50`, `100`...). Evite pedir centenas de conversas em uma
 única resposta do Gemini CLI. Para "quantos chats ao todo" e para exportar,
 rode a CLI; se ela falhar por timeout/conexão, responda a falha curta em vez de
 trocar para MCP.
+Também não faça cleanup manual com `kill -9`/`pkill`/`taskkill /F` como
+fallback de contagem/exportação; diagnóstico e cleanup de processos só entram
+quando o usuário pedir diagnóstico explicitamente.
 
 Exports longos gravam relatório JSON incremental. Se
 `gemini-md-export export recent`, `export missing` ou `sync` for interrompido,

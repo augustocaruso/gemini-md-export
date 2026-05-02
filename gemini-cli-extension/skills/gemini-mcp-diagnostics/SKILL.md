@@ -8,6 +8,11 @@ description: Use when gemini-md-export is slow, unstable, disconnected, stale af
 Use this skill for bridge/extension/browser instability, port conflicts,
 timeouts, stale Chrome extension builds, and Windows process cleanup.
 
+Do not activate this skill as an automatic fallback after a normal
+`gemini-md-export chats count` or export/sync CLI failure. For those user-facing
+count/export requests, report the short CLI failure and stop unless the user
+explicitly asks for diagnostics.
+
 ## Order Of Operations
 
 1. Check the compact ready state:
@@ -64,6 +69,9 @@ Only clean up after inspecting the plan:
   has been tried or the loaded extension is too old to self-reload.
 - In proxy mode, prefer diagnostics over killing processes. The primary bridge
   may be valid.
+- Never run raw `kill -9`, `pkill`, `killall`, or `taskkill /F` as a shortcut.
+  Process cleanup must go through the exporter diagnostics/dry-run path and
+  requires explicit user confirmation.
 - Keep normal output compact. Use `detail: "full"` only for root-cause work.
 - Browser-facing MCP tools require explicit diagnostic/control intent. Use
   `diagnostic: true` for `gemini_ready` and `intent: "tab_management"` for

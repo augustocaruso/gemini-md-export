@@ -234,6 +234,19 @@ test('BeforeTool bloqueia caminhos proibidos', () => {
   assert.match(output.reason, /fora do escopo combinado/);
 });
 
+test('BeforeTool bloqueia kill manual de processos', () => {
+  const output = runHook('before-tool', {
+    hook_event_name: 'BeforeTool',
+    tool_name: 'run_shell_command',
+    tool_input: {
+      command: 'kill -9 12345 67890',
+    },
+  });
+
+  assert.equal(output.decision, 'deny');
+  assert.match(output.reason, /nao mate processos manualmente/);
+});
+
 test('hooks.json aplica guardrail em ferramentas que podem editar', () => {
   const hooksConfig = JSON.parse(
     readFileSync(resolve(ROOT, 'gemini-cli-extension', 'hooks', 'hooks.json'), 'utf-8'),
@@ -249,6 +262,35 @@ test('hooks.json aplica guardrail em ferramentas que podem editar', () => {
   }
   assert.equal(matcher.test('read_file'), false);
   assert.equal(matcher.test('mcp_gemini-md-export_gemini_ready'), false);
+});
+
+test('hooks.json audita falha da CLI via shell sem fallback MCP', () => {
+  const hooksConfig = JSON.parse(
+    readFileSync(resolve(ROOT, 'gemini-cli-extension', 'hooks', 'hooks.json'), 'utf-8'),
+  );
+  const shellAfterTool = hooksConfig.hooks.AfterTool.find(
+    (entry) => entry.hooks?.[0]?.name === 'gemini-md-export-cli-result-guard',
+  );
+  assert.ok(shellAfterTool);
+  const matcher = new RegExp(shellAfterTool.matcher);
+  assert.equal(matcher.test('run_shell_command'), true);
+  assert.equal(matcher.test('shell'), true);
+  assert.equal(shellAfterTool.hooks[0].timeout, 3000);
+});
+
+test('AfterTool de shell manda parar depois de falha da CLI', () => {
+  const output = runHook('after-tool', {
+    hook_event_name: 'AfterTool',
+    tool_name: 'run_shell_command',
+    tool_response: {
+      stdout:
+        'node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" chats count --plain\nTimeout falando com a bridge em 5000ms.',
+    },
+  });
+
+  assert.equal(output.suppressOutput, true);
+  assert.match(output.hookSpecificOutput.additionalContext, /Pare aqui/);
+  assert.match(output.hookSpecificOutput.additionalContext, /nao chame gemini_ready/);
 });
 
 test('BeforeTool falha aberto para chamada normal', () => {

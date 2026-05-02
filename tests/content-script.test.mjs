@@ -472,6 +472,7 @@ test('content script reporta diagnóstico de scroll ao puxar histórico', async 
   assert.match(source, /scrollInfoIsNearBottom/);
   assert.match(source, /traceConfirmsStableBottom/);
   assert.match(source, /confirmedStableBottom/);
+  assert.doesNotMatch(source, /loadOptions\.fastMode\s*&&\s*scrolledToBottom/);
   assert.match(source, /requiredEndFailures/);
   assert.match(source, /state\.sidebarConversationCache\.size/);
   assert.match(source, /loadTrace:\s*command\.args\?\.includeLoadTrace === false/);

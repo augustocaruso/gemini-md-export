@@ -1777,7 +1777,6 @@
       let scrolledToBottom = isAtBottom(scroller) || traceConfirmsStableBottom(trace);
       if (
         !loaded &&
-        loadOptions.fastMode &&
         scrolledToBottom
       ) {
         const confirmation = await triggerSidebarLoading({

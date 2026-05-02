@@ -12,6 +12,18 @@
             "timeout": 3000
           }
         ]
+      },
+      {
+        "matcher": "^(run_shell_command|shell|Shell)$",
+        "hooks": [
+          {
+            "name": "gemini-md-export-cli-result-guard",
+            "description": "Stop CLI count/export failures from cascading into noisy MCP fallbacks.",
+            "type": "command",
+            "command": "node \"${extensionPath}${/}scripts${/}hooks${/}gemini-md-export-hook.mjs\" after-tool",
+            "timeout": 3000
+          }
+        ]
       }
     ],
     "SessionStart": [

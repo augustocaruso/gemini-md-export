@@ -40,6 +40,9 @@ const SESSION_CONTEXT = [
 const BLOCK_REASON =
   'Bloqueado pelo gemini-md-export: este caminho esta fora do escopo combinado. Use DOM atual, data/blob, fetch permitido, bridge/background existente ou lightbox controlado; se nao houver bytes legiveis, mantenha um warning honesto.';
 
+const PROCESS_KILL_BLOCK_REASON =
+  'Bloqueado pelo gemini-md-export: nao mate processos manualmente com kill -9/pkill/taskkill. Se o usuario pediu diagnostico, use primeiro a CLI/diagnostico de processos com dry-run e so encerre alvo seguro com confirmacao explicita.';
+
 const MEDIA_WARNING_RE =
   /\[!warning\]\s*M[ií]dia n[aã]o importada|M[ií]dia n[aã]o exportada|media n(?:ao|ão) importad/i;
 
@@ -1474,12 +1477,31 @@ const hasBrowserBridgeProblem = (value) => {
   );
 };
 
+const hasCliCountOrExportFailure = (value) => {
+  const text = collectText(value).join('\n').toLowerCase();
+  if (!/gemini-md-export(?:\.mjs)?/.test(text)) return false;
+  if (!/(chats count|export recent|export missing|sync|export resume|export reexport|export notebook)/.test(text)) {
+    return false;
+  }
+  return (
+    text.includes('timeout falando com a bridge') ||
+    text.includes('gemini web ainda nao esta pronto') ||
+    text.includes('gemini web ainda não esta pronto') ||
+    text.includes('gemini web ainda não está pronto') ||
+    text.includes('extension_version_mismatch') ||
+    text.includes('no_connected_clients') ||
+    text.includes('bridge local nao respondeu') ||
+    text.includes('bridge local não respondeu')
+  );
+};
+
 const analyzeToolResponse = (response) => {
   const candidates = responseCandidates(response);
   let mediaFailureCount = null;
   let mediaFileCount = null;
   let mediaWarning = false;
   let bridgeProblem = false;
+  let cliCountOrExportFailure = false;
 
   for (const candidate of candidates) {
     if (mediaFailureCount == null) {
@@ -1490,6 +1512,7 @@ const analyzeToolResponse = (response) => {
     }
     mediaWarning = mediaWarning || hasMediaWarning(candidate);
     bridgeProblem = bridgeProblem || hasBrowserBridgeProblem(candidate);
+    cliCountOrExportFailure = cliCountOrExportFailure || hasCliCountOrExportFailure(candidate);
   }
 
   return {
@@ -1497,6 +1520,7 @@ const analyzeToolResponse = (response) => {
     mediaFileCount: mediaFileCount ?? 0,
     mediaWarning,
     bridgeProblem,
+    cliCountOrExportFailure,
   };
 };
 
@@ -1519,6 +1543,11 @@ const afterTool = (input) => {
   if (analysis.bridgeProblem) {
     notes.push(
       'A resposta sugere problema de bridge/extensao do navegador. Antes de repetir a mesma exportacao ou pedir acao manual, cheque gemini_ready { action: "status", diagnostic: true }: ele tenta auto-reload da extensao stale. Se o problema for modo proxy/porta ocupada, use gemini_support { action: "processes" } antes de cleanup ou restart manual. Se houver abas conectadas mas presas, use gemini_tabs { action: "reload", intent: "tab_management" }. Reload manual do card da extensao e ultimo recurso.',
+    );
+  }
+  if (analysis.cliCountOrExportFailure) {
+    notes.push(
+      'A CLI gemini-md-export falhou no caminho de contagem/exportacao. Pare aqui e responda a falha curta ao usuario; nao chame gemini_ready, gemini_tabs, gemini_chats nem gemini_support como fallback, a menos que o usuario peca diagnostico explicitamente depois da falha.',
     );
   }
 
@@ -1570,6 +1599,10 @@ const forbiddenReason = (input) => {
     )
   ) {
     return BLOCK_REASON;
+  }
+
+  if (/\bkill\s+-9\b|\bpkill\b|\bkillall\b|\btaskkill(?:\.exe)?\b[\s\S]{0,120}\s\/f\b/.test(text)) {
+    return PROCESS_KILL_BLOCK_REASON;
   }
 
   return null;

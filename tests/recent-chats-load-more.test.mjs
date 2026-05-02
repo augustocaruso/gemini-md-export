@@ -92,6 +92,18 @@ test('contagem usa timeout total sem vazar para rodada interna do browser', () =
   assert.match(block, /withTimeout\(\s*loadAllPromise,\s*totalLoadMoreTimeoutMs/s);
 });
 
+test('contagem longa aplica claim visual temporaria na aba', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const block = source.match(
+    /url\.pathname === '\/agent\/recent-chats'[\s\S]*?\n  if \(req\.method === 'GET' && url\.pathname === '\/agent\/export-recent-chats'\)/,
+  )?.[0];
+  assert.ok(block, '/agent/recent-chats deve existir');
+  assert.match(block, /shouldTemporarilyClaimTab/);
+  assert.match(block, /ensureTabClaimForJob\(client, args, args\.countOnly \? 'GME Count' : 'GME List'\)/);
+  assert.match(block, /recent-chats-list-finished/);
+  assert.match(block, /tabClaimRelease/);
+});
+
 test('export all incompleto vira aviso em vez de sucesso silencioso', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const block = source.match(

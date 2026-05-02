@@ -125,6 +125,12 @@ If the CLI returns a partial count, stop there. Do not call `gemini_chats`,
 `gemini_ready`, or `gemini_tabs` as a fallback for the same count request; that
 adds noisy JSON tool cards and can contend with the same browser tab.
 
+If the CLI count/export fails with timeout, connection/readiness failure,
+`extension_version_mismatch`, or `no_connected_clients`, stop there too. Report
+the concise CLI failure. Do not activate diagnostics, call MCP fallback tools,
+or kill processes unless the user explicitly asks for diagnostics after the
+failure.
+
 MCP now enforces this: `gemini_chats` count/download returns a short
 `use_cli_only` refusal, and `gemini_ready`/`gemini_tabs`/`gemini_chats` require
 explicit diagnostic/control intent for browser-facing calls. Do not bypass that

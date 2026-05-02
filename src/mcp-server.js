@@ -9420,25 +9420,42 @@ const bridgeServer = createServer(async (req, res) => {
     try {
       const selector = clientSelectorFromSearchParams(url.searchParams);
       const client = requireRecentChatsClient(selector);
-      sendAgentJson(
-        res,
-        200,
-        await listRecentChatsForClient(client, {
-          ...selector,
-          limit: url.searchParams.get('limit'),
-          offset: url.searchParams.get('offset'),
-          refresh: parseOptionalBoolean(url.searchParams.get('refresh')),
-          untilEnd: parseOptionalBoolean(url.searchParams.get('untilEnd')),
-          countOnly: parseOptionalBoolean(url.searchParams.get('countOnly')),
-          maxLoadMoreRounds: url.searchParams.get('maxLoadMoreRounds') || undefined,
-          loadMoreRounds: url.searchParams.get('loadMoreRounds') || undefined,
-          loadMoreAttempts: url.searchParams.get('loadMoreAttempts') || undefined,
-          maxNoGrowthRounds: url.searchParams.get('maxNoGrowthRounds') || undefined,
-          loadMoreBrowserRounds: url.searchParams.get('loadMoreBrowserRounds') || undefined,
-          loadMoreBrowserTimeoutMs: url.searchParams.get('loadMoreBrowserTimeoutMs') || undefined,
-          loadMoreTimeoutMs: url.searchParams.get('loadMoreTimeoutMs') || undefined,
-        }),
-      );
+      const args = {
+        ...selector,
+        limit: url.searchParams.get('limit'),
+        offset: url.searchParams.get('offset'),
+        refresh: parseOptionalBoolean(url.searchParams.get('refresh')),
+        untilEnd: parseOptionalBoolean(url.searchParams.get('untilEnd')),
+        countOnly: parseOptionalBoolean(url.searchParams.get('countOnly')),
+        autoReleaseClaim: parseOptionalBoolean(url.searchParams.get('autoReleaseClaim')),
+        maxLoadMoreRounds: url.searchParams.get('maxLoadMoreRounds') || undefined,
+        loadMoreRounds: url.searchParams.get('loadMoreRounds') || undefined,
+        loadMoreAttempts: url.searchParams.get('loadMoreAttempts') || undefined,
+        maxNoGrowthRounds: url.searchParams.get('maxNoGrowthRounds') || undefined,
+        loadMoreBrowserRounds: url.searchParams.get('loadMoreBrowserRounds') || undefined,
+        loadMoreBrowserTimeoutMs: url.searchParams.get('loadMoreBrowserTimeoutMs') || undefined,
+        loadMoreTimeoutMs: url.searchParams.get('loadMoreTimeoutMs') || undefined,
+      };
+      const shouldTemporarilyClaimTab =
+        (args.countOnly === true || args.untilEnd === true) && args.autoClaim !== false;
+      let claim = null;
+      let result = null;
+      try {
+        if (shouldTemporarilyClaimTab) {
+          claim = await ensureTabClaimForJob(client, args, args.countOnly ? 'GME Count' : 'GME List');
+        }
+        result = await listRecentChatsForClient(client, args);
+        if (claim) result.tabClaim = claim;
+      } finally {
+        if (claim?.claimId && shouldAutoReleaseTabClaim(args)) {
+          const tabClaimRelease = await releaseTabClaim({
+            claimId: claim.claimId,
+            reason: 'recent-chats-list-finished',
+          });
+          if (result) result.tabClaimRelease = tabClaimRelease;
+        }
+      }
+      sendAgentJson(res, 200, result);
     } catch (err) {
       sendAgentJson(res, 503, { error: err.message });
     }
