@@ -1,12 +1,16 @@
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { resolve, win32 } from 'node:path';
+import { dirname, resolve, win32 } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { discoverLoadedExtension } from './browser-diagnostics.mjs';
 
 const GEMINI_URL = 'https://gemini.google.com/app';
 const DEFAULT_LAUNCH_OBSERVE_MS = 180;
 export const BROWSER_LAUNCH_STATE_FILENAME = 'hook-browser-launch.json';
 const WINDOWS_RESTORE_FOCUS_SCRIPT_FILENAME = 'open-gemini-restore-focus.ps1';
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const PACKAGE_ROOT = resolve(__dirname, '..');
 
 const quotePowerShellString = (value) => `'${String(value).replace(/'/g, "''")}'`;
 
@@ -123,6 +127,46 @@ const browserOrder = (preferredKey) => [
   ...['chrome', 'edge', 'brave', 'dia'].filter((key) => key !== preferredKey),
 ];
 
+const browserAutoDetectEnabled = (env) =>
+  env.GEMINI_MCP_BROWSER_AUTO_DETECT_EXTENSION !== 'false' &&
+  env.GME_BROWSER_AUTO_DETECT_EXTENSION !== 'false';
+
+const profileDirectoryForAutoDetect = (env) =>
+  env.GEMINI_MCP_CHROME_PROFILE_DIRECTORY ||
+  env.GME_CHROME_PROFILE_DIRECTORY ||
+  env.GEMINI_MCP_BROWSER_PROFILE_DIRECTORY ||
+  env.GME_BROWSER_PROFILE_DIRECTORY ||
+  'Default';
+
+export const detectBrowserWithLoadedExtension = ({
+  env = process.env,
+  platform = process.platform,
+  home = homedir(),
+  packageRoot = PACKAGE_ROOT,
+  browserKeys = ['chrome', 'edge', 'brave', 'dia'],
+} = {}) => {
+  const profileDirectory = profileDirectoryForAutoDetect(env);
+  for (const browser of browserKeys) {
+    const diagnosis = discoverLoadedExtension({
+      browser,
+      profileDirectory,
+      packageRoot,
+      platform,
+      home,
+      env,
+    });
+    if (diagnosis?.ok && diagnosis.extension?.version) {
+      return {
+        browserKey: browser,
+        profileDirectory,
+        extension: diagnosis.extension,
+        source: 'loaded-extension',
+      };
+    }
+  }
+  return null;
+};
+
 export const browserLaunchStateDir = (env = process.env) =>
   env.GEMINI_MCP_BROWSER_LAUNCH_STATE_DIR ||
   env.GEMINI_MCP_HOOK_STATE_DIR ||
@@ -220,7 +264,12 @@ export const resolveGeminiBrowserLaunchPlan = ({
   exists = existsSync,
   spawnSyncFn = spawnSync,
 } = {}) => {
-  const preferredKey = normalizeBrowserKey(env.GEMINI_MCP_BROWSER || env.GME_BROWSER || 'chrome');
+  const explicitBrowser = env.GEMINI_MCP_BROWSER || env.GME_BROWSER || '';
+  const autoDetected =
+    !explicitBrowser && env === process.env && browserAutoDetectEnabled(env)
+      ? detectBrowserWithLoadedExtension({ env, platform })
+      : null;
+  const preferredKey = normalizeBrowserKey(explicitBrowser || autoDetected?.browserKey || 'chrome');
 
   if (platform === 'darwin') {
     const browsers = macBrowsers(env);

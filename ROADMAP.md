@@ -1645,6 +1645,28 @@ Critérios de aceite:
   quando de fato não houve recuperação.
 - Tab group/badge temporário é liberado no `finally` mesmo após reconexão.
 
+## v0.8.10 — Hotfix de seleção automática do navegador correto
+
+Status: implementada na versão `0.8.10`.
+
+Objetivo: evitar que a CLI acorde Chrome por padrão quando a extensão unpacked
+está carregada em outro Chromium, como Dia. Sem isso, a bridge fica saudável
+mas a página aberta não tem content script, gerando `no_connected_clients`.
+
+Entregas:
+
+- Detectar em qual browser/perfil a extensão unpacked `gemini-md-export` está
+  carregada quando `GEMINI_MCP_BROWSER`/`GME_BROWSER` não foram definidos.
+- Preferir esse browser no launcher automático da CLI/MCP.
+- Preservar override explícito por variável de ambiente.
+
+Critérios de aceite:
+
+- Em uma máquina onde a extensão está no Dia e não no Chrome, o launcher abre
+  Dia automaticamente.
+- `doctor --browser dia --plain` e o launch plan concordam sobre o browser
+  recuperável.
+
 ## v0.9.0 — Spike condicional de `debugger`/CDP
 
 Status: possibilidade técnica de alto poder, no mesmo bloco de avaliação de

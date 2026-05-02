@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import test from 'node:test';
@@ -8,6 +8,7 @@ import {
   buildWindowsRestoreFocusLaunchScript,
   browserLaunchStatePath,
   describeRecentBrowserLaunch,
+  detectBrowserWithLoadedExtension,
   launchGeminiBrowser,
   readBrowserLaunchState,
   resolveGeminiBrowserLaunchPlan,
@@ -30,6 +31,57 @@ const child = ({ pid = 123, error = null, exitCode = null } = {}) => {
   });
   return emitter;
 };
+
+test('auto-detect escolhe browser onde a extensao unpacked esta carregada', () => {
+  const home = mkdtempSync(resolve(tmpdir(), 'gme-browser-detect-test-'));
+  const packageRoot = resolve(home, 'gemini-md-export');
+  const extensionDir = resolve(packageRoot, 'browser-extension');
+  const prefsDir = resolve(
+    home,
+    'Library',
+    'Application Support',
+    'Dia',
+    'User Data',
+    'Default',
+  );
+  try {
+    mkdirSync(extensionDir, { recursive: true });
+    mkdirSync(prefsDir, { recursive: true });
+    writeFileSync(
+      resolve(extensionDir, 'manifest.json'),
+      JSON.stringify({
+        manifest_version: 3,
+        name: 'Gemini Chat -> Markdown Export',
+        version: '0.8.9',
+      }),
+    );
+    writeFileSync(
+      resolve(prefsDir, 'Secure Preferences'),
+      JSON.stringify({
+        extensions: {
+          settings: {
+            ikjanjokpogoakdlikhcgfgcjbgoogkc: {
+              location: 4,
+              path: extensionDir,
+            },
+          },
+        },
+      }),
+    );
+
+    const detected = detectBrowserWithLoadedExtension({
+      platform: 'darwin',
+      home,
+      packageRoot,
+      browserKeys: ['chrome', 'dia'],
+    });
+
+    assert.equal(detected.browserKey, 'dia');
+    assert.equal(detected.extension.version, '0.8.9');
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+  }
+});
 
 test('Windows prefere Chrome encontrado em caminho conhecido sem chamar where', () => {
   const plan = resolveGeminiBrowserLaunchPlan({
