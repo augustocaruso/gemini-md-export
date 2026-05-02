@@ -1826,6 +1826,28 @@ Critérios de aceite:
 - A claim visual continua com release imediato por content script e fallback de
   expiração enquanto o offscreen mantém o service worker acordado.
 
+## v0.8.17 — Hotfix do default auto da CLI
+
+Status: implementada na versão `0.8.17`.
+
+Objetivo: corrigir o último atrito do diagnóstico/launcher: sem `--browser`
+explícito, a CLI não deve preencher `chrome` cedo demais e bloquear o
+auto-detect do navegador onde a extensão realmente está carregada.
+
+Entregas:
+
+- `parseArgs` deixa `browser`/`profileDirectory` indefinidos por padrão quando
+  não há variável de ambiente explícita.
+- `doctor` e fluxos que usam o launcher podem detectar Dia/Default quando a
+  extensão unpacked está ali.
+- Variáveis explícitas (`GEMINI_MCP_BROWSER`, `GME_BROWSER`,
+  `GEMINI_MCP_*PROFILE*`) continuam vencendo o auto-detect.
+
+Critérios de aceite:
+
+- `doctor --plain` sem `--browser` não deve diagnosticar Chrome/Default por
+  reflexo se a extensão só existe no Dia.
+
 ## v0.9.0 — Spike condicional de `debugger`/CDP
 
 Status: possibilidade técnica de alto poder, no mesmo bloco de avaliação de

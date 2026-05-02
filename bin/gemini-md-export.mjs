@@ -557,11 +557,16 @@ const parseArgs = (argv) => {
       startBridge: true,
       extraRepairArgs: [],
       chatIds: [],
-      browser: normalizeBrowserKey(process.env.GEMINI_MCP_BROWSER || process.env.GME_BROWSER || 'chrome'),
+      browser:
+        process.env.GEMINI_MCP_BROWSER || process.env.GME_BROWSER
+          ? normalizeBrowserKey(process.env.GEMINI_MCP_BROWSER || process.env.GME_BROWSER)
+          : undefined,
       profileDirectory:
         process.env.GEMINI_MCP_CHROME_PROFILE_DIRECTORY ||
         process.env.GME_CHROME_PROFILE_DIRECTORY ||
-        'Default',
+        process.env.GEMINI_MCP_BROWSER_PROFILE_DIRECTORY ||
+        process.env.GME_BROWSER_PROFILE_DIRECTORY ||
+        undefined,
       color: process.env.NO_COLOR ? false : true,
       wakeBrowser: true,
       selfHeal: true,
