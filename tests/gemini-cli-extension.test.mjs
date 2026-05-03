@@ -25,6 +25,7 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   const nativeHostPath = resolve(extensionDir, 'src', 'native-host.mjs');
   const bridgeVersionPath = resolve(extensionDir, 'bridge-version.json');
   const browserManifestPath = resolve(extensionDir, 'browser-extension', 'manifest.json');
+  const artifactCapturePath = resolve(extensionDir, 'browser-extension', 'artifact-capture.js');
   const offscreenHtmlPath = resolve(extensionDir, 'browser-extension', 'offscreen.html');
   const offscreenScriptPath = resolve(extensionDir, 'browser-extension', 'offscreen.js');
   const nativeHostBinPath = resolve(extensionDir, 'bin', 'gemini-md-export-native-host.mjs');
@@ -49,6 +50,12 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
     'exporter',
     'diagnose-page.toml',
   );
+  const captureArtifactsCommandPath = resolve(
+    extensionDir,
+    'commands',
+    'exporter',
+    'capture-artifacts.toml',
+  );
   const repairAuditScriptPath = resolve(extensionDir, 'scripts', 'vault-repair-audit.mjs');
   const repairScriptPath = resolve(extensionDir, 'scripts', 'vault-repair.mjs');
   const nativeHostManifestScriptPath = resolve(extensionDir, 'scripts', 'native-host-manifest.mjs');
@@ -72,6 +79,7 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.equal(existsSync(nativeHostPath), true);
   assert.equal(existsSync(bridgeVersionPath), true);
   assert.equal(existsSync(browserManifestPath), true);
+  assert.equal(existsSync(artifactCapturePath), true);
   assert.equal(existsSync(offscreenHtmlPath), true);
   assert.equal(existsSync(offscreenScriptPath), true);
   assert.equal(existsSync(nativeHostBinPath), true);
@@ -87,6 +95,7 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.equal(existsSync(syncCommandPath), true);
   assert.equal(existsSync(repairCommandPath), true);
   assert.equal(existsSync(diagnosePageCommandPath), true);
+  assert.equal(existsSync(captureArtifactsCommandPath), true);
   assert.equal(existsSync(repairAuditScriptPath), true);
   assert.equal(existsSync(repairScriptPath), true);
   assert.equal(existsSync(nativeHostManifestScriptPath), true);
@@ -111,40 +120,25 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
     browserManifest.host_permissions.includes('https://*.usercontent.goog/*'),
     'browser extension precisa conseguir diagnosticar iframes scf.usercontent.goog',
   );
+  assert.ok(
+    browserManifest.content_scripts.some(
+      (entry) =>
+        entry.js?.includes('artifact-capture.js') &&
+        entry.all_frames === true &&
+        entry.run_at === 'document_start' &&
+        entry.matches?.includes('https://*.usercontent.goog/gemini-code-immersive/*'),
+    ),
+    'browser extension precisa capturar postMessage dos iframes gemini-code-immersive',
+  );
 
   const hooksConfig = JSON.parse(readFileSync(hooksConfigPath, 'utf-8'));
-  assert.ok(Array.isArray(hooksConfig.hooks?.AfterTool));
-  assert.ok(Array.isArray(hooksConfig.hooks?.BeforeTool));
-  assert.ok(Array.isArray(hooksConfig.hooks?.SessionStart));
-  assert.equal(
-    hooksConfig.hooks.SessionStart[0].hooks[0].name,
-    'gemini-md-export-bridge-warmup',
-  );
-  assert.match(hooksConfig.hooks.AfterTool[0].matcher, /chats/);
-  assert.doesNotMatch(hooksConfig.hooks.AfterTool[0].matcher, /ready/);
-  assert.doesNotMatch(hooksConfig.hooks.AfterTool[0].matcher, /support/);
-  assert.notEqual(hooksConfig.hooks.BeforeTool[0].matcher, '*');
-  assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /ready/);
-  assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /tabs/);
-  assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /chats/);
-  assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /mcp_\+gemini/);
-  assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /config/);
-  assert.match(hooksConfig.hooks.BeforeTool[0].matcher, /support/);
-  const browserReadyMatcher = new RegExp(hooksConfig.hooks.BeforeTool[0].matcher);
-  assert.equal(browserReadyMatcher.test('gemini_export'), false);
-  assert.equal(browserReadyMatcher.test('mcp_gemini-md-export_gemini_export'), false);
-  assert.equal(browserReadyMatcher.test('gemini_job'), false);
-  assert.equal(browserReadyMatcher.test('mcp_gemini-md-export_gemini_job'), false);
-  assert.doesNotMatch(hooksConfig.hooks.BeforeTool[0].matcher, /browser_status/);
-  assert.doesNotMatch(hooksConfig.hooks.BeforeTool[0].matcher, /export_job_status/);
-  assert.equal(hooksConfig.hooks.BeforeTool[0].hooks[0].timeout, 20000);
-  const scopeGuard = hooksConfig.hooks.BeforeTool.find(
-    (entry) => entry.hooks?.[0]?.name === 'gemini-md-export-scope-guard',
-  );
-  assert.ok(scopeGuard);
-  assert.match(scopeGuard.matcher, /write_file/);
-  assert.match(scopeGuard.matcher, /run_shell_command/);
-  assert.equal(scopeGuard.hooks[0].timeout, 3000);
+  assert.deepEqual(hooksConfig, { hooks: {} });
+
+  const hookSource = readFileSync(hookScriptPath, 'utf-8');
+  assert.match(hookSource, /hooksRegisteredByDefault:\s*false/);
+  assert.doesNotMatch(hookSource, /Start-Process/);
+  assert.doesNotMatch(hookSource, /waitForConnectedBrowserClient/);
+  assert.doesNotMatch(hookSource, /decision:\s*'deny'/);
 
   const repairAgent = readFileSync(repairAgentPath, 'utf-8');
   assert.match(repairAgent, /^---\nname: gemini-vault-repair/m);
@@ -185,6 +179,12 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.match(repairCommand, /relatorio preliminar/);
   assert.match(repairCommand, /nao deve chamar outro subagent/);
   assert.match(repairCommand, /uniao\s+deduplicada/);
+
+  const captureArtifactsCommand = readFileSync(captureArtifactsCommandPath, 'utf-8');
+  assert.match(captureArtifactsCommand, /--save-html/);
+  assert.match(captureArtifactsCommand, /--output-dir/);
+  assert.match(captureArtifactsCommand, /Captura HTML/);
+  assert.match(captureArtifactsCommand, /N(?:ao|\u00e3o) tente burlar/);
 
   const bridgeVersion = JSON.parse(readFileSync(bridgeVersionPath, 'utf-8'));
   assert.ok(browserManifest.host_permissions.includes('https://lh3.google.com/*'));

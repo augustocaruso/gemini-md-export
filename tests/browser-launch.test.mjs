@@ -227,12 +227,12 @@ test('launcher Windows nao cai para cmd start quando spawn direto falha', async 
   }
 });
 
-test('estado compartilhado de launch identifica tentativa recente do hook', () => {
+test('estado compartilhado de launch identifica tentativa recente da CLI', () => {
   const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-browser-launch-test-'));
   const env = { GEMINI_MCP_BROWSER_LAUNCH_STATE_DIR: tmpRoot };
   const now = Date.now();
   const state = {
-    source: 'hook',
+    source: 'cli',
     lastAttemptAt: now - 100,
     method: 'windows-direct-spawn',
     browserName: 'Chrome',
@@ -243,8 +243,8 @@ test('estado compartilhado de launch identifica tentativa recente do hook', () =
     const loaded = readBrowserLaunchState({ env });
     const recent = describeRecentBrowserLaunch(loaded, { now, cooldownMs: 60_000 });
 
-    assert.equal(browserLaunchStatePath(env), resolve(tmpRoot, 'hook-browser-launch.json'));
-    assert.equal(recent.source, 'hook');
+    assert.equal(browserLaunchStatePath(env), resolve(tmpRoot, 'browser-launch.json'));
+    assert.equal(recent.source, 'cli');
     assert.equal(recent.reason, undefined);
     assert.equal(recent.previousLaunch.method, 'windows-direct-spawn');
   } finally {

@@ -1057,7 +1057,7 @@ acionável.
 
 ## v0.7.1 — Hook slimming e browser wake pela CLI
 
-Status: implementada.
+Status: substituída por v0.8.30.
 
 Objetivo: simplificar a estratégia de hooks depois da migração CLI-first,
 deixando hooks como preparação leve da sessão e segurança de desenvolvimento,
@@ -1140,6 +1140,55 @@ bridge/browser que o agente tem.
   desenvolvimento.
 - Testes cobrem SessionStart bridge warmup, CLI browser wake e ausência de
   prelaunch para `gemini_export`.
+
+## v0.8.30 — Runtime sem hooks por padrão
+
+Status: implementada.
+
+Objetivo: remover a camada invisível de hooks como participante do runtime. Os
+hooks antigos eram síncronos, tinham matchers amplos e misturavam warmup,
+browser wake, guardrails de desenvolvimento e auditoria de respostas; isso
+gerava latência e acionamentos difíceis de explicar.
+
+### Decisão consolidada
+
+```text
+Gemini CLI session start
+  -> nenhum hook do exporter roda por padrão
+
+Humano/agente roda gemini-md-export sync/export...
+  -> CLI garante bridge
+  -> CLI abre Gemini Web em background quando precisa
+  -> CLI espera extensão conectar
+  -> CLI executa job e reporta RESULT_JSON/erro
+
+Humano/agente chama tool MCP
+  -> MCP faz readiness/self-heal próprio quando a ação pede navegador
+  -> MCP retorna erro acionável quando não puder prosseguir
+```
+
+### Entregas
+
+- Publicar `hooks/hooks.json` como `{ "hooks": {} }`.
+- Manter `scripts/hooks/gemini-md-export-hook.mjs` apenas como no-op de
+  compatibilidade e diagnóstico manual (`diagnose`).
+- Remover do hook script qualquer spawn de navegador/bridge, leitura de stdin,
+  bloqueio de ferramenta, `hookSpecificOutput` e decisão de fluxo.
+- Renomear o estado ativo de launch para `browser-launch.json`, lendo
+  `hook-browser-launch.json` apenas como legado durante upgrades.
+- Atualizar docs/testes para deixar claro que CLI/MCP são os donos explícitos de
+  bridge/browser wake.
+
+### Critérios de aceite
+
+- Abrir uma sessão Gemini CLI com a extensão instalada não inicia bridge nem
+  navegador por hook.
+- Chamar `before-tool`, `after-tool` ou `session-start` no entrypoint legado
+  retorna JSON silencioso e não grava estado.
+- `node scripts/hooks/gemini-md-export-hook.mjs diagnose` mostra saúde da
+  bridge e estado de launch sem alterar o ambiente.
+- Jobs CLI continuam usando `browser-launch.json` para coordenar launch e ainda
+  reconhecem `hook-browser-launch.json` legado.
 
 ## Pesquisa futura — Transporte da bridge local
 

@@ -131,14 +131,11 @@ precisar do navegador confere versão/protocolo da extensão do Chrome e pede
 própria extensão recarrega as abas do Gemini em seguida. O reload manual do
 card em `chrome://extensions`/`edge://extensions` continua sendo o fallback
 para a primeira migração, mudança de permissões/manifest ou perfil errado.
-Na extensão do Gemini CLI, o hook `SessionStart` faz apenas warmup da bridge:
-consulta `/healthz` e, se necessário, inicia a bridge local em modo
-`bridge-only` sem abrir Chrome/Gemini. O hook `BeforeTool` ficou estreito: ele
-só tenta acordar o navegador para ferramentas MCP pequenas que realmente leem
-ou alteram uma aba quando a chamada traz intenção explícita
-(`diagnostic: true`, `intent: "tab_management"` ou `intent: "small_page"`).
-Ele não roda para `gemini_export`, `gemini_job` nem chamadas MCP acidentais;
-export/sync longo é responsabilidade da CLI.
+Na extensão do Gemini CLI, hooks de runtime ficam desabilitados por padrão:
+`hooks/hooks.json` publica `{ "hooks": {} }`. Não há `SessionStart` aquecendo
+bridge, `BeforeTool` abrindo navegador nem `AfterTool` tentando orientar o
+agente depois de comandos. Isso evita automação invisível acionando em sessões
+que não têm relação direta com exportação.
 
 A CLI empacotada é quem acorda o navegador para jobs longos. Antes de
 `sync`/`export`, ela garante a bridge, chama `/agent/ready` com
@@ -146,7 +143,9 @@ A CLI empacotada é quem acorda o navegador para jobs longos. Antes de
 não há aba conectada e espera a extensão conectar até `--ready-wait-ms`. Não há
 fallback por `cmd.exe /c start`; no Windows o launcher usa PowerShell
 minimizado/restauração de foco quando aplicável. O arquivo
-`hook-browser-launch.json` continua servindo como diagnóstico/trava de launch.
+`browser-launch.json` serve como diagnóstico/trava de launch; instalações
+antigas que ainda tenham `hook-browser-launch.json` continuam legíveis como
+fallback de compatibilidade.
 
 O MCP também deve ficar silencioso por padrão. Checagens internas de
 versão/protocolo, reload e wake do navegador só aparecem no terminal com
@@ -164,10 +163,10 @@ O argumento `--profile-directory` só é enviado quando
 `GEMINI_MCP_CHROME_PROFILE_DIRECTORY` é definido explicitamente. Para
 diagnosticar sem acionar nenhuma tool, rode
 `node scripts/hooks/gemini-md-export-hook.mjs diagnose`; ele imprime
-`/healthz`, `/agent/ready`, timeouts efetivos, plano de launch e os arquivos
-`hook-last-run.json`/`hook-browser-launch.json`. O prelaunch pode ser
-desativado com `GEMINI_MCP_HOOK_LAUNCH_BROWSER=false`; o timeout curto do
-bridge é `GEMINI_MCP_HOOK_BRIDGE_TIMEOUT_MS` (default 180ms).
+`/healthz`, `/agent/ready`, `/agent/diagnostics`, timeouts efetivos e os
+arquivos `browser-launch.json`/legados quando existirem. Esse script é apenas
+no-op de compatibilidade e diagnóstico manual; não faz spawn, não lê stdin de
+hooks e não decide fluxo de exportação.
 
 Smoke manual rápido no DevTools da aba Gemini:
 
@@ -343,12 +342,23 @@ Para diagnosticar artefatos interativos renderizados em iframes, use a CLI:
 gemini-md-export diagnose page "https://gemini.google.com/app/<chatId>" --plain
 ```
 
+Para capturar payloads HTML de mini apps abertos por `postMessage`, use:
+
+```bash
+gemini-md-export diagnose page "https://gemini.google.com/app/<chatId>" --save-html --output-dir ~/Downloads --plain
+```
+
+Isso grava `artifact-<chatId>-manifest.json` e arquivos
+`artifact-<chatId>-turn-<turnIndex>-<hash>.html` na pasta escolhida. O HTML fica
+como asset isolado para embed no Obsidian; a nota deve apontar para esse arquivo
+via `<iframe>`/link fallback, não colar o HTML dentro do Markdown.
+
 Dentro do Gemini CLI, o bundle também expõe
 `/exporter:diagnose-page <url>`. Esse diagnóstico apenas informa se o HTML do
 iframe parece legível pela extensão; se o artefato ainda estiver fechado atrás
 de um botão, a CLI tenta abrir um candidato forte, diagnosticar o iframe e
-fechar a superfície aberta. Ela não salva o artefato nem tenta burlar
-sandbox/cross-origin.
+fechar a superfície aberta. Por padrão ela não salva o artefato nem tenta
+burlar sandbox/cross-origin.
 
 Também não faça cleanup manual com `kill <pid>`/`pkill`/`taskkill` como
 fallback de contagem/exportação; diagnóstico e cleanup de processos só entram

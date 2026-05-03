@@ -39,6 +39,7 @@ const notebookReturnPlanSrc = readFileSync(
 const batchSessionSrc = readFileSync(resolve(ROOT, 'src/batch-session.mjs'), 'utf-8');
 const domRunnerSrc = readFileSync(resolve(ROOT, 'src/dom-runner.mjs'), 'utf-8');
 const shellSrc = readFileSync(resolve(ROOT, 'src/userscript-shell.js'), 'utf-8');
+const artifactCaptureSrc = readFileSync(resolve(ROOT, 'src/artifact-capture.js'), 'utf-8');
 const extensionBackgroundSrc = readFileSync(
   resolve(ROOT, 'src/extension-background.js'),
   'utf-8',
@@ -165,6 +166,15 @@ const manifest = {
       js: ['content.js'],
       run_at: 'document_idle',
     },
+    {
+      matches: [
+        'https://*.usercontent.goog/gemini-code-immersive/*',
+        'https://*.googleusercontent.com/gemini-code-immersive/*',
+      ],
+      js: ['artifact-capture.js'],
+      run_at: 'document_start',
+      all_frames: true,
+    },
   ],
   permissions: ['tabs', 'storage', 'tabGroups', 'scripting', 'nativeMessaging', 'offscreen'],
   host_permissions: [
@@ -181,6 +191,7 @@ const manifest = {
 };
 
 writeFileSync(resolve(extensionDir, 'content.js'), extensionContent, 'utf-8');
+writeFileSync(resolve(extensionDir, 'artifact-capture.js'), artifactCaptureSrc, 'utf-8');
 cpSync(resolve(ROOT, 'src', 'offscreen.html'), resolve(extensionDir, 'offscreen.html'));
 cpSync(resolve(ROOT, 'src', 'offscreen.js'), resolve(extensionDir, 'offscreen.js'));
 writeFileSync(
@@ -198,6 +209,7 @@ writeFileSync(
 );
 
 console.log(`[build] wrote ${resolve(extensionDir, 'content.js')}`);
+console.log(`[build] wrote ${resolve(extensionDir, 'artifact-capture.js')}`);
 console.log(`[build] wrote ${resolve(extensionDir, 'background.js')}`);
 console.log(`[build] wrote ${resolve(extensionDir, 'manifest.json')}`);
 

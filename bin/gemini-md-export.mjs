@@ -269,6 +269,8 @@ const diagnoseHelp = () =>
     '  --no-open-artifacts      Nao clica em botoes candidatos para abrir artefatos.',
     '  --keep-artifact-open     Nao tenta fechar a superficie aberta apos diagnosticar.',
     '  --artifact-open-wait-ms <ms> Tempo para aguardar iframe apos clique.',
+    '  --save-html              Salva payloads HTML capturados e gera artifact-<chatId>-manifest.json.',
+    '  --output-dir <dir>       Pasta de destino para --save-html.',
     '',
     ...outputModeHelp(),
     '',
@@ -276,6 +278,7 @@ const diagnoseHelp = () =>
     '',
     'Exemplos:',
     '  gemini-md-export diagnose page "https://gemini.google.com/app/46b61afe42a5956d" --plain',
+    '  gemini-md-export diagnose page "https://gemini.google.com/app/46b61afe42a5956d" --save-html --output-dir ~/Downloads --plain',
     '  gemini-md-export diagnose page --url "https://gemini.google.com/app/46b61afe42a5956d" --json',
   ].join('\n');
 
@@ -724,6 +727,8 @@ const parseArgs = (argv) => {
     else if (arg === '--close-artifact') out.flags.closeOpenedLaunchers = true;
     else if (arg === '--max-open-artifacts') out.flags.maxOpenArtifactLaunchers = Number(value());
     else if (arg === '--artifact-open-wait-ms') out.flags.artifactOpenWaitMs = Number(value());
+    else if (arg === '--save-html') out.flags.saveHtml = true;
+    else if (arg === '--no-save-html') out.flags.saveHtml = false;
     else if (arg === '--audit-only' || arg === '--include-notes') out.flags.extraRepairArgs.push(arg);
     else if (arg === '--report') {
       const report = value();
@@ -1968,6 +1973,18 @@ const diagnosePlainLabel = (result = {}) => {
       }`,
     );
   }
+  if (result.artifactHtmlSave) {
+    const saved = result.artifactHtmlSave;
+    lines.push(
+      `Captura HTML: ${saved.ok === false ? 'falhou' : 'ok'}; payloads: ${saved.captureCount ?? 0}`,
+    );
+    if (saved.ok === false) {
+      lines.push(`Erro ao salvar HTML: ${saved.error || 'falha desconhecida'}`);
+    } else {
+      lines.push(`HTML salvo: ${saved.savedCount ?? 0} arquivo(s) em ${saved.outputDir || ''}`);
+      if (saved.manifestFile) lines.push(`Manifesto: ${saved.manifestFile}`);
+    }
+  }
   const items = Array.isArray(result.items) ? result.items : [];
   for (const item of items.slice(0, 8)) {
     lines.push('');
@@ -2029,6 +2046,7 @@ const runDiagnose = async (parsed, streams = {}) => {
   }
   await ensureReady(parsed.flags.bridgeUrl, parsed.flags, ui);
   let result = null;
+  const diagnoseWaitMs = parsed.flags.waitMs || (parsed.flags.saveHtml === true ? 90_000 : undefined);
   try {
     result = await requestJson(
       parsed.flags.bridgeUrl,
@@ -2042,13 +2060,15 @@ const runDiagnose = async (parsed, streams = {}) => {
         includeHtml: parsed.flags.includeHtml,
         openArtifactLaunchers: parsed.flags.openArtifactLaunchers,
         closeOpenedLaunchers: parsed.flags.closeOpenedLaunchers,
+        saveHtml: parsed.flags.saveHtml,
+        outputDir: parsed.flags.outputDir,
         maxOpenArtifactLaunchers: parsed.flags.maxOpenArtifactLaunchers,
         artifactOpenWaitMs: parsed.flags.artifactOpenWaitMs,
         releaseClaimOnOperationEnd: parsed.flags.autoReleaseClaim !== false,
         autoReleaseClaim: parsed.flags.autoReleaseClaim,
-        waitMs: parsed.flags.waitMs,
+        waitMs: diagnoseWaitMs,
       }),
-      { timeoutMs: Math.max(45_000, Number(parsed.flags.waitMs || 0) + 20_000) },
+      { timeoutMs: Math.max(45_000, Number(diagnoseWaitMs || 0) + 20_000) },
     );
     writeStructuredResult(ui, result, {
       label: diagnosePlainLabel(result),

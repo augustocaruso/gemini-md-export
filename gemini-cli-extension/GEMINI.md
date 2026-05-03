@@ -1,9 +1,8 @@
 # Gemini Markdown Export
 
-Exports Gemini Web conversations to Markdown through the visible Gemini DOM, a
-local MCP bridge, and the companion Chrome/Edge extension. It does not use
-private APIs, cookies, account tokens, `chrome.debugger`, screenshots, or
-capture fallbacks.
+Exports Gemini Web conversations to Markdown through the visible DOM, local MCP
+bridge, and Chrome/Edge extension. No private APIs, cookies, tokens,
+`chrome.debugger`, screenshots, or capture fallbacks.
 
 ## Public MCP Tools
 
@@ -19,8 +18,8 @@ Only these MCP tools are public:
 
 Old `gemini_*` names return `code: "tool_renamed"` with the replacement.
 
-Default tool output is compact. Browser-facing MCP tools are opt-in: pass
-`diagnostic: true` or an explicit `intent` only when you are deliberately doing
+Default output is compact. Browser tools are opt-in: pass `diagnostic: true`
+or an explicit `intent` only when you are deliberately doing
 diagnostics/control-plane work. Ask for `detail: "full"` only while debugging.
 
 ## Router
@@ -54,6 +53,8 @@ Use bundled Agent Skills for detailed workflows: `gemini-vault-sync`,
   vault path from context.
 - `/exporter:diagnose-page`: diagnose artifact iframes without export/bypass;
   may click a strong artifact button, then close it and release the tab claim.
+- `/exporter:capture-artifacts`: capture artifact HTML files plus an Obsidian
+  manifest; never paste captured HTML.
 - `/exporter:repair-vault`: audit and repair contaminated raw exports/wiki
   cases.
 
@@ -131,4 +132,4 @@ and exits idle bridges unless `--no-exit-when-idle` is set.
 - Use Brazilian Portuguese, plain language, and concrete next actions for user-facing
   errors.
 
-For richer procedures, activate the matching bundled skill and follow it.
+For richer procedures, activate the matching bundled skill.

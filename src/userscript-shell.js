@@ -4312,6 +4312,29 @@
       };
     }
 
+    if (command.type === 'artifact-captures') {
+      try {
+        const response = await extensionSendMessage(
+          {
+            type: 'gemini-md-export/artifact-captures',
+            action: command.args?.action || 'list',
+            tabId: command.args?.tabId,
+            includeBodies: command.args?.includeBodies === true,
+          },
+          { timeoutMs: 12000 },
+        );
+        return response || {
+          ok: false,
+          error: 'Contexto da extensão indisponível.',
+        };
+      } catch (err) {
+        return {
+          ok: false,
+          error: err?.message || String(err),
+        };
+      }
+    }
+
     if (command.type === 'reload-page') {
       const delayMs = Math.max(0, Math.min(10_000, Number(command.args?.delayMs || 250)));
       setTimeout(() => {

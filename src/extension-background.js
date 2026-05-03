@@ -20,6 +20,7 @@ const CONTENT_SCRIPT_SELF_HEAL_COOLDOWN_MS = 10_000;
 const CONTENT_SCRIPT_POST_INJECT_PING_ATTEMPTS = 5;
 const CONTENT_SCRIPT_POST_INJECT_PING_DELAY_MS = 180;
 const GEMINI_TAB_RELOAD_SETTLE_MS = 900;
+const ARTIFACT_CAPTURE_CACHE_LIMIT = 60;
 const TAB_CLAIM_COLORS = new Set([
   'grey',
   'blue',
@@ -38,6 +39,7 @@ let lastOffscreenStatus = null;
 let offscreenIdleCloseTimer = 0;
 const tabBrokerRegistry = new Map();
 const tabClaimExpiryTimers = new Map();
+const artifactCaptureCache = [];
 
 const clampText = (value, maxLength) =>
   String(value || '')
@@ -1241,6 +1243,135 @@ const arrayBufferToBase64 = (buffer) => {
   return btoa(binary);
 };
 
+const base64ToUint8Array = (value) => {
+  const binary = atob(String(value || ''));
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+};
+
+const sha256Hex = async (bytes) => {
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest))
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+};
+
+const artifactCaptureBytes = (payload = {}) => {
+  if (payload.bodyBase64) return base64ToUint8Array(payload.bodyBase64);
+  return new TextEncoder().encode(String(payload.body || ''));
+};
+
+const summarizeArtifactCapture = (capture = {}, { includeBody = false } = {}) => {
+  const {
+    body,
+    bodyBase64,
+    ...rest
+  } = capture || {};
+  return {
+    ...rest,
+    ...(includeBody && body ? { body } : {}),
+    ...(includeBody && bodyBase64 ? { bodyBase64 } : {}),
+  };
+};
+
+const rememberArtifactCapture = async (message = {}, sender = {}) => {
+  const payload = message.payload || {};
+  if (payload.sourceOrigin !== 'https://gemini.google.com') {
+    return { ok: false, reason: 'untrusted-origin' };
+  }
+  if (!/^text\/html(?:\s*;|$)/i.test(String(payload.mimeType || '').trim())) {
+    return { ok: false, reason: 'unsupported-mime-type' };
+  }
+  if (!payload.body && !payload.bodyBase64) {
+    return { ok: false, reason: 'empty-body' };
+  }
+
+  const bytes = artifactCaptureBytes(payload);
+  const sha256 = await sha256Hex(bytes);
+  const tabId = sender.tab?.id ?? null;
+  const frameId = sender.frameId ?? null;
+  const locationHref = payload.locationHref || sender.url || null;
+  const now = new Date().toISOString();
+  const capture = {
+    source: 'postMessage',
+    body: payload.body || null,
+    bodyBase64: payload.bodyBase64 || null,
+    mimeType: payload.mimeType,
+    sha256,
+    byteLength: bytes.length,
+    tabId,
+    frameId,
+    documentId: sender.documentId || null,
+    locationHref,
+    locationOrigin: payload.locationOrigin || null,
+    locationPathname: payload.locationPathname || null,
+    title: payload.title || '',
+    capturedAt: payload.capturedAt || now,
+    receivedAt: now,
+  };
+  const cacheKey = [sha256, tabId ?? '', frameId ?? '', locationHref || ''].join('|');
+  const existingIndex = artifactCaptureCache.findIndex((item) => item.cacheKey === cacheKey);
+  if (existingIndex >= 0) {
+    artifactCaptureCache[existingIndex] = {
+      ...artifactCaptureCache[existingIndex],
+      ...capture,
+      cacheKey,
+    };
+  } else {
+    artifactCaptureCache.push({ ...capture, cacheKey });
+  }
+  while (artifactCaptureCache.length > ARTIFACT_CAPTURE_CACHE_LIMIT) {
+    artifactCaptureCache.shift();
+  }
+  return {
+    ok: true,
+    stored: true,
+    cacheSize: artifactCaptureCache.length,
+    capture: summarizeArtifactCapture(capture),
+  };
+};
+
+const artifactCapturesForTab = (tabId) =>
+  artifactCaptureCache.filter((capture) => !Number.isInteger(tabId) || capture.tabId === tabId);
+
+const handleArtifactCapturesRequest = (message = {}, sender = {}) => {
+  const tabId = Number.isInteger(Number(message.tabId))
+    ? Number(message.tabId)
+    : Number.isInteger(sender.tab?.id)
+      ? sender.tab.id
+      : null;
+  const action = message.action || 'list';
+  if (action === 'clear') {
+    const before = artifactCaptureCache.length;
+    for (let i = artifactCaptureCache.length - 1; i >= 0; i -= 1) {
+      if (!Number.isInteger(tabId) || artifactCaptureCache[i].tabId === tabId) {
+        artifactCaptureCache.splice(i, 1);
+      }
+    }
+    return {
+      ok: true,
+      action,
+      tabId,
+      cleared: before - artifactCaptureCache.length,
+      cacheSize: artifactCaptureCache.length,
+    };
+  }
+
+  const captures = artifactCapturesForTab(tabId).map((capture) =>
+    summarizeArtifactCapture(capture, { includeBody: message.includeBodies === true }),
+  );
+  return {
+    ok: true,
+    action: 'list',
+    tabId,
+    captureCount: captures.length,
+    captures,
+  };
+};
+
 const fetchAsset = async (source) => {
   const url = new URL(String(source || ''));
   if (url.protocol !== 'https:' && url.protocol !== 'http:') {
@@ -1568,6 +1699,23 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
       });
     return true;
+  }
+
+  if (message?.type === 'gemini-md-export/artifact-html-payload') {
+    rememberArtifactCapture(message, sender)
+      .then(sendResponse)
+      .catch((err) => {
+        sendResponse({
+          ok: false,
+          error: err?.message || String(err),
+        });
+      });
+    return true;
+  }
+
+  if (message?.type === 'gemini-md-export/artifact-captures') {
+    sendResponse(handleArtifactCapturesRequest(message, sender));
+    return false;
   }
 
   if (message?.type === 'gemini-md-export/probe-artifact-frames') {

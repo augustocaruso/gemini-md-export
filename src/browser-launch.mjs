@@ -7,7 +7,8 @@ import { discoverLoadedExtension } from './browser-diagnostics.mjs';
 
 const GEMINI_URL = 'https://gemini.google.com/app';
 const DEFAULT_LAUNCH_OBSERVE_MS = 180;
-export const BROWSER_LAUNCH_STATE_FILENAME = 'hook-browser-launch.json';
+export const BROWSER_LAUNCH_STATE_FILENAME = 'browser-launch.json';
+export const LEGACY_BROWSER_LAUNCH_STATE_FILENAME = 'hook-browser-launch.json';
 const WINDOWS_RESTORE_FOCUS_SCRIPT_FILENAME = 'open-gemini-restore-focus.ps1';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = resolve(__dirname, '..');
@@ -175,11 +176,18 @@ export const browserLaunchStateDir = (env = process.env) =>
 export const browserLaunchStatePath = (env = process.env) =>
   resolve(browserLaunchStateDir(env), BROWSER_LAUNCH_STATE_FILENAME);
 
+export const legacyBrowserLaunchStatePath = (env = process.env) =>
+  resolve(browserLaunchStateDir(env), LEGACY_BROWSER_LAUNCH_STATE_FILENAME);
+
 export const readBrowserLaunchState = ({ env = process.env } = {}) => {
   try {
     return JSON.parse(readFileSync(browserLaunchStatePath(env), 'utf-8'));
   } catch {
-    return null;
+    try {
+      return JSON.parse(readFileSync(legacyBrowserLaunchStatePath(env), 'utf-8'));
+    } catch {
+      return null;
+    }
   }
 };
 

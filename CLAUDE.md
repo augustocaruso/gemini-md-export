@@ -341,25 +341,15 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   `GEMINI_MCP_CHROME_LAUNCH_IF_CLOSED` (default ligado); timeout e tentativas
   vêm de `GEMINI_MCP_CHROME_INITIAL_CONNECT_TIMEOUT_MS` (default 1500ms),
   `GEMINI_MCP_CHROME_RELOAD_TIMEOUT_MS` e
-  `GEMINI_MCP_CHROME_MAX_RELOAD_ATTEMPTS`. O hook `BeforeTool` também faz
-  pré-aquecimento para tools do exporter que dependem do navegador no Windows:
-  o hook JavaScript consulta rapidamente
-  `/agent/ready?wakeBrowser=false&selfHeal=false`; se já houver uma aba Gemini
-  pronta, não abre nada. `/agent/clients` fica como fallback de compatibilidade
-  e inspeção. Se não houver cliente conectado e o bridge estiver ativo, abre
-  `https://gemini.google.com/app` por um PowerShell temporário oculto com
-  `Start-Process -WindowStyle Minimized` e tenta restaurar o foco anterior.
-  O hook em si não deve fazer
-  leitura síncrona de stdin, `import()` dinâmico ou trabalho bloqueante.
-  `SessionStart` não deve ler stdin. Before/AfterTool leem
-  stdin de forma assíncrona, tentam parsear assim que o JSON chega e falham
-  aberto por timeout curto (`GEMINI_MCP_HOOK_STDIN_TIMEOUT_MS`, default 120ms)
-  se o cliente mantiver o pipe aberto. O modo
-  `node scripts/hooks/gemini-md-export-hook.mjs diagnose` deve continuar
-  disponível para imprimir estado, `/agent/ready`, plano de launch e caminhos
-  de `hook-last-run.json`/`hook-browser-launch.json`. Esse prelaunch é
-  controlado por `GEMINI_MCP_HOOK_LAUNCH_BROWSER` (default ligado),
-  `GEMINI_MCP_HOOK_BRIDGE_TIMEOUT_MS` (default 180ms) e pelo mesmo cooldown.
+  `GEMINI_MCP_CHROME_MAX_RELOAD_ATTEMPTS`. Hooks de runtime do bundle Gemini
+  CLI ficam desabilitados por padrão (`hooks/hooks.json` publica
+  `{ "hooks": {} }`): não há hook para aquecer bridge, abrir navegador,
+  bloquear edições ou injetar contexto após shell/MCP. CLI e MCP devem cuidar
+  explicitamente de wake/diagnóstico e retornar erros acionáveis no próprio
+  comando. O estado de launch ativo fica em `browser-launch.json`; o nome
+  antigo `hook-browser-launch.json` é apenas fallback de leitura. O modo
+  `node scripts/hooks/gemini-md-export-hook.mjs diagnose` continua disponível
+  só como diagnóstico/no-op de compatibilidade, sem spawn nem hook stdin.
   `gemini_ready { action: "status" }` também deve acordar o
   navegador quando não há clientes conectados e aguardar um curto período
   (`GEMINI_MCP_BROWSER_STATUS_WAKE_WAIT_MS`, default 8000ms), porque o Gemini

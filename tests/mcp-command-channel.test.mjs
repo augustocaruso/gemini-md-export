@@ -99,11 +99,10 @@ test('MCP v0.5 lista somente as 7 tools públicas de domínio', () => {
   assert.match(source, /cliFirstExportResult/);
 });
 
-test('MCP publico bloqueia contagem/exportacao por tools ruidosas sem intencao explicita', () => {
+test('MCP publico bloqueia contagem/exportacao por tools ruidosas sem depender de hooks', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
-  const hookSource = readFileSync(
-    resolve(ROOT, 'gemini-cli-extension', 'scripts', 'hooks', 'gemini-md-export-hook.mjs'),
-    'utf-8',
+  const hooksConfig = JSON.parse(
+    readFileSync(resolve(ROOT, 'gemini-cli-extension', 'hooks', 'hooks.json'), 'utf-8'),
   );
 
   assert.match(source, /const PUBLIC_MCP_INTENTS = new Set\(\['diagnostic', 'tab_management', 'small_page', 'one_off'\]\)/);
@@ -116,8 +115,7 @@ test('MCP publico bloqueia contagem/exportacao por tools ruidosas sem intencao e
   assert.match(source, /diagnostic: \{ type: 'boolean' \}/);
   assert.match(source, /intent: \{ type: 'string', enum: \['diagnostic', 'tab_management'\] \}/);
   assert.match(source, /intent: \{ type: 'string', enum: \['diagnostic', 'small_page', 'one_off'\] \}/);
-  assert.match(hookSource, /hasExplicitMcpIntent/);
-  assert.match(hookSource, /!hasExplicitMcpIntent\(toolInput\)/);
+  assert.deepEqual(hooksConfig, { hooks: {} });
 });
 
 test('MCP implementa afinidade confiável por claim de aba', () => {

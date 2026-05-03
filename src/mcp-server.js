@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { createServer } from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import {
   appendFileSync,
@@ -4229,6 +4229,103 @@ const writeExportPayloadBundle = (payload, { outputDir } = {}) => {
   };
 };
 
+const artifactCaptureBuffer = (capture = {}) => {
+  if (capture.bodyBase64) return Buffer.from(String(capture.bodyBase64), 'base64');
+  return Buffer.from(String(capture.body || ''), 'utf-8');
+};
+
+const artifactCaptureHash = (capture = {}) =>
+  capture.sha256 || createHash('sha256').update(artifactCaptureBuffer(capture)).digest('hex');
+
+const stripArtifactCaptureBody = (capture = {}) => {
+  const { body: _body, bodyBase64: _bodyBase64, cacheKey: _cacheKey, ...summary } = capture || {};
+  return summary;
+};
+
+const correlateArtifactCapture = (capture = {}, items = [], captureIndex = 0) => {
+  const unused = items.filter(Boolean);
+  const locationHref = capture.locationHref || capture.iframeUrl || '';
+  if (locationHref) {
+    const byUrl = unused.find((item) => item.source === locationHref || item.frameProbe?.url === locationHref);
+    if (byUrl) return { item: byUrl, confidence: 'high', method: 'locationHref' };
+  }
+
+  if (Number.isInteger(capture.frameId)) {
+    const byFrame = unused.find((item) => Number(item.frameProbe?.frameId) === Number(capture.frameId));
+    if (byFrame) return { item: byFrame, confidence: 'medium', method: 'frameId' };
+  }
+
+  if (items.length === 1) return { item: items[0], confidence: 'low', method: 'single-item' };
+  if (items.length > captureIndex) return { item: items[captureIndex], confidence: 'low', method: 'order' };
+  return { item: null, confidence: 'low', method: 'unmatched' };
+};
+
+const saveArtifactHtmlCaptures = ({ captures = [], artifacts = {}, outputDir, chatId, page = {} } = {}) => {
+  const directory = resolveOutputDir(outputDir);
+  mkdirSync(directory, { recursive: true });
+  const items = Array.isArray(artifacts.items) ? artifacts.items : [];
+  const files = [];
+  const normalizedChatId =
+    chatId || artifacts.chatId || page.chatId || extractChatIdFromUrl(page.url || artifacts.url || '') || 'gemini-chat';
+
+  captures.forEach((capture, index) => {
+    if (!capture?.body && !capture?.bodyBase64) return;
+    if (!/^text\/html(?:\s*;|$)/i.test(String(capture.mimeType || '').trim())) return;
+    const hash = artifactCaptureHash(capture);
+    const buffer = artifactCaptureBuffer(capture);
+    const correlation = correlateArtifactCapture(capture, items, index);
+    const turnToken = Number.isInteger(correlation.item?.turnIndex)
+      ? String(correlation.item.turnIndex)
+      : 'unknown';
+    const filename = safeFilename(
+      `artifact-${normalizedChatId}-turn-${turnToken}-${hash.slice(0, 16)}.html`,
+    );
+    const filePath = resolve(directory, filename);
+    writeFileSync(filePath, buffer);
+    files.push({
+      file: filename,
+      filename,
+      filePath,
+      hash,
+      mimeType: capture.mimeType || 'text/html; charset=utf-8',
+      byteLength: buffer.length,
+      turnIndex: Number.isInteger(correlation.item?.turnIndex) ? correlation.item.turnIndex : null,
+      itemId: correlation.item?.id || null,
+      iframeUrl: capture.locationHref || correlation.item?.source || null,
+      frameId: Number.isInteger(capture.frameId) ? capture.frameId : null,
+      capturedAt: capture.capturedAt || capture.receivedAt || null,
+      source: capture.source || 'postMessage',
+      correlationConfidence: correlation.confidence,
+      correlationMethod: correlation.method,
+    });
+  });
+
+  const manifest = {
+    schema: 'gemini-md-export.artifact-html-manifest.v1',
+    generatedAt: new Date().toISOString(),
+    chatId: normalizedChatId,
+    page: page || null,
+    outputDir: directory,
+    captureCount: captures.length,
+    savedCount: files.length,
+    files,
+    captures: captures.map(stripArtifactCaptureBody),
+  };
+  const manifestFilename = safeFilename(`artifact-${normalizedChatId}-manifest.json`);
+  const manifestPath = resolve(directory, manifestFilename);
+  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf-8');
+  return {
+    ok: true,
+    outputDir: directory,
+    manifestFile: manifestPath,
+    manifestFilename,
+    captureCount: captures.length,
+    savedCount: files.length,
+    files,
+    manifest,
+  };
+};
+
 const timestampForFilename = () =>
   new Date()
     .toISOString()
@@ -5188,6 +5285,27 @@ const diagnosePageArtifactsForClient = async (client, args = {}) => {
     }
   }
 
+  let artifactCaptureClear = null;
+  if (args.saveHtml === true) {
+    const cleared = await enqueueCommandWithClientRecovery(
+      activeClient,
+      'artifact-captures',
+      {
+        action: 'clear',
+      },
+      { timeoutMs: 15_000 },
+      args,
+    );
+    activeClient = cleared.client;
+    artifactCaptureClear = cleared.result || null;
+  }
+
+  const artifactOpenWaitMs = normalizeWaitMs(args.artifactOpenWaitMs, 6000, 15_000);
+  const diagnoseCommandTimeoutMs = Math.max(
+    normalizeWaitMs(args.waitMs, args.saveHtml === true ? 90_000 : 30_000, 120_000),
+    artifactOpenWaitMs + 20_000,
+  );
+
   const {
     client: diagnosedClient,
     result,
@@ -5206,11 +5324,50 @@ const diagnosePageArtifactsForClient = async (client, args = {}) => {
       maxOpenArtifactLaunchers: args.maxOpenArtifactLaunchers,
       artifactOpenWaitMs: args.artifactOpenWaitMs,
     },
-    { timeoutMs: normalizeWaitMs(args.waitMs, 30_000, 120_000) },
+    { timeoutMs: diagnoseCommandTimeoutMs },
     args,
   );
   const artifacts = result?.artifacts || {};
   const ok = result?.ok !== false && artifacts.ok !== false;
+  const page = {
+    url: artifacts.url || diagnosedClient.page?.url || null,
+    chatId: artifacts.chatId || diagnosedClient.page?.chatId || null,
+    title: artifacts.title || diagnosedClient.page?.title || null,
+    buildStamp: artifacts.buildStamp || diagnosedClient.buildStamp || null,
+  };
+  let artifactHtmlSave = null;
+  if (args.saveHtml === true) {
+    try {
+      const listed = await enqueueCommandWithClientRecovery(
+        diagnosedClient,
+        'artifact-captures',
+        {
+          action: 'list',
+          includeBodies: true,
+        },
+        { timeoutMs: 15_000 },
+        args,
+      );
+      const captures = Array.isArray(listed.result?.captures) ? listed.result.captures : [];
+      artifactHtmlSave = saveArtifactHtmlCaptures({
+        captures,
+        artifacts,
+        outputDir: args.outputDir,
+        chatId: requestedChatId || page.chatId,
+        page,
+      });
+      artifactHtmlSave.cache = {
+        ok: listed.result?.ok !== false,
+        captureCount: listed.result?.captureCount ?? captures.length,
+        tabId: listed.result?.tabId ?? null,
+      };
+    } catch (err) {
+      artifactHtmlSave = {
+        ok: false,
+        error: err?.message || String(err),
+      };
+    }
+  }
   const tabClaimRelease = await releaseDiagnoseTabClaimIfNeeded(
     diagnosedClient,
     args,
@@ -5229,20 +5386,17 @@ const diagnosePageArtifactsForClient = async (client, args = {}) => {
           ok: openResult.ok !== false,
           conversation: openResult.conversation || null,
           error: openResult.error || null,
-        }
+      }
       : null,
-    page: {
-      url: artifacts.url || diagnosedClient.page?.url || null,
-      chatId: artifacts.chatId || diagnosedClient.page?.chatId || null,
-      title: artifacts.title || diagnosedClient.page?.title || null,
-      buildStamp: artifacts.buildStamp || diagnosedClient.buildStamp || null,
-    },
+    page,
     summary: artifacts.summary || null,
     frameProbe: artifacts.frameProbe || null,
     launcherOpen: artifacts.launcherOpen || null,
     launchers: Array.isArray(artifacts.launchers) ? artifacts.launchers : [],
     items: Array.isArray(artifacts.items) ? artifacts.items : [],
     nextAction: artifacts.nextAction || null,
+    artifactCaptureClear,
+    artifactHtmlSave,
     tabClaimRelease,
     snapshot: result?.snapshot || null,
     error: result?.error || artifacts.error || null,
@@ -8887,6 +9041,15 @@ const legacyRawTools = [
           type: 'boolean',
           description: 'Quando true ou omitido, tenta fechar a superfície de artefato aberta no diagnóstico.',
         },
+        saveHtml: {
+          type: 'boolean',
+          description:
+            'Quando true, salva payloads HTML capturados de mini apps em outputDir e gera manifesto.',
+        },
+        outputDir: {
+          type: 'string',
+          description: 'Diretório local para salvar HTMLs e manifesto quando saveHtml=true.',
+        },
         maxOpenArtifactLaunchers: { type: 'integer', minimum: 0, maximum: 3 },
         artifactOpenWaitMs: { type: 'integer', minimum: 800, maximum: 15000 },
         releaseClaimOnOperationEnd: {
@@ -9239,6 +9402,16 @@ const compactStructuredContent = (name, action, structured = {}) => {
 	      artifactSummary: structured.summary || null,
 	      frameProbe: structured.frameProbe || null,
 	      launcherOpen: structured.launcherOpen || null,
+	      artifactHtmlSave: structured.artifactHtmlSave
+	        ? {
+	            ok: structured.artifactHtmlSave.ok !== false,
+	            captureCount: structured.artifactHtmlSave.captureCount ?? null,
+	            savedCount: structured.artifactHtmlSave.savedCount ?? null,
+	            outputDir: structured.artifactHtmlSave.outputDir || null,
+	            manifestFile: structured.artifactHtmlSave.manifestFile || null,
+	            error: structured.artifactHtmlSave.error || null,
+	          }
+	        : null,
 	      launcherPreviewCount: Math.min(artifactLaunchers.length, 5),
 	      omittedLauncherCount: Math.max(0, artifactLaunchers.length - 5),
 	      launchers: artifactLaunchers.slice(0, 5).map((item) => ({
@@ -9750,6 +9923,7 @@ const rawTools = [
         includeHtml: { type: 'boolean' },
         openArtifactLaunchers: { type: 'boolean' },
         closeOpenedLaunchers: { type: 'boolean' },
+        saveHtml: { type: 'boolean' },
         maxOpenArtifactLaunchers: { type: 'integer', minimum: 0, maximum: 3 },
         artifactOpenWaitMs: { type: 'integer', minimum: 800, maximum: 15000 },
         releaseClaimOnOperationEnd: { type: 'boolean' },
@@ -10917,6 +11091,8 @@ const bridgeServer = createServer(async (req, res) => {
         includeHtml: parseOptionalBoolean(url.searchParams.get('includeHtml')),
         openArtifactLaunchers: parseOptionalBoolean(url.searchParams.get('openArtifactLaunchers')),
         closeOpenedLaunchers: parseOptionalBoolean(url.searchParams.get('closeOpenedLaunchers')),
+        saveHtml: parseOptionalBoolean(url.searchParams.get('saveHtml')),
+        outputDir: url.searchParams.get('outputDir') || undefined,
         releaseClaimOnOperationEnd:
           parseOptionalBoolean(url.searchParams.get('releaseClaimOnOperationEnd')) !== false,
         autoReleaseClaim: parseOptionalBoolean(url.searchParams.get('autoReleaseClaim')),

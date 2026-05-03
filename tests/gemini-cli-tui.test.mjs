@@ -745,6 +745,13 @@ test('CLI diagnose page abre artefatos e pede liberação da claim no endpoint',
           ok: true,
           released: { claimId: 'claim-123' },
         },
+        artifactHtmlSave: {
+          ok: true,
+          captureCount: 1,
+          savedCount: 1,
+          outputDir: '/tmp/artifacts',
+          manifestFile: '/tmp/artifacts/artifact-46b61afe42a5956d-manifest.json',
+        },
       });
       return;
     }
@@ -761,6 +768,9 @@ test('CLI diagnose page abre artefatos e pede liberação da claim no endpoint',
         bridgeUrl,
         '--claim-id',
         'claim-123',
+        '--save-html',
+        '--output-dir',
+        '/tmp/artifacts',
         '--plain',
       ],
       { stdout, stderr },
@@ -768,11 +778,15 @@ test('CLI diagnose page abre artefatos e pede liberação da claim no endpoint',
 
     assert.equal(run.exitCode, 0);
     assert.match(stdout.text(), /Botões candidatos: 1; abertos: 1/);
+    assert.match(stdout.text(), /Captura HTML: ok; payloads: 1/);
+    assert.match(stdout.text(), /HTML salvo: 1 arquivo\(s\) em \/tmp\/artifacts/);
     assert.match(stdout.text(), /Superfície aberta: fechada após o diagnóstico/);
     assert.match(stdout.text(), /Claim da aba: liberada/);
     const diagnoseRequest = requests.find((item) => item.pathname === '/agent/diagnose-page');
     assert.ok(diagnoseRequest);
     assert.equal(diagnoseRequest.searchParams.get('claimId'), 'claim-123');
+    assert.equal(diagnoseRequest.searchParams.get('saveHtml'), 'true');
+    assert.equal(diagnoseRequest.searchParams.get('outputDir'), '/tmp/artifacts');
     assert.equal(diagnoseRequest.searchParams.get('releaseClaimOnOperationEnd'), 'true');
     assert.equal(requests.some((item) => item.pathname === '/agent/release-tab'), false);
     assert.equal(stderr.text(), '');
@@ -943,7 +957,7 @@ test('CLI sync acorda Gemini Web pela propria CLI antes de exportar', async () =
     await withEnv(
       {
         GEMINI_MD_EXPORT_CLI_BROWSER_LAUNCH_DRY_RUN: 'true',
-        GEMINI_MCP_HOOK_STATE_DIR: tmpRoot,
+        GEMINI_MCP_BROWSER_LAUNCH_STATE_DIR: tmpRoot,
         GEMINI_MD_EXPORT_EXISTING_TAB_GRACE_MS: '0',
       },
       async () => {
@@ -996,7 +1010,7 @@ test('CLI sync acorda Gemini Web pela propria CLI antes de exportar', async () =
           assert.equal(readyRequests[0].searchParams.get('waitMs'), '0');
           assert.equal(readyRequests[1].searchParams.get('waitMs'), '300');
 
-          const launchState = JSON.parse(readFileSync(resolve(tmpRoot, 'hook-browser-launch.json'), 'utf-8'));
+          const launchState = JSON.parse(readFileSync(resolve(tmpRoot, 'browser-launch.json'), 'utf-8'));
           assert.equal(launchState.source, 'cli');
           assert.equal(launchState.status, 'dry-run');
           assert.equal(launchState.launch.dryRun, true);
@@ -1015,7 +1029,7 @@ test('CLI espera aba Gemini existente reconectar antes de abrir nova aba', async
     await withEnv(
       {
         GEMINI_MD_EXPORT_CLI_BROWSER_LAUNCH_DRY_RUN: 'true',
-        GEMINI_MCP_HOOK_STATE_DIR: tmpRoot,
+        GEMINI_MCP_BROWSER_LAUNCH_STATE_DIR: tmpRoot,
         GEMINI_MD_EXPORT_EXISTING_TAB_GRACE_MS: '300',
       },
       async () => {
@@ -1058,7 +1072,7 @@ test('CLI espera aba Gemini existente reconectar antes de abrir nova aba', async
           assert.equal(run.exitCode, 0);
           assert.match(stdout.text(), /Aguardando aba Gemini existente reconectar \(1s\)/);
           assert.doesNotMatch(stdout.text(), /Abrindo Gemini Web em background/);
-          assert.equal(existsSync(resolve(tmpRoot, 'hook-browser-launch.json')), false);
+          assert.equal(existsSync(resolve(tmpRoot, 'browser-launch.json')), false);
           assert.equal(stderr.text(), '');
 
           const readyRequests = requests.filter((item) => item.pathname === '/agent/ready');
@@ -1073,10 +1087,11 @@ test('CLI espera aba Gemini existente reconectar antes de abrir nova aba', async
   }
 });
 
-test('CLI sync reaproveita launch em andamento para evitar aba duplicada', async () => {
+test('CLI sync reaproveita estado legado de launch em andamento para evitar aba duplicada', async () => {
   const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-cli-launch-'));
+  const legacyLaunchStatePath = resolve(tmpRoot, 'hook-browser-launch.json');
   writeFileSync(
-    resolve(tmpRoot, 'hook-browser-launch.json'),
+    legacyLaunchStatePath,
     JSON.stringify({
       source: 'cli',
       launchId: 'existing-cli-launch',
@@ -1090,7 +1105,7 @@ test('CLI sync reaproveita launch em andamento para evitar aba duplicada', async
   try {
     await withEnv(
       {
-        GEMINI_MCP_HOOK_STATE_DIR: tmpRoot,
+        GEMINI_MCP_BROWSER_LAUNCH_STATE_DIR: tmpRoot,
         GEMINI_MD_EXPORT_EXISTING_TAB_GRACE_MS: '0',
       },
       async () => {
@@ -1135,7 +1150,7 @@ test('CLI sync reaproveita launch em andamento para evitar aba duplicada', async
         assert.doesNotMatch(stdout.text(), /Abrindo Gemini Web em background/);
         assert.equal(stderr.text(), '');
 
-        const launchState = JSON.parse(readFileSync(resolve(tmpRoot, 'hook-browser-launch.json'), 'utf-8'));
+        const launchState = JSON.parse(readFileSync(legacyLaunchStatePath, 'utf-8'));
         assert.equal(launchState.launchId, 'existing-cli-launch');
       });
     });
