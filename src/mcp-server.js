@@ -9689,9 +9689,8 @@ const buildCliCountCommand = (args = {}) => {
   addCliFlag(commandArgs, '--client-id', args.clientId);
   addCliFlag(commandArgs, '--tab-id', args.tabId);
   addCliFlag(commandArgs, '--claim-id', args.claimId);
-  addCliFlag(commandArgs, '--load-more-browser-rounds', args.loadMoreBrowserRounds);
-  addCliFlag(commandArgs, '--load-more-browser-timeout-ms', args.loadMoreBrowserTimeoutMs);
-  addCliFlag(commandArgs, '--load-more-timeout-ms', args.loadMoreTimeoutMs);
+  // This is a migration hint for agents that called the wrong MCP surface.
+  // Keep it minimal so the CLI's safer count defaults own timeout/backoff.
   addCliFlag(commandArgs, '--bridge-url', bridgeUrl);
   commandArgs.push('--plain');
   return {

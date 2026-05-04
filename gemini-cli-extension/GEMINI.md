@@ -19,23 +19,25 @@ Only these MCP tools are public:
 Old `gemini_*` names return `code: "tool_renamed"` with the replacement.
 
 Default output is compact. Browser tools are opt-in: pass `diagnostic: true`
-or an explicit `intent` only when you are deliberately doing
-diagnostics/control-plane work. Ask for `detail: "full"` only while debugging.
+or explicit `intent` for deliberate diagnostics/control. Ask for
+`detail: "full"` only while debugging.
 
 ## Router
 
 - Browser/extension health: `gemini_ready` with `diagnostic: true`.
 - Tabs/claim/reload diagnostics: `gemini_tabs` with
   `intent: "tab_management"`.
+- Lightweight chat inventory: use `gemini-chat-inventory` for count, short
+  paginated lists, and title search. For "quantos chats ao todo", run
+  `gemini-md-export chats count --plain` once. If `totalKnown=false`, stop at
+  "pelo menos N".
 - Small read-only chat page/current/open: `gemini_chats` with
-  `intent: "small_page"` or `diagnostic: true`. For "quantos chats ao todo",
-  run `gemini-md-export chats count --plain` once. If `totalKnown=false`, stop
-  at "pelo menos N". Download/export remains CLI-only.
-- Recent export, full import, missing-chat import, incremental sync, reexport,
-  or notebook export: run the bundled CLI directly first. Do not preflight with
-  repeated `gemini_ready`/`gemini_tabs`; the CLI owns readiness, browser wake,
-  tab selection flags, progress, and final `RESULT_JSON`. If `gemini_export` is
-  called, treat `code: "use_cli"` as an instruction to run its returned command.
+  `intent: "small_page"` or `diagnostic: true`. Download/export remains CLI-only.
+- Recent export, full import, missing-chat import, sync, reexport, or notebook:
+  run the bundled CLI directly first. Do not preflight with repeated
+  `gemini_ready`/`gemini_tabs`; the CLI owns readiness, browser wake, tab flags,
+  progress, and final `RESULT_JSON`. If `gemini_export` is called, treat
+  `code: "use_cli"` as an instruction to run its returned command.
 - Background progress/cancel: call `gemini_job`.
 - Export directory and extension cache: call `gemini_config`.
 - Diagnostics, process inspection, cleanup, support bundle, flight recorder, or
@@ -43,8 +45,8 @@ diagnostics/control-plane work. Ask for `detail: "full"` only while debugging.
 
 ## Skills
 
-Use bundled Agent Skills for detailed workflows: `gemini-vault-sync`,
-`gemini-vault-repair`, `gemini-mcp-diagnostics`, and
+Use bundled Agent Skills for detailed workflows: `gemini-chat-inventory`,
+`gemini-vault-sync`, `gemini-vault-repair`, `gemini-mcp-diagnostics`, and
 `gemini-tabs-and-browser`.
 
 ## Commands
@@ -68,8 +70,6 @@ and exits idle bridges unless `--no-exit-when-idle` is set.
   or `run_shell_command` with a real TTY/PTY. Captured shell output cannot
   animate; the CLI falls back to `--plain` with a warning:
   `node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" sync <vaultDir> --tui`
-- On Windows, use:
-  `node "$env:USERPROFILE\.gemini\extensions\gemini-md-export\bin\gemini-md-export.mjs" sync <vaultDir> --tui`
 - For agents, prefer `--plain`; it emits progress lines and final
   `RESULT_JSON`. Use `gemini-md-export --help` for flags.
 - CLI subcommands include `browser status`, `diagnose page`,

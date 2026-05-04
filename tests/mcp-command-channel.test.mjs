@@ -110,6 +110,14 @@ test('MCP publico bloqueia contagem/exportacao por tools ruidosas sem depender d
   assert.match(source, /use_cli_only/);
   assert.match(source, /buildCliCountCommand/);
   assert.match(source, /buildCliReexportCommand/);
+  const countCommandStart = source.indexOf('const buildCliCountCommand');
+  const countCommandEnd = source.indexOf('const buildCliTabsCommand', countCommandStart);
+  assert.ok(countCommandStart >= 0 && countCommandEnd > countCommandStart);
+  const countCommandBlock = source.slice(countCommandStart, countCommandEnd);
+  assert.match(countCommandBlock, /--client-id/);
+  assert.match(countCommandBlock, /--tab-id/);
+  assert.match(countCommandBlock, /--claim-id/);
+  assert.doesNotMatch(countCommandBlock, /loadMore|load-more/);
   assert.match(source, /action === 'count' \|\| args\.untilEnd === true \|\| args\.countOnly === true/);
   assert.match(source, /action === 'download'/);
   assert.match(source, /diagnostic: \{ type: 'boolean' \}/);

@@ -37,6 +37,7 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   const hooksConfigPath = resolve(extensionDir, 'hooks', 'hooks.json');
   const repairAgentPath = resolve(extensionDir, 'agents', 'gemini-vault-repair.md');
   const skillNames = [
+    'gemini-chat-inventory',
     'gemini-vault-sync',
     'gemini-vault-repair',
     'gemini-mcp-diagnostics',
@@ -216,6 +217,7 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.match(context, /gemini-vault-repair/);
   assert.match(context, /gemini-mcp-diagnostics/);
   assert.match(context, /gemini-tabs-and-browser/);
+  assert.match(context, /gemini-chat-inventory/);
   assert.match(context, /detail: "full"/);
   assert.match(context, /code: "tool_renamed"/);
   assert.match(context, /code: "use_cli"/);

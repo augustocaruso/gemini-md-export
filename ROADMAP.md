@@ -1190,6 +1190,24 @@ Humano/agente chama tool MCP
 - Jobs CLI continuam usando `browser-launch.json` para coordenar launch e ainda
   reconhecem `hook-browser-launch.json` legado.
 
+## v0.8.31 — Hotfix de comando mínimo para contagem
+
+Status: implementada na versão `0.8.31`.
+
+Objetivo: reduzir atrito quando um agente chama `gemini_chats { action:
+"count" }` em vez de rodar a CLI direta. O MCP continua recusando contagem
+total por tool, mas o comando sugerido agora é mínimo e deixa
+`gemini-md-export chats count --plain` usar os próprios defaults seguros de
+timeout/backoff.
+
+Entregas:
+
+- `buildCliCountCommand` preserva apenas seleção de aba/claim e `--bridge-url`.
+- Knobs de carregamento vindos da chamada MCP, como `loadMoreTimeoutMs`, não são
+  espelhados no comando sugerido.
+- Teste cobre que o bloco de comando CLI sugerido para contagem não contém
+  flags `load-more`, evitando reintroduzir timeout curto por acidente.
+
 ## Pesquisa futura — Transporte da bridge local
 
 Status: investigação condicionada.
