@@ -38,6 +38,7 @@ const DEFAULT_COUNT_LOAD_MORE_TIMEOUT_MS = 15 * 60 * 1000;
 const DEFAULT_JOB_TIMEOUT_CLEANUP_MS = 45_000;
 const DEFAULT_COUNT_STATUS_INTERVAL_MS = 15_000;
 const DEFAULT_READY_STATUS_INTERVAL_MS = 15_000;
+const DEFAULT_TUI_RENDER_INTERVAL_MS = 250;
 const DEFAULT_COUNT_LOAD_MORE_BROWSER_TIMEOUT_MS = 30_000;
 const DEFAULT_COUNT_LOAD_MORE_BROWSER_ROUNDS = 12;
 const DEFAULT_COUNT_MAX_NO_GROWTH_ROUNDS = 8;
@@ -1352,6 +1353,9 @@ const makeUi = (flags, streams = {}) => {
     firstRender: true,
     closed: false,
     streamHeaderPrinted: false,
+    waitNote: null,
+    waitDetail: null,
+    waitIssue: null,
   };
 };
 
@@ -1470,6 +1474,27 @@ const fitTerminalLine = (ui, text, reserved = 0) => {
   return `${stripAnsi(value).slice(0, Math.max(1, width - 3))}...`;
 };
 
+const padAnsiRight = (text, width) => {
+  const value = String(text || '');
+  const plainLength = stripAnsi(value).length;
+  if (plainLength >= width) return stripAnsi(value).slice(0, width);
+  return `${value}${' '.repeat(width - plainLength)}`;
+};
+
+const panelLines = (ui, title, bodyLines = []) => {
+  if (ui.format !== 'tui') return bodyLines;
+  const width = Math.max(44, Math.min(92, terminalWidth(ui)));
+  const innerWidth = width - 4;
+  const cleanTitle = stripAnsi(title).slice(0, Math.max(8, innerWidth - 2));
+  const titleChunk = ` ${cleanTitle} `;
+  const topFill = '─'.repeat(Math.max(0, width - titleChunk.length - 2));
+  return [
+    `╭${titleChunk}${topFill}╮`,
+    ...bodyLines.map((line) => `│ ${padAnsiRight(fitTerminalLine(ui, line, width - innerWidth), innerWidth)} │`),
+    `╰${'─'.repeat(width - 2)}╯`,
+  ];
+};
+
 const summarizeForResultJson = (job = {}) => {
   const decision = job.decisionSummary || {};
   const totals = jobTotals(job);
@@ -1518,14 +1543,6 @@ const summarizeForResultJson = (job = {}) => {
 };
 
 const renderLinesForCountWait = (ui, job = {}, tick = 0) => {
-  const width = terminalWidth(ui);
-  const activity = bar(ui, 0, 0, {
-    width: Math.max(18, Math.min(42, width - 36)),
-    indeterminate: true,
-    seed: tick,
-    filledChar: '#',
-    emptyChar: '.',
-  });
   const loaded = firstFiniteNumber(job.knownLoadedCount, job.minimumKnownCount, job.loadedCount);
   const foundText =
     loaded !== null && loaded > 0
@@ -1539,16 +1556,35 @@ const renderLinesForCountWait = (ui, job = {}, tick = 0) => {
   const details = [elapsedText, roundsText, job.claimLabel ? `aba ${job.claimLabel}` : null]
     .filter(Boolean)
     .join(' | ');
-  return [
-    `${bold(ui, 'Gemini Markdown Export')} ${dim(ui, 'contagem')}`,
-    `${activity}  ${colorize(ui, 'cyan', spinnerFrame(tick))} ${foundText}`,
-    `${colorize(ui, 'cyan', 'Carregando historico')} - ${fitTerminalLine(ui, job.progressMessage || 'Buscando o fim da lista sem abrir outra operacao pesada.')}`,
+  const lines = [
+    `${colorize(ui, 'cyan', spinnerFrame(tick))} Buscando fim do historico`,
+    foundText,
+    job.progressMessage ? dim(ui, job.progressMessage) : null,
     details ? dim(ui, details) : null,
   ].filter(Boolean);
+  return panelLines(ui, 'Gemini Markdown Export · contagem', lines);
+};
+
+const renderLinesForReadyWait = (ui, job = {}, tick = 0) => {
+  const note = job.waitNote || job.progressMessage || 'Verificando Gemini Web';
+  const details = [
+    job.elapsedMs ? `tempo ${formatDuration(job.elapsedMs)}` : null,
+    job.waitDetail || null,
+    job.blockingIssue ? `motivo ${job.blockingIssue}` : null,
+  ]
+    .filter(Boolean)
+    .join(' | ');
+  const lines = [
+    `${colorize(ui, 'cyan', spinnerFrame(tick))} ${note}`,
+    job.progressMessage && job.progressMessage !== note ? dim(ui, job.progressMessage) : null,
+    details ? dim(ui, details) : null,
+  ].filter(Boolean);
+  return panelLines(ui, 'Gemini Markdown Export · preparando', lines);
 };
 
 const renderLinesForJob = (ui, job = {}, tick = 0) => {
   if (job.tuiKind === 'count') return renderLinesForCountWait(ui, job, tick);
+  if (job.tuiKind === 'ready') return renderLinesForReadyWait(ui, job, tick);
   const width = terminalWidth(ui);
   const totals = jobTotals(job);
   const total = Number(job.requested || job.missingCount || job.webConversationCount || 0);
@@ -1576,8 +1612,7 @@ const renderLinesForJob = (ui, job = {}, tick = 0) => {
     totals.webSeen != null ? `encontradas ${totals.webSeen}` : null,
     totals.missing != null ? `faltando ${totals.missing}` : null,
   ].filter(Boolean);
-  return [
-    bold(ui, 'Gemini Markdown Export'),
+  const lines = [
     `${progress}  ${countText}`,
     `${statusPrefix}${status} - ${headline}`,
     currentLabel && !TERMINAL_STATUSES.has(job.status) ? `Agora: ${fitTerminalLine(ui, currentLabel, 7)}` : null,
@@ -1587,6 +1622,7 @@ const renderLinesForJob = (ui, job = {}, tick = 0) => {
       ? dim(ui, `Relatorio: ${fitTerminalLine(ui, job.reportFile, 11)}`)
       : null,
   ].filter(Boolean);
+  return panelLines(ui, `Gemini Markdown Export · ${stripAnsi(humanStatusLabel(job)).toLowerCase()}`, lines);
 };
 
 const renderLinesForJobTrace = (traceResult = {}) => {
@@ -1746,6 +1782,7 @@ const withWaitStatus = async (
     message,
     intervalMessage,
     intervalMs = DEFAULT_COUNT_STATUS_INTERVAL_MS,
+    renderIntervalMs = DEFAULT_TUI_RENDER_INTERVAL_MS,
     statusProbe = null,
     tuiKind = null,
   },
@@ -1793,6 +1830,9 @@ const withWaitStatus = async (
     progressMessage: tick === 0 ? message : nextMessage(),
     elapsedMs: Date.now() - startedAt,
     tuiKind,
+    waitNote: ui.waitNote || null,
+    waitDetail: ui.waitDetail || null,
+    blockingIssue: ui.waitIssue || null,
     ...latestProbe,
   });
   const renderWaitTui = () => {
@@ -1807,13 +1847,17 @@ const withWaitStatus = async (
   else if (ui.format === 'tui-stream') renderWaitStreamTui();
   else ui.stdout.write(`${message}\n`);
 
+  const timerMs =
+    ui.format === 'tui'
+      ? Math.max(100, Number(renderIntervalMs) || DEFAULT_TUI_RENDER_INTERVAL_MS)
+      : Math.max(1000, Number(intervalMs) || DEFAULT_COUNT_STATUS_INTERVAL_MS);
   const timer = setInterval(() => {
     tick += 1;
     void refreshProbe();
     if (ui.format === 'tui') renderWaitTui();
     else if (ui.format === 'tui-stream') renderWaitStreamTui();
     else ui.stdout.write(`${nextMessage()}\n`);
-  }, Math.max(1000, Number(intervalMs) || DEFAULT_COUNT_STATUS_INTERVAL_MS));
+  }, timerMs);
   timer.unref?.();
 
   try {
@@ -1879,6 +1923,16 @@ const activeBrowserLaunchState = (state, now = Date.now()) =>
   ['launching', 'attempted', 'dry-run'].includes(String(state?.status || '')) &&
   Number(state?.expiresAt || 0) > now;
 
+const shouldWriteInlineStatus = (ui) =>
+  ui.format !== 'json' && ui.format !== 'jsonl' && ui.format !== 'tui' && ui.format !== 'tui-stream';
+
+const setWaitNote = (ui, note, { detail = null, issue = null } = {}) => {
+  if (!ui) return;
+  ui.waitNote = note || null;
+  ui.waitDetail = detail || null;
+  ui.waitIssue = issue || null;
+};
+
 const wakeBrowserFromCli = async (flags, ui, ready) => {
   if (flags.wakeBrowser === false || !shouldWakeBrowserForReady(ready)) {
     return null;
@@ -1887,7 +1941,10 @@ const wakeBrowserFromCli = async (flags, ui, ready) => {
   const now = Date.now();
   const previousState = readBrowserLaunchState();
   if (activeBrowserLaunchState(previousState, now)) {
-    if (ui.format !== 'json' && ui.format !== 'jsonl') {
+    setWaitNote(ui, 'Outra chamada ja esta abrindo Gemini Web', {
+      issue: ready.blockingIssue || null,
+    });
+    if (shouldWriteInlineStatus(ui)) {
       ui.stdout.write('Outra chamada ja esta abrindo Gemini Web; aguardando a extensao...\n');
     }
     return {
@@ -1920,7 +1977,10 @@ const wakeBrowserFromCli = async (flags, ui, ready) => {
     }
   };
 
-  if (ui.format !== 'json' && ui.format !== 'jsonl') {
+  setWaitNote(ui, 'Abrindo Gemini Web em background', {
+    issue: ready.blockingIssue || null,
+  });
+  if (shouldWriteInlineStatus(ui)) {
     ui.stdout.write('Abrindo Gemini Web em background...\n');
   }
 
@@ -1951,6 +2011,9 @@ const wakeBrowserFromCli = async (flags, ui, ready) => {
 
 const readyWithCliWake = async (bridgeUrl, flags, ui) => {
   let ready = await requestReadyStatus(bridgeUrl, flags, { waitMs: 0 });
+  setWaitNote(ui, ready.ready === true ? 'Gemini Web pronto' : 'Verificando Gemini Web', {
+    issue: ready.blockingIssue || null,
+  });
   let cliBrowserWake = null;
   if (ready.ready !== true) {
     if (shouldWakeBrowserForReady(ready)) {
@@ -1963,7 +2026,11 @@ const readyWithCliWake = async (bridgeUrl, flags, ui) => {
         ),
       );
       if (existingTabGraceMs > 0) {
-        if (ui.format !== 'json' && ui.format !== 'jsonl') {
+        setWaitNote(ui, 'Aguardando aba Gemini existente reconectar', {
+          detail: `limite ${formatDuration(existingTabGraceMs)}`,
+          issue: ready.blockingIssue || null,
+        });
+        if (shouldWriteInlineStatus(ui)) {
           ui.stdout.write(
             `Aguardando aba Gemini existente reconectar (${formatDuration(existingTabGraceMs)})...\n`,
           );
@@ -1973,16 +2040,26 @@ const readyWithCliWake = async (bridgeUrl, flags, ui) => {
         });
         if (reconnected.ready === true || !shouldWakeBrowserForReady(reconnected)) {
           ready = reconnected;
+          setWaitNote(ui, ready.ready === true ? 'Gemini Web pronto' : 'Verificando Gemini Web', {
+            issue: ready.blockingIssue || null,
+          });
         }
       }
     }
     if (ready.ready !== true) {
       cliBrowserWake = await wakeBrowserFromCli(flags, ui, ready);
       if (flags.readyWaitMs > 0) {
-        if (ui.format !== 'json' && ui.format !== 'jsonl') {
+        setWaitNote(ui, 'Aguardando a extensao conectar', {
+          detail: `limite ${formatDuration(flags.readyWaitMs)}`,
+          issue: ready.blockingIssue || null,
+        });
+        if (shouldWriteInlineStatus(ui)) {
           ui.stdout.write(`Aguardando a extensao conectar (${formatDuration(flags.readyWaitMs)})...\n`);
         }
         ready = await requestReadyStatus(bridgeUrl, flags, { waitMs: flags.readyWaitMs });
+        setWaitNote(ui, ready.ready === true ? 'Gemini Web pronto' : 'Extensao ainda nao conectou', {
+          issue: ready.blockingIssue || null,
+        });
       }
     }
   }
@@ -2002,6 +2079,8 @@ const ensureReady = async (bridgeUrl, flags, ui) => {
         DEFAULT_READY_STATUS_INTERVAL_MS,
         60_000,
       ),
+      renderIntervalMs: DEFAULT_TUI_RENDER_INTERVAL_MS,
+      tuiKind: 'ready',
       intervalMessage: (elapsedMs) =>
         `Ainda verificando Gemini Web... ${formatDuration(elapsedMs)} decorridos; sem fallback MCP.`,
     },
@@ -2024,6 +2103,7 @@ const ensureReady = async (bridgeUrl, flags, ui) => {
   }
   const err = new Error(ready.blockingIssue || 'Gemini Web nao esta pronto.');
   err.code = 'extension_unready';
+  err.reported = true;
   err.data = ready;
   throw err;
 };
@@ -3125,6 +3205,7 @@ const runChats = async (parsed, streams = {}) => {
       {
         message: `Buscando o fim da lista de conversas (limite ${formatDuration(countTimeoutMs)}).`,
         intervalMs: statusIntervalMs,
+        renderIntervalMs: DEFAULT_TUI_RENDER_INTERVAL_MS,
         intervalMessage: (elapsedMs) =>
           `Buscando o fim da lista... ${formatDuration(elapsedMs)} decorridos.`,
         tuiKind: 'count',
@@ -3501,6 +3582,8 @@ if (cliEntrypoint) {
       const code = exitCodeForError(err);
       if (code === EXIT.USAGE) {
         process.stderr.write(`${err.message}\n\n${usage()}\n`);
+      } else if (err.reported) {
+        // A camada de comando ja imprimiu uma mensagem humana completa.
       } else if (process.env.GEMINI_MD_EXPORT_DEBUG) {
         process.stderr.write(`${err.stack || err.message}\n`);
       } else {

@@ -1592,6 +1592,62 @@ test('CLI sync --tui reinicia frame apos readiness e conta quebras de linha', as
   });
 });
 
+test('CLI --tui renderiza readiness sem misturar logs plain', async () => {
+  const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-cli-tui-ready-'));
+  try {
+    await withEnv(
+      {
+        GEMINI_MD_EXPORT_CLI_BROWSER_LAUNCH_DRY_RUN: 'true',
+        GEMINI_MCP_BROWSER_LAUNCH_STATE_DIR: tmpRoot,
+        GEMINI_MD_EXPORT_EXISTING_TAB_GRACE_MS: '0',
+      },
+      async () => {
+        await withServer((req, res, url) => {
+          if (url.pathname === '/agent/ready') {
+            sendJson(res, 200, {
+              ready: false,
+              connectedClientCount: 0,
+              selectableTabCount: 0,
+              commandReadyClientCount: 0,
+              blockingIssue: 'no_connected_clients',
+            });
+            return;
+          }
+          sendJson(res, 404, { error: `not found: ${url.pathname}` });
+        }, async (bridgeUrl) => {
+          const stdout = captureStream({ isTTY: true, columns: 92 });
+          const stderr = captureStream();
+          await assert.rejects(
+            () =>
+              main(
+                [
+                  'chats',
+                  'count',
+                  '--bridge-url',
+                  bridgeUrl,
+                  '--tui',
+                  '--ready-wait-ms',
+                  '300',
+                ],
+                { stdout, stderr },
+              ),
+            /no_connected_clients/,
+          );
+
+          assert.match(stdout.text(), /Gemini Markdown Export/);
+          assert.match(stdout.text(), /preparando/);
+          assert.doesNotMatch(stdout.text(), /trabalhando/);
+          assert.doesNotMatch(stdout.text(), /\nAbrindo Gemini Web em background\.\.\.\n/);
+          assert.doesNotMatch(stdout.text(), /\nAguardando a extensao conectar/);
+          assert.match(stderr.text(), /Gemini Web ainda nao esta pronto/);
+        });
+      },
+    );
+  } finally {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
 test('CLI sync --tui usa stream compacto quando pedido por env', async () => {
   await withEnv({ GEMINI_CLI: '1', GEMINI_MD_EXPORT_TUI_MODE: 'stream' }, async () => {
     let statusCalls = 0;
