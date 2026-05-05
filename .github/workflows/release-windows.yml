@@ -23,6 +23,38 @@ jobs:
 
       - run: npm ci
 
+      - name: Configure telemetry defaults for private bundle
+        env:
+          GME_TELEMETRY_ENDPOINT_URL: ${{ secrets.GME_TELEMETRY_ENDPOINT_URL }}
+          GME_TELEMETRY_AUTH_TOKEN: ${{ secrets.GME_TELEMETRY_AUTH_TOKEN }}
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const endpoint = process.env.GME_TELEMETRY_ENDPOINT_URL || '';
+          const token = process.env.GME_TELEMETRY_AUTH_TOKEN || '';
+          if (!endpoint || !token) {
+            console.log('Telemetry defaults not configured; skipping.');
+            process.exit(0);
+          }
+          fs.writeFileSync(
+            '.telemetry-defaults.json',
+            JSON.stringify(
+              {
+                schema: 'gemini-md-export.telemetry-defaults.v1',
+                enabled: true,
+                endpoint_url: endpoint,
+                auth_token: token,
+                payload_level: 'diagnostic_redacted',
+                max_envelope_bytes: 262144,
+              },
+              null,
+              2,
+            ) + '\n',
+            { mode: 0o600 },
+          );
+          console.log('Telemetry defaults configured for the private extension bundle.');
+          NODE
+
       - run: npm run release:windows:prebuilt
 
       - name: Publish Gemini CLI extension branch
