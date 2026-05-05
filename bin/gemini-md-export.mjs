@@ -18,6 +18,15 @@ import {
   createLayeredTimeoutError,
   decorateErrorWithTimeoutContext,
 } from '../src/timeout-diagnostics.mjs';
+import {
+  DEFAULT_PAYLOAD_LEVEL,
+  disableTelemetry,
+  enableTelemetry,
+  previewEnvelope,
+  recordCliTelemetry,
+  sendTelemetry,
+  telemetryStatus,
+} from '../src/telemetry.mjs';
 
 const DEFAULT_BRIDGE_URL = 'http://127.0.0.1:47283';
 const DEFAULT_POLL_MS = 1200;
@@ -165,6 +174,7 @@ const usage = () =>
     '  export-dir get|set    Consulta ou altera diretorio de export.',
     '  cleanup stale-processes Diagnostica/limpa processos antigos seguros.',
     '  repair-vault <path>   Executa reparo local de vault.',
+    '  telemetry enable|status|preview|send|disable  Telemetria, status e opt-out.',
     '  help [comando]        Mostra ajuda global ou de um comando.',
     '',
     'Exemplos:',
@@ -177,6 +187,7 @@ const usage = () =>
     '  gemini-md-export export missing "/path/to/vault" --plain',
     '  gemini-md-export job status job-123 --json',
     '  gemini-md-export job trace job-123 --plain',
+    '  gemini-md-export telemetry status --plain',
     '',
     'Dentro do Gemini CLI:',
     '  - Use TUI se o shell interativo/node-pty estiver ativo.',
@@ -580,6 +591,25 @@ const repairVaultHelp = () =>
     ...commonOptionHelp(),
   ].join('\n');
 
+const telemetryHelp = () =>
+  [
+    'gemini-md-export telemetry',
+    '',
+    'Uso:',
+    '  gemini-md-export telemetry enable --endpoint <url> --token <token> [--payload-level diagnostic_redacted|full_logs]',
+    '  gemini-md-export telemetry status',
+    '  gemini-md-export telemetry preview [--since 7d] [--limit 20]',
+    '  gemini-md-export telemetry send [--since 7d] [--limit 20]',
+    '  gemini-md-export telemetry disable',
+    '',
+    'A telemetria pode vir autoativada pelo pacote do mantenedor, e guarda retry local.',
+    'Por padrao usa diagnostic_redacted: metadados, status, blockers, contagens,',
+    'warnings/erros redigidos e paths compactos. full_logs inclui payload bruto',
+    'redigido quando disponivel.',
+    '',
+    ...outputModeHelp(),
+  ].join('\n');
+
 const helpForParsed = (parsed) => {
   const topic = parsed.command === 'help' ? parsed.positionals : [parsed.command, ...parsed.positionals];
   const [command, subcommand] = topic;
@@ -603,6 +633,7 @@ const helpForParsed = (parsed) => {
   if (command === 'export-dir') return exportDirHelp();
   if (command === 'cleanup') return cleanupHelp();
   if (command === 'repair-vault') return repairVaultHelp();
+  if (command === 'telemetry') return telemetryHelp();
   return usage();
 };
 
@@ -658,6 +689,14 @@ const parseArgs = (argv) => {
     if (arg === '--help' || arg === '-h') out.flags.help = true;
     else if (arg === '--version' || arg === '-v') out.flags.version = true;
     else if (arg === '--bridge-url') out.flags.bridgeUrl = value();
+    else if (arg === '--endpoint') out.flags.endpoint = value();
+    else if (arg === '--token') out.flags.token = value();
+    else if (arg === '--payload-level') out.flags.payloadLevel = value();
+    else if (arg === '--since') out.flags.since = value();
+    else if (arg === '--limit') {
+      if (out.command === 'telemetry') out.flags.limit = Number(value());
+      else out.flags.maxChats = Number(value());
+    }
     else if (arg === '--vault-dir') out.flags.vaultDir = value();
     else if (arg === '--url') out.flags.url = value();
     else if (arg === '--output-dir') out.flags.outputDir = value();
@@ -665,7 +704,7 @@ const parseArgs = (argv) => {
       out.flags.resumeReportFile = value();
     else if (arg === '--sync-state-file') out.flags.syncStateFile = value();
     else if (arg === '--known-boundary-count') out.flags.knownBoundaryCount = Number(value());
-    else if (arg === '--max-chats' || arg === '--limit') out.flags.maxChats = Number(value());
+    else if (arg === '--max-chats') out.flags.maxChats = Number(value());
     else if (arg === '--batch-size') out.flags.batchSize = Number(value());
     else if (arg === '--max-load-more-rounds') out.flags.maxLoadMoreRounds = Number(value());
     else if (arg === '--load-more-attempts') out.flags.loadMoreAttempts = Number(value());
@@ -2447,6 +2486,56 @@ const runRepairVault = async (parsed, streams = {}) => {
   return { exitCode, result: { ok: exitCode === 0, scriptPath, vaultDir } };
 };
 
+const runTelemetry = async (parsed, streams = {}) => {
+  const subcommand = parsed.positionals[0] || 'status';
+  if (!['enable', 'disable', 'status', 'preview', 'send'].includes(subcommand)) {
+    throw usageError('Uso: gemini-md-export telemetry enable|disable|status|preview|send.');
+  }
+  const ui = makeUi(parsed.flags, streams);
+  warnTuiFallback(ui);
+  let result;
+  if (subcommand === 'enable') {
+    result = enableTelemetry({
+      endpointUrl: parsed.flags.endpoint,
+      authToken: parsed.flags.token,
+      payloadLevel: parsed.flags.payloadLevel || DEFAULT_PAYLOAD_LEVEL,
+    });
+  } else if (subcommand === 'disable') {
+    result = disableTelemetry();
+  } else if (subcommand === 'status') {
+    result = telemetryStatus();
+  } else if (subcommand === 'preview') {
+    result = previewEnvelope({
+      since: parsed.flags.since || '30d',
+      limit: parsed.flags.limit || 20,
+    });
+  } else {
+    result = await sendTelemetry({
+      since: parsed.flags.since || '30d',
+      limit: parsed.flags.limit || 20,
+    });
+  }
+
+  const label =
+    subcommand === 'enable'
+      ? `Telemetria ativada: ${result.ready ? 'pronta' : 'pendente'}`
+      : subcommand === 'disable'
+        ? 'Telemetria desativada.'
+        : subcommand === 'status'
+          ? `Telemetria: ${result.ready ? 'pronta' : result.enabled ? 'incompleta' : 'desligada'}; outbox=${result.outbox_count}`
+          : subcommand === 'preview'
+            ? `Preview: ${result.records?.length || 0} run(s).`
+            : `Envio: sent=${result.sent || 0} failed=${result.failed || 0} queued=${result.queued || 0}`;
+  writeStructuredResult(ui, result, {
+    label,
+    includeResultJson: parsed.flags.resultJson === true || ui.format === 'plain',
+  });
+  return {
+    exitCode: subcommand === 'send' && result.ok === false ? EXIT.BRIDGE_UNAVAILABLE : EXIT.OK,
+    result,
+  };
+};
+
 const usageError = (message) => {
   const err = new Error(message);
   err.code = 'usage';
@@ -2464,6 +2553,28 @@ export const main = async (argv = process.argv.slice(2), streams = {}) => {
     return { exitCode: EXIT.OK };
   }
 
+  const startedAt = Date.now();
+  try {
+    const outcome = await runParsedCommand(parsed, streams);
+    await recordCliTelemetry(parsed, {
+      exitCode: outcome.exitCode ?? EXIT.OK,
+      result: outcome.result || null,
+      durationMs: Date.now() - startedAt,
+      version: VERSION,
+    });
+    return outcome;
+  } catch (err) {
+    await recordCliTelemetry(parsed, {
+      exitCode: exitCodeForError(err),
+      error: err,
+      durationMs: Date.now() - startedAt,
+      version: VERSION,
+    });
+    throw err;
+  }
+};
+
+const runParsedCommand = (parsed, streams = {}) => {
   if (parsed.command === 'sync') return runSync(parsed, streams);
   if (parsed.command === 'doctor') return runDoctor(parsed, streams);
   if (parsed.command === 'diagnose') return runDiagnose(parsed, streams);
@@ -2475,8 +2586,20 @@ export const main = async (argv = process.argv.slice(2), streams = {}) => {
   if (parsed.command === 'export-dir') return runExportDir(parsed, streams);
   if (parsed.command === 'cleanup') return runCleanup(parsed, streams);
   if (parsed.command === 'repair-vault') return runRepairVault(parsed, streams);
+  if (parsed.command === 'telemetry') return runTelemetry(parsed, streams);
   throw usageError(`Comando desconhecido: ${parsed.command}.`);
 };
+
+const exitCodeForError = (err) =>
+  err.code === 'usage'
+    ? EXIT.USAGE
+    : err.code === 'extension_unready'
+      ? EXIT.EXTENSION_UNREADY
+      : err.code === 'bridge_timeout' ||
+          err.code === 'bridge_connection_lost' ||
+          /fetch failed|ECONNREFUSED|Bridge/i.test(err.message)
+        ? EXIT.BRIDGE_UNAVAILABLE
+        : EXIT.JOB_FAILED;
 
 const cliEntrypoint = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 
@@ -2486,16 +2609,7 @@ if (cliEntrypoint) {
       process.exitCode = exitCode;
     })
     .catch((err) => {
-      const code =
-        err.code === 'usage'
-          ? EXIT.USAGE
-          : err.code === 'extension_unready'
-            ? EXIT.EXTENSION_UNREADY
-            : err.code === 'bridge_timeout' ||
-                err.code === 'bridge_connection_lost' ||
-                /fetch failed|ECONNREFUSED|Bridge/i.test(err.message)
-              ? EXIT.BRIDGE_UNAVAILABLE
-              : EXIT.JOB_FAILED;
+      const code = exitCodeForError(err);
       if (code === EXIT.USAGE) {
         process.stderr.write(`${err.message}\n\n${usage()}\n`);
       } else if (process.env.GEMINI_MD_EXPORT_DEBUG) {

@@ -342,6 +342,19 @@ cpSync(
   resolve(ROOT, 'src', 'timeout-diagnostics.mjs'),
   resolve(geminiCliExtensionDir, 'src', 'timeout-diagnostics.mjs'),
 );
+cpSync(resolve(ROOT, 'src', 'telemetry.mjs'), resolve(geminiCliExtensionDir, 'src', 'telemetry.mjs'));
+if (existsSync(resolve(ROOT, '.telemetry-defaults.json'))) {
+  cpSync(
+    resolve(ROOT, '.telemetry-defaults.json'),
+    resolve(geminiCliExtensionDir, 'telemetry.defaults.json'),
+  );
+}
+if (existsSync(resolve(ROOT, 'telemetry.defaults.example.json'))) {
+  cpSync(
+    resolve(ROOT, 'telemetry.defaults.example.json'),
+    resolve(geminiCliExtensionDir, 'telemetry.defaults.example.json'),
+  );
+}
 cpSync(resolve(ROOT, 'src', 'native-host.mjs'), resolve(geminiCliExtensionDir, 'src', 'native-host.mjs'));
 if (existsSync(resolve(ROOT, 'native-messaging'))) {
   cpSync(

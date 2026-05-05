@@ -40,8 +40,10 @@ or explicit `intent` for deliberate diagnostics/control. Ask for
   `code: "use_cli"` as an instruction to run its returned command.
 - Background progress/cancel: call `gemini_job`.
 - Export directory and extension cache: call `gemini_config`.
-- Diagnostics, process inspection, cleanup, support bundle, flight recorder, or
-  debug snapshot: call `gemini_support`.
+- Diagnostics/process cleanup/support bundle/flight recorder: `gemini_support`.
+- Telemetry may be auto-enabled in private builds via
+  `telemetry.defaults.json`; status/preview/retry/opt-out: `/exporter:telemetry`
+  or `gemini-md-export telemetry`.
 
 ## Skills
 
@@ -53,12 +55,12 @@ Use bundled Agent Skills for detailed workflows: `gemini-chat-inventory`,
 
 - `/sync`: sync the known vault with Gemini Web; an argument overrides the
   vault path from context.
-- `/exporter:diagnose-page`: diagnose artifact iframes without export/bypass;
-  may click a strong artifact button, then close it and release the tab claim.
+- `/exporter:diagnose-page`: diagnose artifact iframes without export/bypass.
 - `/exporter:capture-artifacts`: capture artifact HTML files plus an Obsidian
   manifest; never paste captured HTML.
 - `/exporter:repair-vault`: audit and repair contaminated raw exports/wiki
   cases.
+- `/exporter:telemetry`: telemetry status, preview, retry and opt-out.
 
 ## CLI/TUI Export UI
 
@@ -72,10 +74,9 @@ and exits idle bridges unless `--no-exit-when-idle` is set.
   `node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" sync <vaultDir> --tui`
 - For agents, prefer `--plain`; it emits progress lines and final
   `RESULT_JSON`. Use `gemini-md-export --help` for flags.
-- CLI subcommands include `browser status`, `diagnose page`,
-  `tabs list/claim/release/reload`, `chats count`, `export recent`, `export missing`, `export resume`,
-  `export reexport`, `export notebook`, `job status`, `job cancel`,
-  `export-dir get/set`, `cleanup stale-processes`, and `repair-vault`.
+- CLI subcommands include `browser status`, `diagnose page`, `tabs`,
+  `chats count`, `export ...`, `job ...`, `export-dir`, `cleanup`,
+  `repair-vault`, and `telemetry enable/status/preview/send/disable`.
 - Automation: `--json` for final JSON only, `--jsonl` for events. Do not use
   custom-command shell injection for long sync jobs.
 
@@ -85,9 +86,8 @@ and exits idle bridges unless `--no-exit-when-idle` is set.
   chats", use the CLI. MCP `gemini_export` returns `code: "use_cli"` with the
   exact command instead of starting a hidden job.
 - Do not call `gemini_ready`/`gemini_tabs` repeatedly before long exports. If
-  multiple tabs block the CLI, use `gemini-md-export tabs list --plain` and
-  `gemini-md-export tabs claim --index <n> --plain`, then rerun sync/export with
-  `--claim-id <claimId>`.
+  multiple tabs block the CLI, use `gemini-md-export tabs list --plain`, then
+  `tabs claim --index <n> --plain`, and rerun with `--claim-id <claimId>`.
 - MCP `gemini_ready`, `gemini_tabs`, and `gemini_chats` intentionally refuse
   normal user-facing count/export paths unless the call carries explicit
   diagnostic/control intent. Treat that refusal as final; do not work around it

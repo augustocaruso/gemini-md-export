@@ -250,6 +250,27 @@ gemini-md-export export resume "/caminho/do/relatorio.json" --plain
 Em terminal interativo, use `--tui` para ver barra de progresso. Para agentes,
 use `--plain`: a saída termina com `RESULT_JSON`, que é curto e parseável.
 
+Telemetria remota por email pode vir autoativada em builds privados pelo
+arquivo `telemetry.defaults.json`. O usuário pode inspecionar, reenviar a
+outbox ou desligar:
+
+```bash
+gemini-md-export telemetry status --plain
+gemini-md-export telemetry preview --since 7d --plain
+gemini-md-export telemetry send --since 7d --plain
+gemini-md-export telemetry disable --plain
+```
+
+Override manual, quando não houver defaults de distribuição:
+
+```bash
+gemini-md-export telemetry enable --endpoint "https://..." --token "..." --payload-level diagnostic_redacted
+```
+
+Quando ligada, a CLI registra runs em
+`~/.gemini/gemini-md-export/telemetry/runs/`, envia envelopes redigidos em modo
+fail-open e guarda retries em `~/.gemini/gemini-md-export/telemetry/outbox/`.
+
 A CLI fala direto com a bridge HTTP local em `127.0.0.1:47283`. Se a bridge
 não estiver no ar, a CLI pode iniciar um processo `bridge-only`; esse processo
 usa `exit-when-idle` por padrão e encerra sozinho depois da janela de

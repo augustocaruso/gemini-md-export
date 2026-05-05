@@ -8,6 +8,8 @@ Thumbs.db
 .idea/
 .claude/
 .mcp.json
+.telemetry-defaults.json
+telemetry.defaults.json
 .claude/settings.local.json
 
 # Fixtures podem conter trechos de conversas pessoais.
