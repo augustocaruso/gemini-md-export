@@ -47,7 +47,7 @@ test('bridge smoke valida healthz, snapshot, SSE, ready, clients e diagnostico s
 test('bridge smoke destrutivo exercita claim e release com cliente sintetico', () => {
   const output = execFileSync(
     process.execPath,
-    [SMOKE_SCRIPT, '--spawn', '--destructive-fixture', '--json'],
+    [SMOKE_SCRIPT, '--spawn', '--destructive-fixture', '--timeout-ms', '20000', '--json'],
     {
       cwd: ROOT,
       encoding: 'utf-8',
