@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
@@ -112,6 +112,7 @@ const commonOptionHelp = () => [
   '  --client-id <id>         Escolhe uma aba Gemini pelo clientId.',
   '  --tab-id <id>            Escolhe uma aba Gemini pelo tabId do navegador.',
   '  --claim-id <id>          Usa uma claim criada por gemini-md-export tabs claim.',
+  '  --session <nome>         Sessao nomeada reutilizavel para claim/export.',
   '  --keep-claim             Nao libera --claim-id automaticamente apos chats/sync/export.',
   '  --no-wake                Nao tentar acordar o navegador.',
   '  --no-self-heal           Nao tentar auto-recuperacao da extensao.',
@@ -130,6 +131,8 @@ const jobOptionHelp = () => [
   '  --batch-size <n>             Tamanho de lote do export.',
   '  --start-index <n>            Primeira posicao para export notebook/recent.',
   '  --chat-id <id>               Chat ID para export reexport; pode repetir.',
+  '  --selection-file <path>      Manifesto criado por chats list --save-selection.',
+  '  --expected-count <n>         Falha antes de iniciar se a selecao tiver outra quantidade.',
   '  --delay-ms <ms>              Pausa entre chats no reexport.',
   '  --max-load-more-rounds <n>   Rodadas maximas para puxar historico.',
   '  --load-more-attempts <n>     Tentativas de scroll por rodada.',
@@ -163,6 +166,7 @@ const usage = () =>
     '  browser status        Mostra prontidao da bridge/extensao/abas.',
     '  tabs list|claim       Lista/reivindica abas Gemini pela CLI.',
     '  chats count           Conta chats carregaveis sem despejar lista no chat.',
+    '  chats list            Lista uma pagina e pode salvar selecao de chatIds.',
     '  export recent         Exporta historico recente carregavel.',
     '  export missing        Exporta apenas chats ausentes no vault.',
     '  export resume         Retoma export por relatorio incremental.',
@@ -185,10 +189,12 @@ const usage = () =>
     '  gemini-md-export diagnose page "https://gemini.google.com/app/<chatId>" --plain',
     '  gemini-md-export tabs list --plain',
     '  gemini-md-export chats count --plain',
+    '  gemini-md-export chats list --limit 10 --save-selection --plain',
     '  gemini-md-export export missing "/path/to/vault" --plain',
     '  gemini-md-export job list --active --plain',
     '  gemini-md-export job status job-123 --json',
     '  gemini-md-export job trace job-123 --plain',
+    '  gemini-md-export export reexport --selection-file ~/.gemini-md-export/selections/latest.json --expected-count 10 --plain',
     '  gemini-md-export telemetry status --plain',
     '',
     'Dentro do Gemini CLI:',
@@ -346,12 +352,19 @@ const chatsHelp = () =>
     '',
     'Uso:',
     '  gemini-md-export chats count [opcoes]',
+    '  gemini-md-export chats list [--limit <n>] [--offset <n>] [--save-selection] [opcoes]',
     '',
-    'Conta conversas carregaveis no sidebar sem imprimir a lista inteira.',
+    'Conta ou lista conversas carregaveis no sidebar sem despejar historico inteiro.',
     'A contagem so e total quando a CLI imprimir "Total confirmado".',
     'Se a CLI imprimir "Contagem parcial", responda "pelo menos N" e nao "ao todo".',
+    'Para baixar a pagina listada depois, use --save-selection e passe o manifesto',
+    'para export reexport --selection-file ... --expected-count N.',
     '',
     'Opcoes:',
+    '  --limit <n>                  Quantidade de conversas na pagina. Default: 25.',
+    '  --offset <n>                 Pula conversas ja vistas. Default: 0.',
+    '  --save-selection            Salva a pagina listada como manifesto reutilizavel.',
+    '  --selection-file <path>      Caminho do manifesto. Default: ~/.gemini-md-export/selections/latest.json.',
     '  --max-load-more-rounds <n>   Rodadas maximas para puxar historico.',
     '  --load-more-attempts <n>     Tentativas de scroll por rodada.',
     '  --max-no-growth-rounds <n>   Rodadas sem crescimento antes de desistir.',
@@ -365,6 +378,7 @@ const chatsHelp = () =>
     '',
     'Exemplos:',
     '  gemini-md-export chats count --plain',
+    '  gemini-md-export chats list --limit 10 --save-selection --plain',
     '  gemini-md-export chats count --json',
   ].join('\n');
 
@@ -446,9 +460,12 @@ const exportReexportHelp = () =>
     'gemini-md-export export reexport',
     '',
     'Uso:',
+    '  gemini-md-export export reexport --selection-file <manifest.json> --expected-count <n> [opcoes]',
     '  gemini-md-export export reexport --chat-id <id> [--chat-id <id>] [opcoes]',
+    '  gemini-md-export export reexport <id1> <id2> ... [opcoes]',
     '',
-    'Reexporta chatIds explicitos em job de background, util para repair/staging.',
+    'Reexporta chatIds explicitos em job de background. Para follow-up de "baixe essas",',
+    'prefira o manifesto criado por chats list --save-selection para evitar ambiguidade.',
     '',
     ...outputModeHelp(),
     '',
@@ -538,9 +555,14 @@ const jobCancelHelp = () =>
     'gemini-md-export job cancel',
     '',
     'Uso:',
-    '  gemini-md-export job cancel <jobId> [opcoes]',
+    '  gemini-md-export job cancel <jobId> [--wait] [opcoes]',
     '',
-    'Solicita cancelamento de um job em andamento.',
+    'Solicita cancelamento de um job em andamento. Com --wait, aguarda estado terminal',
+    'ou explica que o navegador ainda está dentro da conversa atual.',
+    '',
+    'Opcoes:',
+    '  --wait       Aguarda o job virar cancelled/completed/failed antes de sair.',
+    '  --wait-ms <ms> Tempo maximo de espera. Default: cleanup timeout da CLI.',
     '',
     ...outputModeHelp(),
     '',
@@ -719,9 +741,12 @@ const parseArgs = (argv) => {
     else if (arg === '--payload-level') out.flags.payloadLevel = value();
     else if (arg === '--since') out.flags.since = value();
     else if (arg === '--limit') {
-      if (out.command === 'telemetry' || out.command === 'job') out.flags.limit = Number(value());
+      if (out.command === 'telemetry' || out.command === 'job' || out.command === 'chats') {
+        out.flags.limit = Number(value());
+      }
       else out.flags.maxChats = Number(value());
     }
+    else if (arg === '--offset') out.flags.offset = Number(value());
     else if (arg === '--vault-dir') out.flags.vaultDir = value();
     else if (arg === '--url') out.flags.url = value();
     else if (arg === '--output-dir') out.flags.outputDir = value();
@@ -762,6 +787,7 @@ const parseArgs = (argv) => {
     else if (arg === '--client-id') out.flags.clientId = value();
     else if (arg === '--tab-id') out.flags.tabId = value();
     else if (arg === '--claim-id') out.flags.claimId = value();
+    else if (arg === '--session' || arg === '--session-id') out.flags.sessionId = value();
     else if (arg === '--keep-claim' || arg === '--no-auto-release-claim')
       out.flags.autoReleaseClaim = false;
     else if (arg === '--auto-release-claim') out.flags.autoReleaseClaim = true;
@@ -773,10 +799,14 @@ const parseArgs = (argv) => {
     else if (arg === '--no-open-if-missing') out.flags.openIfMissing = false;
     else if (arg === '--start-index') out.flags.startIndex = Number(value());
     else if (arg === '--chat-id') out.flags.chatIds.push(value());
+    else if (arg === '--selection-file') out.flags.selectionFile = value();
+    else if (arg === '--save-selection') out.flags.saveSelection = true;
+    else if (arg === '--expected-count') out.flags.expectedCount = Number(value());
     else if (arg === '--delay-ms') out.flags.delayMs = Number(value());
     else if (arg === '--reset') out.flags.reset = true;
     else if (arg === '--confirm') out.flags.confirm = true;
     else if (arg === '--force') out.flags.force = true;
+    else if (arg === '--wait') out.flags.wait = true;
     else if (arg === '--wait-ms') out.flags.waitMs = Number(value());
     else if (arg === '--artifacts') out.flags.artifacts = true;
     else if (arg === '--full') {
@@ -846,6 +876,148 @@ const appendParams = (path, params = {}) => {
   return suffix ? `${path}?${suffix}` : path;
 };
 
+const selectionDir = () => resolve(homedir(), '.gemini-md-export', 'selections');
+
+const defaultSelectionFile = () => resolve(selectionDir(), 'latest.json');
+
+const expandUserPath = (value) => {
+  const text = String(value || '');
+  if (text === '~') return homedir();
+  if (text.startsWith('~/')) return resolve(homedir(), text.slice(2));
+  return text;
+};
+
+const selectionFileForWrite = (flags = {}) => resolve(expandUserPath(flags.selectionFile || defaultSelectionFile()));
+
+const extractChatIdForCli = (value) => {
+  const text = String(value ?? '').trim();
+  if (!text) return null;
+  const fromUrl = text.match(/\/app\/([a-f0-9]{12,})/i);
+  const raw = (fromUrl ? fromUrl[1] : text.replace(/^gemini:/i, '')).trim();
+  const match = raw.match(/^[a-f0-9]{12,}$/i);
+  return match ? raw.toLowerCase() : null;
+};
+
+const splitChatIdArgs = (values = []) =>
+  values
+    .flatMap((value) => String(value ?? '').split(/[,\s]+/))
+    .map((value) => value.trim())
+    .filter(Boolean);
+
+const normalizeReexportSelection = ({ chatIds = [], items = [] } = {}) => {
+  const rawItems = [
+    ...splitChatIdArgs(chatIds).map((chatId) => ({ chatId })),
+    ...(Array.isArray(items) ? items : []),
+  ];
+  const seen = new Set();
+  const normalizedItems = [];
+  const duplicates = [];
+  const invalid = [];
+
+  for (const raw of rawItems) {
+    const item = typeof raw === 'string' ? { chatId: raw } : raw || {};
+    const chatId = extractChatIdForCli(item.chatId || item.id || item.url);
+    if (!chatId) {
+      invalid.push(String(item.chatId || item.id || item.url || raw));
+      continue;
+    }
+    if (seen.has(chatId)) {
+      duplicates.push(chatId);
+      continue;
+    }
+    seen.add(chatId);
+    normalizedItems.push({
+      chatId,
+      title: item.title || item.label || null,
+      url: item.url || `https://gemini.google.com/app/${chatId}`,
+      source: item.source || null,
+      sourcePath: item.sourcePath || item.path || null,
+      listedIndex: item.listedIndex ?? item.index ?? null,
+    });
+  }
+
+  return {
+    inputCount: rawItems.length,
+    uniqueCount: normalizedItems.length,
+    duplicateCount: duplicates.length,
+    duplicates,
+    invalid,
+    items: normalizedItems,
+    chatIds: normalizedItems.map((item) => item.chatId),
+  };
+};
+
+const readSelectionFile = (filePath) => {
+  const resolved = resolve(expandUserPath(filePath || defaultSelectionFile()));
+  const json = JSON.parse(readFileSync(resolved, 'utf-8'));
+  const items = Array.isArray(json.conversations)
+    ? json.conversations
+    : Array.isArray(json.items)
+      ? json.items
+      : [];
+  const chatIds = items.length > 0 ? [] : Array.isArray(json.chatIds) ? json.chatIds : [];
+  const selection = normalizeReexportSelection({ chatIds, items });
+  return {
+    filePath: resolved,
+    manifest: json,
+    ...selection,
+  };
+};
+
+const writeSelectionFile = (raw = {}, flags = {}) => {
+  const filePath = selectionFileForWrite(flags);
+  const conversations = Array.isArray(raw.conversations) ? raw.conversations : [];
+  const items = conversations.map((conversation, index) => {
+    const chatId = extractChatIdForCli(conversation.chatId || conversation.id || conversation.url);
+    return {
+      index: conversation.index ?? (Number(flags.offset || 0) + index + 1),
+      chatId,
+      title: conversation.title || null,
+      url: conversation.url || (chatId ? `https://gemini.google.com/app/${chatId}` : null),
+      source: conversation.source || null,
+    };
+  }).filter((item) => item.chatId);
+  const manifest = {
+    kind: 'gemini-md-export-selection',
+    version: 1,
+    createdAt: new Date().toISOString(),
+    source: 'chats list',
+    offset: Math.max(0, Number(flags.offset || 0)),
+    limit: Math.max(1, Number(flags.limit || flags.maxChats || items.length || 25)),
+    expectedCount: items.length,
+    chatIds: items.map((item) => item.chatId),
+    conversations: items,
+    pagination: raw.pagination || null,
+  };
+  mkdirSync(dirname(filePath), { recursive: true });
+  writeFileSync(filePath, `${JSON.stringify(manifest, null, 2)}\n`);
+  return {
+    filePath,
+    manifest,
+  };
+};
+
+const validateExpectedCount = (selection, expectedCount) => {
+  if (expectedCount === undefined || expectedCount === null || expectedCount === '') return;
+  const expected = Number(expectedCount);
+  if (!Number.isInteger(expected) || expected <= 0) {
+    throw usageError('--expected-count precisa ser um numero inteiro positivo.');
+  }
+  if (selection.uniqueCount !== expected) {
+    const err = usageError(
+      `A selecao tem ${selection.uniqueCount} chatId(s) unico(s), mas --expected-count pediu ${expected}. Nao iniciei exportacao.`,
+    );
+    err.data = {
+      expectedCount: expected,
+      uniqueCount: selection.uniqueCount,
+      inputCount: selection.inputCount,
+      duplicateCount: selection.duplicateCount,
+      invalid: selection.invalid,
+    };
+    throw err;
+  }
+};
+
 const loadMoreParamsFromFlags = (flags = {}) => ({
   maxLoadMoreRounds: flags.maxLoadMoreRounds,
   loadMoreAttempts: flags.loadMoreAttempts,
@@ -896,11 +1068,12 @@ const formatExportJobInProgressMessage = (json = {}) => {
 const requestJson = async (
   bridgeUrl,
   path,
-  { timeoutMs = 15000, method = 'GET', layer = 'bridge', operation = null } = {},
+  { timeoutMs = 15000, method = 'GET', layer = 'bridge', operation = null, body = undefined } = {},
 ) => {
   const url = new URL(path, `${normalizeBridgeUrl(bridgeUrl)}/`);
   const transport = url.protocol === 'https:' ? httpsRequest : httpRequest;
   const operationName = operation || `${method} ${url.pathname}`;
+  const bodyText = body === undefined ? null : JSON.stringify(body);
 
   return new Promise((resolveRequest, rejectRequest) => {
     let settled = false;
@@ -915,6 +1088,12 @@ const requestJson = async (
         method,
         headers: {
           accept: 'application/json',
+          ...(bodyText
+            ? {
+                'content-type': 'application/json',
+                'content-length': Buffer.byteLength(bodyText),
+              }
+            : {}),
         },
       },
       (response) => {
@@ -978,7 +1157,7 @@ const requestJson = async (
         }),
       ),
     );
-    req.end();
+    req.end(bodyText || undefined);
   });
 };
 
@@ -1181,6 +1360,16 @@ const jobTotals = (job = {}) => {
   return { downloaded, failed, skipped, warnings, webSeen, existing, missing };
 };
 
+const displayProgressPosition = (job = {}, total = 0) => {
+  const requested = Math.max(0, Number(total || job.requested || 0));
+  const completed = Math.max(0, Number(job.completed || 0));
+  const currentIndex = Math.max(0, Number(job.current?.index || job.position || 0));
+  if (requested > 0 && !TERMINAL_STATUSES.has(job.status) && job.phase === 'exporting') {
+    return Math.min(requested, Math.max(completed + 1, currentIndex, 1));
+  }
+  return requested > 0 ? Math.min(completed, requested) : completed;
+};
+
 const summarizeForResultJson = (job = {}) => {
   const decision = job.decisionSummary || {};
   const totals = jobTotals(job);
@@ -1232,7 +1421,7 @@ const renderLinesForJob = (ui, job = {}, tick = 0) => {
   const width = terminalWidth(ui);
   const totals = jobTotals(job);
   const total = Number(job.requested || job.missingCount || job.webConversationCount || 0);
-  const current = Number(job.completed || 0);
+  const current = displayProgressPosition(job, total);
   const indeterminate = !total || ['queued', 'loading-history', 'scanning-vault'].includes(job.phase);
   const title = bold(ui, 'Gemini Markdown Export');
   const status = colorize(ui, terminalColorForStatus(job.status), job.status || 'running');
@@ -1357,11 +1546,12 @@ const renderPlainProgress = (ui, job, previous = {}) => {
     job.loadedCount,
     job.failureCount,
     job.progressMessage,
+    job.current?.index,
     job.current?.chatId,
   ].join('|');
   if (previous.key === key) return previous;
   const total = Number(job.requested || job.missingCount || job.webConversationCount || 0);
-  const current = Number(job.completed || 0);
+  const current = displayProgressPosition(job, total);
   const count = total > 0 ? `${Math.min(current, total)}/${total}` : `${job.loadedCount || 0} vistas`;
   ui.stdout.write(`[${new Date().toLocaleTimeString()}] ${job.status}/${job.phase}: ${count} - ${job.progressMessage || 'sincronizando'}\n`);
   return { key };
@@ -1446,6 +1636,7 @@ const exitCodeForJob = (job = {}) => {
 
 const exitCodeForJobCommand = (subcommand, job = {}) => {
   if (subcommand === 'cancel') {
+    if (job.status === 'cancel_requested') return EXIT.MANUAL_ACTION;
     return job.status === 'failed' ? EXIT.JOB_FAILED : EXIT.OK;
   }
   if (!TERMINAL_STATUSES.has(job.status)) return EXIT.OK;
@@ -1650,6 +1841,7 @@ const startExportJob = async (bridgeUrl, kind, flags) => {
     clientId: flags.clientId,
     tabId: flags.tabId,
     claimId: flags.claimId,
+    sessionId: flags.sessionId,
     autoReleaseClaim: flags.autoReleaseClaim,
   };
   if (kind === 'recent') {
@@ -1680,11 +1872,20 @@ const startExportJob = async (bridgeUrl, kind, flags) => {
   if (kind === 'reexport') {
     return requestJson(
       bridgeUrl,
-      appendParams('/agent/reexport-chats', {
-        ...params,
-        chatId: flags.chatIds,
-      }),
-      { timeoutMs: 20000 },
+      '/agent/reexport-chats',
+      {
+        method: 'POST',
+        timeoutMs: 20000,
+        operation: 'reexport-chats',
+        body: {
+          ...params,
+          chatIds: flags.chatIds,
+          items: flags.selectionItems,
+          expectedCount: flags.expectedCount,
+          selectionFile: flags.selectionSourceFile,
+          selectionManifestKind: flags.selectionManifestKind,
+        },
+      },
     );
   }
   if (kind === 'notebook') {
@@ -1734,7 +1935,7 @@ const jobCleanupTimeoutMs = () =>
 const waitForJobTerminalQuietly = async (bridgeUrl, jobId, flags = {}) => {
   const startedAt = Date.now();
   const pollMs = Math.max(250, Math.min(2000, Number(flags.pollMs || DEFAULT_POLL_MS)));
-  const timeoutMs = jobCleanupTimeoutMs();
+  const timeoutMs = Math.max(1000, Number(flags.waitMs || jobCleanupTimeoutMs()));
   let lastJob = null;
   while (Date.now() - startedAt <= timeoutMs) {
     try {
@@ -1902,6 +2103,7 @@ const claimCliTabForCount = async (flags = {}, countTimeoutMs) => {
       action: 'claim',
       clientId: flags.clientId,
       tabId: flags.tabId,
+      sessionId: flags.sessionId,
       index: flags.index,
       preferRecent: true,
       label: 'GME Count',
@@ -2073,6 +2275,7 @@ const runDoctor = async (parsed, streams = {}) => {
     profileDirectory: local.profileDirectory,
     sourceVersion: local.sourceVersion,
     loadedExtension: local.loadedExtension?.extension || null,
+    playwrightExtension: local.playwrightExtension?.extension || null,
     nativeHost: local.nativeHost,
     bridge: bridge
       ? {
@@ -2112,6 +2315,13 @@ const runDoctor = async (parsed, streams = {}) => {
       `Extensao: ${
         extension
           ? `${extension.version || '?'} ${extension.locationKind || 'desconhecida'} id=${extension.id}`
+          : 'nao encontrada no perfil'
+      }\n`,
+    );
+    ui.stdout.write(
+      `Playwright Extension: ${
+        result.playwrightExtension
+          ? `${result.playwrightExtension.version || '?'} id=${result.playwrightExtension.id}`
           : 'nao encontrada no perfil'
       }\n`,
     );
@@ -2404,6 +2614,7 @@ const runTabs = async (parsed, streams = {}) => {
       clientId: parsed.flags.clientId,
       tabId: parsed.flags.tabId,
       claimId: parsed.flags.claimId,
+      sessionId: parsed.flags.sessionId,
       index: parsed.flags.index,
       label: parsed.flags.label,
       color: parsed.flags.colorName,
@@ -2446,10 +2657,66 @@ const summarizeChatsCountResult = (result = {}) => ({
   nextAction: result.nextAction || null,
 });
 
+const summarizeChatsListResult = (raw = {}, flags = {}, selection = null) => {
+  const conversations = Array.isArray(raw.conversations) ? raw.conversations : [];
+  return {
+    ok: raw.ok !== false,
+    action: 'list',
+    count: conversations.length,
+    offset: Math.max(0, Number(flags.offset || 0)),
+    limit: Math.max(1, Number(flags.limit || flags.maxChats || 25)),
+    countStatus: raw.countStatus || raw.pagination?.countStatus || null,
+    totalKnown: raw.totalKnown === true || raw.pagination?.totalKnown === true,
+    totalCount: raw.totalCount ?? raw.pagination?.totalCount ?? null,
+    minimumKnownCount: raw.minimumKnownCount ?? raw.pagination?.minimumKnownCount ?? null,
+    knownLoadedCount: raw.knownLoadedCount ?? raw.pagination?.loadedCount ?? null,
+    pagination: raw.pagination || null,
+    conversations: conversations.map((conversation, index) => ({
+      index: conversation.index ?? Math.max(0, Number(flags.offset || 0)) + index + 1,
+      chatId: conversation.chatId || conversation.id || null,
+      title: conversation.title || null,
+      url: conversation.url || null,
+      source: conversation.source || null,
+    })),
+    selectionFile: selection?.filePath || null,
+    expectedCount: selection?.manifest?.expectedCount ?? null,
+    nextAction: selection?.filePath
+      ? {
+          code: 'export_selection',
+          message: 'Use o manifesto salvo para baixar exatamente esta lista.',
+          command: `gemini-md-export export reexport --selection-file ${selection.filePath} --expected-count ${selection.manifest.expectedCount} --plain`,
+        }
+      : raw.nextAction || null,
+  };
+};
+
+const chatsListPlainLabel = (result = {}) => {
+  const lines = [
+    `${result.count} conversa(s) listada(s) a partir do offset ${result.offset}.`,
+  ];
+  for (const conversation of result.conversations) {
+    lines.push(
+      `${conversation.index}. ${conversation.title || 'Sem titulo'} (${conversation.chatId || 'sem chatId'})`,
+    );
+  }
+  if (result.selectionFile) {
+    lines.push(`selectionFile: ${result.selectionFile}`);
+    lines.push(
+      `baixar: gemini-md-export export reexport --selection-file ${result.selectionFile} --expected-count ${result.expectedCount} --plain`,
+    );
+  }
+  if (!result.totalKnown && result.minimumKnownCount !== null) {
+    lines.push(
+      `Observacao: historico completo ainda nao confirmado; pelo menos ${result.minimumKnownCount} conversa(s) carregada(s).`,
+    );
+  }
+  return lines.join('\n');
+};
+
 const runChats = async (parsed, streams = {}) => {
   const subcommand = parsed.positionals[0] || 'count';
-  if (subcommand !== 'count') {
-    throw usageError('Uso: gemini-md-export chats count [opcoes].');
+  if (!['count', 'list'].includes(subcommand)) {
+    throw usageError('Uso: gemini-md-export chats count|list [opcoes].');
   }
   const ui = makeUi(parsed.flags, streams);
   warnTuiFallback(ui);
@@ -2461,6 +2728,35 @@ const runChats = async (parsed, streams = {}) => {
     ui.stdout.write('Bridge conectada. Verificando Gemini Web...\n');
   }
   await ensureReady(parsed.flags.bridgeUrl, parsed.flags, ui);
+  if (subcommand === 'list') {
+    const limit = Math.max(1, Math.min(200, Number(parsed.flags.limit || parsed.flags.maxChats || 25)));
+    const offset = Math.max(0, Number(parsed.flags.offset || 0));
+    const raw = await requestJson(
+      parsed.flags.bridgeUrl,
+      appendParams('/agent/recent-chats', {
+        limit,
+        offset,
+        preferActive: true,
+        refresh: parsed.flags.refresh,
+        clientId: parsed.flags.clientId,
+        tabId: parsed.flags.tabId,
+        claimId: parsed.flags.claimId,
+        sessionId: parsed.flags.sessionId,
+        autoReleaseClaim: parsed.flags.autoReleaseClaim,
+      }),
+      { timeoutMs: 30_000 },
+    );
+    const selection =
+      parsed.flags.saveSelection || parsed.flags.selectionFile
+        ? writeSelectionFile(raw, { ...parsed.flags, limit, offset })
+        : null;
+    const result = summarizeChatsListResult(raw, { ...parsed.flags, limit, offset }, selection);
+    writeStructuredResult(ui, result, {
+      label: chatsListPlainLabel(result),
+      includeResultJson: parsed.flags.resultJson === true,
+    });
+    return { exitCode: result.ok ? EXIT.OK : EXIT.WARNINGS, result };
+  }
   const countTimeoutMs = Math.max(
     1000,
     Number(parsed.flags.loadMoreTimeoutMs || DEFAULT_COUNT_LOAD_MORE_TIMEOUT_MS),
@@ -2512,6 +2808,7 @@ const runChats = async (parsed, streams = {}) => {
             clientId: parsed.flags.clientId,
             tabId: requestTabId,
             claimId: requestClaimId,
+            sessionId: parsed.flags.sessionId,
           }),
           { timeoutMs: countTimeoutMs + 15_000 },
         ),
@@ -2539,19 +2836,37 @@ const runExport = async (parsed, streams = {}) => {
   }
   if (subcommand === 'missing' && !flags.vaultDir) flags.vaultDir = parsed.positionals[1];
   if (subcommand === 'resume' && !flags.resumeReportFile) flags.resumeReportFile = parsed.positionals[1];
-  if (subcommand === 'reexport' && parsed.positionals[1]) {
-    flags.chatIds.push(
-      ...String(parsed.positionals[1])
-        .split(/[,\s]+/)
-        .filter(Boolean),
-    );
+  if (subcommand === 'reexport' && parsed.positionals.length > 1) {
+    flags.chatIds.push(...splitChatIdArgs(parsed.positionals.slice(1)));
   }
   if (subcommand === 'missing' && !flags.vaultDir) throw usageError('Informe vaultDir para export missing.');
   if (subcommand === 'resume' && !flags.resumeReportFile) {
     throw usageError('Informe reportFile para export resume.');
   }
-  if (subcommand === 'reexport' && flags.chatIds.length === 0) {
-    throw usageError('Informe ao menos um --chat-id para export reexport.');
+  if (subcommand === 'reexport') {
+    let selectionFromFile = null;
+    if (flags.selectionFile) {
+      selectionFromFile = readSelectionFile(flags.selectionFile);
+      flags.selectionSourceFile = selectionFromFile.filePath;
+      flags.selectionManifestKind = selectionFromFile.manifest?.kind || null;
+      flags.expectedCount ??= selectionFromFile.manifest?.expectedCount;
+    }
+    const cliSelection = normalizeReexportSelection({
+      chatIds: flags.chatIds,
+      items: selectionFromFile?.items || [],
+    });
+    if (cliSelection.invalid.length > 0) {
+      throw usageError(`chatId inválido para export reexport: ${cliSelection.invalid[0]}`);
+    }
+    if (cliSelection.uniqueCount === 0) {
+      throw usageError('Informe --selection-file ou ao menos um --chat-id para export reexport.');
+    }
+    validateExpectedCount(cliSelection, flags.expectedCount);
+    flags.chatIds = cliSelection.chatIds;
+    flags.selectionItems = cliSelection.items;
+    flags.reexportInputCount = cliSelection.inputCount;
+    flags.reexportUniqueCount = cliSelection.uniqueCount;
+    flags.reexportDuplicateCount = cliSelection.duplicateCount;
   }
 
   const ui = makeUi(flags, streams);
@@ -2562,6 +2877,15 @@ const runExport = async (parsed, streams = {}) => {
   try {
     if (ui.format !== 'json' && ui.format !== 'jsonl') {
       ui.stdout.write(`Conectando na bridge ${normalizeBridgeUrl(flags.bridgeUrl)}...\n`);
+      if (subcommand === 'reexport') {
+        ui.stdout.write(
+          `Selecao de reexport: ${flags.reexportUniqueCount} chatId(s) unico(s)` +
+            (flags.reexportDuplicateCount ? `; ${flags.reexportDuplicateCount} duplicado(s) ignorado(s)` : '') +
+            (flags.expectedCount ? `; esperado=${flags.expectedCount}` : '') +
+            '.\n',
+        );
+        if (flags.selectionSourceFile) ui.stdout.write(`selectionFile: ${flags.selectionSourceFile}\n`);
+      }
     }
     await ensureBridgeAvailable(flags, ui);
     await ensureReady(flags.bridgeUrl, flags, ui);
@@ -2626,7 +2950,20 @@ const runJob = async (parsed, streams = {}) => {
     }
     return { exitCode: trace.ok === false ? EXIT.JOB_FAILED : EXIT.OK, result: trace };
   }
-  const job = subcommand === 'cancel' ? await cancelJob(parsed.flags.bridgeUrl, jobId) : await fetchJobStatus(parsed.flags.bridgeUrl, jobId);
+  let job = subcommand === 'cancel' ? await cancelJob(parsed.flags.bridgeUrl, jobId) : await fetchJobStatus(parsed.flags.bridgeUrl, jobId);
+  if (subcommand === 'cancel' && parsed.flags.wait === true && !TERMINAL_STATUSES.has(job.status)) {
+    if (ui.format !== 'json' && ui.format !== 'jsonl') {
+      ui.stdout.write(`Cancelamento solicitado; aguardando o job ${jobId} parar com seguranca...\n`);
+    }
+    job = await waitForJobTerminalQuietly(parsed.flags.bridgeUrl, jobId, parsed.flags);
+    if (!TERMINAL_STATUSES.has(job.status) && ui.format !== 'json' && ui.format !== 'jsonl') {
+      ui.stdout.write(
+        `O job ainda nao chegou ao estado terminal; provavelmente a aba ainda esta dentro da conversa atual.\n`,
+      );
+      ui.stdout.write(`status: gemini-md-export job status ${jobId} --plain\n`);
+      ui.stdout.write(`cancelar: gemini-md-export job cancel ${jobId} --wait --plain\n`);
+    }
+  }
   if (ui.format === 'json') {
     ui.stdout.write(`${JSON.stringify(job, null, 2)}\n`);
   } else {

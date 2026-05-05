@@ -46,8 +46,20 @@ test('diagnostico local encontra extensao e native host no Dia', async () => {
             state: 1,
             path: extensionPath,
           },
+          playwrightdiaextensionid0000000000: {
+            location: 4,
+            state: 1,
+            path: resolve(home, 'playwright-extension'),
+          },
         },
       },
+    });
+    mkdirSync(resolve(home, 'playwright-extension'), { recursive: true });
+    writeJson(resolve(home, 'playwright-extension', 'manifest.json'), {
+      manifest_version: 3,
+      name: 'Playwright Extension',
+      version: '1.0.0',
+      description: 'Connects Playwright MCP to a running browser',
     });
 
     writeJson(
@@ -74,6 +86,8 @@ test('diagnostico local encontra extensao e native host no Dia', async () => {
     assert.equal(report.browser, 'dia');
     assert.equal(report.loadedExtension.extension.id, extensionId);
     assert.equal(report.loadedExtension.extension.locationKind, 'unpacked');
+    assert.equal(report.playwrightExtension.ok, true);
+    assert.equal(report.playwrightExtension.extension.name, 'Playwright Extension');
     assert.equal(report.nativeHost.status, 'ready');
     assert.equal(report.warnings.length, 0);
   } finally {

@@ -34,10 +34,25 @@ const captureStream = ({ isTTY = false, columns = 88 } = {}) => {
 
 const withServer = async (handler, fn) => {
   const requests = [];
-  const server = createServer((req, res) => {
+  const server = createServer(async (req, res) => {
     const url = new URL(req.url || '/', 'http://127.0.0.1');
-    requests.push({ method: req.method, pathname: url.pathname, searchParams: url.searchParams });
-    handler(req, res, url);
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    let jsonBody = null;
+    try {
+      jsonBody = body ? JSON.parse(body) : null;
+    } catch {
+      jsonBody = null;
+    }
+    const requestRecord = {
+      method: req.method,
+      pathname: url.pathname,
+      searchParams: url.searchParams,
+      body,
+      jsonBody,
+    };
+    requests.push(requestRecord);
+    handler(req, res, url, requestRecord);
   });
   await new Promise((resolveListen) => server.listen(0, '127.0.0.1', resolveListen));
   const port = server.address().port;
@@ -245,6 +260,8 @@ test('CLI expõe ajuda contextual para comandos e subcomandos', async () => {
   assert.equal((await main(['export', 'reexport', '--help'], { stdout: reexportStdout })).exitCode, 0);
   assert.match(reexportStdout.text(), /gemini-md-export export reexport/);
   assert.match(reexportStdout.text(), /--chat-id/);
+  assert.match(reexportStdout.text(), /--selection-file/);
+  assert.match(reexportStdout.text(), /--expected-count/);
 
   const tabsStdout = captureStream();
   assert.equal((await main(['tabs', '--help'], { stdout: tabsStdout })).exitCode, 0);
@@ -255,6 +272,8 @@ test('CLI expõe ajuda contextual para comandos e subcomandos', async () => {
   assert.equal((await main(['chats', '--help'], { stdout: chatsStdout })).exitCode, 0);
   assert.match(chatsStdout.text(), /gemini-md-export chats/);
   assert.match(chatsStdout.text(), /chats count/);
+  assert.match(chatsStdout.text(), /chats list/);
+  assert.match(chatsStdout.text(), /--save-selection/);
   assert.match(chatsStdout.text(), /Total confirmado/);
 });
 
@@ -418,6 +437,81 @@ test('CLI chats count carrega ate o fim sem despejar lista no chat', async () =>
     assert.equal(releaseRequest.searchParams.get('claimId'), 'count-claim');
     assert.equal(releaseRequest.searchParams.get('tabId'), '101');
   });
+});
+
+test('CLI chats list salva selection manifest com IDs da pagina', async () => {
+  const tempDir = mkdtempSync(resolve(tmpdir(), 'gme-selection-'));
+  const selectionFile = resolve(tempDir, 'selection.json');
+  try {
+    await withServer((req, res, url) => {
+      if (url.pathname === '/agent/ready') {
+        sendJson(res, 200, {
+          ready: true,
+          mode: 'hot',
+          connectedClientCount: 1,
+          selectableTabCount: 1,
+          commandReadyClientCount: 1,
+        });
+        return;
+      }
+      if (url.pathname === '/agent/recent-chats') {
+        sendJson(res, 200, {
+          ok: true,
+          countStatus: 'partial',
+          totalKnown: false,
+          minimumKnownCount: 13,
+          knownLoadedCount: 13,
+          pagination: {
+            offset: 0,
+            limit: 10,
+            returned: 10,
+            loadedCount: 13,
+          },
+          conversations: Array.from({ length: 10 }, (_, index) => ({
+            index: index + 1,
+            chatId: `${String(index + 1).padStart(12, 'a')}abcd`,
+            title: `Conversa ${index + 1}`,
+            url: `https://gemini.google.com/app/${String(index + 1).padStart(12, 'a')}abcd`,
+            source: 'sidebar',
+          })),
+        });
+        return;
+      }
+      sendJson(res, 404, { error: `not found: ${url.pathname}` });
+    }, async (bridgeUrl, requests) => {
+      const stdout = captureStream();
+      const run = await main(
+        [
+          'chats',
+          'list',
+          '--limit',
+          '10',
+          '--save-selection',
+          '--selection-file',
+          selectionFile,
+          '--bridge-url',
+          bridgeUrl,
+          '--plain',
+        ],
+        { stdout },
+      );
+
+      assert.equal(run.exitCode, 0);
+      assert.match(stdout.text(), /10 conversa\(s\) listada\(s\)/);
+      assert.match(stdout.text(), /selectionFile:/);
+      assert.equal(existsSync(selectionFile), true);
+      const manifest = JSON.parse(readFileSync(selectionFile, 'utf-8'));
+      assert.equal(manifest.kind, 'gemini-md-export-selection');
+      assert.equal(manifest.expectedCount, 10);
+      assert.equal(manifest.chatIds.length, 10);
+      const listRequest = requests.find((item) => item.pathname === '/agent/recent-chats');
+      assert.equal(listRequest.searchParams.get('limit'), '10');
+      assert.equal(listRequest.searchParams.get('offset'), '0');
+      assert.notEqual(listRequest.searchParams.get('countOnly'), 'true');
+    });
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test('CLI chats count --result-json reativa RESULT_JSON explicitamente', async () => {
@@ -1347,6 +1441,40 @@ test('CLI job status considera job em andamento como consulta bem-sucedida', asy
   });
 });
 
+test('CLI job cancel --wait aguarda estado terminal ou instrui status seguro', async () => {
+  let statusCalls = 0;
+  await withServer((req, res, url) => {
+    if (url.pathname === '/agent/export-job-cancel') {
+      sendJson(res, 200, {
+        ...runningJob,
+        status: 'cancel_requested',
+        progressMessage: 'Cancelamento solicitado. Vou parar antes da próxima conversa.',
+      });
+      return;
+    }
+    if (url.pathname === '/agent/export-job-status') {
+      statusCalls += 1;
+      sendJson(res, 200, statusCalls >= 2 ? { ...runningJob, status: 'cancelled', phase: 'cancelled' } : {
+        ...runningJob,
+        status: 'cancel_requested',
+      });
+      return;
+    }
+    sendJson(res, 404, { error: `not found: ${url.pathname}` });
+  }, async (bridgeUrl) => {
+    const stdout = captureStream();
+    const run = await main(
+      ['job', 'cancel', 'job-1', '--wait', '--wait-ms', '5000', '--poll-ms', '10', '--bridge-url', bridgeUrl, '--plain'],
+      { stdout },
+    );
+
+    assert.equal(run.exitCode, 0);
+    assert.match(stdout.text(), /Cancelamento solicitado; aguardando/);
+    assert.match(stdout.text(), /cancelled/);
+    assert.equal(statusCalls, 2);
+  });
+});
+
 test('CLI job list mostra jobs ativos em plain e json', async () => {
   const jobList = {
     ok: true,
@@ -1463,8 +1591,11 @@ test('CLI export reexport e notebook usam endpoints diretos da bridge', async ()
             'reexport',
             '--chat-id',
             'abc123abc123',
+            'def456def456',
             '--output-dir',
             '/vault/staging',
+            '--expected-count',
+            '2',
             '--hydration-timeout-ms',
             '900000',
             '--hydration-stall-ms',
@@ -1494,15 +1625,91 @@ test('CLI export reexport e notebook usam endpoints diretos da bridge', async ()
     );
 
     const reexportRequest = requests.find((item) => item.pathname === '/agent/reexport-chats');
-    assert.equal(reexportRequest.searchParams.get('chatId'), 'abc123abc123');
-    assert.equal(reexportRequest.searchParams.get('outputDir'), '/vault/staging');
-    assert.equal(reexportRequest.searchParams.get('hydrationMaxTotalMs'), '900000');
-    assert.equal(reexportRequest.searchParams.get('hydrationStallTimeoutMs'), '60000');
-    assert.equal(reexportRequest.searchParams.get('exportBrowserTimeoutMs'), '960000');
+    assert.equal(reexportRequest.method, 'POST');
+    assert.deepEqual(reexportRequest.jsonBody.chatIds, ['abc123abc123', 'def456def456']);
+    assert.equal(reexportRequest.jsonBody.expectedCount, 2);
+    assert.equal(reexportRequest.jsonBody.outputDir, '/vault/staging');
+    assert.equal(reexportRequest.jsonBody.hydrationMaxTotalMs, 900000);
+    assert.equal(reexportRequest.jsonBody.hydrationStallTimeoutMs, 60000);
+    assert.equal(reexportRequest.jsonBody.exportBrowserTimeoutMs, 960000);
 
     const notebookRequest = requests.find((item) => item.pathname === '/agent/export-notebook');
     assert.equal(notebookRequest.searchParams.get('startIndex'), '2');
   });
+});
+
+test('CLI export reexport falha antes da bridge quando expected-count nao bate', async () => {
+  const stdout = captureStream();
+  await assert.rejects(
+    () =>
+      main(
+        [
+          'export',
+          'reexport',
+          '--chat-id',
+          'abc123abc123',
+          'def456def456',
+          '--expected-count',
+          '10',
+          '--bridge-url',
+          'http://127.0.0.1:9',
+          '--plain',
+        ],
+        { stdout },
+      ),
+    (err) => {
+      assert.equal(err.code, 'usage');
+      assert.match(err.message, /A selecao tem 2 chatId\(s\) unico\(s\).*expected-count pediu 10/);
+      return true;
+    },
+  );
+  assert.equal(stdout.text(), '');
+});
+
+test('CLI export reexport usa selection-file sem duplicar chatIds do manifesto', async () => {
+  const tempDir = mkdtempSync(resolve(tmpdir(), 'gme-reexport-selection-'));
+  const selectionFile = resolve(tempDir, 'selection.json');
+  writeFileSync(
+    selectionFile,
+    JSON.stringify({
+      kind: 'gemini-md-export-selection',
+      expectedCount: 2,
+      chatIds: ['abc123abc123', 'def456def456'],
+      conversations: [
+        { index: 1, chatId: 'abc123abc123', title: 'Um' },
+        { index: 2, chatId: 'def456def456', title: 'Dois' },
+      ],
+    }),
+  );
+  try {
+    await withServer(mockSyncServer({ completedImmediately: true }), async (bridgeUrl, requests) => {
+      const stdout = captureStream();
+      const run = await main(
+        [
+          'export',
+          'reexport',
+          '--selection-file',
+          selectionFile,
+          '--bridge-url',
+          bridgeUrl,
+          '--plain',
+          '--poll-ms',
+          '10',
+        ],
+        { stdout },
+      );
+
+      assert.equal(run.exitCode, 0);
+      assert.match(stdout.text(), /Selecao de reexport: 2 chatId\(s\) unico\(s\); esperado=2/);
+      const request = requests.find((item) => item.pathname === '/agent/reexport-chats');
+      assert.deepEqual(request.jsonBody.chatIds, ['abc123abc123', 'def456def456']);
+      assert.equal(request.jsonBody.expectedCount, 2);
+      assert.equal(request.jsonBody.selectionFile, selectionFile);
+      assert.equal(request.jsonBody.items.length, 2);
+    });
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test('CLI export-dir get e cleanup stale-processes usam endpoints da bridge', async () => {

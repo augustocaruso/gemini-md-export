@@ -34,17 +34,22 @@ previous report should be resumed.
 
 When the user just listed a small page of chats and then says "baixe essas" or
 "exporte essas", do not use a fresh recent-history export. Reexport the exact
-IDs that were shown:
+IDs that were shown. Prefer the saved manifest from the inventory snapshot:
 
 ```bash
-node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" export reexport --chat-id "<chatId1>" --chat-id "<chatId2>" --plain --timeout-ms 1800000
+node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" export reexport --selection-file "$HOME/.gemini-md-export/selections/latest.json" --expected-count 10 --plain --timeout-ms 1800000
 ```
+
+If the list was produced before `chats list --save-selection`, copy every
+listed `chatId` explicitly with repeated `--chat-id` and still pass
+`--expected-count N`; the CLI must fail before touching the bridge if the count
+does not match.
 
 Give the surrounding shell/tool a longer timeout than the CLI. If the shell
 ended before a final `RESULT_JSON`, recover explicitly with
 `job list --active --plain`, then `job status <jobId> --plain` or
-`job cancel <jobId> --plain`. Do not start another export until the previous
-job is terminal or cancelled.
+`job cancel <jobId> --wait --plain`. Do not start another export until the
+previous job is terminal or cancelled.
 
 For a human-visible progress UI inside Gemini CLI, only promise this when the
 shell executor is interactive and exposes a real TTY/PTY:
@@ -72,8 +77,8 @@ If the CLI reports multiple Gemini tabs, stay in CLI mode:
 
 ```bash
 node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" tabs list --plain
-node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" tabs claim --index 1 --plain
-node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" sync "/path/to/vault" --claim-id "<claimId>" --plain
+node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" tabs claim --index 1 --session gemini-downloads --plain
+node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" sync "/path/to/vault" --session gemini-downloads --plain
 ```
 
 Do not inject a long-running CLI command with custom-command `!{...}` because
@@ -151,6 +156,11 @@ suggest `kill <pid>`; report the timeout plainly and wait for the user's next
 instruction.
 Do not ask whether to run diagnostics immediately after that timeout. The next
 step must come from the user explicitly.
+
+For Dia, add `--browser dia` when the CLI does not auto-detect the profile.
+Use `gemini-md-export doctor --browser dia --plain` only when the user asks for
+diagnostics; it reports our extension, the Playwright Extension when present,
+native host, bridge, and connected Gemini tabs.
 
 MCP now enforces this: `gemini_chats` count/download returns a short
 `use_cli_only` refusal, and `gemini_ready`/`gemini_tabs`/`gemini_chats` require

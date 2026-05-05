@@ -42,7 +42,18 @@ as fallback unless the user's next message explicitly asks for diagnostics.
 For "liste meus chats", show a small page. Prefer 25 items by default and never
 show more than 50 unless the user explicitly asks for a larger page.
 
-Use `gemini_chats` only for this deliberate small read:
+Prefer the CLI snapshot flow when shell access exists, especially if the user
+may follow with "baixe essas":
+
+```bash
+node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" chats list --limit 25 --save-selection --plain
+```
+
+This is the Playwright-style loop: list/snapshot first, act later by stable
+chat refs from the saved `selectionFile`.
+
+Use `gemini_chats` only for a deliberate small read when shell access is not
+available:
 
 ```json
 {
@@ -75,11 +86,15 @@ you have just listed chats, treat "essas" as the exact `chatId`s from that list.
 Do not switch to a positional recent-history export; the sidebar may have
 changed and the wrong chats can be downloaded.
 
-Use one CLI command with explicit IDs:
+Use the saved selection manifest from `chats list --save-selection`:
 
 ```bash
-node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" export reexport --chat-id "<chatId1>" --chat-id "<chatId2>" --plain --timeout-ms 1800000
+node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" export reexport --selection-file "$HOME/.gemini-md-export/selections/latest.json" --expected-count 10 --plain --timeout-ms 1800000
 ```
+
+If no selection file exists because the list came from an older tool result,
+use `export reexport --chat-id ...` only with every listed `chatId` copied
+explicitly and add `--expected-count N`.
 
 Set the shell/tool timeout higher than the CLI timeout so the CLI has time to
 cancel the job and release the tab itself. If an external shell timeout or
@@ -91,7 +106,12 @@ node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" job li
 ```
 
 Then use the printed `job status ...` or `job cancel ...` command for the active
-job before retrying.
+job before retrying. Prefer `job cancel <jobId> --wait --plain` when you need
+to clear a stuck job; do not run `kill`, reload, cleanup, or a new export as a
+shortcut.
+
+When the target browser is Dia, keep the same CLI flow and add `--browser dia`
+if the profile is not auto-detected.
 
 ## Search By Title
 

@@ -6256,8 +6256,13 @@ const summarizeExportJob = (job) => ({
   maxChats: job.maxChats ?? null,
   loadedCount: job.loadedCount ?? 0,
   inputCount: job.inputCount ?? (Array.isArray(job.items) ? job.items.length : null),
+  expectedCount: job.expectedCount ?? null,
+  uniqueCount: job.uniqueCount ?? (Array.isArray(job.items) ? job.items.length : null),
+  duplicateCount: job.duplicateCount ?? 0,
+  duplicateChatIds: Array.isArray(job.duplicateChatIds) ? job.duplicateChatIds.slice(0, 20) : [],
   requested: job.requested,
   completed: job.completed,
+  position: job.current?.index ?? null,
   successCount: job.successCount,
   failureCount: job.failureCount,
   skippedCount: job.skippedCount || 0,
@@ -6674,7 +6679,7 @@ const persistRecentChatsExportReport = (job, client, successes, failures) => {
   overwriteExportReport(job.reportFile, buildRecentChatsExportReport(job, client, successes, failures));
 };
 
-const normalizeDirectReexportItems = (args = {}) => {
+const normalizeDirectReexportSelection = (args = {}) => {
   const rawItems = [];
   if (Array.isArray(args.chatIds)) {
     for (const chatId of args.chatIds) rawItems.push({ chatId });
@@ -6693,6 +6698,7 @@ const normalizeDirectReexportItems = (args = {}) => {
 
   const seen = new Set();
   const normalized = [];
+  const duplicates = [];
   for (const raw of rawItems) {
     const item = typeof raw === 'string' ? { chatId: raw } : raw || {};
     const idLike = item.chatId || item.id || '';
@@ -6705,7 +6711,10 @@ const normalizeDirectReexportItems = (args = {}) => {
     }
 
     const key = chatId.toLowerCase();
-    if (seen.has(key)) continue;
+    if (seen.has(key)) {
+      duplicates.push(key);
+      continue;
+    }
     seen.add(key);
 
     const title = String(item.title || item.label || chatId).slice(0, 240);
@@ -6719,7 +6728,8 @@ const normalizeDirectReexportItems = (args = {}) => {
       request: {
         title,
         sourcePath: item.sourcePath || item.path || null,
-        originalIndex: normalized.length + 1,
+        originalIndex: item.listedIndex || item.index || normalized.length + 1,
+        selectionFile: args.selectionFile || null,
       },
     });
   }
@@ -6728,8 +6738,44 @@ const normalizeDirectReexportItems = (args = {}) => {
     throw new Error('Nenhum chatId único válido para reexportar.');
   }
 
-  return normalized;
+  const expectedCount = args.expectedCount === undefined || args.expectedCount === null || args.expectedCount === ''
+    ? null
+    : Number(args.expectedCount);
+  if (expectedCount !== null) {
+    if (!Number.isInteger(expectedCount) || expectedCount <= 0) {
+      const err = new Error('expectedCount precisa ser um inteiro positivo.');
+      err.code = 'reexport_invalid_expected_count';
+      throw err;
+    }
+    if (normalized.length !== expectedCount) {
+      const err = new Error(
+        `A seleção recebida tem ${normalized.length} chatId(s) único(s), mas expectedCount=${expectedCount}.`,
+      );
+      err.code = 'reexport_selection_mismatch';
+      err.data = {
+        expectedCount,
+        inputCount: rawItems.length,
+        uniqueCount: normalized.length,
+        duplicateCount: duplicates.length,
+        duplicateChatIds: duplicates.slice(0, 20),
+      };
+      throw err;
+    }
+  }
+
+  return {
+    items: normalized,
+    inputCount: rawItems.length,
+    uniqueCount: normalized.length,
+    duplicateCount: duplicates.length,
+    duplicateChatIds: duplicates,
+    expectedCount,
+    selectionFile: args.selectionFile || null,
+  };
 };
+
+const normalizeDirectReexportItems = (args = {}) =>
+  normalizeDirectReexportSelection(args).items;
 
 const buildDirectChatsExportReport = (job, client, successes, failures) => ({
   job: {
@@ -6747,6 +6793,11 @@ const buildDirectChatsExportReport = (job, client, successes, failures) => ({
   client: summarizeClient(client),
   outputDir: job.outputDir,
   inputCount: job.inputCount,
+  expectedCount: job.expectedCount ?? null,
+  uniqueCount: job.uniqueCount ?? job.requested,
+  duplicateCount: job.duplicateCount || 0,
+  duplicateChatIds: Array.isArray(job.duplicateChatIds) ? job.duplicateChatIds : [],
+  selectionFile: job.selectionFile || null,
   requested: job.requested,
   completed: job.completed,
   successCount: successes.length,
@@ -6787,7 +6838,11 @@ const persistDirectChatsExportReport = (job, client, successes, failures) => {
 const broadcastRecentChatsJobProgress = (job, client, patch = {}) => {
   if (!client) return;
   const total = patch.total ?? Math.max(job.requested || 0, job.completed || 0, 1);
-  const current = patch.current ?? job.completed ?? 0;
+  const position = patch.position ?? job.current?.index ?? null;
+  const current =
+    patch.current ??
+    (job.phase === 'exporting' && position ? position : job.completed ?? 0);
+  const completed = patch.completed ?? job.completed ?? 0;
   const errorCount = patch.errorCount ?? job.failureCount ?? 0;
   const status = patch.status ?? job.status ?? 'running';
   const phase = patch.phase ?? job.phase ?? null;
@@ -6803,18 +6858,25 @@ const broadcastRecentChatsJobProgress = (job, client, patch = {}) => {
     phase,
     total,
     current,
+    position,
+    completed,
     errorCount,
     label,
     skippedCount: job.skippedCount || 0,
     title: job.current?.title || null,
     chatId: job.current?.chatId || null,
+    currentChatId: job.current?.chatId || null,
   });
 };
 
 const broadcastDirectChatsJobProgress = (job, client, patch = {}) => {
   if (!client) return;
   const total = patch.total ?? Math.max(job.requested || 0, job.completed || 0, 1);
-  const current = patch.current ?? job.completed ?? 0;
+  const position = patch.position ?? job.current?.index ?? null;
+  const current =
+    patch.current ??
+    (job.phase === 'exporting' && position ? position : job.completed ?? 0);
+  const completed = patch.completed ?? job.completed ?? 0;
   const errorCount = patch.errorCount ?? job.failureCount ?? 0;
   const status = patch.status ?? job.status ?? 'running';
   const phase = patch.phase ?? job.phase ?? null;
@@ -6842,10 +6904,13 @@ const broadcastDirectChatsJobProgress = (job, client, patch = {}) => {
     phase,
     total,
     current,
+    position,
+    completed,
     errorCount,
     label,
     title: job.current?.title || null,
     chatId: job.current?.chatId || null,
+    currentChatId: job.current?.chatId || null,
   });
 };
 
@@ -7528,9 +7593,18 @@ const runDirectChatsExportJob = async (job, client, args = {}) => {
         });
       } finally {
         job.completed = i + 1;
+        const hasNext = !job.cancelRequested && i < job.items.length - 1;
+        const completionLabel = job.cancelRequested
+          ? exportJobProgressMessage(job)
+          : `Reexportação: ${job.completed}/${job.requested} conversa${job.completed === 1 ? '' : 's'} concluída${job.completed === 1 ? '' : 's'}.`;
+        if (hasNext) job.current = null;
         touchExportJob(job);
         persistDirectChatsExportReport(job, client, successes, failures);
-        broadcastDirectChatsJobProgress(job, client);
+        broadcastDirectChatsJobProgress(job, client, {
+          current: job.completed,
+          position: job.completed,
+          label: completionLabel,
+        });
       }
 
       if (!job.cancelRequested && job.delayMs > 0 && i < job.items.length - 1) {
@@ -7606,7 +7680,8 @@ const runDirectChatsExportJob = async (job, client, args = {}) => {
 const startDirectChatsExportJob = (client, args = {}) => {
   assertNoRunningBrowserExportJob(client);
 
-  const items = normalizeDirectReexportItems(args);
+  const selection = normalizeDirectReexportSelection(args);
+  const items = selection.items;
   const outputDir = resolveOutputDir(args.outputDir);
   const delayMs = Math.max(
     0,
@@ -7627,7 +7702,12 @@ const startDirectChatsExportJob = (client, args = {}) => {
     updatedAt: new Date().toISOString(),
     finishedAt: null,
     items,
-    inputCount: items.length,
+    inputCount: selection.inputCount,
+    expectedCount: selection.expectedCount,
+    uniqueCount: selection.uniqueCount,
+    duplicateCount: selection.duplicateCount,
+    duplicateChatIds: selection.duplicateChatIds.slice(0, 50),
+    selectionFile: selection.selectionFile,
     requested: items.length,
     completed: 0,
     successCount: 0,
@@ -8833,6 +8913,16 @@ const legacyRawTools = [
           description:
             'Itens com chatId/url e metadados opcionais para rastrear a nota original no relatório.',
         },
+        selectionFile: {
+          type: 'string',
+          description: 'Manifesto gerado por chats list --save-selection. Mantido no relatório.',
+        },
+        expectedCount: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 500,
+          description: 'Quantidade esperada de chatIds únicos. Falha antes de iniciar se não bater.',
+        },
         delayMs: {
           type: 'integer',
           minimum: 0,
@@ -9660,8 +9750,9 @@ const buildCliExportCommand = (action, args = {}) => {
   } else if (action === 'reexport') {
     const chatIds = chatIdsFromExportArgs(args);
     commandArgs.push('export', 'reexport');
-    for (const chatId of chatIds) commandArgs.push('--chat-id', chatId);
-    if (chatIds.length === 0) missingArguments.push('chatId');
+    if (args.selectionFile) commandArgs.push('--selection-file', args.selectionFile);
+    else for (const chatId of chatIds) commandArgs.push('--chat-id', chatId);
+    if (!args.selectionFile && chatIds.length === 0) missingArguments.push('chatId ou selectionFile');
   } else if (action === 'notebook') {
     commandArgs.push('export', 'notebook');
   } else if (action === 'resume') {
@@ -9684,12 +9775,14 @@ const buildCliExportCommand = (action, args = {}) => {
   addCliFlag(commandArgs, '--load-more-browser-timeout-ms', args.loadMoreBrowserTimeoutMs);
   addCliFlag(commandArgs, '--load-more-timeout-ms', args.loadMoreTimeoutMs);
   addCliFlag(commandArgs, '--start-index', args.startIndex);
+  addCliFlag(commandArgs, '--expected-count', args.expectedCount);
   addCliFlag(commandArgs, '--delay-ms', args.delayMs);
   if (args.refresh === true) commandArgs.push('--refresh');
   if (args.refresh === false) commandArgs.push('--no-refresh');
   addCliFlag(commandArgs, '--client-id', args.clientId);
   addCliFlag(commandArgs, '--tab-id', args.tabId);
   addCliFlag(commandArgs, '--claim-id', args.claimId);
+  addCliFlag(commandArgs, '--session', args.sessionId);
   addCliFlag(commandArgs, '--bridge-url', bridgeUrl);
   commandArgs.push('--plain');
 
@@ -10075,6 +10168,8 @@ const rawTools = [
         chatId: { type: 'string' },
         chatIds: { type: 'array', maxItems: 500, items: { type: 'string' } },
         items: { type: 'array', maxItems: 500, items: { type: 'object', additionalProperties: true } },
+        selectionFile: { type: 'string' },
+        expectedCount: { type: 'integer', minimum: 1, maximum: 500 },
         delayMs: { type: 'integer', minimum: 0, maximum: 30000 },
         advanced: { type: 'object', additionalProperties: true },
         detail: { type: 'string', enum: ['compact', 'full'] },
@@ -10926,6 +11021,8 @@ const bridgeServer = createServer(async (req, res) => {
           outputDir: body.outputDir || url.searchParams.get('outputDir') || undefined,
           chatIds,
           items,
+          expectedCount: body.expectedCount || url.searchParams.get('expectedCount') || undefined,
+          selectionFile: body.selectionFile || url.searchParams.get('selectionFile') || undefined,
           delayMs: body.delayMs || url.searchParams.get('delayMs') || undefined,
           ...exportBrowserArgsFromSearchParams(url.searchParams, body),
           autoReleaseClaim: parseOptionalBoolean(

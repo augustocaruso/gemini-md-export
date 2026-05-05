@@ -265,6 +265,98 @@ export const discoverPreferredLoadedExtension = ({
   return null;
 };
 
+export const discoverPlaywrightExtension = ({
+  browser = 'chrome',
+  profileDirectory = 'Default',
+  platform = osPlatform(),
+  home = homedir(),
+  env = process.env,
+} = {}) => {
+  const key = normalizeBrowserKey(browser);
+  const root = browserProfileRoot({ browser: key, platform, home, env });
+  const prefsPath = securePreferencesPath({
+    browser: key,
+    profileDirectory,
+    platform,
+    home,
+    env,
+  });
+  if (!existsSync(prefsPath)) {
+    return {
+      ok: false,
+      status: 'secure-preferences-missing',
+      browser: key,
+      profileDirectory,
+      securePreferencesPath: prefsPath,
+      extension: null,
+    };
+  }
+  const prefs = readJsonSafe(prefsPath);
+  if (!prefs.ok) {
+    return {
+      ok: false,
+      status: 'secure-preferences-invalid',
+      browser: key,
+      profileDirectory,
+      securePreferencesPath: prefsPath,
+      error: prefs.error,
+      extension: null,
+    };
+  }
+  const settings = prefs.value?.extensions?.settings || {};
+  const candidates = Object.entries(settings)
+    .map(([id, setting]) => {
+      const resolvedPath = resolveExtensionPathFromPrefs(root, setting.path);
+      const manifestPath = resolvedPath ? resolve(resolvedPath, 'manifest.json') : null;
+      const manifest = manifestPath && existsSync(manifestPath) ? readJsonSafe(manifestPath) : null;
+      const manifestValue = manifest?.ok ? manifest.value : null;
+      const haystack = [
+        id,
+        setting.path,
+        resolvedPath,
+        manifestValue?.name,
+        manifestValue?.short_name,
+        manifestValue?.description,
+      ].join(' ');
+      const score =
+        /playwright/i.test(haystack) ? 100 : 0;
+      return {
+        id,
+        score,
+        location: setting.location ?? null,
+        state: setting.state ?? null,
+        path: resolvedPath,
+        manifestPath,
+        version: manifestValue?.version ?? null,
+        name: manifestValue?.name || null,
+        description: manifestValue?.description || null,
+      };
+    })
+    .filter((candidate) => candidate.score > 0)
+    .sort((a, b) => b.score - a.score);
+  const selected = candidates[0] || null;
+  return {
+    ok: !!selected,
+    status: selected ? 'found' : 'not-found',
+    browser: key,
+    profileDirectory,
+    securePreferencesPath: prefsPath,
+    extension: selected
+      ? {
+          ...selected,
+          locationKind:
+            selected.location === 1
+              ? 'webstore'
+              : selected.location === 4
+                ? 'unpacked'
+                : selected.location === null
+                  ? null
+                  : 'other',
+        }
+      : null,
+  };
+};
+
 export const diagnoseNativeHost = ({
   browser = 'chrome',
   extensionId = '',
@@ -377,6 +469,13 @@ export const buildLocalDoctorReport = ({
     home,
     env,
   });
+  const playwrightExtension = discoverPlaywrightExtension({
+    browser: key,
+    profileDirectory,
+    platform,
+    home,
+    env,
+  });
   const sourceManifestPath = resolve(expectedBrowserExtensionDir(packageRoot), 'manifest.json');
   const sourceManifest = existsSync(sourceManifestPath) ? readJsonSafe(sourceManifestPath) : null;
   const sourceVersion = sourceManifest?.ok ? sourceManifest.value.version : version || null;
@@ -401,6 +500,7 @@ export const buildLocalDoctorReport = ({
     sourceVersion,
     sourceManifestPath,
     loadedExtension: loaded,
+    playwrightExtension,
     nativeHost,
     warnings,
     nextAction,

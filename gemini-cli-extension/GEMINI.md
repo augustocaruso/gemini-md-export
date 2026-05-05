@@ -19,8 +19,7 @@ Only these MCP tools are public:
 Old `gemini_*` names return `code: "tool_renamed"` with the replacement.
 
 Default output is compact. Browser tools are opt-in: pass `diagnostic: true`
-or explicit `intent` for deliberate diagnostics/control. Ask for
-`detail: "full"` only while debugging.
+or explicit `intent`; ask for `detail: "full"` only while debugging.
 
 ## Router
 
@@ -34,20 +33,24 @@ or explicit `intent` for deliberate diagnostics/control. Ask for
 - Small read-only chat page/current/open: `gemini_chats` with
   `intent: "small_page"` or `diagnostic: true`. Download/export remains CLI-only.
 - Recent export, full import, missing-chat import, sync, reexport, or notebook:
-  run the bundled CLI directly first. Do not preflight with repeated
-  `gemini_ready`/`gemini_tabs`; the CLI owns readiness, browser wake, tab flags,
-  progress, and final `RESULT_JSON`. If `gemini_export` is called, treat
-  `code: "use_cli"` as an instruction to run its returned command.
+  run the bundled CLI directly. Do not preflight with repeated
+  `gemini_ready`/`gemini_tabs`; the CLI owns readiness, tabs, progress, and
+  final `RESULT_JSON`. If `gemini_export` returns `code: "use_cli"`, run its
+  command.
 - Follow-up "baixe/exporte essas" after a chat list means the exact listed
-  `chatId`s. Run CLI `export reexport --chat-id ...` with shell timeout > CLI
-  timeout. If the shell died before final `RESULT_JSON`, run
+  `chatId`s. Use a Playwright-style loop: snapshot/list first, act by stable
+  refs later. Run
+  `gemini-md-export chats list --limit 10 --save-selection --plain`, then
+  `gemini-md-export export reexport --selection-file <file> --expected-count 10 --plain`
+  with shell timeout > CLI timeout. If an old list has no selection file,
+  repeated `--chat-id` is allowed only with every listed ID plus
+  `--expected-count N`. If the shell died before final `RESULT_JSON`, run
   `gemini-md-export job list --active --plain`, then status/cancel before retry.
 - Background progress/cancel: call `gemini_job`.
 - Export directory and extension cache: call `gemini_config`.
-- Diagnostics/process cleanup/support bundle/flight recorder: `gemini_support`.
-- Telemetry may be auto-enabled in private builds via
-  `telemetry.defaults.json`; status/preview/retry/opt-out: `/exporter:telemetry`
-  or `gemini-md-export telemetry`.
+- Diagnostics/process cleanup/support bundle: `gemini_support`.
+- Telemetry status/preview/retry/opt-out: `/exporter:telemetry` or
+  `gemini-md-export telemetry`.
 
 ## Skills
 
@@ -59,26 +62,25 @@ Use bundled Agent Skills for detailed workflows: `gemini-chat-inventory`,
 
 - `/sync`: sync the known vault with Gemini Web; an argument overrides the
   vault path from context.
-- `/exporter:diagnose-page`: diagnose artifact iframes without export/bypass.
-- `/exporter:capture-artifacts`: capture artifact HTML files plus an Obsidian
-  manifest; never paste captured HTML.
+- `/exporter:diagnose-page`: diagnose artifact iframes.
+- `/exporter:capture-artifacts`: capture artifact HTML files plus manifest.
 - `/exporter:repair-vault`: audit and repair contaminated raw exports/wiki
   cases.
 - `/exporter:telemetry`: telemetry status, preview, retry and opt-out.
 
 ## CLI/TUI Export UI
 
-The extension ships `bin/gemini-md-export.mjs`, a terminal UI wrapper over the
-same bridge. The CLI can start `bridge-only`, owns browser wake for long jobs,
-and exits idle bridges unless `--no-exit-when-idle` is set.
+The extension ships `bin/gemini-md-export.mjs`, a terminal wrapper over the
+same bridge. It can start `bridge-only`, wake the browser, and exit idle
+bridges unless `--no-exit-when-idle` is set.
 
-- For visible progress, use shell mode with a real TTY/PTY. Captured shell
-  output cannot animate; the CLI falls back to `--plain` with a warning:
+- Visible progress needs a real TTY/PTY. Captured shell output falls back to
+  `--plain` with a warning:
   `node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" sync <vaultDir> --tui`
 - For agents, prefer `--plain`; it emits progress lines and final
   `RESULT_JSON`. Use `gemini-md-export --help` for flags.
 - CLI subcommands include `browser status`, `diagnose page`, `tabs`,
-  `chats count`, `export ...`, `job ...`, `export-dir`, `cleanup`,
+  `chats count`, `chats list`, `export ...`, `job ...`, `export-dir`, `cleanup`,
   `repair-vault`, and `telemetry enable/status/preview/send/disable`.
 - Automation: `--json` for final JSON only, `--jsonl` for events. Avoid
   custom-command shell injection for long sync jobs.
@@ -88,48 +90,37 @@ and exits idle bridges unless `--no-exit-when-idle` is set.
 - Do not dump full history into chat. For "all history", "sync", or "missing
   chats", use the CLI. MCP `gemini_export` returns `code: "use_cli"` with the
   exact command instead of starting a hidden job.
-- Do not call `gemini_ready`/`gemini_tabs` repeatedly before long exports. If
-  multiple tabs block the CLI, use `gemini-md-export tabs list --plain`, then
-  `tabs claim --index <n> --plain`, and rerun with `--claim-id <claimId>`.
-- MCP `gemini_ready`, `gemini_tabs`, and `gemini_chats` intentionally refuse
-  normal user-facing count/export paths unless the call carries explicit
-  diagnostic/control intent. Treat that refusal as final; do not work around it
-  with another MCP tool.
+- Do not call `gemini_ready`/`gemini_tabs` repeatedly before long exports. For
+  multiple tabs, use `gemini-md-export tabs list --plain`, then
+  `tabs claim --index <n> --plain`, and rerun with the claim/session.
+- MCP browser tools intentionally refuse normal count/export paths unless the
+  call has explicit diagnostic/control intent. Treat that refusal as final.
 - If a CLI command reports multiple Gemini tabs, keep using CLI tab commands.
   Do not switch to `gemini_tabs`; the user explicitly wants to avoid MCP JSON
   cards.
-- Never report success when CLI `RESULT_JSON.status` is `completed_with_errors`,
-  `failed`, or `cancelled`, or when `fullHistoryRequested=true` and
-  `fullHistoryVerified=false`. Mention `failures`, `reportFile`, and resume.
+- Do not run `kill`, reload, cleanup, or a new export after interruption before
+  checking `gemini-md-export job list --active --plain` and using
+  `job status` or `job cancel --wait`.
+- Never report success when `RESULT_JSON.status` is `completed_with_errors`,
+  `failed`, or `cancelled`, or when full-history was not verified. Mention
+  `failures`, `reportFile`, and resume.
 - Never answer "N chats ao todo" unless `totalKnown=true` or
   `countIsTotal=true`; otherwise answer "pelo menos N" and say the sidebar end
   was not confirmed.
-- After a partial CLI count, do not retry with `gemini_chats`,
-  `gemini_ready`, or `gemini_tabs`. That creates noisy JSON tool cards and can
-  lock the same Gemini tab. Report the partial count instead.
-- After a failed CLI count/export caused by timeout, connection, readiness, or
-  `extension_version_mismatch`, stop and report the short CLI failure. Do not
-  activate diagnostics, call `gemini_ready`/`gemini_tabs`/`gemini_support`, or
-  kill processes unless the user explicitly asks for diagnostics after that
-  failure.
-- Never run `cleanup stale-processes` before a normal count/export attempt.
-  Cleanup is diagnostic-only and is not a recovery step for "quantos chats" or
-  "baixe conversas". Do not recommend `kill <pid>` as a next step after a CLI
-  timeout.
-- After a CLI timeout, do not ask "quer que eu rode diagnostico agora?". Stop
-  with the concise failure; diagnostics only happen if the user's next message
-  explicitly asks for them.
-- Do not ask for manual Chrome extension reload before trying
-  `gemini_ready { "action": "status", "diagnostic": true, "selfHeal": true, "allowReload": true }`,
-  unless the loaded extension is too old to support self-heal.
+- After partial counts or CLI failures, do not retry via MCP fallback tools.
+  Report the concise CLI result. Diagnostics only happen if the user asks next.
+- Never run `cleanup stale-processes` before normal count/export. Cleanup is
+  diagnostic-only; do not recommend `kill <pid>` after CLI timeouts.
+- Do not ask for manual extension reload before trying self-heal with
+  `gemini_ready { "action": "status", "diagnostic": true, "selfHeal": true, "allowReload": true }`.
 - If multiple Gemini tabs are connected, prefer CLI tab commands for count/export.
   For MCP diagnostics, use `gemini_tabs` with `intent: "tab_management"`.
-- Keep Markdown/assets inside the vault when `vaultDir` is known; avoid browser
-  Downloads as the intended destination.
-- Integrity beats speed: never save if the DOM belongs to another URL/chat ID.
-- If media fails, report the warning honestly. Do not claim images were
-  imported when `mediaFailureCount > 0` or a media warning produced no files.
-- Use Brazilian Portuguese, plain language, and concrete next actions for user-facing
-  errors.
+- Dia is a first-class browser target. Use `--browser dia` when auto-detection
+  picks another profile. `doctor --browser dia --plain` reports our extension,
+  Playwright Extension when installed, native host, bridge, and connected tabs.
+- Keep Markdown/assets inside the vault when `vaultDir` is known.
+- Integrity beats speed: never save if DOM belongs to another chat ID.
+- Report media warnings honestly.
+- Use Brazilian Portuguese and concrete next actions.
 
 For richer procedures, activate the matching bundled skill.
