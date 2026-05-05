@@ -67,7 +67,9 @@ test('bridge smoke destrutivo exercita claim e release com cliente sintetico', (
     true,
   );
   assert.equal(
-    destructive.value.commands.some((command) => command.type === 'release-tab-claim'),
+    destructive.value.commands.some((command) =>
+      ['release-tab-claim', 'release-tab-claim-by-tab-id'].includes(command.type),
+    ),
     true,
   );
 });
