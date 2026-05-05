@@ -269,7 +269,7 @@ test('botão do top-bar abre menu com toggle de ignorar aba', { timeout: 2000 },
 
   const exportItem = menu.querySelector('[data-role="gm-menu-export"]');
   const ignoreItem = menu.querySelector('[data-role="gm-menu-ignore-tab"]');
-  assert.ok(exportItem, 'menu deve ter item de exportar');
+  assert.ok(exportItem, 'menu deve ter item de baixar');
   assert.ok(ignoreItem, 'menu deve ter item de ignorar aba');
   assert.equal(ignoreItem.getAttribute('role'), 'menuitemcheckbox');
   assert.equal(ignoreItem.getAttribute('aria-checked'), 'false');
@@ -431,7 +431,7 @@ test('content script mantém caminhos frequentes leves', async () => {
     /const buildBridgeHeartbeatPayload = \(\) => \([\s\S]*?\n  \}\);\n\n  const buildBridgeSnapshotPayload/,
   )?.[0];
   const snapshotPayload = source.match(
-    /const buildBridgeSnapshotPayload = \(\) => \{[\s\S]*?\n  \};\n\n  \/\/ --- ação de exportar/,
+    /const buildBridgeSnapshotPayload = \(\) => \{[\s\S]*?\n  \};\n\n  \/\/ --- ação de baixar/,
   )?.[0];
 
   assert.ok(heartbeatPayload, 'buildBridgeHeartbeatPayload deve existir no shell');
@@ -508,8 +508,102 @@ test('content script mantém dock MCP durante navegação e sem prefixo de fase'
   assert.match(source, /loadMcpProgressSnapshot/);
   assert.match(source, /restoreMcpProgressSnapshot\(\)/);
   assert.match(source, /ageMs < MCP_PROGRESS_STALE_GRACE_MS/);
+  assert.match(source, /humanProgressLabelFor/);
+  assert.match(source, /UI_TECHNICAL_COPY_RE/);
+  assert.match(source, /Baixando conversa selecionada/);
+  assert.match(source, /\$\{current\} de \$\{total\}/);
   assert.doesNotMatch(source, /phasePrefix/);
   assert.doesNotMatch(source, /labelEl\.textContent = `\$\{.*phase.*:/);
+  assert.doesNotMatch(source, /MCP exportando conversas/);
+  assert.doesNotMatch(source, /MCP reexportando/);
+});
+
+test('content script renderiza progresso selecionado sem jargão tecnico', { timeout: 2000 }, async () => {
+  const { dom, runtimeErrors } = createGeminiSidebarDom(['f4b75e8dfa21cdc8']);
+  const { window } = dom;
+  const debug = await evaluateContentScript(window);
+
+  const first = debug.showProgressForDebug({
+    jobId: 'job-ux-progress',
+    kind: 'direct-chats-export',
+    workflow: 'direct-reexport',
+    status: 'running',
+    phase: 'exporting',
+    total: 10,
+    current: 1,
+    position: 1,
+    completed: 0,
+    currentChatId: 'f4b75e8dfa21cdc8',
+    label: 'MCP reexportando (1/10): f4b75e8dfa21cdc8',
+  });
+
+  assert.equal(first.title, 'Baixando conversas');
+  assert.equal(first.count, '1 de 10');
+  assert.equal(first.label, 'Baixando conversa selecionada (1 de 10): f4b75e8dfa21cdc8');
+  assert.doesNotMatch(first.label, /MCP|reexportando/);
+
+  const second = debug.showProgressForDebug({
+    jobId: 'job-ux-progress',
+    kind: 'direct-chats-export',
+    workflow: 'direct-reexport',
+    status: 'running',
+    phase: 'exporting',
+    total: 10,
+    current: 2,
+    position: 2,
+    completed: 1,
+    currentChatId: 'e0526fad9838e81f',
+    title: 'Usando OpenCode com ChatGPT Plus',
+    errorCount: 1,
+    label: 'MCP reexportando (2/10): Usando OpenCode com ChatGPT Plus',
+  });
+
+  assert.equal(second.count, '2 de 10 · 1 erro');
+  assert.equal(
+    second.label,
+    'Baixando conversa selecionada (2 de 10): Usando OpenCode com ChatGPT Plus',
+  );
+  assert.doesNotMatch(second.label, /MCP|reexportando/);
+
+  const stale = debug.showProgressForDebug({
+    jobId: 'job-ux-progress',
+    kind: 'direct-chats-export',
+    workflow: 'direct-reexport',
+    status: 'running',
+    phase: 'exporting',
+    total: 10,
+    current: 0,
+    position: 0,
+    completed: 0,
+    currentChatId: 'f4b75e8dfa21cdc8',
+    label: 'MCP reexportando (0/10): f4b75e8dfa21cdc8',
+  });
+
+  assert.equal(stale.count, '2 de 10 · 1 erro');
+  assert.equal(
+    stale.label,
+    'Baixando conversa selecionada (2 de 10): Usando OpenCode com ChatGPT Plus',
+  );
+
+  const third = debug.showProgressForDebug({
+    jobId: 'job-ux-progress',
+    kind: 'direct-chats-export',
+    workflow: 'direct-reexport',
+    status: 'running',
+    phase: 'exporting',
+    total: 10,
+    current: 3,
+    position: 3,
+    completed: 2,
+    currentChatId: '7aeb5c21b12a2137',
+    title: 'Configuração conjunta',
+  });
+
+  assert.equal(third.count, '3 de 10 · 1 erro');
+  assert.equal(third.label, 'Baixando conversa selecionada (3 de 10): Configuração conjunta');
+  assert.deepEqual(runtimeErrors, []);
+
+  window.close();
 });
 
 test('content script hidrata conversa gigante com orçamento adaptativo', async () => {
@@ -528,8 +622,9 @@ test('content script explica fallback para Downloads e warnings de mídia', asyn
   const source = await readFile(new URL('../src/userscript-shell.js', import.meta.url), 'utf8');
   assert.match(source, /Vou cair em Downloads/);
   assert.match(source, /mídias que não baixarem ficam avisadas no Markdown/);
-  assert.match(source, /Para salvar direto no vault, reabra o Gemini CLI\/MCP e clique em Alterar/);
-  assert.match(source, /Sem MCP, cai em Downloads; mídias que falharem ficam como aviso no Markdown/);
+  assert.match(source, /Para salvar direto no vault, reabra o Gemini CLI e clique em Alterar/);
+  assert.match(source, /Sem conexão local, cai em Downloads; mídias que falharem ficam como aviso no Markdown/);
+  assert.doesNotMatch(source, /MCP local fora do ar/);
 });
 
 test('exportPayload baixa blob sem preparar a imagem antes', { timeout: 5000 }, async () => {

@@ -43,7 +43,7 @@
   ];
   const BUTTON_ID = `${UI_ID_PREFIX}-btn`;
   const BUTTON_SLOT_ID = `${UI_ID_PREFIX}-btn-slot`;
-  const BUTTON_LABEL = 'Exportar Markdown';
+  const BUTTON_LABEL = 'Baixar Markdown';
   // Material Symbols "download" (filled), 24x24, no container. currentColor
   // para herdar a cor do top-bar do Gemini (tema claro/escuro automático).
   const BUTTON_ICON_SVG =
@@ -3125,7 +3125,7 @@
     });
 
     if (!response?.ok) {
-      throw new Error(response?.error || 'Falha ao salvar via bridge MCP.');
+      throw new Error(response?.error || 'Falha ao salvar pela conexão local.');
     }
 
     return response.files?.[0] || null;
@@ -3318,7 +3318,7 @@
     };
   };
 
-  // --- ação de exportar -------------------------------------------------
+  // --- ação de baixar ---------------------------------------------------
 
   const MEDIA_ASSET_SELECTOR = MEDIA_SELECTOR;
   const MEDIA_EXPORT_TOTAL_BUDGET_MS = 25000;
@@ -5480,7 +5480,7 @@
             ? `sem progresso por ${Math.round(hydrated.stats.stallTimeoutMs / 1000)}s`
             : hydrated.stats.finalReason || 'fim nao confirmado';
       throw new Error(
-        `Nao consegui carregar o inicio da conversa com seguranca antes de exportar (${reason}; scroller: ${hydrated.stats.matchedBy}; tentativas: ${hydrated.stats.attempts}; turnos vistos: ${hydrated.stats.turnDomCount || hydrated.stats.turnsAfterHydration || 0}). Recarregue a aba e tente novamente.`,
+        `Nao consegui carregar o inicio da conversa com seguranca antes de baixar (${reason}; scroller: ${hydrated.stats.matchedBy}; tentativas: ${hydrated.stats.attempts}; turnos vistos: ${hydrated.stats.turnDomCount || hydrated.stats.turnsAfterHydration || 0}). Recarregue a aba e tente novamente.`,
       );
     }
     const payload = await buildExportPayload(document, location.href, {
@@ -5502,7 +5502,7 @@
     const expectedChatId = stripGeminiConversationPrefix(options.expectedChatId || '');
     if (expectedChatId && payload.chatId !== expectedChatId) {
       throw new Error(
-        `Exportacao abortada: o browser abriu o chat ${payload.chatId}, mas o MCP pediu ${expectedChatId}. Nenhum arquivo foi salvo.`,
+        `Download abortado: o navegador abriu o chat ${payload.chatId}, mas a ferramenta local pediu ${expectedChatId}. Nenhum arquivo foi salvo.`,
       );
     }
 
@@ -5513,7 +5513,7 @@
       conversationDomSignature(document) === options.previousSignature
     ) {
       throw new Error(
-        'Exportacao abortada: a URL mudou, mas o conteudo da conversa ainda parece ser o chat anterior. Tente novamente depois que a pagina terminar de carregar.',
+        'Download abortado: a URL mudou, mas o conteúdo da conversa ainda parece ser o chat anterior. Tente novamente depois que a página terminar de carregar.',
       );
     }
 
@@ -5596,7 +5596,7 @@
         await saveExportViaBridge(payload);
         return;
       } catch (err) {
-        warn('Falha ao salvar via bridge MCP; usando fallback de downloads.', err);
+        warn('Falha ao salvar pela conexão local; usando fallback de downloads.', err);
         if (!state.bridgeSaveFallbackNotified) {
           state.bridgeSaveFallbackNotified = true;
           showToast(
@@ -5617,11 +5617,11 @@
         await saveExportViaBridge(payload, { outputDir: '' });
         return;
       } catch (err) {
-        warn('Falha ao salvar em Downloads via bridge MCP; usando download nativo do browser.', err);
+        warn('Falha ao salvar em Downloads pela conexão local; usando download nativo do browser.', err);
         if (!state.browserDownloadFallbackNotified) {
           state.browserDownloadFallbackNotified = true;
           showToast(
-            'MCP local fora do ar. Vou usar Downloads do navegador. Para salvar direto no vault, reabra o Gemini CLI/MCP e clique em Alterar.',
+            'A conexão local não respondeu. Vou usar Downloads do navegador. Para salvar direto no vault, reabra o Gemini CLI e clique em Alterar.',
             'error',
           );
         }
@@ -5641,7 +5641,7 @@
     const chatId = extractChatId(location.pathname);
     if (!chatId) {
       const message =
-        'Abra uma conversa específica antes de exportar (URL precisa conter /app/<id>).';
+        'Abra uma conversa específica antes de baixar (URL precisa conter /app/<id>).';
       reportFailure(message);
       alert(message);
       return;
@@ -5684,10 +5684,10 @@
         'success',
       );
     } catch (err) {
-      warn('Falha ao exportar conversa atual.', err);
+      warn('Falha ao baixar conversa atual.', err);
       await finishExportProgress();
       showToast(
-        'Não consegui exportar essa conversa. Abra o console (F12) para ver o motivo.',
+        'Não consegui baixar essa conversa. Abra o console (F12) para ver o motivo.',
         'error',
       );
     }
@@ -5964,7 +5964,7 @@
         </style>
         <div class="gm-dock-card">
           <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
-            <strong style="font-size:12px;font-weight:600;letter-spacing:0.01em;">Exportando conversas</strong>
+            <strong id="${PROGRESS_DOCK_ID}-title" style="font-size:12px;font-weight:600;letter-spacing:0.01em;">Baixando conversas</strong>
             <span id="${PROGRESS_DOCK_ID}-count" style="font-size:11px;color:var(--gm-dock-muted);white-space:nowrap;"></span>
           </div>
           <div id="${PROGRESS_DOCK_ID}-label" style="font-size:12px;color:var(--gm-dock-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
@@ -5991,10 +5991,90 @@
 
   const computeProgressMilestone = (progress) => {
     const total = Math.max(progress?.total || 1, 1);
-    const current = Math.max(0, Math.min(progress?.current || 0, total));
+    const raw = Number(progress?.position ?? progress?.current ?? progress?.completed ?? 0);
+    const current = Math.max(0, Math.min(Number.isFinite(raw) ? raw : 0, total));
     const base = (current / total) * 100;
     const next = (Math.min(current + 1, total) / total) * 100;
     return { base, next };
+  };
+
+  const UI_TECHNICAL_COPY_RE =
+    /\b(MCP|bridge|claim|job|payload|phase|reexport(?:ando|acao|ação)?)\b/i;
+
+  const shortChatId = (value) => {
+    const text = String(value || '').trim();
+    if (!text) return '';
+    return text.length > 16 ? text.slice(0, 16) : text;
+  };
+
+  const safeProgressItemLabel = (progress) => {
+    const label = String(progress?.title || progress?.label || '').trim();
+    if (label && !UI_TECHNICAL_COPY_RE.test(label)) return label;
+    return shortChatId(progress?.currentChatId || progress?.chatId) || 'conversa';
+  };
+
+  const progressDisplayCurrent = (progress) => {
+    const total = Math.max(progress?.total || 1, 1);
+    const status = progress?.status || '';
+    if (status === 'completed' || status === 'completed_with_errors') return total;
+    const raw = Number(progress?.position ?? progress?.current ?? 0);
+    return Math.max(0, Math.min(Number.isFinite(raw) ? raw : 0, total));
+  };
+
+  const progressTitleFor = (progress) => {
+    const flow = progress?.workflow || progress?.kind || '';
+    if (flow === 'vault-incremental-sync') return 'Sincronizando vault';
+    if (flow === 'vault-reconciliation' || flow === 'full-history-export') {
+      return 'Importando histórico';
+    }
+    if (flow === 'notebook-export') return 'Exportando caderno';
+    return 'Baixando conversas';
+  };
+
+  const humanProgressLabelFor = (progress) => {
+    const total = Math.max(progress?.total || 1, 1);
+    const current = progressDisplayCurrent(progress);
+    const count = current > 0 && total > 1 ? ` (${current} de ${total})` : '';
+    const item = safeProgressItemLabel(progress);
+    const flow = progress?.workflow || progress?.kind || '';
+    const status = progress?.status || '';
+    const phase = progress?.phase || '';
+
+    if (status === 'cancel_requested') return 'Cancelando com segurança...';
+    if (status === 'completed') return 'Concluído';
+    if (status === 'completed_with_errors') return 'Concluído com erros';
+    if (status === 'cancelled') return 'Cancelado';
+    if (status === 'failed') return 'Falhou';
+
+    if (phase === 'loading-history') return 'Lendo histórico do Gemini...';
+    if (phase === 'scanning-vault') return 'Comparando com o vault...';
+    if (phase === 'writing-report') return 'Salvando relatório...';
+
+    if (phase === 'exporting') {
+      if (flow === 'direct-chats-export' || flow === 'direct-reexport') {
+        return `Baixando conversa selecionada${count}: ${item}`;
+      }
+      if (flow === 'notebook-export') {
+        return `Exportando conversa do caderno${count}: ${item}`;
+      }
+      if (flow === 'vault-incremental-sync') {
+        return `Baixando conversa nova${count}: ${item}`;
+      }
+      return `Baixando conversa${count}: ${item}`;
+    }
+
+    const fallback = String(progress?.label || '').trim();
+    if (fallback && !UI_TECHNICAL_COPY_RE.test(fallback)) return fallback;
+    return 'Preparando...';
+  };
+
+  const humanCountFor = (progress) => {
+    const total = Math.max(progress?.total || 1, 1);
+    const current = progressDisplayCurrent(progress);
+    const errors = Math.max(0, Number(progress?.errorCount || 0));
+    const parts = total > 1 ? [`${current} de ${total}`] : [];
+    if (errors > 0) parts.push(`${errors} erro${errors === 1 ? '' : 's'}`);
+    return parts.join(' · ');
   };
 
   const stopProgressCreep = () => {
@@ -6057,19 +6137,19 @@
 
     Object.entries(vars).forEach(([key, value]) => dock.style.setProperty(key, value));
 
+    const titleEl = document.getElementById(`${PROGRESS_DOCK_ID}-title`);
     const countEl = document.getElementById(`${PROGRESS_DOCK_ID}-count`);
     const labelEl = document.getElementById(`${PROGRESS_DOCK_ID}-label`);
     const barEl = document.getElementById(`${PROGRESS_DOCK_ID}-bar`);
-    const errorSuffix =
-      state.progress.errorCount > 0
-        ? ` · ${state.progress.errorCount} erro${state.progress.errorCount > 1 ? 's' : ''}`
-        : '';
 
+    if (titleEl) {
+      titleEl.textContent = progressTitleFor(state.progress);
+    }
     if (countEl) {
-      countEl.textContent = `${state.progress.current}/${state.progress.total}${errorSuffix}`;
+      countEl.textContent = humanCountFor(state.progress);
     }
     if (labelEl) {
-      labelEl.textContent = state.progress.label || 'Preparando exportação...';
+      labelEl.textContent = humanProgressLabelFor(state.progress);
     }
     if (barEl) {
       const { base, next } = computeProgressMilestone(state.progress);
@@ -6081,7 +6161,7 @@
       state.progress.displayPercent = display;
       barEl.style.width = `${display}%`;
       // Quando bate o total, marca como pronto pra parar o shimmer.
-      if (state.progress.current >= state.progress.total) {
+      if (progressDisplayCurrent(state.progress) >= state.progress.total) {
         dock.classList.add('gm-dock-done');
       } else {
         dock.classList.remove('gm-dock-done');
@@ -6096,10 +6176,17 @@
     dock.style.display = 'block';
   };
 
-  const beginExportProgress = async ({ total, label, phase = 'preparando' }) => {
+  const beginExportProgress = async ({
+    total,
+    label,
+    phase = 'preparando',
+    kind = null,
+    workflow = null,
+    status = 'running',
+  }) => {
     state.activeTabOperation = state.activeTabOperation || {
       type: 'gui-export',
-      label: 'exportação pela interface',
+      label: 'download pela interface',
       commandId: null,
       startedAt: Date.now(),
     };
@@ -6110,6 +6197,9 @@
       total,
       current: 0,
       label,
+      kind,
+      workflow,
+      status,
       phase,
       errorCount: 0,
       startedAt: Date.now(),
@@ -6156,7 +6246,7 @@
   // --- MCP-driven progress -----------------------------------------------
   // Quando o MCP está exportando conversas pelo bridge, ele envia o
   // jobProgress no payload do /bridge/heartbeat. A aba do Gemini reaproveita
-  // o mesmo dock visual usado pelo botão "Exportar selecionadas". Se o
+  // o mesmo dock visual usado pelo botão "Baixar selecionadas". Se o
   // usuário disparou export pela GUI, o GUI tem prioridade e o MCP é ignorado
   // até a GUI terminar.
   const TERMINAL_MCP_STATUSES = new Set([
@@ -6172,15 +6262,75 @@
       source: 'mcp',
       jobId: jobProgress.jobId || null,
       status: jobProgress.status || null,
+      kind: jobProgress.kind || null,
+      workflow: jobProgress.workflow || jobProgress.kind || null,
       total: Math.max(jobProgress.total || 1, 1),
       current: Math.max(0, Number(jobProgress.position ?? jobProgress.current ?? 0)),
       position: jobProgress.position ?? null,
       completed: Math.max(0, Number(jobProgress.completed ?? 0)),
+      title: jobProgress.title || null,
+      chatId: jobProgress.chatId || null,
       currentChatId: jobProgress.currentChatId || jobProgress.chatId || null,
-      label: jobProgress.label || 'Exportando conversas...',
+      label: jobProgress.label || 'Baixando conversas...',
       phase: jobProgress.phase || null,
       errorCount: Math.max(0, Number(jobProgress.errorCount || 0)),
       updatedAt: Date.now(),
+    };
+  };
+
+  const mcpProgressOrdinal = (progress) => {
+    const total = Math.max(progress?.total || 1, 1);
+    const values = [progress?.position, progress?.current, progress?.completed]
+      .map((value) => Number(value))
+      .filter((value) => Number.isFinite(value));
+    return Math.max(0, Math.min(values.length ? Math.max(...values) : 0, total));
+  };
+
+  const mergeMcpProgressForCurrentJob = (jobProgress) => {
+    const existing = state.progress || {};
+    const incomingTotal = Math.max(jobProgress.total || 1, 1);
+    const existingTotal = Math.max(existing.total || 1, 1);
+    const total = Math.max(incomingTotal, existingTotal);
+    const incomingOrdinal = mcpProgressOrdinal({ ...jobProgress, total });
+    const existingOrdinal = mcpProgressOrdinal({ ...existing, total });
+    const terminal =
+      jobProgress.status && TERMINAL_MCP_STATUSES.has(jobProgress.status);
+    const regressing = !terminal && incomingOrdinal < existingOrdinal;
+    const keepProgressField = (field, fallback = null) =>
+      regressing
+        ? existing[field] ?? jobProgress[field] ?? fallback
+        : jobProgress[field] ?? existing[field] ?? fallback;
+    const keepItemField = (field) =>
+      regressing
+        ? existing[field] || jobProgress[field] || null
+        : jobProgress[field] || existing[field] || null;
+
+    return {
+      total,
+      current: keepProgressField('current', 0),
+      position: keepProgressField('position', null),
+      completed: keepProgressField('completed', 0),
+      label: regressing
+        ? existing.label || jobProgress.label || 'Preparando...'
+        : jobProgress.label || existing.label || 'Preparando...',
+      kind: jobProgress.kind || existing.kind || null,
+      workflow: jobProgress.workflow || existing.workflow || jobProgress.kind || null,
+      status: jobProgress.status || existing.status || 'running',
+      phase: jobProgress.phase || existing.phase || 'preparing',
+      title: keepItemField('title'),
+      chatId: keepItemField('chatId'),
+      currentChatId:
+        regressing
+          ? existing.currentChatId ||
+            existing.chatId ||
+            jobProgress.currentChatId ||
+            jobProgress.chatId ||
+            null
+          : jobProgress.currentChatId || jobProgress.chatId || existing.currentChatId || null,
+      errorCount: Math.max(
+        Number(jobProgress.errorCount ?? 0) || 0,
+        Number(existing.errorCount ?? 0) || 0,
+      ),
     };
   };
 
@@ -6235,8 +6385,16 @@
     state.progress = {
       total: Math.max(jobProgress.total || 1, 1),
       current: jobProgress.current || 0,
-      label: jobProgress.label || 'MCP exportando conversas...',
-      phase: jobProgress.phase || 'MCP',
+      label: jobProgress.label || 'Preparando...',
+      kind: jobProgress.kind || null,
+      workflow: jobProgress.workflow || jobProgress.kind || null,
+      status: jobProgress.status || 'running',
+      phase: jobProgress.phase || 'preparing',
+      position: jobProgress.position ?? null,
+      completed: jobProgress.completed ?? 0,
+      title: jobProgress.title || null,
+      chatId: jobProgress.chatId || null,
+      currentChatId: jobProgress.currentChatId || jobProgress.chatId || null,
       errorCount: jobProgress.errorCount || 0,
       startedAt: Date.now(),
       displayPercent: 0,
@@ -6283,7 +6441,6 @@
 
     if (jobProgress.source && jobProgress.source !== 'mcp') return;
     state.mcpProgressLastSeenAt = Date.now();
-    saveMcpProgressSnapshot(jobProgress);
 
     if (!state.mcpProgressActive) {
       beginMcpProgress(jobProgress);
@@ -6294,19 +6451,31 @@
         state.progress = {
           total: Math.max(jobProgress.total || 1, 1),
           current: jobProgress.current || 0,
-          label: jobProgress.label || 'MCP exportando conversas...',
-          phase: jobProgress.phase || 'MCP',
+          label: jobProgress.label || 'Preparando...',
+          kind: jobProgress.kind || null,
+          workflow: jobProgress.workflow || jobProgress.kind || null,
+          status: jobProgress.status || 'running',
+          phase: jobProgress.phase || 'preparing',
+          position: jobProgress.position ?? null,
+          completed: jobProgress.completed ?? 0,
+          title: jobProgress.title || null,
+          chatId: jobProgress.chatId || null,
+          currentChatId: jobProgress.currentChatId || jobProgress.chatId || null,
           errorCount: jobProgress.errorCount || 0,
           startedAt: Date.now(),
           displayPercent: 0,
         };
+        saveMcpProgressSnapshot({
+          source: 'mcp',
+          jobId: state.mcpProgressJobId,
+          ...state.progress,
+        });
       } else {
-        updateExportProgress({
-          total: Math.max(jobProgress.total || state.progress?.total || 1, 1),
-          current: jobProgress.current ?? state.progress?.current ?? 0,
-          label: jobProgress.label || state.progress?.label || 'MCP exportando...',
-          phase: jobProgress.phase || state.progress?.phase || 'MCP',
-          errorCount: jobProgress.errorCount ?? state.progress?.errorCount ?? 0,
+        updateExportProgress(mergeMcpProgressForCurrentJob(jobProgress));
+        saveMcpProgressSnapshot({
+          source: 'mcp',
+          jobId: state.mcpProgressJobId,
+          ...state.progress,
         });
       }
       updateProgressDock();
@@ -6328,7 +6497,7 @@
     if (!snapshot) return;
     beginMcpProgress({
       ...snapshot,
-      label: snapshot.label || 'Retomando indicador de exportação...',
+      label: snapshot.label || 'Retomando indicador de download...',
     });
   };
 
@@ -6346,7 +6515,7 @@
       ? items.map(serializeConversationItem).filter(Boolean)
       : [];
     if (normalizedItems.length === 0) {
-      showToast('Nenhuma conversa selecionada pôde ser exportada.', 'error');
+      showToast('Nenhuma conversa selecionada pôde ser baixada.', 'error');
       return;
     }
 
@@ -6363,7 +6532,9 @@
 
     await beginExportProgress({
       total: activeSession.items.length,
-      label: resume ? 'Retomando exportação...' : 'Preparando exportação...',
+      label: resume ? 'Retomando download...' : 'Preparando download...',
+      kind: originalWasNotebook ? 'notebook-export' : 'direct-chats-export',
+      workflow: originalWasNotebook ? 'notebook-export' : 'direct-chats-export',
       phase: resume ? 'retomada' : 'preparo',
     });
 
@@ -6372,7 +6543,11 @@
       const item = activeSession.items[i];
       updateExportProgress({
         current: i,
-        label: `Exportando ${item.title}...`,
+        position: i + 1,
+        completed: i,
+        title: item.title || item.chatId || item.id || null,
+        currentChatId: item.chatId || item.id || null,
+        label: `Baixando ${item.title}...`,
         phase: 'navegação/hidratação',
         errorCount: failures.size,
       });
@@ -6384,6 +6559,10 @@
         });
         updateExportProgress({
           current: i,
+          position: i + 1,
+          completed: i,
+          title: payload.title || item.title || payload.chatId || null,
+          currentChatId: payload.chatId || item.chatId || item.id || null,
           label: `Salvando ${payload.filename}...`,
           phase: 'escrita',
           errorCount: failures.size,
@@ -6394,6 +6573,10 @@
         activeSession = saveBatchExportSession(activeSession) || activeSession;
         updateExportProgress({
           current: i + 1,
+          position: i + 1,
+          completed: i + 1,
+          title: item.title || item.chatId || item.id || null,
+          currentChatId: item.chatId || item.id || null,
           label: item.title,
           phase: 'concluído',
           errorCount: failures.size,
@@ -6406,11 +6589,15 @@
         activeSession = saveBatchExportSession(activeSession) || activeSession;
         updateExportProgress({
           current: i + 1,
+          position: i + 1,
+          completed: i + 1,
+          title: item.title || item.chatId || item.id || null,
+          currentChatId: item.chatId || item.id || null,
           label: `Falha em ${item.title}`,
           phase: 'falha',
           errorCount: failures.size,
         });
-        warn(`Falha ao exportar ${item.chatId || item.id || i}.`, err);
+        warn(`Falha ao baixar ${item.chatId || item.id || i}.`, err);
       }
     }
 
@@ -6453,7 +6640,7 @@
     if (failures.size === 0) {
       const n = activeSession.items.length;
       showToast(
-        `Pronto! ${n} ${n === 1 ? 'conversa exportada' : 'conversas exportadas'} com sucesso.`,
+        `Pronto! ${n} ${n === 1 ? 'conversa baixada' : 'conversas baixadas'} com sucesso.`,
         'success',
       );
     } else {
@@ -6493,14 +6680,14 @@
     if (dirEl) {
       if (state.bridgeOutputDir) {
         dirEl.textContent = state.bridgeOutputDir;
-        dirEl.title = `Pasta escolhida via MCP: ${state.bridgeOutputDir}`;
+        dirEl.title = `Pasta escolhida pela conexão local: ${state.bridgeOutputDir}`;
       } else if (state.directoryHandle) {
         dirEl.textContent = state.directoryHandle.name;
         dirEl.title = `Pasta escolhida pelo browser: ${state.directoryHandle.name}`;
       } else if (isExtensionContext) {
         dirEl.textContent = 'Downloads (fallback padrão)';
         dirEl.title =
-          'Clique em Alterar para escolher uma pasta via MCP local. Sem MCP, cai em Downloads; mídias que falharem ficam como aviso no Markdown.';
+          'Clique em Alterar para escolher uma pasta pela ferramenta local. Sem conexão local, cai em Downloads; mídias que falharem ficam como aviso no Markdown.';
       } else if (supportsDirectoryPicker()) {
         dirEl.textContent = state.directoryHandle
           ? state.directoryHandle.name
@@ -6517,8 +6704,9 @@
 
     if (statusEl) {
       if (state.progress) {
-        const prefix = state.progress.errorCount > 0 ? 'com erros' : 'em andamento';
-        statusEl.textContent = `${state.progress.current}/${state.progress.total} ${prefix}: ${state.progress.label}`;
+        const count = humanCountFor(state.progress);
+        const label = humanProgressLabelFor(state.progress);
+        statusEl.textContent = count ? `${count}: ${label}` : label;
       } else {
         statusEl.textContent =
           state.reachedSidebarEnd
@@ -6536,8 +6724,8 @@
     if (exportBtn) {
       exportBtn.disabled = !canExport;
       exportBtn.textContent = state.isExporting
-        ? 'Exportando...'
-        : 'Exportar selecionadas';
+        ? 'Baixando...'
+        : 'Baixar selecionadas';
     }
 
     [folderBtn, refreshBtn, selectAllBtn, clearBtn, closeBtn, currentBtn].forEach((btn) => {
@@ -6975,7 +7163,7 @@
       <div data-role="panel" class="gm-modal-panel">
         <div class="gm-modal-header">
           <div class="gm-modal-title">
-            <strong>Exportar conversas</strong>
+            <strong>Baixar conversas</strong>
             <span id="${MODAL_COUNT_ID}" class="gm-count-chip"></span>
           </div>
           <button data-action="close-modal" class="gm-btn-close" aria-label="Fechar">×</button>
@@ -7009,8 +7197,8 @@
         <div class="gm-footer">
           <button data-action="refresh-list" class="gm-btn gm-btn-ghost">Puxar mais histórico</button>
           <div class="gm-footer-actions">
-            <button data-action="export-current" class="gm-btn">Exportar atual</button>
-            <button id="${MODAL_EXPORT_ID}" data-action="run-export" class="gm-btn gm-btn-success">Exportar selecionadas</button>
+            <button data-action="export-current" class="gm-btn">Baixar atual</button>
+            <button id="${MODAL_EXPORT_ID}" data-action="run-export" class="gm-btn gm-btn-success">Baixar selecionadas</button>
           </div>
         </div>
       </div>
@@ -7114,9 +7302,9 @@
             updateModalState();
           } else {
             bridgeState.lastError = result.reason;
-            warn('Falha ao escolher pasta via bridge MCP:', result.reason);
+            warn('Falha ao escolher pasta pela conexão local:', result.reason);
             showToast(
-              'Não consegui abrir o seletor. Verifique se o MCP local está rodando (rode o install-windows.cmd de novo ou reabra o Claude/Gemini CLI).',
+              'Não consegui abrir o seletor. Reabra o Gemini CLI ou rode o instalador de novo para restaurar a ferramenta local.',
               'error',
             );
             updateModalState();
@@ -7126,7 +7314,7 @@
 
         if (!supportsDirectoryPicker()) {
           showToast(
-            'Este navegador não suporta escolher pasta. Use Chrome/Edge ou rode o MCP local.',
+            'Este navegador não suporta escolher pasta. Use Chrome/Edge ou a ferramenta local.',
             'error',
           );
           return;
@@ -7155,7 +7343,7 @@
             );
           } else {
             showToast(
-              'Não consegui salvar a pasta escolhida. Tente outra pasta ou reinicie o MCP.',
+              'Não consegui salvar a pasta escolhida. Tente outra pasta ou reinicie a ferramenta local.',
               'error',
             );
           }
@@ -7173,12 +7361,12 @@
           state.selectedChatIds.has(item.id),
         );
         if (selected.length === 0) {
-          showToast('Marque pelo menos uma conversa na lista antes de exportar.', 'info');
+          showToast('Marque pelo menos uma conversa na lista antes de baixar.', 'info');
           return;
         }
         if (selected.some((item) => item.exportable === false)) {
           showToast(
-            'Algumas conversas do caderno não expõem ID — não consigo exportar em lote. Abra uma por uma e use "Exportar essa conversa".',
+            'Algumas conversas do caderno não expõem ID — não consigo baixar em lote. Abra uma por uma e use "Baixar atual".',
             'error',
           );
           return;
@@ -7275,13 +7463,13 @@
         showToast('Esta aba já está ocupada. Aguarde o comando atual terminar.', 'info');
         return;
       }
-      log('abrindo modal de exportação');
+      log('abrindo modal de download');
       await openExportModal();
     } catch (err) {
       console.error(LOG_PREFIX, 'falha ao abrir o modal', err);
       alert(`Falha ao abrir o modal: ${err?.message || err}`);
       showToast(
-        'Não consegui abrir o modal de exportação. Abra o console (F12) para ver o motivo.',
+        'Não consegui abrir o modal de download. Abra o console (F12) para ver o motivo.',
         'error',
       );
     }
@@ -7885,8 +8073,8 @@
 
     const sub = document.createElement('span');
     sub.textContent = ignored
-      ? 'A bridge MCP está desligada nesta aba.'
-      : 'Desliga a conexão com o MCP só nesta aba.';
+      ? 'A conexão local está desligada nesta aba.'
+      : 'Desliga a conexão local só nesta aba.';
     Object.assign(sub.style, {
       display: 'block',
       marginTop: '3px',
@@ -7939,7 +8127,7 @@
     exportItem.type = 'button';
     exportItem.setAttribute('role', 'menuitem');
     exportItem.dataset.role = 'gm-menu-export';
-    exportItem.textContent = 'Exportar como Markdown';
+    exportItem.textContent = 'Baixar como Markdown';
     styleMenuItem(exportItem);
     exportItem.style.fontWeight = '500';
     exportItem.addEventListener('click', () => {
@@ -7967,8 +8155,8 @@
       try {
         showToast(
           next
-            ? 'Aba ignorada. A bridge MCP não vai usar essa aba até você reativar aqui.'
-            : 'Aba reativada. A bridge MCP voltou a se conectar.',
+            ? 'Aba ignorada. A conexão local não vai usar esta aba até você reativar aqui.'
+            : 'Aba reativada. A conexão local voltou.',
           'info',
         );
       } catch {
@@ -8030,7 +8218,7 @@
     btn.id = BUTTON_ID;
     btn.type = 'button';
     btn.title =
-      'Exportar como Markdown — clique para abrir o menu (Ctrl+Shift+E exporta a conversa atual)';
+      'Baixar como Markdown — clique para abrir o menu (Ctrl+Shift+E baixa a conversa atual)';
     btn.setAttribute('aria-label', BUTTON_LABEL);
     btn.setAttribute('aria-haspopup', 'menu');
     btn.setAttribute('aria-expanded', 'false');
@@ -8355,6 +8543,17 @@
         if (btn) openTopBarMenu(btn);
       },
       closeTopBarMenu: () => closeTopBarMenu(),
+      showProgressForDebug: (progress) => {
+        handleMcpJobProgressBroadcast({
+          source: 'mcp',
+          ...progress,
+        });
+        return {
+          title: document.getElementById(`${PROGRESS_DOCK_ID}-title`)?.textContent || '',
+          count: document.getElementById(`${PROGRESS_DOCK_ID}-count`)?.textContent || '',
+          label: document.getElementById(`${PROGRESS_DOCK_ID}-label`)?.textContent || '',
+        };
+      },
       destination: () => ({
         bridgeOutputDir: state.bridgeOutputDir || null,
         browserDirectoryHandle: state.directoryHandle?.name || null,
@@ -8397,13 +8596,13 @@
       return;
     }
 
-    log('retomando exportação em lote pendente', {
+    log('retomando download em lote pendente', {
       nextIndex: session.nextIndex,
       total: session.items.length,
       failureIds: session.failureIds,
     });
     showToast(
-      `Retomando exportação interrompida — conversa ${session.nextIndex + 1} de ${session.items.length}...`,
+      `Retomando download interrompido — conversa ${session.nextIndex + 1} de ${session.items.length}...`,
       'info',
     );
     try {
@@ -8412,9 +8611,9 @@
         resume: true,
       });
     } catch (err) {
-      warn('Falha ao retomar exportação em lote.', err);
+      warn('Falha ao retomar download em lote.', err);
       showToast(
-        'Não consegui retomar a exportação pendente. Abra o console (F12) para ver o motivo.',
+        'Não consegui retomar o download pendente. Abra o console (F12) para ver o motivo.',
         'error',
       );
     }

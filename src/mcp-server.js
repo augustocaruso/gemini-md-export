@@ -210,6 +210,18 @@ const DIRECT_REEXPORT_DELAY_MS = Math.max(
     ),
   ),
 );
+const DIRECT_REEXPORT_RETRY_LIMIT = Math.max(
+  1,
+  Math.min(5, Number(process.env.GEMINI_MCP_DIRECT_REEXPORT_RETRY_LIMIT || 2)),
+);
+const DIRECT_REEXPORT_RETRY_BASE_MS = Math.max(
+  250,
+  Math.min(10_000, Number(process.env.GEMINI_MCP_DIRECT_REEXPORT_RETRY_BASE_MS || 1500)),
+);
+const EXPORT_CANCEL_REQUEST_STALE_MS = Math.max(
+  5000,
+  Math.min(5 * 60_000, Number(process.env.GEMINI_MCP_EXPORT_CANCEL_STALE_MS || 30_000)),
+);
 const CHROME_GUARD_CONFIG = {
   profileDirectory:
     process.env.GEMINI_MCP_CHROME_PROFILE_DIRECTORY ||
@@ -5099,6 +5111,27 @@ const isTransientTabBusyError = (err) =>
     String(err?.message || ''),
   );
 
+const retryableConversationExportReason = (err) => {
+  if (isTransientTabBusyError(err)) return 'tab_operation_in_progress';
+  const message = String(err?.message || err?.data?.error || '');
+  if (
+    /conte[úu]do da conversa ainda parece ser o chat anterior|URL mudou/i.test(message)
+  ) {
+    return 'stale_conversation_dom';
+  }
+  if (
+    /DOM atualizado|carregar o in[íi]cio da conversa|sem progresso por \d+s|navegador abriu o chat|browser retornou o chat/i.test(
+      message,
+    )
+  ) {
+    return 'conversation_not_ready';
+  }
+  return null;
+};
+
+const isRetryableConversationExportError = (err) =>
+  retryableConversationExportReason(err) !== null;
+
 const isRecoverableClientDisconnectError = (err) =>
   err?.code === 'client_not_found' ||
   (err?.code === 'command_timeout' && err.commandDispatched !== true) ||
@@ -5191,24 +5224,45 @@ const enqueueCommandWithClientRecovery = async (
 
 const downloadConversationItemWithRetry = async (job, client, conversation, args = {}) => {
   let lastError = null;
-  for (let attempt = 1; attempt <= RECENT_CHATS_TRANSIENT_BUSY_RETRY_LIMIT; attempt += 1) {
+  const retryLimit =
+    job?.type === 'direct-chats-export'
+      ? DIRECT_REEXPORT_RETRY_LIMIT
+      : RECENT_CHATS_TRANSIENT_BUSY_RETRY_LIMIT;
+  const retryBaseMs =
+    job?.type === 'direct-chats-export'
+      ? DIRECT_REEXPORT_RETRY_BASE_MS
+      : RECENT_CHATS_TRANSIENT_BUSY_RETRY_BASE_MS;
+  const broadcastProgress =
+    job?.type === 'direct-chats-export'
+      ? broadcastDirectChatsJobProgress
+      : broadcastRecentChatsJobProgress;
+  for (let attempt = 1; attempt <= retryLimit; attempt += 1) {
     try {
       return await downloadConversationItemForClient(client, conversation, args);
     } catch (err) {
       lastError = err;
-      if (!isTransientTabBusyError(err) || attempt >= RECENT_CHATS_TRANSIENT_BUSY_RETRY_LIMIT) {
+      const retryReason = retryableConversationExportReason(err);
+      if (!isRetryableConversationExportError(err) || !retryReason || attempt >= retryLimit) {
         throw err;
       }
-      const retryDelayMs = RECENT_CHATS_TRANSIENT_BUSY_RETRY_BASE_MS * attempt;
+      const retryDelayMs = retryBaseMs * attempt;
       job.current = {
         ...(job.current || {}),
         retrying: true,
         retryAttempt: attempt,
         retryDelayMs,
-        retryReason: 'tab_operation_in_progress',
+        retryReason,
       };
+      appendExportJobTrace(job, 'conversation_retry', {
+        index: job.current?.index ?? null,
+        chatId: conversation?.chatId || null,
+        attempt,
+        retryDelayMs,
+        retryReason,
+        error: err?.message || String(err),
+      });
       touchExportJob(job);
-      broadcastRecentChatsJobProgress(job, client);
+      broadcastProgress(job, client);
       await sleep(retryDelayMs);
     }
   }
@@ -6401,7 +6455,11 @@ const exportJobInProgressError = (job) => {
 
 const assertNoRunningBrowserExportJob = (client) => {
   const running = findRunningBrowserExportJob(client.clientId);
-  if (running) throw exportJobInProgressError(running);
+  if (!running) return;
+  if (maybeFinalizeStaleCancelRequestedJob(running, client, 'cancel-stale-before-new-job')) {
+    return;
+  }
+  throw exportJobInProgressError(running);
 };
 
 const mediaWarningCountForJob = (job) =>
@@ -6481,7 +6539,7 @@ const exportJobProgressMessage = (job) => {
       ? job.syncMode
         ? 'Baixando conversas novas'
         : 'Baixando somente o que falta no vault'
-      : 'Exportando conversas do Gemini';
+      : 'Baixando conversas do Gemini';
     const count =
       job.requested > 0
         ? ` (${Math.min(job.completed + 1, job.requested)}/${job.requested})`
@@ -6491,7 +6549,7 @@ const exportJobProgressMessage = (job) => {
   if (job.phase === 'writing-report') {
     return 'Gravando relatório final...';
   }
-  return 'Preparando exportação...';
+  return 'Preparando...';
 };
 
 const exportJobNextAction = (job) => {
@@ -6586,8 +6644,8 @@ const exportJobDecisionSummary = (job) => {
 
 const setClientJobProgressAndNotify = (client, payload) => {
   setClientJobProgress(client, payload);
-  if (payload) {
-    sendClientEvent(client, 'jobProgress', payload);
+  if (payload && client?.jobProgress) {
+    sendClientEvent(client, 'jobProgress', client.jobProgress);
   }
 };
 
@@ -6853,6 +6911,7 @@ const broadcastRecentChatsJobProgress = (job, client, patch = {}) => {
   setClientJobProgressAndNotify(client, {
     source: 'mcp',
     kind: 'recent-chats-export',
+    workflow: exportJobWorkflow(job),
     jobId: job.jobId,
     status,
     phase,
@@ -6883,22 +6942,23 @@ const broadcastDirectChatsJobProgress = (job, client, patch = {}) => {
   let label = patch.label;
   if (!label) {
     if (status === 'cancelled') {
-      label = 'Reexportação cancelada.';
+      label = 'Download cancelado.';
     } else if (status === 'completed') {
-      label = 'Reexportação concluída.';
+      label = 'Conversas selecionadas baixadas.';
     } else if (status === 'completed_with_errors') {
-      label = `Reexportação concluída com ${errorCount} erro${errorCount === 1 ? '' : 's'}.`;
+      label = `Download concluído com ${errorCount} erro${errorCount === 1 ? '' : 's'}.`;
     } else if (status === 'failed') {
-      label = 'Reexportação falhou.';
+      label = 'Download falhou.';
     } else if (phase === 'exporting' && job.current?.title) {
-      label = `MCP reexportando (${job.current.index}/${total}): ${job.current.title}`;
+      label = `Baixando conversa selecionada (${job.current.index}/${total}): ${job.current.title}`;
     } else {
-      label = 'MCP reexportando chats selecionados...';
+      label = 'Preparando conversas selecionadas...';
     }
   }
   setClientJobProgressAndNotify(client, {
     source: 'mcp',
     kind: 'direct-chats-export',
+    workflow: 'direct-reexport',
     jobId: job.jobId,
     status,
     phase,
@@ -6912,6 +6972,84 @@ const broadcastDirectChatsJobProgress = (job, client, patch = {}) => {
     chatId: job.current?.chatId || null,
     currentChatId: job.current?.chatId || null,
   });
+};
+
+const cancelRequestedAgeMs = (job) => {
+  if (job?.status !== 'cancel_requested') return 0;
+  const startedAt = Date.parse(job.cancelledAt || job.updatedAt || job.createdAt || '');
+  if (!Number.isFinite(startedAt)) return 0;
+  return Date.now() - startedAt;
+};
+
+const persistStaleCancelledJobReport = (job, client) => {
+  if (!job?.reportFile) return;
+  const successes = Array.isArray(job.recentSuccesses) ? job.recentSuccesses : [];
+  const failures = Array.isArray(job.failures) ? job.failures : [];
+  if (job.type === 'direct-chats-export') {
+    persistDirectChatsExportReport(job, client, successes, failures);
+    return;
+  }
+  persistRecentChatsExportReport(job, client, successes, failures);
+};
+
+const maybeFinalizeStaleCancelRequestedJob = (job, client = null, reason = 'cancel-stale') => {
+  if (job?.status !== 'cancel_requested') return false;
+  const ageMs = cancelRequestedAgeMs(job);
+  if (ageMs < EXPORT_CANCEL_REQUEST_STALE_MS) return false;
+
+  const activeClient = client || clients.get(job.clientId) || null;
+  const clientHealth = activeClient ? buildBridgeHealth(activeClient) : null;
+  if (clientHealth?.status === 'healthy') return false;
+
+  job.cancelRequested = true;
+  job.cancelledAt = job.cancelledAt || new Date().toISOString();
+  job.status = 'cancelled';
+  job.phase = 'cancelled';
+  job.current = null;
+  job.finishedAt = new Date().toISOString();
+  appendExportJobTrace(job, 'job_cancel_finalized', {
+    reason,
+    cancelRequestedAgeMs: ageMs,
+    staleAfterMs: EXPORT_CANCEL_REQUEST_STALE_MS,
+    clientHealth: clientHealth?.status || null,
+    clientBlockingIssue: clientHealth?.blockingIssue || null,
+  });
+  touchExportJob(job);
+  try {
+    persistStaleCancelledJobReport(job, activeClient);
+  } catch (err) {
+    appendExportJobTrace(job, 'job_cancel_report_write_failed', {
+      reason,
+      error: err?.message || String(err),
+    });
+  }
+
+  void (async () => {
+    await autoReleaseTabClaimForJob(job, `job-${job.status || 'cancelled'}-${reason}`);
+    recordExportJobCleanup(
+      job,
+      'tab-claim-release',
+      job.tabClaimRelease || { ok: true, reason: 'no-claim-release-needed' },
+    );
+    finishExportJobTabSession(job, `job-${job.status || 'cancelled'}-${reason}`);
+    finalizeExportJobTrace(job);
+    touchExportJob(job);
+    if (activeClient) {
+      if (job.type === 'direct-chats-export') {
+        broadcastDirectChatsJobProgress(job, activeClient);
+      } else {
+        broadcastRecentChatsJobProgress(job, activeClient);
+      }
+    }
+  })().catch((err) => {
+    appendExportJobTrace(job, 'job_cancel_cleanup_failed', {
+      reason,
+      error: err?.message || String(err),
+    });
+    touchExportJob(job);
+  });
+
+  return true;
 };
 
 const maybeUpdateSyncState = (job, client, failures = []) => {
@@ -7518,7 +7656,7 @@ const runDirectChatsExportJob = async (job, client, args = {}) => {
       broadcastDirectChatsJobProgress(job, client);
 
       try {
-        const result = await downloadConversationItemForClient(client, conversation, {
+        const result = await downloadConversationItemWithRetry(job, client, conversation, {
           ...args,
           outputDir: job.outputDir,
           returnToOriginal: false,
@@ -7596,7 +7734,7 @@ const runDirectChatsExportJob = async (job, client, args = {}) => {
         const hasNext = !job.cancelRequested && i < job.items.length - 1;
         const completionLabel = job.cancelRequested
           ? exportJobProgressMessage(job)
-          : `Reexportação: ${job.completed}/${job.requested} conversa${job.completed === 1 ? '' : 's'} concluída${job.completed === 1 ? '' : 's'}.`;
+          : `${job.completed}/${job.requested} conversa${job.completed === 1 ? ' baixada' : ' baixadas'}.`;
         if (hasNext) job.current = null;
         touchExportJob(job);
         persistDirectChatsExportReport(job, client, successes, failures);
@@ -7749,15 +7887,18 @@ const exportNotebookForClient = async (client, args = {}) => {
     setClientJobProgressAndNotify(client, {
       source: 'mcp',
       kind: 'notebook-export',
+      workflow: 'notebook-export',
       status,
       total,
       current,
+      position: status === 'running' && current > 0 ? current : null,
+      completed: Math.max(0, Math.min(current, total)),
       errorCount,
       label,
     });
   };
 
-  broadcast(0, 0, 'MCP exportando caderno...');
+  broadcast(0, 0, 'Preparando caderno...');
 
   const successes = [];
   const failures = [];
@@ -7767,9 +7908,9 @@ const exportNotebookForClient = async (client, args = {}) => {
       const indexLabel = startIndex + i;
       const titleLabel = conversation?.title ? `: ${conversation.title}` : '';
       broadcast(
-        i,
+        i + 1,
         failures.length,
-        `MCP exportando caderno (${indexLabel}/${total + startIndex - 1})${titleLabel}`,
+        `Exportando conversa do caderno (${indexLabel}/${total + startIndex - 1})${titleLabel}`,
       );
       try {
         const result = await downloadConversationItemForClient(client, conversation, {
@@ -7791,7 +7932,7 @@ const exportNotebookForClient = async (client, args = {}) => {
         broadcast(
           i + 1,
           failures.length,
-          `MCP caderno: ${i + 1}/${total} concluído(s)`,
+          `Caderno: ${i + 1}/${total} concluído(s)`,
         );
       }
     }
@@ -8963,6 +9104,9 @@ const legacyRawTools = [
     call: async (args = {}) => {
       const active = args.active === true;
       const limit = Math.max(1, Math.min(100, Number(args.limit || 10)));
+      for (const job of exportJobs.values()) {
+        maybeFinalizeStaleCancelRequestedJob(job, clients.get(job.clientId), 'cancel-stale-list');
+      }
       let jobs = [...exportJobs.values()].sort((a, b) =>
         String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')),
       );
@@ -8996,6 +9140,7 @@ const legacyRawTools = [
       if (!job) {
         return toolTextResult({ error: `Job não encontrado: ${args.jobId}` }, { isError: true });
       }
+      maybeFinalizeStaleCancelRequestedJob(job, clients.get(job.clientId), 'cancel-stale-status');
       return toolTextResult(summarizeExportJob(job), {
         isError: job.status === 'failed',
       });
@@ -9023,10 +9168,11 @@ const legacyRawTools = [
       }
       if (!isTerminalExportJobStatus(job.status)) {
         job.cancelRequested = true;
-        job.cancelledAt = new Date().toISOString();
+        job.cancelledAt = job.cancelledAt || new Date().toISOString();
         job.status = 'cancel_requested';
         touchExportJob(job);
       }
+      maybeFinalizeStaleCancelRequestedJob(job, clients.get(job.clientId), 'cancel-stale-cancel');
       return toolTextResult(summarizeExportJob(job));
     },
   },
@@ -11039,6 +11185,9 @@ const bridgeServer = createServer(async (req, res) => {
   if (req.method === 'GET' && url.pathname === '/agent/export-jobs') {
     const active = parseOptionalBoolean(url.searchParams.get('active'));
     const limit = Math.max(1, Math.min(100, Number(url.searchParams.get('limit') || 10)));
+    for (const job of exportJobs.values()) {
+      maybeFinalizeStaleCancelRequestedJob(job, clients.get(job.clientId), 'cancel-stale-list');
+    }
     let jobs = [...exportJobs.values()].sort((a, b) =>
       String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')),
     );
@@ -11060,6 +11209,7 @@ const bridgeServer = createServer(async (req, res) => {
       sendAgentJson(res, 404, { error: `Job não encontrado: ${jobId}` });
       return;
     }
+    maybeFinalizeStaleCancelRequestedJob(job, clients.get(job.clientId), 'cancel-stale-status');
     sendAgentJson(res, 200, summarizeExportJob(job));
     return;
   }
@@ -11098,10 +11248,11 @@ const bridgeServer = createServer(async (req, res) => {
     }
     if (!isTerminalExportJobStatus(job.status)) {
       job.cancelRequested = true;
-      job.cancelledAt = new Date().toISOString();
+      job.cancelledAt = job.cancelledAt || new Date().toISOString();
       job.status = 'cancel_requested';
       touchExportJob(job);
     }
+    maybeFinalizeStaleCancelRequestedJob(job, clients.get(job.clientId), 'cancel-stale-cancel');
     sendAgentJson(res, 200, summarizeExportJob(job));
     return;
   }

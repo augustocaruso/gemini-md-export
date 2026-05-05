@@ -433,7 +433,10 @@ test('export recente faz retry para aba ocupada antes de registrar falha', () =>
   )?.[0];
   assert.ok(jobBlock, 'runRecentChatsExportJob deve existir');
   assert.match(source, /const isTransientTabBusyError = \(err\) =>/);
+  assert.match(source, /const retryableConversationExportReason = \(err\) =>/);
   assert.match(source, /tab_operation_in_progress/);
+  assert.match(source, /stale_conversation_dom/);
+  assert.match(source, /conversation_not_ready/);
   assert.match(source, /const downloadConversationItemWithRetry = async/);
   assert.match(source, /RECENT_CHATS_TRANSIENT_BUSY_RETRY_LIMIT/);
   assert.match(jobBlock, /downloadConversationItemWithRetry\(job, client, conversation/);
@@ -441,12 +444,41 @@ test('export recente faz retry para aba ocupada antes de registrar falha', () =>
 
 test('reexport de chatIds conhecidos roda como job em background', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const jobBlock = source.match(
+    /const runDirectChatsExportJob = async[\s\S]*?\nconst startDirectChatsExportJob/,
+  )?.[0];
+  assert.ok(jobBlock, 'runDirectChatsExportJob deve existir');
   assert.match(source, /name: 'gemini_reexport_chats'/);
   assert.match(source, /const startDirectChatsExportJob = \(client, args = \{\}\) =>/);
   assert.match(source, /const runDirectChatsExportJob = async/);
   assert.match(source, /extractChatIdFromUrl\(idLike\)/);
   assert.match(source, /writeExportReport\(\s*'direct-chats'/);
   assert.match(source, /findRunningBrowserExportJob\(client\.clientId\)/);
+  assert.match(source, /DIRECT_REEXPORT_RETRY_LIMIT/);
+  assert.match(jobBlock, /downloadConversationItemWithRetry\(job, client, conversation/);
   assert.match(source, /'gemini_reexport_chats'/);
   assert.match(source, /url\.pathname === '\/agent\/reexport-chats'/);
+});
+
+test('cancelamento preso vira terminal depois da janela de seguranca', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  assert.match(source, /EXPORT_CANCEL_REQUEST_STALE_MS/);
+  assert.match(source, /const maybeFinalizeStaleCancelRequestedJob = \(job, client = null/);
+  assert.match(source, /job\.status = 'cancelled'/);
+  assert.match(source, /job_cancel_finalized/);
+  assert.match(source, /maybeFinalizeStaleCancelRequestedJob\(running, client, 'cancel-stale-before-new-job'\)/);
+  assert.match(source, /maybeFinalizeStaleCancelRequestedJob\(job, clients\.get\(job\.clientId\), 'cancel-stale-status'\)/);
+});
+
+test('progresso visual de reexport selecionado usa linguagem humana', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const block = source.match(
+    /const broadcastDirectChatsJobProgress = \(job, client, patch = \{\}\) =>[\s\S]*?\n};/,
+  )?.[0];
+  assert.ok(block, 'broadcastDirectChatsJobProgress deve existir');
+  assert.match(block, /Baixando conversa selecionada/);
+  assert.match(block, /Preparando conversas selecionadas/);
+  assert.match(block, /workflow:\s*'direct-reexport'/);
+  assert.doesNotMatch(block, /MCP reexportando/);
+  assert.doesNotMatch(block, /reexportando/);
 });
