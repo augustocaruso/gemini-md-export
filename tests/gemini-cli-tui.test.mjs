@@ -412,7 +412,7 @@ test('CLI chats count carrega ate o fim sem despejar lista no chat', async () =>
 
     assert.equal(run.exitCode, 0);
     assert.match(stdout.text(), /Bridge conectada/);
-    assert.match(stdout.text(), /Carregando historico do Gemini/);
+    assert.match(stdout.text(), /Buscando o fim da lista/);
     assert.match(stdout.text(), /Total confirmado: 203 chat\(s\)/);
     assert.doesNotMatch(stdout.text(), /RESULT_JSON/);
     const result = run.result;
@@ -728,6 +728,94 @@ test('CLI chats count espera e tenta de novo quando a aba esta ocupada', async (
       assert.equal(stderr.text(), '');
     }),
   );
+});
+
+test('CLI chats count --tui mostra contagem indeterminada com feedback humano', async () => {
+  await withServer((req, res, url) => {
+    if (url.pathname === '/agent/ready') {
+      sendJson(res, 200, {
+        ready: true,
+        mode: 'hot',
+        connectedClientCount: 1,
+        selectableTabCount: 1,
+        commandReadyClientCount: 1,
+      });
+      return;
+    }
+    if (url.pathname === '/agent/tabs' && url.searchParams.get('action') === 'claim') {
+      sendJson(res, 200, {
+        ok: true,
+        claim: {
+          claimId: 'count-claim',
+          tabId: 101,
+          label: 'GME Count',
+        },
+      });
+      return;
+    }
+    if (url.pathname === '/agent/clients') {
+      sendJson(res, 200, {
+        connectedClients: [
+          {
+            clientId: 'client-1',
+            tabId: 101,
+            isActiveTab: true,
+            lastSeenAt: new Date().toISOString(),
+            listedConversationCount: 13,
+            sidebarConversationCount: 13,
+            page: {
+              listedConversationCount: 13,
+            },
+            serverClaim: {
+              claimId: 'count-claim',
+              label: 'GME Count',
+            },
+          },
+        ],
+      });
+      return;
+    }
+    if (url.pathname === '/agent/recent-chats') {
+      sendJson(res, 200, {
+        ok: true,
+        countStatus: 'complete',
+        countIsTotal: true,
+        totalKnown: true,
+        totalCount: 91,
+        knownLoadedCount: 91,
+        minimumKnownCount: 91,
+        pagination: {
+          loadedCount: 91,
+          reachedEnd: true,
+          canLoadMore: false,
+        },
+        conversations: [],
+      });
+      return;
+    }
+    if (url.pathname === '/agent/release-tab') {
+      sendJson(res, 200, { ok: true, released: { claimId: url.searchParams.get('claimId') } });
+      return;
+    }
+    sendJson(res, 404, { error: `not found: ${url.pathname}` });
+  }, async (bridgeUrl) => {
+    const stdout = captureStream({ isTTY: true, columns: 100 });
+    const stderr = captureStream();
+    const run = await main(
+      ['chats', 'count', '--bridge-url', bridgeUrl, '--tui', '--result-json'],
+      { stdout, stderr },
+    );
+
+    assert.equal(run.exitCode, 0);
+    assert.match(stdout.text(), /Gemini Markdown Export/);
+    assert.match(stdout.text(), /contagem/);
+    assert.match(stdout.text(), /13 conversas encontradas ate agora/);
+    assert.match(stdout.text(), /Buscando o fim da lista/);
+    assert.doesNotMatch(stdout.text(), /0 vistas|tool MCP|fallback/);
+    assert.match(stdout.text(), /Total confirmado: 91 chat\(s\)/);
+    assert.match(stdout.text(), /RESULT_JSON /);
+    assert.equal(stderr.text(), '');
+  });
 });
 
 test('CLI chats count libera claim explicita sem imprimir JSON extra', async () => {

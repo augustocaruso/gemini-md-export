@@ -362,7 +362,7 @@ const chatsHelp = () =>
     '',
     'Opcoes:',
     '  --limit <n>                  Quantidade de conversas na pagina. Default: 25.',
-    '  --offset <n>                 Pula conversas ja vistas. Default: 0.',
+    '  --offset <n>                 Pula conversas anteriores da lista. Default: 0.',
     '  --save-selection            Salva a pagina listada como manifesto reutilizavel.',
     '  --selection-file <path>      Caminho do manifesto. Default: ~/.gemini-md-export/selections/latest.json.',
     '  --max-load-more-rounds <n>   Rodadas maximas para puxar historico.',
@@ -1303,6 +1303,14 @@ const bold = (ui, text) => (wantsColor(ui) ? `${ANSI.bold}${text}${ANSI.reset}` 
 const dim = (ui, text) => (wantsColor(ui) ? `${ANSI.dim}${text}${ANSI.reset}` : text);
 
 const stripAnsi = (text) => String(text).replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
+const firstFiniteNumber = (...values) => {
+  for (const value of values) {
+    if (value === undefined || value === null || value === '') continue;
+    const number = Number(value);
+    if (Number.isFinite(number)) return number;
+  }
+  return null;
+};
 
 const formatDuration = (ms) => {
   const seconds = Math.max(1, Math.ceil((Number(ms) || 0) / 1000));
@@ -1388,6 +1396,29 @@ const bar = (
   const pct = Math.max(0, Math.min(1, (Number(current) || 0) / safeTotal));
   const filled = Math.round(pct * width);
   return `[${filledChar.repeat(filled)}${emptyChar.repeat(Math.max(0, width - filled))}] ${Math.round(pct * 100)}%`;
+};
+
+const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+const spinnerFrame = (tick = 0) => SPINNER_FRAMES[Math.abs(Number(tick) || 0) % SPINNER_FRAMES.length];
+
+const pluralizePt = (count, singular, plural = `${singular}s`) =>
+  `${count} ${Number(count) === 1 ? singular : plural}`;
+
+const loadedConversationCount = (job = {}, totals = jobTotals(job)) =>
+  firstFiniteNumber(
+    job.knownLoadedCount,
+    job.minimumKnownCount,
+    job.loadedCount,
+    job.webConversationCount,
+    totals.webSeen,
+  );
+
+const indeterminateCountText = (job = {}, totals = jobTotals(job)) => {
+  const loaded = loadedConversationCount(job, totals);
+  if (loaded !== null && loaded > 0) return `${loaded} encontradas`;
+  if (job.tuiKind === 'count') return 'procurando conversas';
+  return 'trabalhando';
 };
 
 const terminalColorForStatus = (status) => {
@@ -1486,7 +1517,38 @@ const summarizeForResultJson = (job = {}) => {
   };
 };
 
+const renderLinesForCountWait = (ui, job = {}, tick = 0) => {
+  const width = terminalWidth(ui);
+  const activity = bar(ui, 0, 0, {
+    width: Math.max(18, Math.min(42, width - 36)),
+    indeterminate: true,
+    seed: tick,
+    filledChar: '#',
+    emptyChar: '.',
+  });
+  const loaded = firstFiniteNumber(job.knownLoadedCount, job.minimumKnownCount, job.loadedCount);
+  const foundText =
+    loaded !== null && loaded > 0
+      ? `${pluralizePt(loaded, 'conversa')} encontrada${loaded === 1 ? '' : 's'} ate agora`
+      : 'Procurando conversas no historico';
+  const elapsedText = job.elapsedMs ? `tempo ${formatDuration(job.elapsedMs)}` : null;
+  const roundsText =
+    firstFiniteNumber(job.loadMoreRoundsCompleted) !== null
+      ? `rodadas ${Number(job.loadMoreRoundsCompleted)}`
+      : null;
+  const details = [elapsedText, roundsText, job.claimLabel ? `aba ${job.claimLabel}` : null]
+    .filter(Boolean)
+    .join(' | ');
+  return [
+    `${bold(ui, 'Gemini Markdown Export')} ${dim(ui, 'contagem')}`,
+    `${activity}  ${colorize(ui, 'cyan', spinnerFrame(tick))} ${foundText}`,
+    `${colorize(ui, 'cyan', 'Carregando historico')} - ${fitTerminalLine(ui, job.progressMessage || 'Buscando o fim da lista sem abrir outra operacao pesada.')}`,
+    details ? dim(ui, details) : null,
+  ].filter(Boolean);
+};
+
 const renderLinesForJob = (ui, job = {}, tick = 0) => {
+  if (job.tuiKind === 'count') return renderLinesForCountWait(ui, job, tick);
   const width = terminalWidth(ui);
   const totals = jobTotals(job);
   const total = Number(job.requested || job.missingCount || job.webConversationCount || 0);
@@ -1495,7 +1557,8 @@ const renderLinesForJob = (ui, job = {}, tick = 0) => {
   const status = colorize(ui, terminalColorForStatus(job.status), humanStatusLabel(job));
   const headline = fitTerminalLine(ui, job.progressMessage || job.decisionSummary?.headline || 'Sincronizando...');
   const currentLabel = job.current?.title || job.current?.chatId || null;
-  const countText = total > 0 ? `${Math.min(current, total)}/${total}` : `${job.loadedCount || 0} vistas`;
+  const countText = total > 0 ? `${Math.min(current, total)}/${total}` : indeterminateCountText(job, totals);
+  const statusPrefix = TERMINAL_STATUSES.has(job.status) ? '' : `${colorize(ui, 'cyan', spinnerFrame(tick))} `;
   const progress = bar(ui, current, total, {
     width: Math.max(26, Math.min(54, width - 24)),
     indeterminate,
@@ -1510,13 +1573,13 @@ const renderLinesForJob = (ui, job = {}, tick = 0) => {
     totals.warnings ? colorize(ui, 'yellow', `Avisos ${totals.warnings}`) : null,
   ].filter(Boolean);
   const inventoryParts = [
-    totals.webSeen != null ? `vistas ${totals.webSeen}` : null,
+    totals.webSeen != null ? `encontradas ${totals.webSeen}` : null,
     totals.missing != null ? `faltando ${totals.missing}` : null,
   ].filter(Boolean);
   return [
     bold(ui, 'Gemini Markdown Export'),
     `${progress}  ${countText}`,
-    `${status} - ${headline}`,
+    `${statusPrefix}${status} - ${headline}`,
     currentLabel && !TERMINAL_STATUSES.has(job.status) ? `Agora: ${fitTerminalLine(ui, currentLabel, 7)}` : null,
     job.jobId && summaryParts.length ? summaryParts.join(' | ') : null,
     job.jobId && inventoryParts.length ? dim(ui, inventoryParts.join(' | ')) : null,
@@ -1634,7 +1697,7 @@ const renderPlainProgress = (ui, job, previous = {}) => {
   if (previous.key === key) return previous;
   const total = Number(job.requested || job.missingCount || job.webConversationCount || 0);
   const current = displayProgressPosition(job, total);
-  const count = total > 0 ? `${Math.min(current, total)}/${total}` : `${job.loadedCount || 0} vistas`;
+  const count = total > 0 ? `${Math.min(current, total)}/${total}` : indeterminateCountText(job);
   ui.stdout.write(`[${new Date().toLocaleTimeString()}] ${job.status}/${job.phase}: ${count} - ${job.progressMessage || 'sincronizando'}\n`);
   return { key };
 };
@@ -1649,7 +1712,7 @@ const renderTuiStreamProgress = (ui, job, previous = {}, tick = 0) => {
   const total = Number(job.requested || job.missingCount || job.webConversationCount || 0);
   const current = displayProgressPosition(job, total);
   const indeterminate = !total || ['queued', 'loading-history', 'scanning-vault'].includes(job.phase);
-  const count = total > 0 ? `${Math.min(current, total)}/${total}` : `${job.loadedCount || 0} vistas`;
+  const count = total > 0 ? `${Math.min(current, total)}/${total}` : indeterminateCountText(job);
   const progress = bar(ui, current, total, {
     width: Math.max(18, Math.min(30, Math.floor((Number(ui.stdout.columns) || 88) / 3))),
     indeterminate,
@@ -1679,7 +1742,13 @@ const renderTuiStreamProgress = (ui, job, previous = {}, tick = 0) => {
 
 const withWaitStatus = async (
   ui,
-  { message, intervalMessage, intervalMs = DEFAULT_COUNT_STATUS_INTERVAL_MS },
+  {
+    message,
+    intervalMessage,
+    intervalMs = DEFAULT_COUNT_STATUS_INTERVAL_MS,
+    statusProbe = null,
+    tuiKind = null,
+  },
   run,
 ) => {
   if (ui.format === 'json') return run();
@@ -1691,42 +1760,56 @@ const withWaitStatus = async (
   const startedAt = Date.now();
   let tick = 0;
   let previousStream = {};
+  let latestProbe = {};
+  let probeInFlight = null;
+  let lastProbeAt = 0;
   const nextMessage = () =>
     typeof intervalMessage === 'function' ? intervalMessage(Date.now() - startedAt) : message;
+  const refreshProbe = async () => {
+    if (typeof statusProbe !== 'function') return latestProbe;
+    if (probeInFlight) return latestProbe;
+    const now = Date.now();
+    if (lastProbeAt && now - lastProbeAt < Math.max(750, Math.min(3000, intervalMs))) {
+      return latestProbe;
+    }
+    lastProbeAt = now;
+    probeInFlight = Promise.resolve()
+      .then(() => statusProbe({ elapsedMs: now - startedAt, previous: latestProbe }))
+      .then((result) => {
+        if (result && typeof result === 'object') latestProbe = { ...latestProbe, ...result };
+        return latestProbe;
+      })
+      .catch(() => latestProbe)
+      .finally(() => {
+        probeInFlight = null;
+      });
+    return probeInFlight;
+  };
+  const waitJob = () => ({
+    status: 'running',
+    phase: 'loading-history',
+    requested: 0,
+    completed: 0,
+    progressMessage: tick === 0 ? message : nextMessage(),
+    elapsedMs: Date.now() - startedAt,
+    tuiKind,
+    ...latestProbe,
+  });
   const renderWaitTui = () => {
-    renderTui(
-      ui,
-      {
-        status: 'running',
-        phase: 'loading-history',
-        requested: 0,
-        completed: 0,
-        progressMessage: tick === 0 ? message : nextMessage(),
-      },
-      tick,
-    );
+    renderTui(ui, waitJob(), tick);
   };
   const renderWaitStreamTui = () => {
-    previousStream = renderTuiStreamProgress(
-      ui,
-      {
-        status: 'running',
-        phase: 'loading-history',
-        requested: 0,
-        completed: 0,
-        progressMessage: tick === 0 ? message : nextMessage(),
-      },
-      previousStream,
-      tick,
-    );
+    previousStream = renderTuiStreamProgress(ui, waitJob(), previousStream, tick);
   };
 
+  await refreshProbe();
   if (ui.format === 'tui') renderWaitTui();
   else if (ui.format === 'tui-stream') renderWaitStreamTui();
   else ui.stdout.write(`${message}\n`);
 
   const timer = setInterval(() => {
     tick += 1;
+    void refreshProbe();
     if (ui.format === 'tui') renderWaitTui();
     else if (ui.format === 'tui-stream') renderWaitStreamTui();
     else ui.stdout.write(`${nextMessage()}\n`);
@@ -1748,7 +1831,7 @@ const emitResult = (ui, job) => {
   } else if (ui.format !== 'jsonl') {
     if (result.fullHistoryRequested && !result.fullHistoryVerified) {
       ui.stdout.write(
-        `ATENCAO: o fim do historico nao foi confirmado; vistas=${result.webConversationCount ?? '-'}.\n`,
+        `ATENCAO: o fim do historico nao foi confirmado; encontradas=${result.webConversationCount ?? '-'}.\n`,
       );
     }
     if (result.failures.length > 0) {
@@ -2812,6 +2895,62 @@ const countRetryReason = (summary = {}) => {
   return null;
 };
 
+const chooseClientForCountProbe = (clients = [], selector = {}) => {
+  const live = clients.filter(Boolean);
+  if (selector.clientId) {
+    const matched = live.find((client) => client.clientId === selector.clientId);
+    if (matched) return matched;
+  }
+  if (selector.claimId) {
+    const matched = live.find(
+      (client) =>
+        client.serverClaim?.claimId === selector.claimId ||
+        client.tabClaim?.claimId === selector.claimId,
+    );
+    if (matched) return matched;
+  }
+  if (selector.tabId !== undefined && selector.tabId !== null) {
+    const tabId = Number(selector.tabId);
+    const matched = live.find((client) => Number(client.tabId) === tabId);
+    if (matched) return matched;
+  }
+  return (
+    live.find((client) => client.isActiveTab === true) ||
+    live
+      .slice()
+      .sort((a, b) => Date.parse(b.lastSeenAt || 0) - Date.parse(a.lastSeenAt || 0))[0] ||
+    null
+  );
+};
+
+const countProbeFromClients = (payload = {}, selector = {}) => {
+  const client = chooseClientForCountProbe(payload.connectedClients || [], selector);
+  if (!client) return null;
+  const loaded = firstFiniteNumber(
+    client.sidebarConversationCount,
+    client.listedConversationCount,
+    client.page?.listedConversationCount,
+  );
+  const pageListed = firstFiniteNumber(client.page?.listedConversationCount);
+  const claimLabel = client.serverClaim?.label || client.tabClaim?.label || null;
+  return {
+    loadedCount: loaded,
+    knownLoadedCount: loaded,
+    pageListedConversationCount: pageListed,
+    sidebarConversationCount: firstFiniteNumber(client.sidebarConversationCount),
+    claimLabel,
+  };
+};
+
+const probeCountStatusFromBridge = async (bridgeUrl, selector = {}) => {
+  const payload = await requestJson(
+    bridgeUrl,
+    appendParams('/agent/clients', { diagnostics: false }),
+    { timeoutMs: 1000 },
+  );
+  return countProbeFromClients(payload, selector);
+};
+
 const summarizeChatsListResult = (raw = {}, flags = {}, selection = null) => {
   const conversations = Array.isArray(raw.conversations) ? raw.conversations : [];
   return {
@@ -2984,10 +3123,17 @@ const runChats = async (parsed, streams = {}) => {
     const raw = await withWaitStatus(
       ui,
       {
-        message: `Carregando historico do Gemini ate confirmar o fim (limite ${formatDuration(countTimeoutMs)}).`,
+        message: `Buscando o fim da lista de conversas (limite ${formatDuration(countTimeoutMs)}).`,
         intervalMs: statusIntervalMs,
         intervalMessage: (elapsedMs) =>
-          `Ainda carregando historico... ${formatDuration(elapsedMs)} decorridos; nao vou abrir outra tool MCP como fallback.`,
+          `Buscando o fim da lista... ${formatDuration(elapsedMs)} decorridos.`,
+        tuiKind: 'count',
+        statusProbe: () =>
+          probeCountStatusFromBridge(parsed.flags.bridgeUrl, {
+            clientId: parsed.flags.clientId,
+            tabId: requestTabId,
+            claimId: requestClaimId,
+          }),
       },
       requestCountUntilSettled,
     );
