@@ -818,6 +818,78 @@ test('CLI chats count --tui mostra contagem indeterminada com feedback humano', 
   });
 });
 
+test('CLI chats count continua quando o indicador visual da aba trava', async () => {
+  await withServer((req, res, url) => {
+    if (url.pathname === '/agent/ready') {
+      sendJson(res, 200, {
+        ready: true,
+        mode: 'hot',
+        connectedClientCount: 1,
+        selectableTabCount: 1,
+        commandReadyClientCount: 1,
+      });
+      return;
+    }
+    if (url.pathname === '/agent/tabs' && url.searchParams.get('action') === 'claim') {
+      sendJson(res, 503, {
+        ok: false,
+        error: 'Timeout aguardando resposta do comando claim-tab.',
+        code: 'command_timeout',
+      });
+      return;
+    }
+    if (url.pathname === '/agent/clients') {
+      sendJson(res, 200, {
+        connectedClients: [
+          {
+            clientId: 'client-1',
+            tabId: 101,
+            isActiveTab: true,
+            lastSeenAt: new Date().toISOString(),
+            listedConversationCount: 33,
+            sidebarConversationCount: 33,
+          },
+        ],
+      });
+      return;
+    }
+    if (url.pathname === '/agent/recent-chats') {
+      sendJson(res, 200, {
+        ok: true,
+        countStatus: 'complete',
+        countIsTotal: true,
+        totalKnown: true,
+        totalCount: 118,
+        knownLoadedCount: 118,
+        minimumKnownCount: 118,
+        pagination: {
+          loadedCount: 118,
+          reachedEnd: true,
+          canLoadMore: false,
+        },
+        conversations: [],
+      });
+      return;
+    }
+    sendJson(res, 404, { error: `not found: ${url.pathname}` });
+  }, async (bridgeUrl, requests) => {
+    const stdout = captureStream({ isTTY: true, columns: 100 });
+    const stderr = captureStream();
+    const run = await main(
+      ['chats', 'count', '--bridge-url', bridgeUrl, '--tui', '--result-json'],
+      { stdout, stderr },
+    );
+
+    assert.equal(run.exitCode, 0);
+    assert.match(stdout.text(), /Indicador visual da aba nao respondeu/);
+    assert.match(stdout.text(), /Total confirmado: 118 chat\(s\)/);
+    assert.equal(stderr.text(), '');
+    const countRequest = requests.find((item) => item.pathname === '/agent/recent-chats');
+    assert.equal(countRequest.searchParams.get('autoClaim'), 'false');
+    assert.equal(requests.some((item) => item.pathname === '/agent/release-tab'), false);
+  });
+});
+
 test('CLI chats count libera claim explicita sem imprimir JSON extra', async () => {
   await withServer((req, res, url) => {
     if (url.pathname === '/agent/ready') {

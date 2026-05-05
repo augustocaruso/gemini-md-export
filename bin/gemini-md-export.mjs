@@ -1559,6 +1559,7 @@ const renderLinesForCountWait = (ui, job = {}, tick = 0) => {
   const lines = [
     `${colorize(ui, 'cyan', spinnerFrame(tick))} Buscando fim do historico`,
     foundText,
+    job.claimWarning ? dim(ui, job.claimWarning) : null,
     job.progressMessage ? dim(ui, job.progressMessage) : null,
     details ? dim(ui, details) : null,
   ].filter(Boolean);
@@ -2416,6 +2417,16 @@ const claimCliTabForCount = async (flags = {}, countTimeoutMs) => {
   );
 };
 
+const isRecoverableCountClaimError = (err) => {
+  const text = [err?.message, err?.code, err?.data?.code, err?.data?.error]
+    .filter(Boolean)
+    .join(' ');
+  return /claim-tab|tab_claim_visual_failed|command_timeout|Timeout aguardando resposta/i.test(text);
+};
+
+const countClaimWarningMessage = (err) =>
+  `Indicador visual da aba nao respondeu; continuando a contagem sem ele. (${err?.message || err})`;
+
 const writeStructuredResult = (ui, result, { label = null, includeResultJson = true } = {}) => {
   if (ui.format === 'json') {
     ui.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
@@ -3145,9 +3156,24 @@ const runChats = async (parsed, streams = {}) => {
     60_000,
   );
   let countClaimResult = null;
+  let countClaimWarning = null;
+  let countClaimRecovered = false;
   let releaseFlags = { ...parsed.flags };
   try {
-    countClaimResult = await claimCliTabForCount(parsed.flags, countTimeoutMs);
+    try {
+      countClaimResult = await claimCliTabForCount(parsed.flags, countTimeoutMs);
+    } catch (err) {
+      if (!isRecoverableCountClaimError(err)) throw err;
+      countClaimRecovered = true;
+      countClaimWarning = countClaimWarningMessage(err);
+      if (ui.format === 'plain') {
+        ui.stdout.write(`${countClaimWarning}\n`);
+      } else if (ui.format === 'jsonl') {
+        ui.stdout.write(
+          `${JSON.stringify({ type: 'count_claim_recovered', warning: countClaimWarning })}\n`,
+        );
+      }
+    }
     if (countClaimResult?.claim?.claimId) {
       releaseFlags = {
         ...releaseFlags,
@@ -3175,7 +3201,7 @@ const runChats = async (parsed, streams = {}) => {
             refresh: parsed.flags.refresh,
             ...countLoadMoreParams,
             loadMoreTimeoutMs: remainingMs,
-            autoClaim: requestClaimId ? false : undefined,
+            autoClaim: requestClaimId || countClaimRecovered ? false : undefined,
             autoReleaseClaim: requestClaimId ? false : parsed.flags.autoReleaseClaim,
             clientId: parsed.flags.clientId,
             tabId: requestTabId,
@@ -3214,7 +3240,10 @@ const runChats = async (parsed, streams = {}) => {
             clientId: parsed.flags.clientId,
             tabId: requestTabId,
             claimId: requestClaimId,
-          }),
+          }).then((probe) => ({
+            ...(probe || {}),
+            claimWarning: countClaimWarning,
+          })),
       },
       requestCountUntilSettled,
     );
