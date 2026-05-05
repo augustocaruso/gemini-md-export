@@ -5991,7 +5991,10 @@
 
   const computeProgressMilestone = (progress) => {
     const total = Math.max(progress?.total || 1, 1);
-    const raw = Number(progress?.position ?? progress?.current ?? progress?.completed ?? 0);
+    const status = progress?.status || '';
+    const raw = (status === 'completed' || status === 'completed_with_errors')
+      ? total
+      : Number(progress?.current ?? progress?.completed ?? 0);
     const current = Math.max(0, Math.min(Number.isFinite(raw) ? raw : 0, total));
     const base = (current / total) * 100;
     const next = (Math.min(current + 1, total) / total) * 100;
@@ -6018,6 +6021,14 @@
     const status = progress?.status || '';
     if (status === 'completed' || status === 'completed_with_errors') return total;
     const raw = Number(progress?.position ?? progress?.current ?? 0);
+    return Math.max(0, Math.min(Number.isFinite(raw) ? raw : 0, total));
+  };
+
+  const progressBarCurrent = (progress) => {
+    const total = Math.max(progress?.total || 1, 1);
+    const status = progress?.status || '';
+    if (status === 'completed' || status === 'completed_with_errors') return total;
+    const raw = Number(progress?.current ?? progress?.completed ?? 0);
     return Math.max(0, Math.min(Number.isFinite(raw) ? raw : 0, total));
   };
 
@@ -6161,7 +6172,7 @@
       state.progress.displayPercent = display;
       barEl.style.width = `${display}%`;
       // Quando bate o total, marca como pronto pra parar o shimmer.
-      if (progressDisplayCurrent(state.progress) >= state.progress.total) {
+      if (progressBarCurrent(state.progress) >= state.progress.total) {
         dock.classList.add('gm-dock-done');
       } else {
         dock.classList.remove('gm-dock-done');
@@ -6258,6 +6269,9 @@
 
   const serializeMcpProgress = (jobProgress) => {
     if (!jobProgress || typeof jobProgress !== 'object') return null;
+    const completedRaw = Number(jobProgress.completed ?? 0);
+    const completed = Math.max(0, Number.isFinite(completedRaw) ? completedRaw : 0);
+    const currentRaw = Number(jobProgress.current ?? completed);
     return {
       source: 'mcp',
       jobId: jobProgress.jobId || null,
@@ -6265,9 +6279,9 @@
       kind: jobProgress.kind || null,
       workflow: jobProgress.workflow || jobProgress.kind || null,
       total: Math.max(jobProgress.total || 1, 1),
-      current: Math.max(0, Number(jobProgress.position ?? jobProgress.current ?? 0)),
+      current: Math.max(0, Number.isFinite(currentRaw) ? currentRaw : completed),
       position: jobProgress.position ?? null,
-      completed: Math.max(0, Number(jobProgress.completed ?? 0)),
+      completed,
       title: jobProgress.title || null,
       chatId: jobProgress.chatId || null,
       currentChatId: jobProgress.currentChatId || jobProgress.chatId || null,
@@ -6377,29 +6391,31 @@
   };
 
   const beginMcpProgress = (jobProgress) => {
+    const snapshot = serializeMcpProgress(jobProgress);
+    if (!snapshot) return;
     state.mcpProgressActive = true;
-    state.mcpProgressJobId = jobProgress.jobId || null;
+    state.mcpProgressJobId = snapshot.jobId || null;
     state.mcpProgressLastSeenAt = Date.now();
     state.isExporting = true;
     state.exportSource = 'mcp';
     state.progress = {
-      total: Math.max(jobProgress.total || 1, 1),
-      current: jobProgress.current || 0,
-      label: jobProgress.label || 'Preparando...',
-      kind: jobProgress.kind || null,
-      workflow: jobProgress.workflow || jobProgress.kind || null,
-      status: jobProgress.status || 'running',
-      phase: jobProgress.phase || 'preparing',
-      position: jobProgress.position ?? null,
-      completed: jobProgress.completed ?? 0,
-      title: jobProgress.title || null,
-      chatId: jobProgress.chatId || null,
-      currentChatId: jobProgress.currentChatId || jobProgress.chatId || null,
-      errorCount: jobProgress.errorCount || 0,
+      total: snapshot.total,
+      current: snapshot.current || 0,
+      label: snapshot.label || 'Preparando...',
+      kind: snapshot.kind || null,
+      workflow: snapshot.workflow || snapshot.kind || null,
+      status: snapshot.status || 'running',
+      phase: snapshot.phase || 'preparing',
+      position: snapshot.position ?? null,
+      completed: snapshot.completed ?? 0,
+      title: snapshot.title || null,
+      chatId: snapshot.chatId || null,
+      currentChatId: snapshot.currentChatId || snapshot.chatId || null,
+      errorCount: snapshot.errorCount || 0,
       startedAt: Date.now(),
       displayPercent: 0,
     };
-    saveMcpProgressSnapshot(jobProgress);
+    saveMcpProgressSnapshot(snapshot);
     updateProgressDock();
     startProgressCreep();
   };
@@ -6446,22 +6462,24 @@
       beginMcpProgress(jobProgress);
     } else {
       if (jobProgress.jobId && jobProgress.jobId !== state.mcpProgressJobId) {
+        const snapshot = serializeMcpProgress(jobProgress);
+        if (!snapshot) return;
         // Novo job começou — reinicia o dock para refletir totais novos.
-        state.mcpProgressJobId = jobProgress.jobId;
+        state.mcpProgressJobId = snapshot.jobId;
         state.progress = {
-          total: Math.max(jobProgress.total || 1, 1),
-          current: jobProgress.current || 0,
-          label: jobProgress.label || 'Preparando...',
-          kind: jobProgress.kind || null,
-          workflow: jobProgress.workflow || jobProgress.kind || null,
-          status: jobProgress.status || 'running',
-          phase: jobProgress.phase || 'preparing',
-          position: jobProgress.position ?? null,
-          completed: jobProgress.completed ?? 0,
-          title: jobProgress.title || null,
-          chatId: jobProgress.chatId || null,
-          currentChatId: jobProgress.currentChatId || jobProgress.chatId || null,
-          errorCount: jobProgress.errorCount || 0,
+          total: snapshot.total,
+          current: snapshot.current || 0,
+          label: snapshot.label || 'Preparando...',
+          kind: snapshot.kind || null,
+          workflow: snapshot.workflow || snapshot.kind || null,
+          status: snapshot.status || 'running',
+          phase: snapshot.phase || 'preparing',
+          position: snapshot.position ?? null,
+          completed: snapshot.completed ?? 0,
+          title: snapshot.title || null,
+          chatId: snapshot.chatId || null,
+          currentChatId: snapshot.currentChatId || snapshot.chatId || null,
+          errorCount: snapshot.errorCount || 0,
           startedAt: Date.now(),
           displayPercent: 0,
         };
@@ -6471,7 +6489,9 @@
           ...state.progress,
         });
       } else {
-        updateExportProgress(mergeMcpProgressForCurrentJob(jobProgress));
+        const snapshot = serializeMcpProgress(jobProgress);
+        if (!snapshot) return;
+        updateExportProgress(mergeMcpProgressForCurrentJob(snapshot));
         saveMcpProgressSnapshot({
           source: 'mcp',
           jobId: state.mcpProgressJobId,
@@ -8552,6 +8572,7 @@
           title: document.getElementById(`${PROGRESS_DOCK_ID}-title`)?.textContent || '',
           count: document.getElementById(`${PROGRESS_DOCK_ID}-count`)?.textContent || '',
           label: document.getElementById(`${PROGRESS_DOCK_ID}-label`)?.textContent || '',
+          barWidth: document.getElementById(`${PROGRESS_DOCK_ID}-bar`)?.style.width || '',
         };
       },
       destination: () => ({

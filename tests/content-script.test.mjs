@@ -530,7 +530,7 @@ test('content script renderiza progresso selecionado sem jargão tecnico', { tim
     status: 'running',
     phase: 'exporting',
     total: 10,
-    current: 1,
+    current: 0,
     position: 1,
     completed: 0,
     currentChatId: 'f4b75e8dfa21cdc8',
@@ -540,6 +540,7 @@ test('content script renderiza progresso selecionado sem jargão tecnico', { tim
   assert.equal(first.title, 'Baixando conversas');
   assert.equal(first.count, '1 de 10');
   assert.equal(first.label, 'Baixando conversa selecionada (1 de 10): f4b75e8dfa21cdc8');
+  assert.equal(first.barWidth, '0%');
   assert.doesNotMatch(first.label, /MCP|reexportando/);
 
   const second = debug.showProgressForDebug({
@@ -549,7 +550,7 @@ test('content script renderiza progresso selecionado sem jargão tecnico', { tim
     status: 'running',
     phase: 'exporting',
     total: 10,
-    current: 2,
+    current: 1,
     position: 2,
     completed: 1,
     currentChatId: 'e0526fad9838e81f',
@@ -563,6 +564,7 @@ test('content script renderiza progresso selecionado sem jargão tecnico', { tim
     second.label,
     'Baixando conversa selecionada (2 de 10): Usando OpenCode com ChatGPT Plus',
   );
+  assert.equal(second.barWidth, '10%');
   assert.doesNotMatch(second.label, /MCP|reexportando/);
 
   const stale = debug.showProgressForDebug({
@@ -584,6 +586,7 @@ test('content script renderiza progresso selecionado sem jargão tecnico', { tim
     stale.label,
     'Baixando conversa selecionada (2 de 10): Usando OpenCode com ChatGPT Plus',
   );
+  assert.equal(stale.barWidth, '10%');
 
   const third = debug.showProgressForDebug({
     jobId: 'job-ux-progress',
@@ -592,7 +595,7 @@ test('content script renderiza progresso selecionado sem jargão tecnico', { tim
     status: 'running',
     phase: 'exporting',
     total: 10,
-    current: 3,
+    current: 2,
     position: 3,
     completed: 2,
     currentChatId: '7aeb5c21b12a2137',
@@ -601,6 +604,44 @@ test('content script renderiza progresso selecionado sem jargão tecnico', { tim
 
   assert.equal(third.count, '3 de 10 · 1 erro');
   assert.equal(third.label, 'Baixando conversa selecionada (3 de 10): Configuração conjunta');
+  assert.equal(third.barWidth, '20%');
+
+  const lastStarted = debug.showProgressForDebug({
+    jobId: 'job-ux-progress-last',
+    kind: 'direct-chats-export',
+    workflow: 'direct-reexport',
+    status: 'running',
+    phase: 'exporting',
+    total: 10,
+    current: 9,
+    position: 10,
+    completed: 9,
+    currentChatId: 'cc95230567196da7',
+    title: 'Novas Funções Multimodais do Gemini',
+  });
+
+  assert.equal(lastStarted.count, '10 de 10');
+  assert.equal(
+    lastStarted.label,
+    'Baixando conversa selecionada (10 de 10): Novas Funções Multimodais do Gemini',
+  );
+  assert.equal(lastStarted.barWidth, '90%');
+
+  const done = debug.showProgressForDebug({
+    jobId: 'job-ux-progress-last',
+    kind: 'direct-chats-export',
+    workflow: 'direct-reexport',
+    status: 'completed',
+    phase: 'done',
+    total: 10,
+    current: 10,
+    position: 10,
+    completed: 10,
+  });
+
+  assert.equal(done.count, '10 de 10');
+  assert.equal(done.label, 'Concluído');
+  assert.equal(done.barWidth, '100%');
   assert.deepEqual(runtimeErrors, []);
 
   window.close();

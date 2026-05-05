@@ -4204,6 +4204,47 @@ const loadRecentChatsResumeCheckpoint = (filePath) => {
   };
 };
 
+const loadDirectChatsResumeCheckpoint = (filePath) => {
+  const reportFile = normalizeReportPath(filePath);
+  if (!reportFile) return null;
+  const report = readJsonFile(reportFile);
+  if (report?.job?.type && report.job.type !== 'direct-chats-export') {
+    throw new Error(`Relatório não é de reexportação direta: ${reportFile}`);
+  }
+
+  const previousSuccesses = compactReportItems(report.successes, 'success');
+  const previousFailures = compactReportItems(report.failures, 'failure');
+  const completedChatIds = new Set();
+  for (const item of previousSuccesses) {
+    if (item.chatId) completedChatIds.add(item.chatId);
+  }
+
+  return {
+    enabled: true,
+    reportFile,
+    reportFilename: basename(reportFile),
+    previousJobId: report?.job?.jobId || null,
+    previousStatus: report?.job?.status || null,
+    previousUpdatedAt: report?.job?.updatedAt || null,
+    previousFinishedAt: report?.job?.finishedAt || null,
+    previousOutputDir: report?.outputDir || null,
+    previousSelectionFile: report?.selectionFile || null,
+    previousSuccesses,
+    previousFailures,
+    completedChatIds,
+    completedCount: completedChatIds.size,
+    previousSuccessCount: previousSuccesses.length,
+    previousFailureCount: previousFailures.length,
+    previousCounters: {
+      requested: report.requested ?? null,
+      expectedCount: report.expectedCount ?? null,
+      successCount: report.successCount ?? previousSuccesses.length,
+      failureCount: report.failureCount ?? previousFailures.length,
+      completed: report.completed ?? null,
+    },
+  };
+};
+
 const writeExportPayload = (payload, { outputDir } = {}) => {
   if (!payload?.content && !payload?.contentBase64) {
     throw new Error('A extensão não retornou conteúdo para salvar.');
@@ -6875,6 +6916,34 @@ const buildDirectChatsExportReport = (job, client, successes, failures) => ({
     sourcePath: item.request?.sourcePath || null,
     url: item.url,
   })),
+  pendingItems: Array.isArray(job.pendingItems)
+    ? job.pendingItems.map((item) => ({
+        index: item.request?.originalIndex ?? null,
+        chatId: item.chatId,
+        title: item.title || null,
+        sourcePath: item.request?.sourcePath || null,
+        url: item.url,
+      }))
+    : [],
+  resume: job.resume
+    ? {
+        enabled: true,
+        reportFile: job.resume.reportFile,
+        reportFilename: job.resume.reportFilename,
+        previousJobId: job.resume.previousJobId,
+        previousStatus: job.resume.previousStatus,
+        previousUpdatedAt: job.resume.previousUpdatedAt,
+        previousFinishedAt: job.resume.previousFinishedAt,
+        previousSelectionFile: job.resume.previousSelectionFile,
+        previousSuccessCount: job.resume.previousSuccessCount,
+        previousFailureCount: job.resume.previousFailureCount,
+        previousCounters: job.resume.previousCounters,
+        completedChatIds: [...job.resume.completedChatIds],
+        previousFailures: job.resume.previousFailures,
+        resumedCompletedCount: job.resumedCompletedCount || 0,
+        remainingAfterResume: job.remainingAfterResume ?? null,
+      }
+    : { enabled: false },
   successes,
   failures,
 });
@@ -6897,10 +6966,8 @@ const broadcastRecentChatsJobProgress = (job, client, patch = {}) => {
   if (!client) return;
   const total = patch.total ?? Math.max(job.requested || 0, job.completed || 0, 1);
   const position = patch.position ?? job.current?.index ?? null;
-  const current =
-    patch.current ??
-    (job.phase === 'exporting' && position ? position : job.completed ?? 0);
   const completed = patch.completed ?? job.completed ?? 0;
+  const current = patch.current ?? completed;
   const errorCount = patch.errorCount ?? job.failureCount ?? 0;
   const status = patch.status ?? job.status ?? 'running';
   const phase = patch.phase ?? job.phase ?? null;
@@ -6932,10 +6999,8 @@ const broadcastDirectChatsJobProgress = (job, client, patch = {}) => {
   if (!client) return;
   const total = patch.total ?? Math.max(job.requested || 0, job.completed || 0, 1);
   const position = patch.position ?? job.current?.index ?? null;
-  const current =
-    patch.current ??
-    (job.phase === 'exporting' && position ? position : job.completed ?? 0);
   const completed = patch.completed ?? job.completed ?? 0;
+  const current = patch.current ?? completed;
   const errorCount = patch.errorCount ?? job.failureCount ?? 0;
   const status = patch.status ?? job.status ?? 'running';
   const phase = patch.phase ?? job.phase ?? null;
@@ -7623,7 +7688,7 @@ const startRecentChatsExportJob = (client, args = {}) => {
 };
 
 const runDirectChatsExportJob = async (job, client, args = {}) => {
-  const successes = [];
+  const successes = Array.isArray(job.resumedSuccesses) ? [...job.resumedSuccesses] : [];
   const failures = [];
   try {
     job.phase = 'exporting';
@@ -7632,15 +7697,20 @@ const runDirectChatsExportJob = async (job, client, args = {}) => {
     broadcastDirectChatsJobProgress(job, client);
 
     const exportingStartedAt = Date.now();
-    for (let i = 0; i < job.items.length; i += 1) {
+    const pendingItems = Array.isArray(job.pendingItems) ? job.pendingItems : job.items;
+    const resumedCompletedCount = Math.max(0, Number(job.resumedCompletedCount || 0));
+    for (let i = 0; i < pendingItems.length; i += 1) {
       if (job.cancelRequested) {
         job.status = 'cancelled';
         job.phase = 'cancelled';
         break;
       }
 
-      const conversation = job.items[i];
-      const index = i + 1;
+      const conversation = pendingItems[i];
+      const index = Math.max(
+        1,
+        Number(conversation.request?.originalIndex || resumedCompletedCount + i + 1),
+      );
       job.current = {
         index,
         title: conversation.title || null,
@@ -7730,8 +7800,8 @@ const runDirectChatsExportJob = async (job, client, args = {}) => {
           error: err.message,
         });
       } finally {
-        job.completed = i + 1;
-        const hasNext = !job.cancelRequested && i < job.items.length - 1;
+        job.completed = Math.min(job.requested, resumedCompletedCount + i + 1);
+        const hasNext = !job.cancelRequested && i < pendingItems.length - 1;
         const completionLabel = job.cancelRequested
           ? exportJobProgressMessage(job)
           : `${job.completed}/${job.requested} conversa${job.completed === 1 ? ' baixada' : ' baixadas'}.`;
@@ -7745,7 +7815,7 @@ const runDirectChatsExportJob = async (job, client, args = {}) => {
         });
       }
 
-      if (!job.cancelRequested && job.delayMs > 0 && i < job.items.length - 1) {
+      if (!job.cancelRequested && job.delayMs > 0 && i < pendingItems.length - 1) {
         await sleep(job.delayMs);
       }
     }
@@ -7820,7 +7890,18 @@ const startDirectChatsExportJob = (client, args = {}) => {
 
   const selection = normalizeDirectReexportSelection(args);
   const items = selection.items;
-  const outputDir = resolveOutputDir(args.outputDir);
+  const resumeReportFile = args.resumeReportFile || args.reportFile || null;
+  const resume = resumeReportFile ? loadDirectChatsResumeCheckpoint(resumeReportFile) : null;
+  const selectionChatIds = new Set(items.map((item) => item.chatId));
+  const resumedSuccesses = resume
+    ? resume.previousSuccesses.filter((item) => selectionChatIds.has(item.chatId))
+    : [];
+  const resumedCompletedChatIds = new Set(resumedSuccesses.map((item) => item.chatId));
+  const pendingItems = resumedCompletedChatIds.size
+    ? items.filter((item) => !resumedCompletedChatIds.has(item.chatId))
+    : items;
+  const resumedCompletedCount = resumedCompletedChatIds.size;
+  const outputDir = resolveOutputDir(args.outputDir || resume?.previousOutputDir);
   const delayMs = Math.max(
     0,
     Math.min(30_000, Number(args.delayMs ?? DIRECT_REEXPORT_DELAY_MS)),
@@ -7840,6 +7921,7 @@ const startDirectChatsExportJob = (client, args = {}) => {
     updatedAt: new Date().toISOString(),
     finishedAt: null,
     items,
+    pendingItems,
     inputCount: selection.inputCount,
     expectedCount: selection.expectedCount,
     uniqueCount: selection.uniqueCount,
@@ -7847,8 +7929,8 @@ const startDirectChatsExportJob = (client, args = {}) => {
     duplicateChatIds: selection.duplicateChatIds.slice(0, 50),
     selectionFile: selection.selectionFile,
     requested: items.length,
-    completed: 0,
-    successCount: 0,
+    completed: resumedCompletedCount,
+    successCount: resumedSuccesses.length,
     failureCount: 0,
     cancelRequested: false,
     cancelledAt: null,
@@ -7857,8 +7939,12 @@ const startDirectChatsExportJob = (client, args = {}) => {
     reportFilename: null,
     error: null,
     delayMs,
+    resume,
+    resumedSuccesses,
+    resumedCompletedCount,
+    remainingAfterResume: pendingItems.length,
     metrics: createExportJobMetrics(),
-    recentSuccesses: [],
+    recentSuccesses: resumedSuccesses.slice(-10),
     failures: [],
   };
   createExportJobTrace(job, { purpose: 'direct-reexport' });
@@ -9895,7 +9981,7 @@ const buildCliExportCommand = (action, args = {}) => {
     if (!vaultDir) missingArguments.push('vaultDir');
   } else if (action === 'reexport') {
     const chatIds = chatIdsFromExportArgs(args);
-    commandArgs.push('export', 'reexport');
+    commandArgs.push('export', 'selected');
     if (args.selectionFile) commandArgs.push('--selection-file', args.selectionFile);
     else for (const chatId of chatIds) commandArgs.push('--chat-id', chatId);
     if (!args.selectionFile && chatIds.length === 0) missingArguments.push('chatId ou selectionFile');
@@ -9949,7 +10035,7 @@ const cliFirstExportResult = (action, args = {}) => {
     code: 'use_cli',
     action,
     reason:
-      'Export/sync/reexport/notebook sao jobs longos. Na arquitetura CLI-first, execute a CLI diretamente para ter progresso, RESULT_JSON e lifecycle correto da bridge.',
+      'Export/sync/download de selecionadas/notebook sao jobs longos. Na arquitetura CLI-first, execute a CLI diretamente para ter progresso, RESULT_JSON e lifecycle correto da bridge.',
     cli: cliCommand,
     command: cliCommand.command,
     args: cliCommand.args,
@@ -10021,7 +10107,7 @@ const buildCliTabsCommand = (action, args = {}) => {
 
 const buildCliReexportCommand = (args = {}) => {
   const bridgeUrl = `http://${cli.host}:${cli.port}`;
-  const commandArgs = [CLI_BIN_PATH, 'export', 'reexport'];
+  const commandArgs = [CLI_BIN_PATH, 'export', 'selected'];
   for (const chatId of chatIdsFromExportArgs(args)) commandArgs.push('--chat-id', chatId);
   addCliFlag(commandArgs, '--output-dir', args.outputDir);
   addCliFlag(commandArgs, '--client-id', args.clientId);

@@ -18,28 +18,32 @@ Contrato:
 - Preferencia: use o binario CLI da extensao, porque ele mostra progresso no
   terminal, consegue iniciar a bridge em modo `bridge-only` quando ela esta
   fora, e evita polling MCP no chat.
+- Em sessao interativa do Gemini CLI, rode qualquer comando humano da CLI da
+  extensao com `--tui` por padrao, mesmo que o usuario nao peça barra de
+  progresso. Use `--tui --result-json` quando voce precisar parsear
+  `RESULT_JSON` sem abandonar a TUI. Use `--plain` somente quando a saida
+  estiver capturada/nao interativa ou outro programa precisar de saida sem TUI.
 - Nao rode uma sequencia de `gemini_ready`/`gemini_tabs` antes da CLI. Isso
   polui a UI com JSON e duplica o readiness que a CLI ja faz.
-- Se o usuario pediu visualmente uma UI/barra de progresso, execute o CLI com
-  `--tui` via shell interativo/pty quando disponivel. So prometa barra visivel
-  quando o executor realmente tiver TTY/PTY; em shell capturado a CLI cai para
-  `--plain` e avisa:
+- Para o sync principal, execute o CLI com `--tui` via shell interativo/pty
+  quando disponivel. So prometa barra visivel quando o executor realmente tiver
+  TTY/PTY; em shell capturado a CLI cai para `--plain` e avisa:
   macOS/Linux:
   `node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" sync "<vaultDir>" --tui`
   Windows/PowerShell:
   `node "$env:USERPROFILE\\.gemini\\extensions\\gemini-md-export\\bin\\gemini-md-export.mjs" sync "<vaultDir>" --tui`
-- Se voce for ler o resultado como agente, use `--plain` em vez de `--tui`; ele
-  termina com `RESULT_JSON`.
+- Se voce for ler o resultado como agente em terminal interativo, use
+  `--tui --result-json`; em shell capturado/nao interativo, use `--plain`.
 - Para importar somente ausentes de forma explícita, use `export missing
-  "<vaultDir>" --plain`; para retomar relatório, use `export resume
-  "<reportFile>" --plain`.
+  "<vaultDir>" --tui`; para retomar relatório, use `export resume
+  "<reportFile>" --tui`.
 - Para descobrir flags/contrato antes de rodar, chame
   `node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" sync --help`
   (ou o caminho equivalente no Windows).
 - Se a CLI disser que ha varias abas Gemini, resolva ainda pela CLI:
-  `node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" tabs list --plain`
-  e depois `tabs claim --index <n> --plain`; repita o sync com
-  `--claim-id <claimId>`.
+  `node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" tabs list --tui --result-json`
+  e depois `tabs claim --index <n> --tui --result-json`; repita o sync com
+  `--claim-id <claimId> --tui`.
 - Se voce chamar `gemini_export` por engano, ele deve responder
   `code: "use_cli"` com o comando exato. Rode esse comando no shell; nao espere
   que o MCP inicie um job longo escondido.

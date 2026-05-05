@@ -235,23 +235,28 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.match(context, /gemini-tabs-and-browser/);
   assert.match(context, /gemini-chat-inventory/);
   assert.match(context, /gemini-md-export telemetry/);
-  assert.match(context, /chats list --limit 10 --save-selection/);
-  assert.match(context, /export reexport --selection-file/);
+  assert.match(context, /with `--tui` by default for every human-facing command/);
+  assert.match(context, /Add `--result-json`/);
+  assert.match(context, /chats list --limit 10 --save-selection --tui --result-json/);
+  assert.match(context, /export selected --selection-file/);
   assert.match(context, /--expected-count/);
-  assert.match(context, /job list --active --plain/);
+  assert.match(context, /job list --active --tui --result-json/);
   assert.match(context, /detail: "full"/);
   assert.match(context, /code: "tool_renamed"/);
   assert.match(context, /code: "use_cli"/);
   assert.doesNotMatch(context, /gemini_export_recent_chats/);
   assert.doesNotMatch(context, /gemini_download_chat/);
   assert.match(chatInventorySkill, /chats list --limit/);
-  assert.match(chatInventorySkill, /export reexport --selection-file/);
+  assert.match(chatInventorySkill, /--tui --result-json/);
+  assert.match(chatInventorySkill, /export selected --selection-file/);
   assert.match(chatInventorySkill, /--expected-count/);
-  assert.match(chatInventorySkill, /job list --active --plain/);
+  assert.match(chatInventorySkill, /job list --active --tui --result-json/);
   assert.doesNotMatch(chatInventorySkill, /export recent --limit/);
-  assert.match(vaultSyncSkill, /export reexport --selection-file/);
+  assert.match(vaultSyncSkill, /export selected --selection-file/);
+  assert.match(vaultSyncSkill, /every human-facing bundled CLI command\s+with `--tui`/);
+  assert.match(vaultSyncSkill, /Do not use `--plain` just\s+because a command is short/);
   assert.match(vaultSyncSkill, /--expected-count/);
-  assert.match(vaultSyncSkill, /job list --active --plain/);
+  assert.match(vaultSyncSkill, /job list --active --tui --result-json/);
 });
 
 test('auditor coleta todos os links Gemini de origem em nota wiki consolidada', () => {

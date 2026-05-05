@@ -110,6 +110,7 @@ test('MCP publico bloqueia contagem/exportacao por tools ruidosas sem depender d
   assert.match(source, /use_cli_only/);
   assert.match(source, /buildCliCountCommand/);
   assert.match(source, /buildCliReexportCommand/);
+  assert.match(source, /const commandArgs = \[CLI_BIN_PATH, 'export', 'selected'\]/);
   assert.match(source, /name: 'gemini_job'[\s\S]*?enum: \['list', 'status', 'cancel'\]/);
   assert.match(source, /'gemini_export_job_list'/);
   const countCommandStart = source.indexOf('const buildCliCountCommand');

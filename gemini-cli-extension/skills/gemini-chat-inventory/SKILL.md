@@ -25,7 +25,7 @@ repair, notebook export, artifact capture, or bridge/root-cause diagnostics.
 For "quantos chats/conversas ao todo?", run the CLI directly:
 
 ```bash
-node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" chats count --plain
+node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" chats count --tui --result-json
 ```
 
 Report an exact total only when the CLI result confirms `totalKnown=true` or
@@ -46,7 +46,7 @@ Prefer the CLI snapshot flow when shell access exists, especially if the user
 may follow with "baixe essas":
 
 ```bash
-node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" chats list --limit 25 --save-selection --plain
+node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" chats list --limit 25 --save-selection --tui --result-json
 ```
 
 This is the Playwright-style loop: list/snapshot first, act later by stable
@@ -76,8 +76,9 @@ paste large JSON. Include the next page hint when available, for example:
 
 If the list cache is empty or stale and the user asked for current data, repeat
 with `refresh: true`. If the tool reports multiple Gemini tabs, stay in CLI tab
-selection flow (`tabs list --plain`, `tabs claim --index <n> --plain`) before
-retrying the small list with the selected tab/claim.
+selection flow (`tabs list --tui --result-json`,
+`tabs claim --index <n> --tui --result-json`) before retrying the small list
+with the selected tab/claim.
 
 ## Follow-up Downloads From A Listed Page
 
@@ -89,11 +90,11 @@ changed and the wrong chats can be downloaded.
 Use the saved selection manifest from `chats list --save-selection`:
 
 ```bash
-node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" export reexport --selection-file "$HOME/.gemini-md-export/selections/latest.json" --expected-count 10 --plain --timeout-ms 1800000
+node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" export selected --selection-file "$HOME/.gemini-md-export/selections/latest.json" --expected-count 10 --tui --timeout-ms 1800000
 ```
 
 If no selection file exists because the list came from an older tool result,
-use `export reexport --chat-id ...` only with every listed `chatId` copied
+use `export selected --chat-id ...` only with every listed `chatId` copied
 explicitly and add `--expected-count N`.
 
 Set the shell/tool timeout higher than the CLI timeout so the CLI has time to
@@ -102,13 +103,13 @@ interruption happened and you did not see a terminal `RESULT_JSON`, do not start
 another export immediately. First run:
 
 ```bash
-node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" job list --active --plain
+node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" job list --active --tui --result-json
 ```
 
 Then use the printed `job status ...` or `job cancel ...` command for the active
-job before retrying. Prefer `job cancel <jobId> --wait --plain` when you need
-to clear a stuck job; do not run `kill`, reload, cleanup, or a new export as a
-shortcut.
+job before retrying. Prefer `job cancel <jobId> --wait --tui --result-json`
+when you need to clear a stuck job; do not run `kill`, reload, cleanup, or a
+new export as a shortcut.
 
 When the target browser is Dia, keep the same CLI flow and add `--browser dia`
 if the profile is not auto-detected.

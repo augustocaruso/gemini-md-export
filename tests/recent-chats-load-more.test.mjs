@@ -460,6 +460,35 @@ test('reexport de chatIds conhecidos roda como job em background', () => {
   assert.match(source, /url\.pathname === '\/agent\/reexport-chats'/);
 });
 
+test('reexport direto retoma pelo relatório sem baixar tudo de novo', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const jobBlock = source.match(
+    /const runDirectChatsExportJob = async[\s\S]*?\nconst startDirectChatsExportJob/,
+  )?.[0];
+  const startBlock = source.match(
+    /const startDirectChatsExportJob = \(client, args = \{\}\) =>[\s\S]*?\nconst downloadNotebookChatForClient/,
+  )?.[0];
+  const endpointBlock = source.match(
+    /url\.pathname === '\/agent\/reexport-chats'[\s\S]*?\n  if \(req\.method === 'GET' && url\.pathname === '\/agent\/export-jobs'\)/,
+  )?.[0];
+  assert.ok(jobBlock, 'runDirectChatsExportJob deve existir');
+  assert.ok(startBlock, 'startDirectChatsExportJob deve existir');
+  assert.ok(endpointBlock, 'endpoint de reexport deve existir');
+  assert.match(source, /const loadDirectChatsResumeCheckpoint = \(filePath\) =>/);
+  assert.match(source, /report\.job\.type !== 'direct-chats-export'/);
+  assert.match(startBlock, /const resumeReportFile = args\.resumeReportFile \|\| args\.reportFile/);
+  assert.match(startBlock, /loadDirectChatsResumeCheckpoint\(resumeReportFile\)/);
+  assert.match(startBlock, /const resumedCompletedChatIds = new Set/);
+  assert.match(startBlock, /items\.filter\(\(item\) => !resumedCompletedChatIds\.has\(item\.chatId\)\)/);
+  assert.match(startBlock, /pendingItems,/);
+  assert.match(startBlock, /completed: resumedCompletedCount/);
+  assert.match(jobBlock, /const successes = Array\.isArray\(job\.resumedSuccesses\)/);
+  assert.match(jobBlock, /const pendingItems = Array\.isArray\(job\.pendingItems\)/);
+  assert.match(jobBlock, /for \(let i = 0; i < pendingItems\.length; i \+= 1\)/);
+  assert.match(jobBlock, /job\.completed = Math\.min\(job\.requested, resumedCompletedCount \+ i \+ 1\)/);
+  assert.match(endpointBlock, /\.\.\.bodySelector/);
+});
+
 test('cancelamento preso vira terminal depois da janela de seguranca', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   assert.match(source, /EXPORT_CANCEL_REQUEST_STALE_MS/);
@@ -478,6 +507,7 @@ test('progresso visual de reexport selecionado usa linguagem humana', () => {
   assert.ok(block, 'broadcastDirectChatsJobProgress deve existir');
   assert.match(block, /Baixando conversa selecionada/);
   assert.match(block, /Preparando conversas selecionadas/);
+  assert.match(block, /const current = patch\.current \?\? completed/);
   assert.match(block, /workflow:\s*'direct-reexport'/);
   assert.doesNotMatch(block, /MCP reexportando/);
   assert.doesNotMatch(block, /reexportando/);

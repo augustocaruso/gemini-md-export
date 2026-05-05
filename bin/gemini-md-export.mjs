@@ -84,7 +84,7 @@ const outputModeHelp = () => [
   '  --plain   Linhas humanas estaveis, sem ANSI.',
   '  --json    JSON final puro, sem texto humano.',
   '  --jsonl   Eventos JSONL durante o progresso.',
-  '  --result-json  Acrescenta RESULT_JSON no --plain quando explicitamente necessario.',
+  '  --result-json  Acrescenta RESULT_JSON nos modos humanos quando necessario.',
 ];
 
 const exitCodeHelp = () => [
@@ -130,10 +130,10 @@ const jobOptionHelp = () => [
   '  --limit <n>                  Alias de --max-chats.',
   '  --batch-size <n>             Tamanho de lote do export.',
   '  --start-index <n>            Primeira posicao para export notebook/recent.',
-  '  --chat-id <id>               Chat ID para export reexport; pode repetir.',
+  '  --chat-id <id>               Chat ID para export selected; pode repetir.',
   '  --selection-file <path>      Manifesto criado por chats list --save-selection.',
   '  --expected-count <n>         Falha antes de iniciar se a selecao tiver outra quantidade.',
-  '  --delay-ms <ms>              Pausa entre chats no reexport.',
+  '  --delay-ms <ms>              Pausa entre chats selecionados.',
   '  --max-load-more-rounds <n>   Rodadas maximas para puxar historico.',
   '  --load-more-attempts <n>     Tentativas de scroll por rodada.',
   '  --max-no-growth-rounds <n>   Rodadas sem crescimento antes de desistir.',
@@ -170,7 +170,8 @@ const usage = () =>
     '  export recent         Exporta historico recente carregavel.',
     '  export missing        Exporta apenas chats ausentes no vault.',
     '  export resume         Retoma export por relatorio incremental.',
-    '  export reexport       Reexporta chatIds explicitos.',
+    '  export selected       Baixa uma selecao explicita de conversas.',
+    '  export reexport       Legado: alias antigo de export selected.',
     '  export notebook       Exporta caderno Gemini carregado.',
     '  job list              Lista jobs ativos/recentes.',
     '  job status <jobId>    Consulta progresso de um job.',
@@ -184,23 +185,22 @@ const usage = () =>
     '',
     'Exemplos:',
     '  gemini-md-export sync "/path/to/vault" --tui',
-    '  gemini-md-export sync "/path/to/vault" --plain',
-    '  gemini-md-export doctor --plain',
-    '  gemini-md-export diagnose page "https://gemini.google.com/app/<chatId>" --plain',
-    '  gemini-md-export tabs list --plain',
-    '  gemini-md-export chats count --plain',
-    '  gemini-md-export chats list --limit 10 --save-selection --plain',
-    '  gemini-md-export export missing "/path/to/vault" --plain',
-    '  gemini-md-export job list --active --plain',
+    '  gemini-md-export doctor --tui --result-json',
+    '  gemini-md-export diagnose page "https://gemini.google.com/app/<chatId>" --tui --result-json',
+    '  gemini-md-export tabs list --tui --result-json',
+    '  gemini-md-export chats count --tui --result-json',
+    '  gemini-md-export chats list --limit 10 --save-selection --tui --result-json',
+    '  gemini-md-export export missing "/path/to/vault" --tui',
+    '  gemini-md-export job list --active --tui --result-json',
     '  gemini-md-export job status job-123 --json',
-    '  gemini-md-export job trace job-123 --plain',
-    '  gemini-md-export export reexport --selection-file ~/.gemini-md-export/selections/latest.json --expected-count 10 --plain',
-    '  gemini-md-export telemetry status --plain',
+    '  gemini-md-export job trace job-123 --tui --result-json',
+    '  gemini-md-export export selected --selection-file ~/.gemini-md-export/selections/latest.json --expected-count 10 --tui',
+    '  gemini-md-export telemetry status --tui --result-json',
     '',
     'Dentro do Gemini CLI:',
-    '  - Use TUI se o shell interativo/node-pty estiver ativo.',
+    '  - Use --tui por padrao no shell interativo/node-pty.',
     '  - Para export/sync, rode a CLI direto; evite despejar gemini_ready/gemini_tabs no chat.',
-    '  - Use --plain para saida humana curta; use --json quando precisar parsear dados.',
+    '  - Use --tui --result-json quando precisar ler resultado final; --plain so em shell capturado.',
     '',
     ...outputModeHelp(),
     '',
@@ -240,12 +240,11 @@ const syncHelp = () =>
     '',
     'Exemplos:',
     '  gemini-md-export sync "/path/to/vault" --tui',
-    '  gemini-md-export sync "/path/to/vault" --plain',
-    '  gemini-md-export sync --resume-report-file "/path/to/report.json" --plain',
+    '  gemini-md-export sync --resume-report-file "/path/to/report.json" --tui',
     '',
     'Contrato para agentes:',
-    '  Use --plain e leia a ultima linha RESULT_JSON {...}.',
-    '  Use --json apenas quando precisar de JSON final puro.',
+    '  Em Gemini CLI interativo, use --tui --result-json e leia a ultima linha RESULT_JSON {...}.',
+    '  Use --plain somente em shell capturado; use --json apenas quando precisar de JSON final puro.',
   ].join('\n');
 
 const doctorHelp = () =>
@@ -263,7 +262,7 @@ const doctorHelp = () =>
     ...commonOptionHelp(),
     '',
     'Exemplos:',
-    '  gemini-md-export doctor --plain',
+    '  gemini-md-export doctor --tui --result-json',
     '  gemini-md-export doctor --json',
   ].join('\n');
 
@@ -296,8 +295,8 @@ const diagnoseHelp = () =>
     ...commonOptionHelp(),
     '',
     'Exemplos:',
-    '  gemini-md-export diagnose page "https://gemini.google.com/app/46b61afe42a5956d" --plain',
-    '  gemini-md-export diagnose page "https://gemini.google.com/app/46b61afe42a5956d" --save-html --output-dir ~/Downloads --plain',
+    '  gemini-md-export diagnose page "https://gemini.google.com/app/46b61afe42a5956d" --tui --result-json',
+    '  gemini-md-export diagnose page "https://gemini.google.com/app/46b61afe42a5956d" --save-html --output-dir ~/Downloads --tui --result-json',
     '  gemini-md-export diagnose page --url "https://gemini.google.com/app/46b61afe42a5956d" --json',
   ].join('\n');
 
@@ -341,9 +340,9 @@ const tabsHelp = () =>
     ...commonOptionHelp(),
     '',
     'Exemplos:',
-    '  gemini-md-export tabs list --plain',
-    '  gemini-md-export tabs claim --index 1 --plain',
-    '  gemini-md-export sync "/path/to/vault" --claim-id <claimId> --plain',
+    '  gemini-md-export tabs list --tui --result-json',
+    '  gemini-md-export tabs claim --index 1 --tui --result-json',
+    '  gemini-md-export sync "/path/to/vault" --claim-id <claimId> --tui',
   ].join('\n');
 
 const chatsHelp = () =>
@@ -358,7 +357,7 @@ const chatsHelp = () =>
     'A contagem so e total quando a CLI imprimir "Total confirmado".',
     'Se a CLI imprimir "Contagem parcial", responda "pelo menos N" e nao "ao todo".',
     'Para baixar a pagina listada depois, use --save-selection e passe o manifesto',
-    'para export reexport --selection-file ... --expected-count N.',
+    'para export selected --selection-file ... --expected-count N.',
     '',
     'Opcoes:',
     '  --limit <n>                  Quantidade de conversas na pagina. Default: 25.',
@@ -377,8 +376,8 @@ const chatsHelp = () =>
     ...commonOptionHelp(),
     '',
     'Exemplos:',
-    '  gemini-md-export chats count --plain',
-    '  gemini-md-export chats list --limit 10 --save-selection --plain',
+    '  gemini-md-export chats count --tui --result-json',
+    '  gemini-md-export chats list --limit 10 --save-selection --tui --result-json',
     '  gemini-md-export chats count --json',
   ].join('\n');
 
@@ -390,14 +389,17 @@ const exportHelp = () =>
     '  gemini-md-export export recent [opcoes]',
     '  gemini-md-export export missing <vaultDir> [opcoes]',
     '  gemini-md-export export resume <reportFile> [opcoes]',
-    '  gemini-md-export export reexport --chat-id <id> [opcoes]',
+    '  gemini-md-export export selected --selection-file <manifest.json> --expected-count <n> [opcoes]',
+    '  gemini-md-export export selected --chat-id <id> [opcoes]',
+    '  gemini-md-export export reexport --chat-id <id> [opcoes]  (legado)',
     '  gemini-md-export export notebook [opcoes]',
     '',
     'Subcomandos:',
     '  recent   Exporta historico recente carregavel.',
     '  missing  Cruza Gemini Web com o vault e baixa ausentes.',
     '  resume   Retoma a partir de relatorio incremental.',
-    '  reexport Reexporta chatIds explicitos para staging/reparo.',
+    '  selected Baixa uma selecao explicita de conversas por chatId/manifesto.',
+    '  reexport Legado: alias antigo de selected para staging/reparo.',
     '  notebook Exporta conversas carregadas no caderno Gemini atual.',
     '',
     ...outputModeHelp(),
@@ -464,7 +466,26 @@ const exportReexportHelp = () =>
     '  gemini-md-export export reexport --chat-id <id> [--chat-id <id>] [opcoes]',
     '  gemini-md-export export reexport <id1> <id2> ... [opcoes]',
     '',
-    'Reexporta chatIds explicitos em job de background. Para follow-up de "baixe essas",',
+    'Legado: use export selected para baixar conversas selecionadas.',
+    'Mantido para scripts de reparo/staging que ainda usam o nome antigo.',
+    '',
+    ...outputModeHelp(),
+    '',
+    ...jobOptionHelp(),
+    '',
+    ...commonOptionHelp(),
+  ].join('\n');
+
+const exportSelectedHelp = () =>
+  [
+    'gemini-md-export export selected',
+    '',
+    'Uso:',
+    '  gemini-md-export export selected --selection-file <manifest.json> --expected-count <n> [opcoes]',
+    '  gemini-md-export export selected --chat-id <id> [--chat-id <id>] [opcoes]',
+    '  gemini-md-export export selected <id1> <id2> ... [opcoes]',
+    '',
+    'Baixa conversas selecionadas em job de background. Para follow-up de "baixe essas",',
     'prefira o manifesto criado por chats list --save-selection para evitar ambiguidade.',
     '',
     ...outputModeHelp(),
@@ -511,10 +532,10 @@ const jobHelp = () =>
     ...commonOptionHelp(),
     '',
     'Exemplos:',
-    '  gemini-md-export job list --active --plain',
-    '  gemini-md-export job status job-123 --plain',
-    '  gemini-md-export job cancel job-123 --plain',
-    '  gemini-md-export job trace job-123 --plain',
+    '  gemini-md-export job list --active --tui --result-json',
+    '  gemini-md-export job status job-123 --tui --result-json',
+    '  gemini-md-export job cancel job-123 --tui --result-json',
+    '  gemini-md-export job trace job-123 --tui --result-json',
   ].join('\n');
 
 const jobListHelp = () =>
@@ -669,6 +690,7 @@ const helpForParsed = (parsed) => {
   if (command === 'export' && subcommand === 'recent') return exportRecentHelp();
   if (command === 'export' && subcommand === 'missing') return exportMissingHelp();
   if (command === 'export' && subcommand === 'resume') return exportResumeHelp();
+  if (command === 'export' && subcommand === 'selected') return exportSelectedHelp();
   if (command === 'export' && subcommand === 'reexport') return exportReexportHelp();
   if (command === 'export' && subcommand === 'notebook') return exportNotebookHelp();
   if (command === 'export') return exportHelp();
@@ -1451,9 +1473,9 @@ const renderLinesForJob = (ui, job = {}, tick = 0) => {
     job.traceFile || job.trace?.filePath
       ? `${dim(ui, 'trace')} ${job.traceFile || job.trace?.filePath}`
       : `${dim(ui, 'trace')} compacto/em memoria`,
-    job.jobId ? `${dim(ui, 'status cmd')} gemini-md-export job status ${job.jobId} --plain` : null,
+    job.jobId ? `${dim(ui, 'status cmd')} gemini-md-export job status ${job.jobId} --tui --result-json` : null,
     job.jobId && !TERMINAL_STATUSES.has(job.status)
-      ? `${dim(ui, 'cancelar')} gemini-md-export job cancel ${job.jobId} --plain`
+      ? `${dim(ui, 'cancelar')} gemini-md-export job cancel ${job.jobId} --tui --result-json`
       : null,
   ].filter(Boolean);
 };
@@ -1506,9 +1528,9 @@ const renderLinesForJobList = (result = {}) => {
   ];
   for (const job of jobs) {
     lines.push(`- ${job.jobId || '-'} ${job.status || '-'}${job.phase ? `/${job.phase}` : ''} ${job.type || ''}`.trim());
-    lines.push(`  status: gemini-md-export job status ${job.jobId} --plain`);
+    lines.push(`  status: gemini-md-export job status ${job.jobId} --tui --result-json`);
     if (!TERMINAL_STATUSES.has(job.status)) {
-      lines.push(`  cancelar: gemini-md-export job cancel ${job.jobId} --plain`);
+      lines.push(`  cancelar: gemini-md-export job cancel ${job.jobId} --tui --result-json`);
     }
     if (job.reportFile) lines.push(`  reportFile: ${job.reportFile}`);
     if (job.traceFile) lines.push(`  traceFile: ${job.traceFile}`);
@@ -1869,7 +1891,7 @@ const startExportJob = async (bridgeUrl, kind, flags) => {
       { timeoutMs: 20000 },
     );
   }
-  if (kind === 'reexport') {
+  if (kind === 'selected' || kind === 'reexport') {
     return requestJson(
       bridgeUrl,
       '/agent/reexport-chats',
@@ -2135,8 +2157,8 @@ const announceJobStarted = (ui, job = {}) => {
     return;
   }
   ui.stdout.write(`Job iniciado: ${job.jobId}\n`);
-  ui.stdout.write(`status: gemini-md-export job status ${job.jobId} --plain\n`);
-  ui.stdout.write(`cancelar: gemini-md-export job cancel ${job.jobId} --plain\n`);
+  ui.stdout.write(`status: gemini-md-export job status ${job.jobId} --tui --result-json\n`);
+  ui.stdout.write(`cancelar: gemini-md-export job cancel ${job.jobId} --tui --result-json\n`);
   if (job.reportFile) ui.stdout.write(`reportFile: ${job.reportFile}\n`);
   if (job.traceFile || job.trace?.filePath) {
     ui.stdout.write(`traceFile: ${job.traceFile || job.trace?.filePath}\n`);
@@ -2562,9 +2584,9 @@ const summarizeTabsCliResult = (action, result = {}) => {
     error: result.error || null,
     nextAction:
       action === 'list' && tabs.length > 1
-        ? 'Rode gemini-md-export tabs claim --index <n> --plain e reutilize o claimId no sync/export.'
+        ? 'Rode gemini-md-export tabs claim --index <n> --tui --result-json e reutilize o claimId no sync/export.'
         : action === 'list' && tabs.length === 1
-          ? 'Rode gemini-md-export tabs claim --index 1 --plain ou passe --client-id diretamente.'
+          ? 'Rode gemini-md-export tabs claim --index 1 --tui --result-json ou passe --client-id diretamente.'
           : null,
   };
 };
@@ -2583,7 +2605,7 @@ const tabsPlainLabel = (action, summary = {}) => {
         `${tab.index}. tabId=${tab.tabId ?? '-'} clientId=${tab.clientId || '-'}${chatInfo}${countInfo}${title}`,
       );
     }
-    if (summary.nextAction) lines.push(summary.nextAction.replace(/ --plain/g, ''));
+    if (summary.nextAction) lines.push(summary.nextAction);
     return lines.join('\n');
   }
 
@@ -2684,7 +2706,7 @@ const summarizeChatsListResult = (raw = {}, flags = {}, selection = null) => {
       ? {
           code: 'export_selection',
           message: 'Use o manifesto salvo para baixar exatamente esta lista.',
-          command: `gemini-md-export export reexport --selection-file ${selection.filePath} --expected-count ${selection.manifest.expectedCount} --plain`,
+          command: `gemini-md-export export selected --selection-file ${selection.filePath} --expected-count ${selection.manifest.expectedCount} --tui`,
         }
       : raw.nextAction || null,
   };
@@ -2702,7 +2724,7 @@ const chatsListPlainLabel = (result = {}) => {
   if (result.selectionFile) {
     lines.push(`selectionFile: ${result.selectionFile}`);
     lines.push(
-      `baixar: gemini-md-export export reexport --selection-file ${result.selectionFile} --expected-count ${result.expectedCount} --plain`,
+      `baixar: gemini-md-export export selected --selection-file ${result.selectionFile} --expected-count ${result.expectedCount} --tui`,
     );
   }
   if (!result.totalKnown && result.minimumKnownCount !== null) {
@@ -2831,19 +2853,20 @@ const runChats = async (parsed, streams = {}) => {
 const runExport = async (parsed, streams = {}) => {
   const subcommand = parsed.positionals[0];
   const flags = { ...parsed.flags };
-  if (!['recent', 'missing', 'resume', 'reexport', 'notebook'].includes(subcommand)) {
-    throw usageError('Uso: gemini-md-export export recent|missing|resume|reexport|notebook ...');
+  const isSelectedExport = subcommand === 'selected' || subcommand === 'reexport';
+  if (!['recent', 'missing', 'resume', 'selected', 'reexport', 'notebook'].includes(subcommand)) {
+    throw usageError('Uso: gemini-md-export export recent|missing|resume|selected|reexport|notebook ...');
   }
   if (subcommand === 'missing' && !flags.vaultDir) flags.vaultDir = parsed.positionals[1];
   if (subcommand === 'resume' && !flags.resumeReportFile) flags.resumeReportFile = parsed.positionals[1];
-  if (subcommand === 'reexport' && parsed.positionals.length > 1) {
+  if (isSelectedExport && parsed.positionals.length > 1) {
     flags.chatIds.push(...splitChatIdArgs(parsed.positionals.slice(1)));
   }
   if (subcommand === 'missing' && !flags.vaultDir) throw usageError('Informe vaultDir para export missing.');
   if (subcommand === 'resume' && !flags.resumeReportFile) {
     throw usageError('Informe reportFile para export resume.');
   }
-  if (subcommand === 'reexport') {
+  if (isSelectedExport) {
     let selectionFromFile = null;
     if (flags.selectionFile) {
       selectionFromFile = readSelectionFile(flags.selectionFile);
@@ -2856,10 +2879,10 @@ const runExport = async (parsed, streams = {}) => {
       items: selectionFromFile?.items || [],
     });
     if (cliSelection.invalid.length > 0) {
-      throw usageError(`chatId inválido para export reexport: ${cliSelection.invalid[0]}`);
+      throw usageError(`chatId inválido para export ${subcommand}: ${cliSelection.invalid[0]}`);
     }
     if (cliSelection.uniqueCount === 0) {
-      throw usageError('Informe --selection-file ou ao menos um --chat-id para export reexport.');
+      throw usageError(`Informe --selection-file ou ao menos um --chat-id para export ${subcommand}.`);
     }
     validateExpectedCount(cliSelection, flags.expectedCount);
     flags.chatIds = cliSelection.chatIds;
@@ -2877,9 +2900,14 @@ const runExport = async (parsed, streams = {}) => {
   try {
     if (ui.format !== 'json' && ui.format !== 'jsonl') {
       ui.stdout.write(`Conectando na bridge ${normalizeBridgeUrl(flags.bridgeUrl)}...\n`);
-      if (subcommand === 'reexport') {
+      if (isSelectedExport) {
+        if (subcommand === 'reexport') {
+          ui.stdout.write(
+            'Aviso: `export reexport` é legado; use `export selected` para baixar conversas selecionadas.\n',
+          );
+        }
         ui.stdout.write(
-          `Selecao de reexport: ${flags.reexportUniqueCount} chatId(s) unico(s)` +
+          `Selecao para download: ${flags.reexportUniqueCount} chatId(s) unico(s)` +
             (flags.reexportDuplicateCount ? `; ${flags.reexportDuplicateCount} duplicado(s) ignorado(s)` : '') +
             (flags.expectedCount ? `; esperado=${flags.expectedCount}` : '') +
             '.\n',
@@ -2889,7 +2917,7 @@ const runExport = async (parsed, streams = {}) => {
     }
     await ensureBridgeAvailable(flags, ui);
     await ensureReady(flags.bridgeUrl, flags, ui);
-    initialJob = await startExportJob(flags.bridgeUrl, subcommand, flags);
+    initialJob = await startExportJob(flags.bridgeUrl, isSelectedExport ? 'selected' : subcommand, flags);
     uninstallSignalCleanup = installJobSignalCleanup({
       flags,
       ui,
@@ -2960,8 +2988,8 @@ const runJob = async (parsed, streams = {}) => {
       ui.stdout.write(
         `O job ainda nao chegou ao estado terminal; provavelmente a aba ainda esta dentro da conversa atual.\n`,
       );
-      ui.stdout.write(`status: gemini-md-export job status ${jobId} --plain\n`);
-      ui.stdout.write(`cancelar: gemini-md-export job cancel ${jobId} --wait --plain\n`);
+      ui.stdout.write(`status: gemini-md-export job status ${jobId} --tui --result-json\n`);
+      ui.stdout.write(`cancelar: gemini-md-export job cancel ${jobId} --wait --tui --result-json\n`);
     }
   }
   if (ui.format === 'json') {

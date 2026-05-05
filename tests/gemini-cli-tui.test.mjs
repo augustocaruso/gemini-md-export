@@ -216,6 +216,7 @@ test('CLI --help na posicao inicial sai com sucesso', async () => {
   assert.match(stdout.text(), /Exit codes:/);
   assert.match(stdout.text(), /--json/);
   assert.match(stdout.text(), /export missing/);
+  assert.match(stdout.text(), /export selected/);
   assert.match(stdout.text(), /export reexport/);
   assert.match(stdout.text(), /export notebook/);
   assert.match(stdout.text(), /repair-vault/);
@@ -256,12 +257,17 @@ test('CLI expõe ajuda contextual para comandos e subcomandos', async () => {
   assert.match(exportStdout.text(), /gemini-md-export export missing/);
   assert.match(exportStdout.text(), /--max-chats/);
 
+  const selectedStdout = captureStream();
+  assert.equal((await main(['export', 'selected', '--help'], { stdout: selectedStdout })).exitCode, 0);
+  assert.match(selectedStdout.text(), /gemini-md-export export selected/);
+  assert.match(selectedStdout.text(), /--chat-id/);
+  assert.match(selectedStdout.text(), /--selection-file/);
+  assert.match(selectedStdout.text(), /--expected-count/);
+  assert.doesNotMatch(selectedStdout.text(), /gemini-md-export export reexport/);
+
   const reexportStdout = captureStream();
   assert.equal((await main(['export', 'reexport', '--help'], { stdout: reexportStdout })).exitCode, 0);
-  assert.match(reexportStdout.text(), /gemini-md-export export reexport/);
-  assert.match(reexportStdout.text(), /--chat-id/);
-  assert.match(reexportStdout.text(), /--selection-file/);
-  assert.match(reexportStdout.text(), /--expected-count/);
+  assert.match(reexportStdout.text(), /Legado: use export selected/);
 
   const tabsStdout = captureStream();
   assert.equal((await main(['tabs', '--help'], { stdout: tabsStdout })).exitCode, 0);
@@ -1506,8 +1512,8 @@ test('CLI job list mostra jobs ativos em plain e json', async () => {
 
     assert.equal(plain.exitCode, 0);
     assert.match(plainStdout.text(), /job-1 running\/exporting/);
-    assert.match(plainStdout.text(), /gemini-md-export job status job-1 --plain/);
-    assert.match(plainStdout.text(), /gemini-md-export job cancel job-1 --plain/);
+    assert.match(plainStdout.text(), /gemini-md-export job status job-1 --tui --result-json/);
+    assert.match(plainStdout.text(), /gemini-md-export job cancel job-1 --tui --result-json/);
     assert.match(plainStdout.text(), /RESULT_JSON /);
     assert.equal(plainStderr.text(), '');
 
@@ -1578,9 +1584,9 @@ test('CLI export missing inicia job com vaultDir e segue ate resultado final', a
   });
 });
 
-test('CLI export reexport e notebook usam endpoints diretos da bridge', async () => {
+test('CLI export selected e notebook usam endpoints diretos da bridge', async () => {
   await withServer(mockSyncServer({ completedImmediately: true }), async (bridgeUrl, requests) => {
-    const reexportStdout = captureStream();
+    const selectedStdout = captureStream();
     const notebookStdout = captureStream();
 
     assert.equal(
@@ -1588,7 +1594,7 @@ test('CLI export reexport e notebook usam endpoints diretos da bridge', async ()
         await main(
           [
             'export',
-            'reexport',
+            'selected',
             '--chat-id',
             'abc123abc123',
             'def456def456',
@@ -1596,6 +1602,8 @@ test('CLI export reexport e notebook usam endpoints diretos da bridge', async ()
             '/vault/staging',
             '--expected-count',
             '2',
+            '--resume-report-file',
+            '/vault/staging/partial-direct-report.json',
             '--hydration-timeout-ms',
             '900000',
             '--hydration-stall-ms',
@@ -1608,7 +1616,7 @@ test('CLI export reexport e notebook usam endpoints diretos da bridge', async ()
             '--poll-ms',
             '10',
           ],
-          { stdout: reexportStdout },
+          { stdout: selectedStdout },
         )
       ).exitCode,
       0,
@@ -1629,6 +1637,7 @@ test('CLI export reexport e notebook usam endpoints diretos da bridge', async ()
     assert.deepEqual(reexportRequest.jsonBody.chatIds, ['abc123abc123', 'def456def456']);
     assert.equal(reexportRequest.jsonBody.expectedCount, 2);
     assert.equal(reexportRequest.jsonBody.outputDir, '/vault/staging');
+    assert.equal(reexportRequest.jsonBody.resumeReportFile, '/vault/staging/partial-direct-report.json');
     assert.equal(reexportRequest.jsonBody.hydrationMaxTotalMs, 900000);
     assert.equal(reexportRequest.jsonBody.hydrationStallTimeoutMs, 60000);
     assert.equal(reexportRequest.jsonBody.exportBrowserTimeoutMs, 960000);
@@ -1638,14 +1647,14 @@ test('CLI export reexport e notebook usam endpoints diretos da bridge', async ()
   });
 });
 
-test('CLI export reexport falha antes da bridge quando expected-count nao bate', async () => {
+test('CLI export selected falha antes da bridge quando expected-count nao bate', async () => {
   const stdout = captureStream();
   await assert.rejects(
     () =>
       main(
         [
           'export',
-          'reexport',
+          'selected',
           '--chat-id',
           'abc123abc123',
           'def456def456',
@@ -1666,7 +1675,7 @@ test('CLI export reexport falha antes da bridge quando expected-count nao bate',
   assert.equal(stdout.text(), '');
 });
 
-test('CLI export reexport usa selection-file sem duplicar chatIds do manifesto', async () => {
+test('CLI export selected usa selection-file sem duplicar chatIds do manifesto', async () => {
   const tempDir = mkdtempSync(resolve(tmpdir(), 'gme-reexport-selection-'));
   const selectionFile = resolve(tempDir, 'selection.json');
   writeFileSync(
@@ -1687,7 +1696,7 @@ test('CLI export reexport usa selection-file sem duplicar chatIds do manifesto',
       const run = await main(
         [
           'export',
-          'reexport',
+          'selected',
           '--selection-file',
           selectionFile,
           '--bridge-url',
@@ -1700,7 +1709,7 @@ test('CLI export reexport usa selection-file sem duplicar chatIds do manifesto',
       );
 
       assert.equal(run.exitCode, 0);
-      assert.match(stdout.text(), /Selecao de reexport: 2 chatId\(s\) unico\(s\); esperado=2/);
+      assert.match(stdout.text(), /Selecao para download: 2 chatId\(s\) unico\(s\); esperado=2/);
       const request = requests.find((item) => item.pathname === '/agent/reexport-chats');
       assert.deepEqual(request.jsonBody.chatIds, ['abc123abc123', 'def456def456']);
       assert.equal(request.jsonBody.expectedCount, 2);
@@ -1710,6 +1719,48 @@ test('CLI export reexport usa selection-file sem duplicar chatIds do manifesto',
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }
+});
+
+test('CLI export reexport legado avisa em saida humana sem quebrar JSON', async () => {
+  await withServer(mockSyncServer({ completedImmediately: true }), async (bridgeUrl) => {
+    const plainStdout = captureStream();
+    const plain = await main(
+      [
+        'export',
+        'reexport',
+        '--chat-id',
+        'abc123abc123',
+        '--bridge-url',
+        bridgeUrl,
+        '--plain',
+        '--poll-ms',
+        '10',
+      ],
+      { stdout: plainStdout },
+    );
+    assert.equal(plain.exitCode, 0);
+    assert.match(plainStdout.text(), /export reexport.*legado.*export selected/);
+    assert.match(plainStdout.text(), /Selecao para download: 1 chatId\(s\) unico\(s\)/);
+
+    const jsonStdout = captureStream();
+    const json = await main(
+      [
+        'export',
+        'reexport',
+        '--chat-id',
+        'def456def456',
+        '--bridge-url',
+        bridgeUrl,
+        '--json',
+        '--poll-ms',
+        '10',
+      ],
+      { stdout: jsonStdout },
+    );
+    assert.equal(json.exitCode, 0);
+    assert.doesNotMatch(jsonStdout.text(), /legado|export selected/);
+    assert.doesNotThrow(() => JSON.parse(jsonStdout.text()));
+  });
 });
 
 test('CLI export-dir get e cleanup stale-processes usam endpoints da bridge', async () => {
