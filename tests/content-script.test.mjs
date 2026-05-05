@@ -186,6 +186,16 @@ const fakeBlobResponse = (window, bytes, type = 'image/png') => ({
   blob: async () => new Blob([new Uint8Array(bytes)], { type }),
 });
 
+const waitForElementById = async (window, id, timeoutMs = 1000) => {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const element = window.document.getElementById(id);
+    if (element) return element;
+    await new Promise((resolve) => window.setTimeout(resolve, 25));
+  }
+  return window.document.getElementById(id);
+};
+
 test('content script injeta botão moderno sem loop de MutationObserver', { timeout: 2000 }, async () => {
   const script = await readFile(contentScriptUrl, 'utf8');
   const pkg = JSON.parse(
@@ -195,9 +205,8 @@ test('content script injeta botão moderno sem loop de MutationObserver', { time
   const { window } = dom;
 
   window.eval(script);
-  await new Promise((resolve) => window.setTimeout(resolve, 25));
+  const button = await waitForElementById(window, 'gm-md-export-modern-btn');
 
-  const button = window.document.getElementById('gm-md-export-modern-btn');
   const slot = window.document.getElementById('gm-md-export-modern-btn-slot');
   const rightSection = window.document.querySelector('.right-section');
 
@@ -243,9 +252,8 @@ test('botão do top-bar abre menu com toggle de ignorar aba', { timeout: 2000 },
   const { window } = dom;
 
   window.eval(script);
-  await new Promise((resolve) => window.setTimeout(resolve, 25));
+  const button = await waitForElementById(window, 'gm-md-export-modern-btn');
 
-  const button = window.document.getElementById('gm-md-export-modern-btn');
   assert.ok(button, 'botão moderno deve existir');
   assert.equal(button.getAttribute('aria-haspopup'), 'menu');
   assert.equal(button.getAttribute('aria-expanded'), 'false');
@@ -320,9 +328,8 @@ test('isTabIgnored persiste entre aberturas do menu e zera bridge', { timeout: 2
   window.sessionStorage.setItem('gemini-md-export.ignoreThisTab.v1', '1');
 
   window.eval(script);
-  await new Promise((resolve) => window.setTimeout(resolve, 25));
+  const button = await waitForElementById(window, 'gm-md-export-modern-btn');
 
-  const button = window.document.getElementById('gm-md-export-modern-btn');
   button.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
   const ignoreItem = window.document.querySelector(
     '[data-role="gm-menu-ignore-tab"]',

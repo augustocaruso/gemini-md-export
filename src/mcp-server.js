@@ -1891,6 +1891,14 @@ const sendAgentJson = (res, statusCode, payload) => {
   res.end(JSON.stringify(payload));
 };
 
+const sendAgentError = (res, statusCode, err) =>
+  sendAgentJson(res, statusCode, {
+    ok: false,
+    error: err?.message || String(err),
+    code: err?.code || null,
+    data: err?.data || null,
+  });
+
 const sendNoContent = (res) => {
   res.writeHead(204, {
     'cache-control': 'no-store',
@@ -6370,6 +6378,27 @@ const exportJobCancelCommand = (job) => ({
   text: `gemini_job(${shellQuoteJson({ action: 'cancel', jobId: job.jobId })})`,
 });
 
+const exportJobInProgressError = (job) => {
+  const summary = summarizeExportJob(job);
+  const err = new Error(
+    `Já existe um job de exportação em andamento para esta aba: ${job.jobId}. Consulte o status ou cancele antes de iniciar outro.`,
+  );
+  err.code = 'export_job_in_progress';
+  err.data = {
+    ...summary,
+    statusCommand: exportJobPollCommand(job),
+    cancelCommand: exportJobCancelCommand(job),
+    statusCliCommand: `gemini-md-export job status ${job.jobId} --plain`,
+    cancelCliCommand: `gemini-md-export job cancel ${job.jobId} --plain`,
+  };
+  return err;
+};
+
+const assertNoRunningBrowserExportJob = (client) => {
+  const running = findRunningBrowserExportJob(client.clientId);
+  if (running) throw exportJobInProgressError(running);
+};
+
 const mediaWarningCountForJob = (job) =>
   Number(job.metrics?.counters?.mediaWarnings || 0) ||
   (Array.isArray(job.recentSuccesses)
@@ -7306,12 +7335,7 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
 };
 
 const startRecentChatsExportJob = (client, args = {}) => {
-  const running = findRunningBrowserExportJob(client.clientId);
-  if (running) {
-    throw new Error(
-      `Já existe um job de exportação em andamento para esta aba: ${running.jobId}. Consulte o status ou cancele antes de iniciar outro.`,
-    );
-  }
+  assertNoRunningBrowserExportJob(client);
 
   const resumeReportFile = args.resumeReportFile || args.reportFile || null;
   const resume = resumeReportFile ? loadRecentChatsResumeCheckpoint(resumeReportFile) : null;
@@ -7580,12 +7604,7 @@ const runDirectChatsExportJob = async (job, client, args = {}) => {
 };
 
 const startDirectChatsExportJob = (client, args = {}) => {
-  const running = findRunningBrowserExportJob(client.clientId);
-  if (running) {
-    throw new Error(
-      `Já existe um job de exportação em andamento para esta aba: ${running.jobId}. Consulte o status ou cancele antes de iniciar outro.`,
-    );
-  }
+  assertNoRunningBrowserExportJob(client);
 
   const items = normalizeDirectReexportItems(args);
   const outputDir = resolveOutputDir(args.outputDir);
@@ -8570,6 +8589,7 @@ const legacyRawTools = [
     },
     call: async (args = {}) => {
       const client = requireClient(args);
+      assertNoRunningBrowserExportJob(client);
       await ensureTabClaimForJob(client, args, 'GME Export');
       return toolTextResult(startRecentChatsExportJob(client, args));
     },
@@ -8664,6 +8684,7 @@ const legacyRawTools = [
     },
     call: async (args = {}) => {
       const client = requireClient(args);
+      assertNoRunningBrowserExportJob(client);
       await ensureTabClaimForJob(client, args, 'GME Missing');
       return toolTextResult(
         startRecentChatsExportJob(client, {
@@ -8757,6 +8778,7 @@ const legacyRawTools = [
     },
     call: async (args = {}) => {
       const client = requireClient(args);
+      assertNoRunningBrowserExportJob(client);
       await ensureTabClaimForJob(client, args, 'GME Sync');
       return toolTextResult(
         startRecentChatsExportJob(client, {
@@ -8823,8 +8845,45 @@ const legacyRawTools = [
     },
     call: async (args = {}) => {
       const client = requireClient(args);
+      assertNoRunningBrowserExportJob(client);
       await ensureTabClaimForJob(client, args, 'GME Reexport');
       return toolTextResult(startDirectChatsExportJob(client, args));
+    },
+  },
+  {
+    name: 'gemini_export_job_list',
+    description:
+      'Lista jobs de exportacao/sync ativos ou recentes para recuperar status quando o agente perdeu o jobId.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        active: {
+          type: 'boolean',
+          description: 'Se true, mostra apenas jobs ainda nao terminais.',
+        },
+        limit: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 100,
+          description: 'Quantidade maxima de jobs. Default: 10.',
+        },
+      },
+      additionalProperties: false,
+    },
+    call: async (args = {}) => {
+      const active = args.active === true;
+      const limit = Math.max(1, Math.min(100, Number(args.limit || 10)));
+      let jobs = [...exportJobs.values()].sort((a, b) =>
+        String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')),
+      );
+      if (active) jobs = jobs.filter((job) => !isTerminalExportJobStatus(job.status));
+      return toolTextResult({
+        ok: true,
+        action: 'list',
+        activeOnly: active,
+        activeCount: activeExportJobs().length,
+        jobs: jobs.slice(0, limit).map(summarizeExportJob),
+      });
     },
   },
   {
@@ -10029,19 +10088,33 @@ const rawTools = [
   },
   {
     name: 'gemini_job',
-    description: 'Consulta ou cancela job de export/sync iniciado por gemini_export.',
+    description:
+      'Lista, consulta ou cancela job de export/sync iniciado pela CLI/gemini_export.',
     inputSchema: {
       type: 'object',
       properties: {
-        action: { type: 'string', enum: ['status', 'cancel'] },
+        action: { type: 'string', enum: ['list', 'status', 'cancel'] },
         jobId: { type: 'string' },
+        active: { type: 'boolean' },
+        limit: { type: 'integer', minimum: 1, maximum: 100 },
         detail: { type: 'string', enum: ['compact', 'full'] },
       },
-      required: ['jobId'],
       additionalProperties: false,
     },
     call: async (args = {}) => {
+      if (args.action === 'list') {
+        return callLegacyToolCompacted('gemini_job', 'list', 'gemini_export_job_list', args);
+      }
       const action = args.action === 'cancel' ? 'cancel' : 'status';
+      if (!args.jobId) {
+        return toolTextResult(
+          {
+            error: 'Informe jobId para consultar ou cancelar um job. Use action:"list" para descobrir jobs ativos.',
+            code: 'missing_job_id',
+          },
+          { isError: true },
+        );
+      }
       return callLegacyToolCompacted(
         'gemini_job',
         action,
@@ -10714,6 +10787,7 @@ const bridgeServer = createServer(async (req, res) => {
     try {
       const selector = clientSelectorFromSearchParams(url.searchParams);
       const client = requireClient(selector);
+      assertNoRunningBrowserExportJob(client);
       await ensureTabClaimForJob(client, selector, 'GME Export');
       sendAgentJson(
         res,
@@ -10739,7 +10813,7 @@ const bridgeServer = createServer(async (req, res) => {
         }),
       );
     } catch (err) {
-      sendAgentJson(res, 503, { error: err.message });
+      sendAgentError(res, 503, err);
     }
     return;
   }
@@ -10748,6 +10822,7 @@ const bridgeServer = createServer(async (req, res) => {
     try {
       const selector = clientSelectorFromSearchParams(url.searchParams);
       const client = requireClient(selector);
+      assertNoRunningBrowserExportJob(client);
       await ensureTabClaimForJob(client, selector, 'GME Missing');
       sendAgentJson(
         res,
@@ -10778,7 +10853,7 @@ const bridgeServer = createServer(async (req, res) => {
         }),
       );
     } catch (err) {
-      sendAgentJson(res, 503, { error: err.message });
+      sendAgentError(res, 503, err);
     }
     return;
   }
@@ -10787,6 +10862,7 @@ const bridgeServer = createServer(async (req, res) => {
     try {
       const selector = clientSelectorFromSearchParams(url.searchParams);
       const client = requireClient(selector);
+      assertNoRunningBrowserExportJob(client);
       await ensureTabClaimForJob(client, selector, 'GME Sync');
       sendAgentJson(
         res,
@@ -10815,7 +10891,7 @@ const bridgeServer = createServer(async (req, res) => {
         }),
       );
     } catch (err) {
-      sendAgentJson(res, 503, { error: err.message });
+      sendAgentError(res, 503, err);
     }
     return;
   }
@@ -10839,6 +10915,7 @@ const bridgeServer = createServer(async (req, res) => {
         ...bodySelector,
       };
       const client = requireClient(selector);
+      assertNoRunningBrowserExportJob(client);
       await ensureTabClaimForJob(client, selector, 'GME Reexport');
       sendAgentJson(
         res,
@@ -10857,8 +10934,25 @@ const bridgeServer = createServer(async (req, res) => {
         }),
       );
     } catch (err) {
-      sendAgentJson(res, 503, { error: err.message });
+      sendAgentError(res, 503, err);
     }
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/agent/export-jobs') {
+    const active = parseOptionalBoolean(url.searchParams.get('active'));
+    const limit = Math.max(1, Math.min(100, Number(url.searchParams.get('limit') || 10)));
+    let jobs = [...exportJobs.values()].sort((a, b) =>
+      String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')),
+    );
+    if (active === true) jobs = jobs.filter((job) => !isTerminalExportJobStatus(job.status));
+    sendAgentJson(res, 200, {
+      ok: true,
+      action: 'list',
+      activeOnly: active === true,
+      activeCount: activeExportJobs().length,
+      jobs: jobs.slice(0, limit).map(summarizeExportJob),
+    });
     return;
   }
 

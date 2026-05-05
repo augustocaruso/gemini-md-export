@@ -208,6 +208,14 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.equal(typeof bridgeVersion.protocolVersion, 'number');
 
   const context = readFileSync(contextPath, 'utf-8');
+  const chatInventorySkill = readFileSync(
+    resolve(extensionDir, 'skills', 'gemini-chat-inventory', 'SKILL.md'),
+    'utf-8',
+  );
+  const vaultSyncSkill = readFileSync(
+    resolve(extensionDir, 'skills', 'gemini-vault-sync', 'SKILL.md'),
+    'utf-8',
+  );
   assert.equal(context.length < 7000, true);
   assert.match(context, /Only these MCP tools are public/);
   for (const toolName of [
@@ -227,11 +235,18 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.match(context, /gemini-tabs-and-browser/);
   assert.match(context, /gemini-chat-inventory/);
   assert.match(context, /gemini-md-export telemetry/);
+  assert.match(context, /export reexport --chat-id/);
+  assert.match(context, /job list --active --plain/);
   assert.match(context, /detail: "full"/);
   assert.match(context, /code: "tool_renamed"/);
   assert.match(context, /code: "use_cli"/);
   assert.doesNotMatch(context, /gemini_export_recent_chats/);
   assert.doesNotMatch(context, /gemini_download_chat/);
+  assert.match(chatInventorySkill, /export reexport --chat-id/);
+  assert.match(chatInventorySkill, /job list --active --plain/);
+  assert.doesNotMatch(chatInventorySkill, /export recent --limit/);
+  assert.match(vaultSyncSkill, /export reexport --chat-id/);
+  assert.match(vaultSyncSkill, /job list --active --plain/);
 });
 
 test('auditor coleta todos os links Gemini de origem em nota wiki consolidada', () => {

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { createServer as createNetServer } from 'node:net';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -229,6 +230,11 @@ test('CLI expõe ajuda contextual para comandos e subcomandos', async () => {
   assert.match(jobStdout.text(), /gemini-md-export job status/);
   assert.match(jobStdout.text(), /running/);
   assert.match(jobStdout.text(), /--jsonl/);
+
+  const jobListStdout = captureStream();
+  assert.equal((await main(['help', 'job', 'list'], { stdout: jobListStdout })).exitCode, 0);
+  assert.match(jobListStdout.text(), /gemini-md-export job list/);
+  assert.match(jobListStdout.text(), /--active/);
 
   const exportStdout = captureStream();
   assert.equal((await main(['export', 'missing', '--help'], { stdout: exportStdout })).exitCode, 0);
@@ -950,6 +956,114 @@ test('CLI sync cancela job em timeout e libera claim visual da aba', async () =>
   });
 });
 
+test('CLI export cancela job e libera claim ao receber SIGTERM externo', { timeout: 10000 }, async () => {
+  const claimedRunningJob = {
+    ...runningJob,
+    jobId: 'job-sigterm',
+    tabClaimId: 'claim-sigterm',
+    tabClaim: {
+      claimId: 'claim-sigterm',
+      tabId: 4242,
+      status: 'active',
+    },
+    traceFile: '/tmp/job-sigterm.trace.jsonl',
+  };
+  let cancelRequested = false;
+
+  await withEnv({ GEMINI_MD_EXPORT_JOB_TIMEOUT_CLEANUP_MS: '1000' }, async () => {
+    await withServer((req, res, url) => {
+      if (url.pathname === '/healthz') {
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+      if (url.pathname === '/agent/ready') {
+        sendJson(res, 200, {
+          ready: true,
+          mode: 'hot',
+          connectedClientCount: 1,
+          selectableTabCount: 1,
+          commandReadyClientCount: 1,
+        });
+        return;
+      }
+      if (url.pathname === '/agent/export-recent-chats') {
+        sendJson(res, 202, claimedRunningJob);
+        return;
+      }
+      if (url.pathname === '/agent/export-job-status') {
+        sendJson(
+          res,
+          200,
+          cancelRequested
+            ? { ...claimedRunningJob, status: 'cancelled', phase: 'cancelled' }
+            : claimedRunningJob,
+        );
+        return;
+      }
+      if (url.pathname === '/agent/export-job-cancel') {
+        cancelRequested = true;
+        sendJson(res, 200, { ...claimedRunningJob, status: 'cancel_requested' });
+        return;
+      }
+      if (url.pathname === '/agent/release-tab') {
+        sendJson(res, 200, {
+          ok: true,
+          released: {
+            claimId: url.searchParams.get('claimId'),
+            tabId: Number(url.searchParams.get('tabId')),
+          },
+        });
+        return;
+      }
+      sendJson(res, 404, { error: `not found: ${url.pathname}` });
+    }, async (bridgeUrl, requests) => {
+      const child = spawn(
+        process.execPath,
+        [
+          resolve(ROOT, 'bin', 'gemini-md-export.mjs'),
+          'export',
+          'recent',
+          '--bridge-url',
+          bridgeUrl,
+          '--plain',
+          '--poll-ms',
+          '50',
+          '--timeout-ms',
+          '300000',
+        ],
+        { stdio: ['ignore', 'pipe', 'pipe'] },
+      );
+      let stdout = '';
+      let stderr = '';
+      let killed = false;
+      child.stdout.on('data', (chunk) => {
+        stdout += String(chunk);
+        if (!killed && stdout.includes('Job iniciado: job-sigterm')) {
+          killed = true;
+          child.kill('SIGTERM');
+        }
+      });
+      child.stderr.on('data', (chunk) => {
+        stderr += String(chunk);
+      });
+      const exit = await new Promise((resolveExit) => {
+        child.on('exit', (code, signal) => resolveExit({ code, signal }));
+      });
+
+      assert.equal(exit.code, 2);
+      assert.equal(exit.signal, null);
+      assert.match(stdout, /Interrupcao recebida \(SIGTERM\); cancelando job job-sigterm/);
+      assert.match(stdout, /traceFile: \/tmp\/job-sigterm\.trace\.jsonl/);
+      assert.equal(stderr, '');
+      assert.equal(requests.some((item) => item.pathname === '/agent/export-job-cancel'), true);
+      const release = requests.find((item) => item.pathname === '/agent/release-tab');
+      assert.ok(release);
+      assert.equal(release.searchParams.get('claimId'), 'claim-sigterm');
+      assert.equal(release.searchParams.get('tabId'), '4242');
+    });
+  });
+});
+
 test('CLI sync acorda Gemini Web pela propria CLI antes de exportar', async () => {
   const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-cli-launch-'));
   let readyCalls = 0;
@@ -1230,6 +1344,52 @@ test('CLI job status considera job em andamento como consulta bem-sucedida', asy
     assert.match(stdout.text(), /running/);
     assert.match(stdout.text(), /RESULT_JSON /);
     assert.equal(stderr.text(), '');
+  });
+});
+
+test('CLI job list mostra jobs ativos em plain e json', async () => {
+  const jobList = {
+    ok: true,
+    action: 'list',
+    activeOnly: true,
+    activeCount: 1,
+    jobs: [
+      {
+        ...runningJob,
+        traceFile: '/tmp/gme-job.trace.jsonl',
+      },
+    ],
+  };
+  await withServer((req, res, url) => {
+    if (url.pathname === '/agent/export-jobs') {
+      assert.equal(url.searchParams.get('active'), 'true');
+      assert.equal(url.searchParams.get('limit'), '5');
+      sendJson(res, 200, jobList);
+      return;
+    }
+    sendJson(res, 404, { error: `not found: ${url.pathname}` });
+  }, async (bridgeUrl) => {
+    const plainStdout = captureStream();
+    const plainStderr = captureStream();
+    const plain = await main(
+      ['job', 'list', '--active', '--limit', '5', '--bridge-url', bridgeUrl, '--plain'],
+      { stdout: plainStdout, stderr: plainStderr },
+    );
+
+    assert.equal(plain.exitCode, 0);
+    assert.match(plainStdout.text(), /job-1 running\/exporting/);
+    assert.match(plainStdout.text(), /gemini-md-export job status job-1 --plain/);
+    assert.match(plainStdout.text(), /gemini-md-export job cancel job-1 --plain/);
+    assert.match(plainStdout.text(), /RESULT_JSON /);
+    assert.equal(plainStderr.text(), '');
+
+    const jsonStdout = captureStream();
+    const json = await main(
+      ['job', 'list', '--active', '--limit', '5', '--bridge-url', bridgeUrl, '--json'],
+      { stdout: jsonStdout },
+    );
+    assert.equal(json.exitCode, 0);
+    assert.equal(JSON.parse(jsonStdout.text()).jobs[0].jobId, 'job-1');
   });
 });
 

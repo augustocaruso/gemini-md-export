@@ -68,6 +68,31 @@ with `refresh: true`. If the tool reports multiple Gemini tabs, stay in CLI tab
 selection flow (`tabs list --plain`, `tabs claim --index <n> --plain`) before
 retrying the small list with the selected tab/claim.
 
+## Follow-up Downloads From A Listed Page
+
+When the user says "baixe essas", "exporte essas conversas", or similar after
+you have just listed chats, treat "essas" as the exact `chatId`s from that list.
+Do not switch to a positional recent-history export; the sidebar may have
+changed and the wrong chats can be downloaded.
+
+Use one CLI command with explicit IDs:
+
+```bash
+node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" export reexport --chat-id "<chatId1>" --chat-id "<chatId2>" --plain --timeout-ms 1800000
+```
+
+Set the shell/tool timeout higher than the CLI timeout so the CLI has time to
+cancel the job and release the tab itself. If an external shell timeout or
+interruption happened and you did not see a terminal `RESULT_JSON`, do not start
+another export immediately. First run:
+
+```bash
+node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" job list --active --plain
+```
+
+Then use the printed `job status ...` or `job cancel ...` command for the active
+job before retrying.
+
 ## Search By Title
 
 For "procure conversas sobre X", page through recent chats in small batches and

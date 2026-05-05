@@ -32,6 +32,20 @@ Use `export missing <vaultDir>` for explicit missing-only imports, `sync
 <vaultDir>` for incremental vault sync, and `export resume <reportFile>` when a
 previous report should be resumed.
 
+When the user just listed a small page of chats and then says "baixe essas" or
+"exporte essas", do not use a fresh recent-history export. Reexport the exact
+IDs that were shown:
+
+```bash
+node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" export reexport --chat-id "<chatId1>" --chat-id "<chatId2>" --plain --timeout-ms 1800000
+```
+
+Give the surrounding shell/tool a longer timeout than the CLI. If the shell
+ended before a final `RESULT_JSON`, recover explicitly with
+`job list --active --plain`, then `job status <jobId> --plain` or
+`job cancel <jobId> --plain`. Do not start another export until the previous
+job is terminal or cancelled.
+
 For a human-visible progress UI inside Gemini CLI, only promise this when the
 shell executor is interactive and exposes a real TTY/PTY:
 

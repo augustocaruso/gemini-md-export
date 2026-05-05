@@ -236,6 +236,26 @@ test('export jobs registram sessao de aba e trace sanitizado por job', () => {
   assert.match(source, /tabSession/);
 });
 
+test('export jobs bloqueiam novo export ativo antes de tentar claim-tab', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  assert.match(source, /const exportJobInProgressError = \(job\) =>/);
+  assert.match(source, /err\.code = 'export_job_in_progress'/);
+  assert.match(source, /statusCliCommand: `gemini-md-export job status \$\{job\.jobId\} --plain`/);
+  assert.match(source, /url\.pathname === '\/agent\/export-jobs'/);
+  for (const route of [
+    '/agent/export-recent-chats',
+    '/agent/export-missing-chats',
+    '/agent/sync-vault',
+    '/agent/reexport-chats',
+  ]) {
+    const escaped = route.replaceAll('/', '\\/');
+    const block = source.match(new RegExp(`url\\.pathname === '${escaped}'[\\s\\S]*?catch \\(err\\)`))?.[0];
+    assert.ok(block, `${route} deve existir`);
+    assert.match(block, /const client = requireClient\(selector\);[\s\S]*?assertNoRunningBrowserExportJob\(client\);[\s\S]*?ensureTabClaimForJob/);
+  }
+  assert.match(source, /sendAgentError\(res, 503, err\)/);
+});
+
 test('export missing oferece UX guiada para importação completa do vault', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const jobBlock = source.match(

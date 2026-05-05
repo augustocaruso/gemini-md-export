@@ -38,6 +38,10 @@ or explicit `intent` for deliberate diagnostics/control. Ask for
   `gemini_ready`/`gemini_tabs`; the CLI owns readiness, browser wake, tab flags,
   progress, and final `RESULT_JSON`. If `gemini_export` is called, treat
   `code: "use_cli"` as an instruction to run its returned command.
+- Follow-up "baixe/exporte essas" after a chat list means the exact listed
+  `chatId`s. Run CLI `export reexport --chat-id ...` with shell timeout > CLI
+  timeout. If the shell died before final `RESULT_JSON`, run
+  `gemini-md-export job list --active --plain`, then status/cancel before retry.
 - Background progress/cancel: call `gemini_job`.
 - Export directory and extension cache: call `gemini_config`.
 - Diagnostics/process cleanup/support bundle/flight recorder: `gemini_support`.
@@ -68,16 +72,15 @@ The extension ships `bin/gemini-md-export.mjs`, a terminal UI wrapper over the
 same bridge. The CLI can start `bridge-only`, owns browser wake for long jobs,
 and exits idle bridges unless `--no-exit-when-idle` is set.
 
-- For a visible human progress UI inside Gemini CLI, run it through shell mode
-  or `run_shell_command` with a real TTY/PTY. Captured shell output cannot
-  animate; the CLI falls back to `--plain` with a warning:
+- For visible progress, use shell mode with a real TTY/PTY. Captured shell
+  output cannot animate; the CLI falls back to `--plain` with a warning:
   `node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" sync <vaultDir> --tui`
 - For agents, prefer `--plain`; it emits progress lines and final
   `RESULT_JSON`. Use `gemini-md-export --help` for flags.
 - CLI subcommands include `browser status`, `diagnose page`, `tabs`,
   `chats count`, `export ...`, `job ...`, `export-dir`, `cleanup`,
   `repair-vault`, and `telemetry enable/status/preview/send/disable`.
-- Automation: `--json` for final JSON only, `--jsonl` for events. Do not use
+- Automation: `--json` for final JSON only, `--jsonl` for events. Avoid
   custom-command shell injection for long sync jobs.
 
 ## Guardrails
@@ -119,11 +122,8 @@ and exits idle bridges unless `--no-exit-when-idle` is set.
 - Do not ask for manual Chrome extension reload before trying
   `gemini_ready { "action": "status", "diagnostic": true, "selfHeal": true, "allowReload": true }`,
   unless the loaded extension is too old to support self-heal.
-- If multiple Gemini tabs are connected, prefer CLI tab commands for
-  count/export. For explicit MCP diagnostics, use `gemini_tabs` with
-  `intent: "tab_management"` to claim the intended tab.
-- If no Gemini tab is connected, the CLI opens one for long jobs. For small MCP
-  diagnostics, use `gemini_tabs { "action": "list", "intent": "tab_management", "openIfMissing": true }`.
+- If multiple Gemini tabs are connected, prefer CLI tab commands for count/export.
+  For MCP diagnostics, use `gemini_tabs` with `intent: "tab_management"`.
 - Keep Markdown/assets inside the vault when `vaultDir` is known; avoid browser
   Downloads as the intended destination.
 - Integrity beats speed: never save if the DOM belongs to another URL/chat ID.

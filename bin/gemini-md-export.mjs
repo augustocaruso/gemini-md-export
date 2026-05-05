@@ -168,6 +168,7 @@ const usage = () =>
     '  export resume         Retoma export por relatorio incremental.',
     '  export reexport       Reexporta chatIds explicitos.',
     '  export notebook       Exporta caderno Gemini carregado.',
+    '  job list              Lista jobs ativos/recentes.',
     '  job status <jobId>    Consulta progresso de um job.',
     '  job cancel <jobId>    Cancela um job.',
     '  job trace <jobId>     Resume o trace tecnico sanitizado de um job.',
@@ -185,6 +186,7 @@ const usage = () =>
     '  gemini-md-export tabs list --plain',
     '  gemini-md-export chats count --plain',
     '  gemini-md-export export missing "/path/to/vault" --plain',
+    '  gemini-md-export job list --active --plain',
     '  gemini-md-export job status job-123 --json',
     '  gemini-md-export job trace job-123 --plain',
     '  gemini-md-export telemetry status --plain',
@@ -476,11 +478,13 @@ const jobHelp = () =>
     'gemini-md-export job',
     '',
     'Uso:',
+    '  gemini-md-export job list [opcoes]',
     '  gemini-md-export job status <jobId> [opcoes]',
     '  gemini-md-export job cancel <jobId> [opcoes]',
     '  gemini-md-export job trace <jobId> [opcoes]',
     '',
     'Subcomandos:',
+    '  list     Lista jobs ativos/recentes para recuperar jobId perdido.',
     '  status   Consulta progresso/resultado de um job.',
     '  cancel   Solicita cancelamento de um job.',
     '  trace    Resume o trace tecnico sanitizado de um job.',
@@ -490,9 +494,29 @@ const jobHelp = () =>
     ...commonOptionHelp(),
     '',
     'Exemplos:',
+    '  gemini-md-export job list --active --plain',
     '  gemini-md-export job status job-123 --plain',
     '  gemini-md-export job cancel job-123 --plain',
     '  gemini-md-export job trace job-123 --plain',
+  ].join('\n');
+
+const jobListHelp = () =>
+  [
+    'gemini-md-export job list',
+    '',
+    'Uso:',
+    '  gemini-md-export job list [--active] [--limit <n>] [opcoes]',
+    '',
+    'Lista jobs ativos ou recentes. Use quando um export longo foi interrompido',
+    'e voce precisa descobrir o jobId antes de consultar/cancelar.',
+    '',
+    'Opcoes:',
+    '  --active       Mostra apenas jobs ainda em andamento.',
+    '  --limit <n>    Quantidade maxima de jobs. Default: 10.',
+    '',
+    ...outputModeHelp(),
+    '',
+    ...commonOptionHelp(),
   ].join('\n');
 
 const jobStatusHelp = () =>
@@ -626,6 +650,7 @@ const helpForParsed = (parsed) => {
   if (command === 'export' && subcommand === 'reexport') return exportReexportHelp();
   if (command === 'export' && subcommand === 'notebook') return exportNotebookHelp();
   if (command === 'export') return exportHelp();
+  if (command === 'job' && subcommand === 'list') return jobListHelp();
   if (command === 'job' && subcommand === 'status') return jobStatusHelp();
   if (command === 'job' && subcommand === 'cancel') return jobCancelHelp();
   if (command === 'job' && subcommand === 'trace') return jobTraceHelp();
@@ -694,7 +719,7 @@ const parseArgs = (argv) => {
     else if (arg === '--payload-level') out.flags.payloadLevel = value();
     else if (arg === '--since') out.flags.since = value();
     else if (arg === '--limit') {
-      if (out.command === 'telemetry') out.flags.limit = Number(value());
+      if (out.command === 'telemetry' || out.command === 'job') out.flags.limit = Number(value());
       else out.flags.maxChats = Number(value());
     }
     else if (arg === '--vault-dir') out.flags.vaultDir = value();
@@ -723,6 +748,7 @@ const parseArgs = (argv) => {
       out.flags.exportBrowserTimeoutMs = Number(value());
     else if (arg === '--refresh') out.flags.refresh = true;
     else if (arg === '--no-refresh') out.flags.refresh = false;
+    else if (arg === '--active') out.flags.active = true;
     else if (arg === '--poll-ms') out.flags.pollMs = Math.max(250, Number(value()) || DEFAULT_POLL_MS);
     else if (arg === '--bridge-start-wait-ms')
       out.flags.bridgeStartWaitMs = Math.max(500, Number(value()) || 6000);
@@ -853,6 +879,20 @@ const normalizeBridgeRequestError = (err) => {
   return err;
 };
 
+const formatExportJobInProgressMessage = (json = {}) => {
+  const data = json.data || {};
+  const lines = [
+    json.error || `Já existe um job de exportação em andamento${data.jobId ? `: ${data.jobId}` : ''}.`,
+    data.jobId ? `jobId: ${data.jobId}` : null,
+    data.status ? `status: ${data.status}${data.phase ? `/${data.phase}` : ''}` : null,
+    data.statusCliCommand ? `status: ${data.statusCliCommand}` : null,
+    data.cancelCliCommand ? `cancelar: ${data.cancelCliCommand}` : null,
+    data.reportFile ? `reportFile: ${data.reportFile}` : null,
+    data.traceFile ? `traceFile: ${data.traceFile}` : null,
+  ].filter(Boolean);
+  return lines.join('\n');
+};
+
 const requestJson = async (
   bridgeUrl,
   path,
@@ -902,9 +942,14 @@ const requestJson = async (
             return;
           }
           if (response.statusCode < 200 || response.statusCode >= 300) {
-            const err = new Error(json?.error || `HTTP ${response.statusCode}`);
+            const err = new Error(
+              json?.code === 'export_job_in_progress'
+                ? formatExportJobInProgressMessage(json)
+                : json?.error || `HTTP ${response.statusCode}`,
+            );
             err.statusCode = response.statusCode;
-            err.data = json;
+            err.code = json?.code || null;
+            err.data = json?.data || json;
             finish(rejectRequest, err);
             return;
           }
@@ -1206,6 +1251,7 @@ const renderLinesForJob = (ui, job = {}, tick = 0) => {
   const warnings = warningParts.length ? colorize(ui, 'yellow', warningParts.join(' · ')) : 'sem warnings';
   return [
     `${title} ${dim(ui, 'sync')}`,
+    `${dim(ui, 'job')} ${job.jobId || '-'}`,
     `${dim(ui, 'status')} ${status}${phase ? ` · ${phase}` : ''}`,
     `${progress} ${countText}`,
     headline,
@@ -1216,7 +1262,11 @@ const renderLinesForJob = (ui, job = {}, tick = 0) => {
     job.traceFile || job.trace?.filePath
       ? `${dim(ui, 'trace')} ${job.traceFile || job.trace?.filePath}`
       : `${dim(ui, 'trace')} compacto/em memoria`,
-  ];
+    job.jobId ? `${dim(ui, 'status cmd')} gemini-md-export job status ${job.jobId} --plain` : null,
+    job.jobId && !TERMINAL_STATUSES.has(job.status)
+      ? `${dim(ui, 'cancelar')} gemini-md-export job cancel ${job.jobId} --plain`
+      : null,
+  ].filter(Boolean);
 };
 
 const renderLinesForJobTrace = (traceResult = {}) => {
@@ -1253,6 +1303,30 @@ const renderLinesForJobTrace = (traceResult = {}) => {
   return lines;
 };
 
+const renderLinesForJobList = (result = {}) => {
+  const jobs = Array.isArray(result.jobs) ? result.jobs : [];
+  if (jobs.length === 0) {
+    return [
+      result.activeOnly
+        ? 'Nenhum job ativo encontrado.'
+        : 'Nenhum job recente encontrado.',
+    ];
+  }
+  const lines = [
+    `${jobs.length} job(s) ${result.activeOnly ? 'ativo(s)' : 'recente(s)'}; ativos agora: ${result.activeCount ?? '-'}.`,
+  ];
+  for (const job of jobs) {
+    lines.push(`- ${job.jobId || '-'} ${job.status || '-'}${job.phase ? `/${job.phase}` : ''} ${job.type || ''}`.trim());
+    lines.push(`  status: gemini-md-export job status ${job.jobId} --plain`);
+    if (!TERMINAL_STATUSES.has(job.status)) {
+      lines.push(`  cancelar: gemini-md-export job cancel ${job.jobId} --plain`);
+    }
+    if (job.reportFile) lines.push(`  reportFile: ${job.reportFile}`);
+    if (job.traceFile) lines.push(`  traceFile: ${job.traceFile}`);
+  }
+  return lines;
+};
+
 const renderTui = (ui, job, tick) => {
   const lines = renderLinesForJob(ui, job, tick);
   if (ui.firstRender) {
@@ -1276,6 +1350,7 @@ const closeTui = (ui) => {
 const renderPlainProgress = (ui, job, previous = {}) => {
   const key = [
     job.status,
+    job.jobId,
     job.phase,
     job.completed,
     job.requested,
@@ -1624,6 +1699,19 @@ const fetchJobStatus = async (bridgeUrl, jobId) =>
     operation: 'job-status',
   });
 
+const fetchJobList = async (bridgeUrl, flags = {}) =>
+  requestJson(
+    bridgeUrl,
+    appendParams('/agent/export-jobs', {
+      active: flags.active === true ? true : undefined,
+      limit: flags.limit,
+    }),
+    {
+      timeoutMs: 20000,
+      operation: 'job-list',
+    },
+  );
+
 const cancelJob = async (bridgeUrl, jobId) =>
   requestJson(bridgeUrl, appendParams('/agent/export-job-cancel', { jobId }), {
     timeoutMs: 20000,
@@ -1692,6 +1780,73 @@ const cancelJobForTimeoutQuietly = async (flags, job, ui = null) => {
       },
     };
   }
+};
+
+const cancelJobForSignalQuietly = async (flags, job, ui, signal) => {
+  if (!job?.jobId || TERMINAL_STATUSES.has(job.status)) return job;
+  if (ui?.format && ui.format !== 'json' && ui.format !== 'jsonl') {
+    ui.stdout.write(`Interrupcao recebida (${signal}); cancelando job ${job.jobId} e liberando a aba.\n`);
+    if (job.reportFile) ui.stdout.write(`reportFile: ${job.reportFile}\n`);
+    if (job.traceFile || job.trace?.filePath) {
+      ui.stdout.write(`traceFile: ${job.traceFile || job.trace?.filePath}\n`);
+    }
+  }
+  try {
+    const cancelled = await cancelJob(flags.bridgeUrl, job.jobId);
+    const terminal = await waitForJobTerminalQuietly(flags.bridgeUrl, job.jobId, flags);
+    return {
+      ...(terminal || cancelled || job),
+      signalCancel: {
+        signal,
+        requested: true,
+        status: cancelled?.status || null,
+      },
+    };
+  } catch (err) {
+    return {
+      ...job,
+      signalCancel: {
+        signal,
+        requested: false,
+        error: err?.message || String(err),
+        code: err?.code || null,
+      },
+    };
+  }
+};
+
+const installJobSignalCleanup = ({ flags, ui, getJob, reason }) => {
+  if (!cliEntrypoint) return () => {};
+  let handling = false;
+  const listeners = new Map();
+  const handler = async (signal) => {
+    if (handling) return;
+    handling = true;
+    let job = null;
+    try {
+      job = getJob?.() || null;
+      const cancelled = await cancelJobForSignalQuietly(flags, job, ui, signal);
+      await releaseCliClaimQuietly(flags, `${reason}-${String(signal).toLowerCase()}`, cancelled || job);
+      closeTui(ui);
+    } catch (err) {
+      if (ui?.format === 'json' || ui?.format === 'jsonl') ui.stderr.write(`${err.message}\n`);
+      else ui?.stdout?.write(`Falha no cleanup da interrupcao: ${err.message}\n`);
+    } finally {
+      process.exit(EXIT.MANUAL_ACTION);
+    }
+  };
+  for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
+    const listener = () => {
+      void handler(signal);
+    };
+    listeners.set(signal, listener);
+    process.once(signal, listener);
+  }
+  return () => {
+    for (const [signal, listener] of listeners) {
+      process.removeListener(signal, listener);
+    }
+  };
 };
 
 const claimIdFromJob = (job = {}) => {
@@ -1770,6 +1925,22 @@ const writeStructuredResult = (ui, result, { label = null, includeResultJson = t
   }
 };
 
+const announceJobStarted = (ui, job = {}) => {
+  if (!job?.jobId) return;
+  if (ui.format === 'json') return;
+  if (ui.format === 'jsonl') {
+    ui.stdout.write(`${JSON.stringify({ type: 'job_started', jobId: job.jobId, job })}\n`);
+    return;
+  }
+  ui.stdout.write(`Job iniciado: ${job.jobId}\n`);
+  ui.stdout.write(`status: gemini-md-export job status ${job.jobId} --plain\n`);
+  ui.stdout.write(`cancelar: gemini-md-export job cancel ${job.jobId} --plain\n`);
+  if (job.reportFile) ui.stdout.write(`reportFile: ${job.reportFile}\n`);
+  if (job.traceFile || job.trace?.filePath) {
+    ui.stdout.write(`traceFile: ${job.traceFile || job.trace?.filePath}\n`);
+  }
+};
+
 const followJob = async (bridgeUrl, initialJob, flags, ui) => {
   let job = initialJob;
   let tick = 0;
@@ -1810,6 +1981,20 @@ const followJob = async (bridgeUrl, initialJob, flags, ui) => {
 
 const isJobTimeoutError = (err) => err?.code === 'job_timeout';
 
+const attachJobContextToErrorMessage = (err, job = {}) => {
+  if (!err || !job) return;
+  const extras = [
+    job.jobId ? `jobId: ${job.jobId}` : null,
+    job.reportFile ? `reportFile: ${job.reportFile}` : null,
+    job.traceFile || job.trace?.filePath ? `traceFile: ${job.traceFile || job.trace?.filePath}` : null,
+  ].filter(Boolean);
+  if (extras.length === 0) return;
+  const extraText = extras.join('\n');
+  if (!String(err.message || '').includes(extraText)) {
+    err.message = `${err.message}\n${extraText}`;
+  }
+};
+
 const runSync = async (parsed, streams = {}) => {
   const flags = { ...parsed.flags };
   if (!flags.vaultDir && parsed.positionals[0]) flags.vaultDir = parsed.positionals[0];
@@ -1820,6 +2005,7 @@ const runSync = async (parsed, streams = {}) => {
   warnTuiFallback(ui);
   let initialJob = null;
   let finalJob = null;
+  let uninstallSignalCleanup = () => {};
   try {
     if (ui.format !== 'json' && ui.format !== 'jsonl') {
       ui.stdout.write(`Conectando na bridge ${normalizeBridgeUrl(flags.bridgeUrl)}...\n`);
@@ -1827,6 +2013,13 @@ const runSync = async (parsed, streams = {}) => {
     await ensureBridgeAvailable(flags, ui);
     await ensureReady(flags.bridgeUrl, flags, ui);
     initialJob = await startSyncJob(flags.bridgeUrl, flags);
+    uninstallSignalCleanup = installJobSignalCleanup({
+      flags,
+      ui,
+      getJob: () => finalJob || initialJob,
+      reason: 'cli-sync-interrupted',
+    });
+    announceJobStarted(ui, initialJob);
     finalJob = await followJob(flags.bridgeUrl, initialJob, flags, ui);
     const result = emitResult(ui, finalJob);
     return { exitCode: exitCodeForJob(finalJob), result };
@@ -1834,9 +2027,11 @@ const runSync = async (parsed, streams = {}) => {
     if (isJobTimeoutError(err)) {
       finalJob = await cancelJobForTimeoutQuietly(flags, err.data || finalJob || initialJob, ui);
       err.data = finalJob;
+      attachJobContextToErrorMessage(err, finalJob);
     }
     throw err;
   } finally {
+    uninstallSignalCleanup();
     await releaseCliClaimQuietly(flags, 'cli-sync-finished', finalJob || initialJob);
     closeTui(ui);
   }
@@ -2363,6 +2558,7 @@ const runExport = async (parsed, streams = {}) => {
   warnTuiFallback(ui);
   let initialJob = null;
   let finalJob = null;
+  let uninstallSignalCleanup = () => {};
   try {
     if (ui.format !== 'json' && ui.format !== 'jsonl') {
       ui.stdout.write(`Conectando na bridge ${normalizeBridgeUrl(flags.bridgeUrl)}...\n`);
@@ -2370,6 +2566,13 @@ const runExport = async (parsed, streams = {}) => {
     await ensureBridgeAvailable(flags, ui);
     await ensureReady(flags.bridgeUrl, flags, ui);
     initialJob = await startExportJob(flags.bridgeUrl, subcommand, flags);
+    uninstallSignalCleanup = installJobSignalCleanup({
+      flags,
+      ui,
+      getJob: () => finalJob || initialJob,
+      reason: `cli-export-${subcommand || 'job'}-interrupted`,
+    });
+    announceJobStarted(ui, initialJob);
     finalJob = await followJob(flags.bridgeUrl, initialJob, flags, ui);
     const result = emitResult(ui, finalJob);
     return { exitCode: exitCodeForJob(finalJob), result };
@@ -2377,9 +2580,11 @@ const runExport = async (parsed, streams = {}) => {
     if (isJobTimeoutError(err)) {
       finalJob = await cancelJobForTimeoutQuietly(flags, err.data || finalJob || initialJob, ui);
       err.data = finalJob;
+      attachJobContextToErrorMessage(err, finalJob);
     }
     throw err;
   } finally {
+    uninstallSignalCleanup();
     await releaseCliClaimQuietly(flags, `cli-export-${subcommand || 'job'}-finished`, finalJob || initialJob);
     closeTui(ui);
   }
@@ -2388,12 +2593,27 @@ const runExport = async (parsed, streams = {}) => {
 const runJob = async (parsed, streams = {}) => {
   const subcommand = parsed.positionals[0];
   const jobId = parsed.positionals[1];
-  if (!['status', 'cancel', 'trace'].includes(subcommand) || !jobId) {
+  if (!['list', 'status', 'cancel', 'trace'].includes(subcommand)) {
+    throw usageError('Uso: gemini-md-export job list|status|cancel|trace.');
+  }
+  if (subcommand !== 'list' && !jobId) {
     throw usageError('Uso: gemini-md-export job status|cancel|trace <jobId>.');
   }
   const ui = makeUi(parsed.flags, streams);
   warnTuiFallback(ui);
   await ensureBridgeAvailable(parsed.flags, ui);
+  if (subcommand === 'list') {
+    const result = await fetchJobList(parsed.flags.bridgeUrl, parsed.flags);
+    if (ui.format === 'json') {
+      ui.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    } else if (ui.format === 'jsonl') {
+      ui.stdout.write(`${JSON.stringify({ type: 'job_list', result })}\n`);
+    } else {
+      for (const line of renderLinesForJobList(result)) ui.stdout.write(`${stripAnsi(line)}\n`);
+      ui.stdout.write(`RESULT_JSON ${JSON.stringify(result)}\n`);
+    }
+    return { exitCode: EXIT.OK, result };
+  }
   if (subcommand === 'trace') {
     const trace = await fetchJobTrace(parsed.flags.bridgeUrl, jobId);
     if (ui.format === 'json') {
@@ -2593,6 +2813,8 @@ const runParsedCommand = (parsed, streams = {}) => {
 const exitCodeForError = (err) =>
   err.code === 'usage'
     ? EXIT.USAGE
+    : err.code === 'export_job_in_progress'
+      ? EXIT.MANUAL_ACTION
     : err.code === 'extension_unready'
       ? EXIT.EXTENSION_UNREADY
       : err.code === 'bridge_timeout' ||
