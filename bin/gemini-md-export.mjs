@@ -1370,19 +1370,24 @@ const renderedLineCount = (ui, lines = []) => {
   }, 0);
 };
 
-const bar = (ui, current, total, { width = 28, indeterminate = false, seed = 0 } = {}) => {
+const bar = (
+  ui,
+  current,
+  total,
+  { width = 28, indeterminate = false, seed = 0, filledChar = '=', emptyChar = '-' } = {},
+) => {
   const safeTotal = Math.max(0, Number(total) || 0);
   if (indeterminate || safeTotal <= 0) {
     const size = Math.max(4, Math.floor(width / 4));
     const start = seed % Math.max(1, width - size);
     const chars = Array.from({ length: width }, (_, index) =>
-      index >= start && index < start + size ? '=' : '-',
+      index >= start && index < start + size ? filledChar : emptyChar,
     );
     return `[${chars.join('')}]`;
   }
   const pct = Math.max(0, Math.min(1, (Number(current) || 0) / safeTotal));
   const filled = Math.round(pct * width);
-  return `[${'='.repeat(filled)}${'-'.repeat(Math.max(0, width - filled))}] ${Math.round(pct * 100)}%`;
+  return `[${filledChar.repeat(filled)}${emptyChar.repeat(Math.max(0, width - filled))}] ${Math.round(pct * 100)}%`;
 };
 
 const terminalColorForStatus = (status) => {
@@ -1413,6 +1418,25 @@ const displayProgressPosition = (job = {}, total = 0) => {
     return Math.min(requested, Math.max(completed + 1, currentIndex, 1));
   }
   return requested > 0 ? Math.min(completed, requested) : completed;
+};
+
+const humanStatusLabel = (job = {}) => {
+  if (job.status === 'completed') return 'Concluido';
+  if (job.status === 'completed_with_errors') return 'Concluido com avisos';
+  if (job.status === 'failed') return 'Falhou';
+  if (job.status === 'cancelled') return 'Cancelado';
+  if (job.phase === 'loading-history') return 'Carregando historico';
+  if (job.phase === 'scanning-vault') return 'Comparando vault';
+  if (job.phase === 'exporting') return 'Exportando';
+  if (job.phase === 'writing-report') return 'Finalizando';
+  return 'Preparando';
+};
+
+const fitTerminalLine = (ui, text, reserved = 0) => {
+  const width = Math.max(24, (Number(ui.stdout.columns) || terminalWidth(ui)) - reserved);
+  const value = String(text || '');
+  if (stripAnsi(value).length <= width) return value;
+  return `${stripAnsi(value).slice(0, Math.max(1, width - 3))}...`;
 };
 
 const summarizeForResultJson = (job = {}) => {
@@ -1468,37 +1492,36 @@ const renderLinesForJob = (ui, job = {}, tick = 0) => {
   const total = Number(job.requested || job.missingCount || job.webConversationCount || 0);
   const current = displayProgressPosition(job, total);
   const indeterminate = !total || ['queued', 'loading-history', 'scanning-vault'].includes(job.phase);
-  const title = bold(ui, 'Gemini Markdown Export');
-  const status = colorize(ui, terminalColorForStatus(job.status), job.status || 'running');
-  const phase = job.phase ? `${dim(ui, 'fase')} ${job.phase}` : '';
-  const headline = job.progressMessage || job.decisionSummary?.headline || 'Sincronizando...';
+  const status = colorize(ui, terminalColorForStatus(job.status), humanStatusLabel(job));
+  const headline = fitTerminalLine(ui, job.progressMessage || job.decisionSummary?.headline || 'Sincronizando...');
   const currentLabel = job.current?.title || job.current?.chatId || null;
   const countText = total > 0 ? `${Math.min(current, total)}/${total}` : `${job.loadedCount || 0} vistas`;
   const progress = bar(ui, current, total, {
-    width: Math.max(22, Math.min(42, width - 42)),
+    width: Math.max(26, Math.min(54, width - 24)),
     indeterminate,
     seed: tick,
+    filledChar: '#',
+    emptyChar: '.',
   });
-  const warningParts = [];
-  if (totals.failed) warningParts.push(`${totals.failed} falha(s)`);
-  if (totals.warnings) warningParts.push(`${totals.warnings} warning(s) de midia`);
-  const warnings = warningParts.length ? colorize(ui, 'yellow', warningParts.join(' · ')) : 'sem warnings';
+  const summaryParts = [
+    `Salvas ${totals.downloaded}`,
+    `Puladas ${totals.skipped}`,
+    totals.failed ? colorize(ui, 'red', `Falhas ${totals.failed}`) : 'Falhas 0',
+    totals.warnings ? colorize(ui, 'yellow', `Avisos ${totals.warnings}`) : null,
+  ].filter(Boolean);
+  const inventoryParts = [
+    totals.webSeen != null ? `vistas ${totals.webSeen}` : null,
+    totals.missing != null ? `faltando ${totals.missing}` : null,
+  ].filter(Boolean);
   return [
-    `${title} ${dim(ui, 'sync')}`,
-    `${dim(ui, 'job')} ${job.jobId || '-'}`,
-    `${dim(ui, 'status')} ${status}${phase ? ` · ${phase}` : ''}`,
-    `${progress} ${countText}`,
-    headline,
-    currentLabel ? `${dim(ui, 'agora')} ${currentLabel}` : `${dim(ui, 'agora')} aguardando Gemini Web`,
-    `${dim(ui, 'contas')} web=${totals.webSeen ?? '-'} existentes=${totals.existing ?? '-'} faltantes=${totals.missing ?? '-'} baixadas=${totals.downloaded} puladas=${totals.skipped}`,
-    `${dim(ui, 'avisos')} ${warnings}`,
-    job.reportFile ? `${dim(ui, 'relatorio')} ${job.reportFile}` : `${dim(ui, 'relatorio')} ainda nao gravado`,
-    job.traceFile || job.trace?.filePath
-      ? `${dim(ui, 'trace')} ${job.traceFile || job.trace?.filePath}`
-      : `${dim(ui, 'trace')} compacto/em memoria`,
-    job.jobId ? `${dim(ui, 'status cmd')} gemini-md-export job status ${job.jobId} --tui --result-json` : null,
-    job.jobId && !TERMINAL_STATUSES.has(job.status)
-      ? `${dim(ui, 'cancelar')} gemini-md-export job cancel ${job.jobId} --tui --result-json`
+    bold(ui, 'Gemini Markdown Export'),
+    `${progress}  ${countText}`,
+    `${status} - ${headline}`,
+    currentLabel && !TERMINAL_STATUSES.has(job.status) ? `Agora: ${fitTerminalLine(ui, currentLabel, 7)}` : null,
+    job.jobId && summaryParts.length ? summaryParts.join(' | ') : null,
+    job.jobId && inventoryParts.length ? dim(ui, inventoryParts.join(' | ')) : null,
+    job.reportFile && TERMINAL_STATUSES.has(job.status)
+      ? dim(ui, `Relatorio: ${fitTerminalLine(ui, job.reportFile, 11)}`)
       : null,
   ].filter(Boolean);
 };
@@ -1567,8 +1590,14 @@ const renderTui = (ui, job, tick) => {
     ui.stdout.write(ANSI.hideCursor);
     ui.firstRender = false;
     ui.closed = false;
-  } else if (ui.lastLineCount > 0) {
-    ui.stdout.write(`\x1b[${ui.lastLineCount}F${ANSI.clearBelow}`);
+  } else {
+    if (ui.closed) {
+      ui.stdout.write(ANSI.hideCursor);
+      ui.closed = false;
+    }
+    if (ui.lastLineCount > 0) {
+      ui.stdout.write(`\x1b[${ui.lastLineCount}F${ANSI.clearBelow}`);
+    }
   }
   ui.stdout.write(`${lines.join('\n')}\n`);
   ui.lastLineCount = renderedLineCount(ui, lines);
@@ -1708,7 +1737,7 @@ const withWaitStatus = async (
     return await run();
   } finally {
     clearInterval(timer);
-    if (ui.format === 'tui') closeTui(ui, { resetFrame: true });
+    if (ui.format === 'tui') closeTui(ui);
   }
 };
 
@@ -2242,6 +2271,7 @@ const announceJobStarted = (ui, job = {}) => {
     ui.stdout.write(`${JSON.stringify({ type: 'job_started', jobId: job.jobId, job })}\n`);
     return;
   }
+  if (ui.format === 'tui' || ui.format === 'tui-stream') return;
   ui.stdout.write(`Job iniciado: ${job.jobId}\n`);
   ui.stdout.write(`status: gemini-md-export job status ${job.jobId} --tui --result-json\n`);
   ui.stdout.write(`cancelar: gemini-md-export job cancel ${job.jobId} --tui --result-json\n`);
@@ -2768,6 +2798,20 @@ const summarizeChatsCountResult = (result = {}) => ({
   nextAction: result.nextAction || null,
 });
 
+const countRetryReason = (summary = {}) => {
+  if (summary.totalKnown) return null;
+  if (summary.canLoadMore === false) return null;
+  const text = [summary.loadMoreError, summary.refreshError].filter(Boolean).join(' ');
+  if (!text) return null;
+  if (/tab_operation_in_progress|aba do Gemini.*ocupada|outro comando pesado|tab operation/i.test(text)) {
+    return 'aba ocupada';
+  }
+  if (/Timeout ap[oó]s \d+ms|timeout/i.test(text) && summary.reachedEnd !== true) {
+    return 'timeout transitório';
+  }
+  return null;
+};
+
 const summarizeChatsListResult = (raw = {}, flags = {}, selection = null) => {
   const conversations = Array.isArray(raw.conversations) ? raw.conversations : [];
   return {
@@ -2894,16 +2938,14 @@ const runChats = async (parsed, streams = {}) => {
     }
     const requestClaimId = parsed.flags.claimId || countClaimResult?.claim?.claimId || undefined;
     const requestTabId = parsed.flags.tabId ?? countClaimResult?.claim?.tabId ?? undefined;
-    const raw = await withWaitStatus(
-      ui,
-      {
-        message: `Carregando historico do Gemini ate confirmar o fim (limite ${formatDuration(countTimeoutMs)}).`,
-        intervalMs: statusIntervalMs,
-        intervalMessage: (elapsedMs) =>
-          `Ainda carregando historico... ${formatDuration(elapsedMs)} decorridos; nao vou abrir outra tool MCP como fallback.`,
-      },
-      () =>
-        requestJson(
+    const countStartedAt = Date.now();
+    const requestCountUntilSettled = async () => {
+      let latestRaw = null;
+      let attempt = 0;
+      while (true) {
+        const elapsedMs = Date.now() - countStartedAt;
+        const remainingMs = Math.max(1000, countTimeoutMs - elapsedMs);
+        latestRaw = await requestJson(
           parsed.flags.bridgeUrl,
           appendParams('/agent/recent-chats', {
             limit: 1,
@@ -2913,7 +2955,7 @@ const runChats = async (parsed, streams = {}) => {
             preferActive: true,
             refresh: parsed.flags.refresh,
             ...countLoadMoreParams,
-            loadMoreTimeoutMs: countTimeoutMs,
+            loadMoreTimeoutMs: remainingMs,
             autoClaim: requestClaimId ? false : undefined,
             autoReleaseClaim: requestClaimId ? false : parsed.flags.autoReleaseClaim,
             clientId: parsed.flags.clientId,
@@ -2921,8 +2963,33 @@ const runChats = async (parsed, streams = {}) => {
             claimId: requestClaimId,
             sessionId: parsed.flags.sessionId,
           }),
-          { timeoutMs: countTimeoutMs + 15_000 },
-        ),
+          { timeoutMs: remainingMs + 15_000 },
+        );
+        const summary = summarizeChatsCountResult(latestRaw);
+        const retryReason = countRetryReason(summary);
+        if (!retryReason || Date.now() - countStartedAt >= countTimeoutMs) return latestRaw;
+        attempt += 1;
+        if (ui.format === 'plain') {
+          ui.stdout.write(
+            `Ainda tentando confirmar o total (${retryReason}; tentativa ${attempt + 1}).\n`,
+          );
+        } else if (ui.format === 'jsonl') {
+          ui.stdout.write(
+            `${JSON.stringify({ type: 'count_retry', reason: retryReason, attempt: attempt + 1 })}\n`,
+          );
+        }
+        await sleep(Math.min(2500, Math.max(250, statusIntervalMs)));
+      }
+    };
+    const raw = await withWaitStatus(
+      ui,
+      {
+        message: `Carregando historico do Gemini ate confirmar o fim (limite ${formatDuration(countTimeoutMs)}).`,
+        intervalMs: statusIntervalMs,
+        intervalMessage: (elapsedMs) =>
+          `Ainda carregando historico... ${formatDuration(elapsedMs)} decorridos; nao vou abrir outra tool MCP como fallback.`,
+      },
+      requestCountUntilSettled,
     );
     const result = summarizeChatsCountResult(raw);
     const partialReason = result.loadMoreError || result.refreshError;

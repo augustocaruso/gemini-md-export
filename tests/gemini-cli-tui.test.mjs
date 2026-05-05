@@ -428,7 +428,7 @@ test('CLI chats count carrega ate o fim sem despejar lista no chat', async () =>
     assert.equal(countRequest.searchParams.get('untilEnd'), 'true');
     assert.equal(countRequest.searchParams.get('preferActive'), 'true');
     assert.equal(countRequest.searchParams.get('limit'), '1');
-    assert.equal(countRequest.searchParams.get('loadMoreTimeoutMs'), '900000');
+    assert.ok(Number(countRequest.searchParams.get('loadMoreTimeoutMs')) >= 899000);
     assert.equal(countRequest.searchParams.get('maxNoGrowthRounds'), '8');
     assert.equal(countRequest.searchParams.get('loadMoreBrowserRounds'), '12');
     assert.equal(countRequest.searchParams.get('loadMoreBrowserTimeoutMs'), '30000');
@@ -607,7 +607,7 @@ test('CLI chats count nao transforma contagem parcial em total', async () => {
         knownLoadedCount: 73,
         minimumKnownCount: 73,
         countWarning: 'Contagem parcial: nao informe como total.',
-        loadMoreError: 'Esta aba do Gemini ja esta ocupada com outro comando pesado.',
+        loadMoreError: 'Nao consegui confirmar o fim do historico.',
         pagination: {
           loadedCount: 73,
           reachedEnd: false,
@@ -632,16 +632,102 @@ test('CLI chats count nao transforma contagem parcial em total', async () => {
 
     assert.equal(run.exitCode, 1);
     assert.match(stdout.text(), /Contagem parcial: pelo menos 73 chat\(s\)/);
-    assert.match(stdout.text(), /aba do Gemini ja esta ocupada/);
+    assert.match(stdout.text(), /Nao consegui confirmar o fim/);
     assert.doesNotMatch(stdout.text(), /RESULT_JSON/);
     const result = run.result;
     assert.equal(result.totalKnown, false);
     assert.equal(result.totalCount, null);
     assert.equal(result.minimumKnownCount, 73);
-    assert.match(result.loadMoreError, /ocupada/);
+    assert.match(result.loadMoreError, /confirmar o fim/);
     assert.match(result.warning, /parcial/);
     assert.equal(stderr.text(), '');
   });
+});
+
+test('CLI chats count espera e tenta de novo quando a aba esta ocupada', async () => {
+  let countRequests = 0;
+  await withEnv({ GEMINI_MD_EXPORT_CLI_STATUS_INTERVAL_MS: '250' }, async () =>
+    withServer((req, res, url) => {
+    if (url.pathname === '/agent/ready') {
+      sendJson(res, 200, {
+        ready: true,
+        mode: 'hot',
+        connectedClientCount: 1,
+        selectableTabCount: 1,
+        commandReadyClientCount: 1,
+      });
+      return;
+    }
+    if (url.pathname === '/agent/tabs' && url.searchParams.get('action') === 'claim') {
+      sendJson(res, 200, {
+        ok: true,
+        claim: {
+          claimId: 'count-claim',
+          tabId: 101,
+          label: 'GME Count',
+        },
+      });
+      return;
+    }
+    if (url.pathname === '/agent/recent-chats') {
+      countRequests += 1;
+      if (countRequests === 1) {
+        sendJson(res, 200, {
+          ok: true,
+          countStatus: 'incomplete',
+          totalKnown: false,
+          knownLoadedCount: 13,
+          minimumKnownCount: 13,
+          loadMoreError: 'Esta aba do Gemini ja esta ocupada com outro comando pesado.',
+          refreshError: 'Timeout após 2500ms.',
+          pagination: {
+            loadedCount: 13,
+            reachedEnd: false,
+            canLoadMore: true,
+          },
+          conversations: [],
+        });
+        return;
+      }
+      sendJson(res, 200, {
+        ok: true,
+        countStatus: 'complete',
+        countIsTotal: true,
+        totalKnown: true,
+        totalCount: 91,
+        knownLoadedCount: 91,
+        minimumKnownCount: 91,
+        pagination: {
+          loadedCount: 91,
+          reachedEnd: true,
+          canLoadMore: false,
+        },
+        conversations: [],
+      });
+      return;
+    }
+    if (url.pathname === '/agent/release-tab') {
+      sendJson(res, 200, { ok: true, released: { claimId: url.searchParams.get('claimId') } });
+      return;
+    }
+    sendJson(res, 404, { error: `not found: ${url.pathname}` });
+    }, async (bridgeUrl) => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+      const run = await main(['chats', 'count', '--bridge-url', bridgeUrl, '--plain'], {
+        stdout,
+        stderr,
+      });
+
+      assert.equal(run.exitCode, 0);
+      assert.equal(countRequests, 2);
+      assert.match(stdout.text(), /Ainda tentando confirmar o total/);
+      assert.match(stdout.text(), /Total confirmado: 91 chat\(s\)/);
+      assert.equal(run.result.totalKnown, true);
+      assert.equal(run.result.totalCount, 91);
+      assert.equal(stderr.text(), '');
+    }),
+  );
 });
 
 test('CLI chats count libera claim explicita sem imprimir JSON extra', async () => {
@@ -1386,7 +1472,10 @@ test('CLI sync --tui renderiza painel ANSI quando usado com TTY', async () => {
     assert.match(stdout.text(), /\x1b\[\?25l/);
     assert.match(stdout.text(), /\x1b\[\?25h/);
     assert.match(stdout.text(), /Gemini Markdown Export/);
-    assert.match(stdout.text(), /\[[=-]+]/);
+    assert.match(stdout.text(), /\[[#.]+]/);
+    assert.match(stdout.text(), /Concluido/);
+    assert.match(stdout.text(), /Salvas 1 \| Puladas 1 \| Falhas 0/);
+    assert.doesNotMatch(stdout.text(), /contas web|trace compacto|status cmd|Job iniciado/);
     assert.match(stdout.text(), /RESULT_JSON /);
     assert.equal(stderr.text(), '');
   });
@@ -1405,9 +1494,10 @@ test('CLI sync --tui reinicia frame apos readiness e conta quebras de linha', as
       assert.equal(run.exitCode, 0);
       assert.match(stdout.text(), /\x1b\[\?25l/);
       const cursorMoves = [...stdout.text().matchAll(/\x1b\[(\d+)F/g)].map((match) => Number(match[1]));
-      assert.equal(cursorMoves.length, 1);
-      assert.ok(cursorMoves[0] > 12, `cursor deveria considerar linhas quebradas; recebeu ${cursorMoves[0]}`);
-      assert.match(stdout.text(), /Job iniciado: job-1/);
+      assert.equal(cursorMoves.length, 2);
+      assert.ok(cursorMoves.every((move) => move >= 5), `cursor deveria considerar o painel; recebeu ${cursorMoves.join(',')}`);
+      assert.doesNotMatch(stdout.text(), /Job iniciado: job-1/);
+      assert.doesNotMatch(stdout.text(), /relatorio ainda nao gravado|trace compacto/);
       assert.match(stdout.text(), /RESULT_JSON /);
       assert.equal(stderr.text(), '');
     });
