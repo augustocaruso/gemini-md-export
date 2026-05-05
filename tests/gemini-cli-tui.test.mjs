@@ -1392,6 +1392,74 @@ test('CLI sync --tui renderiza painel ANSI quando usado com TTY', async () => {
   });
 });
 
+test('CLI sync --tui reinicia frame apos readiness e conta quebras de linha', async () => {
+  await withEnv({ GEMINI_CLI: '1' }, async () => {
+    await withServer(mockSyncServer(), async (bridgeUrl) => {
+      const stdout = captureStream({ isTTY: true, columns: 36 });
+      const stderr = captureStream();
+      const run = await main(
+        ['sync', '/vault/Gemini', '--bridge-url', bridgeUrl, '--tui', '--poll-ms', '10'],
+        { stdout, stderr },
+      );
+
+      assert.equal(run.exitCode, 0);
+      assert.match(stdout.text(), /\x1b\[\?25l/);
+      const cursorMoves = [...stdout.text().matchAll(/\x1b\[(\d+)F/g)].map((match) => Number(match[1]));
+      assert.equal(cursorMoves.length, 1);
+      assert.ok(cursorMoves[0] > 12, `cursor deveria considerar linhas quebradas; recebeu ${cursorMoves[0]}`);
+      assert.match(stdout.text(), /Job iniciado: job-1/);
+      assert.match(stdout.text(), /RESULT_JSON /);
+      assert.equal(stderr.text(), '');
+    });
+  });
+});
+
+test('CLI sync --tui usa stream compacto quando pedido por env', async () => {
+  await withEnv({ GEMINI_CLI: '1', GEMINI_MD_EXPORT_TUI_MODE: 'stream' }, async () => {
+    let statusCalls = 0;
+    await withServer((req, res, url) => {
+      if (url.pathname === '/agent/ready') {
+        sendJson(res, 200, {
+          ready: true,
+          mode: 'hot',
+          connectedClientCount: 1,
+          selectableTabCount: 1,
+          commandReadyClientCount: 1,
+        });
+        return;
+      }
+      if (url.pathname === '/agent/sync-vault') {
+        sendJson(res, 202, runningJob);
+        return;
+      }
+      if (url.pathname === '/agent/export-job-status') {
+        statusCalls += 1;
+        sendJson(res, 200, statusCalls >= 3 ? completedJob : runningJob);
+        return;
+      }
+      sendJson(res, 404, { error: `not found: ${url.pathname}` });
+    }, async (bridgeUrl) => {
+      const stdout = captureStream({ isTTY: true, columns: 100 });
+      const stderr = captureStream();
+      const run = await main(
+        ['sync', '/vault/Gemini', '--bridge-url', bridgeUrl, '--tui', '--poll-ms', '10'],
+        { stdout, stderr },
+      );
+
+      assert.equal(run.exitCode, 0);
+      assert.doesNotMatch(stdout.text(), /\x1b\[\?25l/);
+      assert.doesNotMatch(stdout.text(), /\x1b\[\d+F/);
+      assert.match(stdout.text(), /Gemini Markdown Export/);
+      assert.match(stdout.text(), /\[[=-]+]/);
+      assert.equal(stdout.text().match(/Gemini Markdown Export/g)?.length, 1);
+      assert.equal(stdout.text().match(/running\/exporting/g)?.length, 1);
+      assert.match(stdout.text(), /completed\/writing-report/);
+      assert.match(stdout.text(), /RESULT_JSON /);
+      assert.equal(stderr.text(), '');
+    });
+  });
+});
+
 test('CLI sync --tui avisa e cai para plain sem TTY', async () => {
   await withServer(mockSyncServer({ completedImmediately: true }), async (bridgeUrl) => {
     const stdout = captureStream();

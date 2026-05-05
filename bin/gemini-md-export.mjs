@@ -199,6 +199,7 @@ const usage = () =>
     '',
     'Dentro do Gemini CLI:',
     '  - Use --tui por padrao no shell interativo/node-pty.',
+    '  - Dentro do Gemini CLI, --tui usa a TUI ANSI completa; se precisar, GEMINI_MD_EXPORT_TUI_MODE=stream troca para modo compacto.',
     '  - Para export/sync, rode a CLI direto; evite despejar gemini_ready/gemini_tabs no chat.',
     '  - Use --tui --result-json quando precisar ler resultado final; --plain so em shell capturado.',
     '',
@@ -1313,10 +1314,18 @@ const formatDuration = (ms) => {
 
 const supportsTui = (stdout = process.stdout) => stdout.isTTY && process.env.TERM !== 'dumb';
 
+const prefersStreamTui = () => {
+  const explicit = String(process.env.GEMINI_MD_EXPORT_TUI_MODE || '').trim().toLowerCase();
+  if (['ansi', 'full', 'vt100'].includes(explicit)) return false;
+  if (['stream', 'line', 'append', 'compact'].includes(explicit)) return true;
+  return false;
+};
+
 const selectFormat = (flags, stdout = process.stdout) => {
   if (flags.format === 'tui' && !stdout.isTTY) return 'plain';
+  if (flags.format === 'tui' && prefersStreamTui()) return 'tui-stream';
   if (flags.format !== 'auto') return flags.format;
-  if (supportsTui(stdout)) return 'tui';
+  if (supportsTui(stdout)) return prefersStreamTui() ? 'tui-stream' : 'tui';
   return 'plain';
 };
 
@@ -1326,7 +1335,7 @@ const makeUi = (flags, streams = {}) => {
   return {
     format,
     requestedFormat: flags.format,
-    tuiFallback: flags.format === 'tui' && format !== 'tui',
+    tuiFallback: flags.format === 'tui' && format === 'plain',
     tuiFallbackWarned: false,
     color: flags.color,
     stdout,
@@ -1334,6 +1343,7 @@ const makeUi = (flags, streams = {}) => {
     lastLineCount: 0,
     firstRender: true,
     closed: false,
+    streamHeaderPrinted: false,
   };
 };
 
@@ -1346,6 +1356,19 @@ const warnTuiFallback = (ui) => {
 };
 
 const terminalWidth = (ui) => Math.max(60, Math.min(120, ui.stdout.columns || 88));
+
+const renderedLineCount = (ui, lines = []) => {
+  const columns = Math.max(1, Math.floor(Number(ui.stdout.columns) || terminalWidth(ui)));
+  return lines.reduce((sum, line) => {
+    const plain = stripAnsi(line);
+    return (
+      sum +
+      plain
+        .split('\n')
+        .reduce((lineSum, part) => lineSum + Math.max(1, Math.ceil(String(part).length / columns)), 0)
+    );
+  }, 0);
+};
 
 const bar = (ui, current, total, { width = 28, indeterminate = false, seed = 0 } = {}) => {
   const safeTotal = Math.max(0, Number(total) || 0);
@@ -1543,19 +1566,27 @@ const renderTui = (ui, job, tick) => {
   if (ui.firstRender) {
     ui.stdout.write(ANSI.hideCursor);
     ui.firstRender = false;
+    ui.closed = false;
   } else if (ui.lastLineCount > 0) {
     ui.stdout.write(`\x1b[${ui.lastLineCount}F${ANSI.clearBelow}`);
   }
   ui.stdout.write(`${lines.join('\n')}\n`);
-  ui.lastLineCount = lines.reduce((sum, line) => sum + Math.max(1, stripAnsi(line).split('\n').length), 0);
+  ui.lastLineCount = renderedLineCount(ui, lines);
 };
 
-const closeTui = (ui) => {
+const resetTuiFrame = (ui) => {
+  ui.lastLineCount = 0;
+  ui.firstRender = true;
+  ui.closed = false;
+};
+
+const closeTui = (ui, { resetFrame = false } = {}) => {
   if (ui.closed) return;
   ui.closed = true;
   if (ui.format === 'tui' && !ui.firstRender) {
     ui.stdout.write(ANSI.showCursor);
   }
+  if (resetFrame) resetTuiFrame(ui);
 };
 
 const renderPlainProgress = (ui, job, previous = {}) => {
@@ -1579,6 +1610,44 @@ const renderPlainProgress = (ui, job, previous = {}) => {
   return { key };
 };
 
+const STREAM_TUI_REPEAT_MS = 12_000;
+
+const renderTuiStreamProgress = (ui, job, previous = {}, tick = 0) => {
+  if (!ui.streamHeaderPrinted) {
+    ui.stdout.write(`${bold(ui, 'Gemini Markdown Export')} ${dim(ui, 'sync')}\n`);
+    ui.streamHeaderPrinted = true;
+  }
+  const total = Number(job.requested || job.missingCount || job.webConversationCount || 0);
+  const current = displayProgressPosition(job, total);
+  const indeterminate = !total || ['queued', 'loading-history', 'scanning-vault'].includes(job.phase);
+  const count = total > 0 ? `${Math.min(current, total)}/${total}` : `${job.loadedCount || 0} vistas`;
+  const progress = bar(ui, current, total, {
+    width: Math.max(18, Math.min(30, Math.floor((Number(ui.stdout.columns) || 88) / 3))),
+    indeterminate,
+    seed: tick,
+  });
+  const status = `${job.status || 'running'}${job.phase ? `/${job.phase}` : ''}`;
+  const headline = job.progressMessage || job.decisionSummary?.headline || 'sincronizando';
+  const currentLabel = job.current?.title || job.current?.chatId || null;
+  const key = [
+    job.status,
+    job.jobId,
+    job.phase,
+    current,
+    total,
+    job.loadedCount,
+    job.failureCount,
+    headline,
+    currentLabel,
+  ].join('|');
+  const now = Date.now();
+  if (previous.key === key && now - (previous.lastWriteAt || 0) < STREAM_TUI_REPEAT_MS) return previous;
+  const jobPart = job.jobId ? ` ${dim(ui, 'job')} ${job.jobId}` : '';
+  const currentPart = currentLabel ? ` ${dim(ui, 'agora')} ${currentLabel}` : '';
+  ui.stdout.write(`${progress} ${count} ${colorize(ui, terminalColorForStatus(job.status), status)}${jobPart} - ${headline}${currentPart}\n`);
+  return { key, lastWriteAt: now };
+};
+
 const withWaitStatus = async (
   ui,
   { message, intervalMessage, intervalMs = DEFAULT_COUNT_STATUS_INTERVAL_MS },
@@ -1592,6 +1661,7 @@ const withWaitStatus = async (
 
   const startedAt = Date.now();
   let tick = 0;
+  let previousStream = {};
   const nextMessage = () =>
     typeof intervalMessage === 'function' ? intervalMessage(Date.now() - startedAt) : message;
   const renderWaitTui = () => {
@@ -1607,13 +1677,29 @@ const withWaitStatus = async (
       tick,
     );
   };
+  const renderWaitStreamTui = () => {
+    previousStream = renderTuiStreamProgress(
+      ui,
+      {
+        status: 'running',
+        phase: 'loading-history',
+        requested: 0,
+        completed: 0,
+        progressMessage: tick === 0 ? message : nextMessage(),
+      },
+      previousStream,
+      tick,
+    );
+  };
 
   if (ui.format === 'tui') renderWaitTui();
+  else if (ui.format === 'tui-stream') renderWaitStreamTui();
   else ui.stdout.write(`${message}\n`);
 
   const timer = setInterval(() => {
     tick += 1;
     if (ui.format === 'tui') renderWaitTui();
+    else if (ui.format === 'tui-stream') renderWaitStreamTui();
     else ui.stdout.write(`${nextMessage()}\n`);
   }, Math.max(1000, Number(intervalMs) || DEFAULT_COUNT_STATUS_INTERVAL_MS));
   timer.unref?.();
@@ -1622,7 +1708,7 @@ const withWaitStatus = async (
     return await run();
   } finally {
     clearInterval(timer);
-    if (ui.format === 'tui') closeTui(ui);
+    if (ui.format === 'tui') closeTui(ui, { resetFrame: true });
   }
 };
 
@@ -2169,10 +2255,13 @@ const followJob = async (bridgeUrl, initialJob, flags, ui) => {
   let job = initialJob;
   let tick = 0;
   let previousPlain = {};
+  let previousStream = {};
   const startedAt = Date.now();
   while (true) {
     if (ui.format === 'tui') {
       renderTui(ui, job, tick);
+    } else if (ui.format === 'tui-stream') {
+      previousStream = renderTuiStreamProgress(ui, job, previousStream, tick);
     } else if (ui.format === 'plain') {
       previousPlain = renderPlainProgress(ui, job, previousPlain);
     } else if (ui.format === 'jsonl') {
