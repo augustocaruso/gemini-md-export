@@ -2007,7 +2007,7 @@ test('CLI sync --tui renderiza painel ANSI quando usado com TTY', async () => {
     assert.match(stdout.text(), /\x1b\[\?25l/);
     assert.match(stdout.text(), /\x1b\[\?25h/);
     assert.match(stdout.text(), /Gemini Markdown Export/);
-    assert.match(stdout.text(), /\[[#.]+]/);
+    assert.match(stdout.text(), /▕.*[█▓░].*▏/);
     assert.match(stdout.text(), /Concluido/);
     assert.match(stdout.text(), /Salvas 1 \| Puladas 1 \| Falhas 0/);
     assert.doesNotMatch(stdout.text(), /contas web|trace compacto|status cmd|Job iniciado/);
@@ -2131,7 +2131,7 @@ test('CLI sync --tui usa stream compacto quando pedido por env', async () => {
       assert.doesNotMatch(stdout.text(), /\x1b\[\?25l/);
       assert.doesNotMatch(stdout.text(), /\x1b\[\d+F/);
       assert.match(stdout.text(), /Gemini Markdown Export/);
-      assert.match(stdout.text(), /\[[=-]+]/);
+      assert.match(stdout.text(), /▕.*[█▓░].*▏/);
       assert.equal(stdout.text().match(/Gemini Markdown Export/g)?.length, 1);
       assert.equal(stdout.text().match(/running\/exporting/g)?.length, 1);
       assert.match(stdout.text(), /completed\/writing-report/);

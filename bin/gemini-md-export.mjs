@@ -1629,24 +1629,56 @@ const renderedLineCount = (ui, lines = []) => {
   }, 0);
 };
 
+const progressBarWidth = (ui, reserved = 34, { min = 24, max = 54 } = {}) =>
+  Math.max(min, Math.min(max, terminalWidth(ui) - reserved));
+
+const progressBarColor = (status) => {
+  if (status === 'completed') return 'green';
+  if (status === 'completed_with_errors') return 'yellow';
+  if (status === 'failed' || status === 'cancelled') return 'red';
+  return 'cyan';
+};
+
 const bar = (
   ui,
   current,
   total,
-  { width = 28, indeterminate = false, seed = 0, filledChar = '=', emptyChar = '-' } = {},
+  { width = 28, indeterminate = false, seed = 0, status = 'running', showPercent = true } = {},
 ) => {
+  const glyph = {
+    left: '▕',
+    right: '▏',
+    full: '█',
+    head: '▓',
+    empty: '░',
+  };
+  const safeWidth = Math.max(8, Math.floor(Number(width) || 28));
+  const color = progressBarColor(status);
   const safeTotal = Math.max(0, Number(total) || 0);
   if (indeterminate || safeTotal <= 0) {
-    const size = Math.max(4, Math.floor(width / 4));
-    const start = seed % Math.max(1, width - size);
-    const chars = Array.from({ length: width }, (_, index) =>
-      index >= start && index < start + size ? filledChar : emptyChar,
-    );
-    return `[${chars.join('')}]`;
+    const span = Math.max(4, Math.min(safeWidth, Math.floor(safeWidth * 0.28)));
+    const travel = safeWidth + span;
+    const start = (Math.abs(Number(seed) || 0) % travel) - span;
+    const chars = Array.from({ length: safeWidth }, (_, index) => {
+      const offset = index - start;
+      if (offset < 0 || offset >= span) return dim(ui, glyph.empty);
+      return colorize(ui, color, offset === 0 || offset === span - 1 ? glyph.head : glyph.full);
+    });
+    return `${dim(ui, glyph.left)}${chars.join('')}${dim(ui, glyph.right)}`;
   }
   const pct = Math.max(0, Math.min(1, (Number(current) || 0) / safeTotal));
-  const filled = Math.round(pct * width);
-  return `[${filledChar.repeat(filled)}${emptyChar.repeat(Math.max(0, width - filled))}] ${Math.round(pct * 100)}%`;
+  const hasHead = pct > 0 && pct < 1;
+  const fullCount =
+    pct >= 1 ? safeWidth : Math.max(0, Math.min(safeWidth, Math.floor(pct * safeWidth) - (hasHead ? 1 : 0)));
+  const headCount = hasHead && fullCount < safeWidth ? 1 : 0;
+  const emptyCount = Math.max(0, safeWidth - fullCount - headCount);
+  const body = [
+    fullCount ? colorize(ui, color, glyph.full.repeat(fullCount)) : '',
+    headCount ? colorize(ui, color, glyph.head) : '',
+    emptyCount ? dim(ui, glyph.empty.repeat(emptyCount)) : '',
+  ].join('');
+  const percent = `${String(Math.round(pct * 100)).padStart(3, ' ')}%`;
+  return `${dim(ui, glyph.left)}${body}${dim(ui, glyph.right)}${showPercent ? ` ${colorize(ui, color, percent)}` : ''}`;
 };
 
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -1700,6 +1732,17 @@ const displayProgressPosition = (job = {}, total = 0) => {
     return Math.min(requested, Math.max(completed + 1, currentIndex, 1));
   }
   return requested > 0 ? Math.min(completed, requested) : completed;
+};
+
+const barProgressPosition = (job = {}, total = 0) => {
+  const requested = Math.max(0, Number(total || job.requested || 0));
+  const completed = Math.max(0, Number(job.completed || 0));
+  if (requested <= 0) return completed;
+  if (TERMINAL_STATUSES.has(job.status)) return Math.min(completed, requested);
+  if (job.phase === 'exporting') {
+    return Math.min(requested - 0.02, completed + 0.62);
+  }
+  return Math.min(completed, requested);
 };
 
 const humanStatusLabel = (job = {}) => {
@@ -1803,9 +1846,15 @@ const renderLinesForCountWait = (ui, job = {}, tick = 0) => {
   const details = [elapsedText, roundsText, job.claimLabel ? `aba ${job.claimLabel}` : null]
     .filter(Boolean)
     .join(' | ');
+  const activity = bar(ui, 0, 0, {
+    width: progressBarWidth(ui, 38, { min: 22, max: 44 }),
+    indeterminate: true,
+    seed: tick,
+    showPercent: false,
+  });
   const lines = [
+    `${activity}  ${foundText}`,
     `${colorize(ui, 'cyan', spinnerFrame(tick))} Buscando fim do historico`,
-    foundText,
     job.claimWarning ? dim(ui, job.claimWarning) : null,
     job.progressMessage ? dim(ui, job.progressMessage) : null,
     details ? dim(ui, details) : null,
@@ -1822,8 +1871,15 @@ const renderLinesForReadyWait = (ui, job = {}, tick = 0) => {
   ]
     .filter(Boolean)
     .join(' | ');
+  const activity = bar(ui, 0, 0, {
+    width: progressBarWidth(ui, 38, { min: 22, max: 44 }),
+    indeterminate: true,
+    seed: tick,
+    showPercent: false,
+  });
   const lines = [
-    `${colorize(ui, 'cyan', spinnerFrame(tick))} ${note}`,
+    `${activity}  ${note}`,
+    `${colorize(ui, 'cyan', spinnerFrame(tick))} Preparando ambiente`,
     job.progressMessage && job.progressMessage !== note ? dim(ui, job.progressMessage) : null,
     details ? dim(ui, details) : null,
   ].filter(Boolean);
@@ -1837,18 +1893,18 @@ const renderLinesForJob = (ui, job = {}, tick = 0) => {
   const totals = jobTotals(job);
   const total = Number(job.requested || job.missingCount || job.webConversationCount || 0);
   const current = displayProgressPosition(job, total);
+  const barCurrent = barProgressPosition(job, total);
   const indeterminate = !total || ['queued', 'loading-history', 'scanning-vault'].includes(job.phase);
   const status = colorize(ui, terminalColorForStatus(job.status), humanStatusLabel(job));
   const headline = fitTerminalLine(ui, job.progressMessage || job.decisionSummary?.headline || 'Sincronizando...');
   const currentLabel = job.current?.title || job.current?.chatId || null;
   const countText = total > 0 ? `${Math.min(current, total)}/${total}` : indeterminateCountText(job, totals);
   const statusPrefix = TERMINAL_STATUSES.has(job.status) ? '' : `${colorize(ui, 'cyan', spinnerFrame(tick))} `;
-  const progress = bar(ui, current, total, {
-    width: Math.max(26, Math.min(54, width - 24)),
+  const progress = bar(ui, barCurrent, total, {
+    width: progressBarWidth(ui, 34, { min: 26, max: 54 }),
     indeterminate,
     seed: tick,
-    filledChar: '#',
-    emptyChar: '.',
+    status: job.status,
   });
   const summaryParts = [
     `Salvas ${totals.downloaded}`,
@@ -1861,8 +1917,8 @@ const renderLinesForJob = (ui, job = {}, tick = 0) => {
     totals.missing != null ? `faltando ${totals.missing}` : null,
   ].filter(Boolean);
   const lines = [
-    `${progress}  ${countText}`,
-    `${statusPrefix}${status} - ${headline}`,
+    `${progress}  ${bold(ui, countText)}`,
+    `${statusPrefix}${status} · ${headline}`,
     currentLabel && !TERMINAL_STATUSES.has(job.status) ? `Agora: ${fitTerminalLine(ui, currentLabel, 7)}` : null,
     job.jobId && summaryParts.length ? summaryParts.join(' | ') : null,
     job.jobId && inventoryParts.length ? dim(ui, inventoryParts.join(' | ')) : null,
@@ -1995,9 +2051,10 @@ const renderTuiStreamProgress = (ui, job, previous = {}, tick = 0) => {
   }
   const total = Number(job.requested || job.missingCount || job.webConversationCount || 0);
   const current = displayProgressPosition(job, total);
+  const barCurrent = barProgressPosition(job, total);
   const indeterminate = !total || ['queued', 'loading-history', 'scanning-vault'].includes(job.phase);
   const count = total > 0 ? `${Math.min(current, total)}/${total}` : indeterminateCountText(job);
-  const progress = bar(ui, current, total, {
+  const progress = bar(ui, barCurrent, total, {
     width: Math.max(18, Math.min(30, Math.floor((Number(ui.stdout.columns) || 88) / 3))),
     indeterminate,
     seed: tick,
