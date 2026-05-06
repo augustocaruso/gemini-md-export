@@ -1,0 +1,31 @@
+description = "Mostra status, retry, preview e opt-out da telemetria do Gemini Markdown Export."
+prompt = """
+Gerencie a telemetria do gemini-md-export pela interface do Gemini CLI.
+
+Argumentos do usuario: {{args}}
+
+Leia `docs/reference/telemetry.md` se precisar explicar a arquitetura. Esta
+telemetria é separada da telemetria do Medical Notes Workbench: endpoint/token
+devem apontar para `gemini-md-export-telemetry`, não para
+`medical-notes-workbench-telemetry`.
+
+Use o binario local da extensao:
+macOS/Linux:
+`node "${extensionPath}/bin/gemini-md-export.mjs" telemetry <acao> ...`
+Windows/PowerShell:
+`node "${extensionPath}\\bin\\gemini-md-export.mjs" telemetry <acao> ...`
+
+Intencoes:
+- `status`: mostre se a telemetria esta pronta, autoativada por defaults de
+  distribuicao ou desligada por opt-out. Se aparecer
+  `endpoint_warning=endpoint_points_to_med_notes_receiver`, diga que o defaults
+  ainda aponta para o receiver errado e precisa ser trocado.
+- `enable` ou "ativar": use apenas como override manual quando endpoint/token
+  vierem do mantenedor do exporter; rode `telemetry enable --endpoint ... --token ...`.
+- `status`, `preview`, `send`, `disable`: rode a ação correspondente.
+- Para retry da outbox, use `telemetry send --since 7d --plain`.
+- Para ver o que sairia sem enviar, use `telemetry preview --since 7d --plain`.
+
+Explique em portugues simples: se esta pronto, quantos itens estão na outbox,
+e qual é a próxima ação. Não imprima token.
+"""

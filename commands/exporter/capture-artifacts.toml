@@ -1,0 +1,24 @@
+description = "Captura HTML de mini apps Gemini e gera manifesto para embed no Obsidian."
+prompt = """
+Capture payloads HTML de artefatos interativos de uma página Gemini usando a
+CLI local desta extensão.
+
+Argumentos do usuario: {{args}}
+
+Contrato:
+- O usuário deve informar uma URL `https://gemini.google.com/app/<chatId>`.
+  Se não houver URL, peça apenas esse link.
+- O destino padrão pode ser `~/Downloads`, salvo se o usuário informar outra
+  pasta.
+- Rode o binário local da extensão, não Playwright/CDP/debugger:
+  macOS/Linux:
+  `node "${extensionPath}/bin/gemini-md-export.mjs" diagnose page "<url>" --save-html --output-dir "<dir>" --plain`
+  Windows/PowerShell:
+  `node "${extensionPath}\\bin\\gemini-md-export.mjs" diagnose page "<url>" --save-html --output-dir "<dir>" --plain`
+- A CLI pode clicar em um botão candidato de artefato para materializar o
+  iframe, depois tenta fechar a superfície aberta e liberar claim visual da aba.
+- A saída esperada inclui `Captura HTML`, `HTML salvo` e `Manifesto`.
+- Não cole HTML no chat. Informe só os caminhos dos arquivos salvos, contagem,
+  hash quando aparecer no manifesto e qualquer falha acionável.
+- Não tente burlar sandbox, autenticação, cookies ou permissões do navegador.
+"""

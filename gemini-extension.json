@@ -1,0 +1,17 @@
+{
+  "name": "gemini-md-export",
+  "version": "0.8.48",
+  "description": "Gemini CLI extension that exposes the local Gemini web Markdown exporter MCP and its operational context.",
+  "contextFileName": "GEMINI.md",
+  "mcpServers": {
+    "gemini-md-export": {
+      "command": "node",
+      "args": [
+        "${extensionPath}${/}src${/}mcp-server.js"
+      ],
+      "env": {
+        "GEMINI_MCP_CHROME_LAUNCH_IF_CLOSED": "false"
+      }
+    }
+  }
+}
