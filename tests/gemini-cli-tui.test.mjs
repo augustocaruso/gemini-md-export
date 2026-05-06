@@ -11,6 +11,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { main } from '../bin/gemini-md-export.mjs';
 
 const ROOT = resolve(import.meta.dirname, '..');
+const PACKAGE_VERSION = JSON.parse(readFileSync(resolve(ROOT, 'package.json'), 'utf-8')).version;
 
 test('CLI usa timeout honesto e status visivel para readiness lenta', () => {
   const source = readFileSync(resolve(ROOT, 'bin', 'gemini-md-export.mjs'), 'utf-8');
@@ -93,6 +94,87 @@ const getFreePort = async () => {
   const port = server.address().port;
   await new Promise((resolveClose) => server.close(resolveClose));
   return port;
+};
+
+const waitForHealth = async (bridgeUrl, timeoutMs = 4000) => {
+  const startedAt = Date.now();
+  let lastError = null;
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      const response = await fetch(`${bridgeUrl}/healthz`);
+      if (response.ok) return response.json();
+      lastError = new Error(`HTTP ${response.status}`);
+    } catch (err) {
+      lastError = err;
+    }
+    await sleep(80);
+  }
+  throw lastError || new Error(`healthz nao ficou pronto em ${timeoutMs}ms`);
+};
+
+const isPidAlive = (pid) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err?.code === 'EPERM';
+  }
+};
+
+const waitForChildExit = async (child, timeoutMs = 3000) => {
+  if (child.exitCode !== null || child.signalCode !== null) return true;
+  return Promise.race([
+    new Promise((resolveExit) => child.once('exit', () => resolveExit(true))),
+    sleep(timeoutMs).then(() => false),
+  ]);
+};
+
+const spawnFakeOldBridge = async (port) => {
+  const code = `
+    import { createServer } from 'node:http';
+    const port = Number(process.env.GME_FAKE_BRIDGE_PORT);
+    const server = createServer((req, res) => {
+      const url = new URL(req.url || '/', 'http://127.0.0.1');
+      if (url.pathname === '/healthz') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({
+          ok: true,
+          name: 'gemini-md-export',
+          version: '0.0.1',
+          protocolVersion: 2,
+          bridgeRole: 'primary',
+          pid: process.pid,
+          process: {
+            pid: process.pid,
+            ppid: process.ppid,
+            argv: [process.execPath, process.cwd() + '/src/mcp-server.js'],
+            root: process.cwd(),
+            cwd: process.cwd()
+          }
+        }));
+        return;
+      }
+      if (url.pathname === '/agent/ready') {
+        res.writeHead(500, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'old bridge should not be used' }));
+        return;
+      }
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'not found: ' + url.pathname }));
+    });
+    server.listen(port, '127.0.0.1');
+    process.on('SIGTERM', () => server.close(() => process.exit(0)));
+  `;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', code], {
+    cwd: ROOT,
+    stdio: ['ignore', 'ignore', 'pipe'],
+    env: {
+      ...process.env,
+      GME_FAKE_BRIDGE_PORT: String(port),
+    },
+  });
+  await waitForHealth(`http://127.0.0.1:${port}`);
+  return child;
 };
 
 const runningJob = {
@@ -346,6 +428,134 @@ test('CLI tabs list usa endpoint proprio sem preflight gemini_ready', async () =
     assert.equal(stderr.text(), '');
     assert.equal(requests.some((item) => item.pathname === '/agent/ready'), false);
   });
+});
+
+test('CLI recusa bridge antiga com --no-start-bridge antes de chamar readiness', async () => {
+  await withServer((req, res, url) => {
+    if (url.pathname === '/healthz') {
+      sendJson(res, 200, {
+        ok: true,
+        name: 'gemini-md-export',
+        version: '0.0.1',
+        protocolVersion: 2,
+        pid: 999999,
+        process: {
+          pid: 999999,
+          argv: ['/usr/local/bin/node', '/tmp/gemini-md-export/src/mcp-server.js'],
+          root: '/tmp/gemini-md-export',
+        },
+      });
+      return;
+    }
+    if (url.pathname === '/agent/ready') {
+      sendJson(res, 500, { error: 'ready da bridge antiga nao deveria ser chamado' });
+      return;
+    }
+    sendJson(res, 404, { error: `not found: ${url.pathname}` });
+  }, async (bridgeUrl, requests) => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+    await assert.rejects(
+      () =>
+        main(
+          ['chats', 'count', '--bridge-url', bridgeUrl, '--no-start-bridge', '--plain'],
+          { stdout, stderr },
+        ),
+      /Bridge local desatualizada.*0\.0\.1/s,
+    );
+    assert.equal(requests.some((item) => item.pathname === '/agent/ready'), false);
+    assert.match(stdout.text(), /Conectando na bridge/);
+    assert.equal(stderr.text(), '');
+  });
+});
+
+test('CLI recusa encerrar dono de porta que nao e gemini-md-export', async () => {
+  await withServer((req, res, url) => {
+    if (url.pathname === '/healthz') {
+      sendJson(res, 200, {
+        ok: true,
+        name: 'outro-servico',
+        version: '9.9.9',
+        protocolVersion: 2,
+        pid: 999998,
+        process: {
+          pid: 999998,
+          argv: ['/usr/bin/python3', '/tmp/server.py'],
+          root: '/tmp',
+        },
+      });
+      return;
+    }
+    if (url.pathname === '/agent/ready') {
+      sendJson(res, 500, { error: 'ready de outro servico nao deveria ser chamado' });
+      return;
+    }
+    sendJson(res, 404, { error: `not found: ${url.pathname}` });
+  }, async (bridgeUrl, requests) => {
+    const stdout = captureStream();
+    await assert.rejects(
+      () => main(['chats', 'count', '--bridge-url', bridgeUrl, '--plain'], { stdout }),
+      /outro-servico/,
+    );
+    assert.equal(requests.some((item) => item.pathname === '/agent/ready'), false);
+  });
+});
+
+test('CLI substitui bridge antiga segura por bridge atual antes de seguir', async () => {
+  const port = await getFreePort();
+  const bridgeUrl = `http://127.0.0.1:${port}`;
+  const oldBridge = await spawnFakeOldBridge(port);
+  const stdout = captureStream();
+  const stderr = captureStream();
+  let freshBridgePid = null;
+
+  try {
+    const run = await main(
+      [
+        'doctor',
+        '--bridge-url',
+        bridgeUrl,
+        '--json',
+        '--no-wake',
+        '--no-self-heal',
+        '--no-reload',
+        '--ready-wait-ms',
+        '0',
+        '--bridge-start-wait-ms',
+        '5000',
+      ],
+      { stdout, stderr },
+    );
+
+    assert.equal(run.exitCode, 4);
+    const parsed = JSON.parse(stdout.text());
+    assert.equal(parsed.bridge.ok, true);
+    assert.equal(parsed.bridge.version, PACKAGE_VERSION);
+    assert.notEqual(parsed.bridge.pid, oldBridge.pid);
+    assert.equal(stderr.text(), '');
+    assert.equal(await waitForChildExit(oldBridge), true);
+
+    const health = await waitForHealth(bridgeUrl);
+    freshBridgePid = health.pid;
+    assert.equal(health.version, PACKAGE_VERSION);
+    assert.equal(health.bridgeOnly, true);
+  } finally {
+    if (freshBridgePid) {
+      try {
+        process.kill(freshBridgePid, 'SIGTERM');
+      } catch {
+        // Process may already have exited.
+      }
+    }
+    if (isPidAlive(oldBridge.pid)) {
+      try {
+        process.kill(oldBridge.pid, 'SIGTERM');
+      } catch {
+        // Process may already have exited.
+      }
+    }
+    await sleep(150);
+  }
 });
 
 test('CLI chats count carrega ate o fim sem despejar lista no chat', async () => {
@@ -1460,7 +1670,7 @@ test('CLI sync acorda Gemini Web pela propria CLI antes de exportar', async () =
 
           assert.equal(run.exitCode, 0);
           assert.match(stdout.text(), /Abrindo Gemini Web em background/);
-          assert.match(stdout.text(), /Aguardando a extensao conectar \(1s\)/);
+          assert.match(stdout.text(), /Aguardando a extensao conectar/);
           assert.match(stdout.text(), /RESULT_JSON /);
           assert.equal(stderr.text(), '');
 
@@ -1474,6 +1684,171 @@ test('CLI sync acorda Gemini Web pela propria CLI antes de exportar', async () =
           assert.equal(launchState.source, 'cli');
           assert.equal(launchState.status, 'dry-run');
           assert.equal(launchState.launch.dryRun, true);
+        });
+      },
+    );
+  } finally {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test('CLI falha rapido quando navegador cai na verificacao do Google', async () => {
+  const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-cli-google-sorry-'));
+  try {
+    await withEnv(
+      {
+        GEMINI_MD_EXPORT_CLI_BROWSER_LAUNCH_DRY_RUN: 'true',
+        GEMINI_MCP_BROWSER_LAUNCH_STATE_DIR: tmpRoot,
+        GEMINI_MD_EXPORT_EXISTING_TAB_GRACE_MS: '0',
+        GEMINI_MD_EXPORT_FAST_BROWSER_DIAGNOSTIC_MS: '200',
+        GEMINI_MD_EXPORT_ACTIVE_TAB_URL:
+          'https://www.google.com/sorry/index?continue=https://gemini.google.com/app&q=blocked',
+      },
+      async () => {
+        await withServer((req, res, url) => {
+          if (url.pathname === '/agent/ready') {
+            sendJson(res, 200, {
+              ready: false,
+              connectedClientCount: 0,
+              selectableTabCount: 0,
+              commandReadyClientCount: 0,
+              blockingIssue: 'no_connected_clients',
+            });
+            return;
+          }
+          sendJson(res, 404, { error: `not found: ${url.pathname}` });
+        }, async (bridgeUrl) => {
+          const stdout = captureStream();
+          const stderr = captureStream();
+          const startedAt = Date.now();
+          await assert.rejects(
+            () =>
+              main(
+                [
+                  'chats',
+                  'count',
+                  '--bridge-url',
+                  bridgeUrl,
+                  '--plain',
+                  '--ready-wait-ms',
+                  '30000',
+                ],
+                { stdout, stderr },
+              ),
+            /google_verification_required/,
+          );
+          assert.ok(Date.now() - startedAt < 3000);
+          assert.match(stderr.text(), /Google abriu uma tela de verificação/);
+        });
+      },
+    );
+  } finally {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test('CLI falha rapido quando navegador esta no login do Google', async () => {
+  const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-cli-google-login-'));
+  try {
+    await withEnv(
+      {
+        GEMINI_MD_EXPORT_CLI_BROWSER_LAUNCH_DRY_RUN: 'true',
+        GEMINI_MCP_BROWSER_LAUNCH_STATE_DIR: tmpRoot,
+        GEMINI_MD_EXPORT_EXISTING_TAB_GRACE_MS: '0',
+        GEMINI_MD_EXPORT_FAST_BROWSER_DIAGNOSTIC_MS: '200',
+        GEMINI_MD_EXPORT_ACTIVE_TAB_URL:
+          'https://accounts.google.com/signin/v2/identifier?continue=https://gemini.google.com/app',
+      },
+      async () => {
+        await withServer((req, res, url) => {
+          if (url.pathname === '/agent/ready') {
+            sendJson(res, 200, {
+              ready: false,
+              connectedClientCount: 0,
+              selectableTabCount: 0,
+              commandReadyClientCount: 0,
+              blockingIssue: 'no_connected_clients',
+            });
+            return;
+          }
+          sendJson(res, 404, { error: `not found: ${url.pathname}` });
+        }, async (bridgeUrl) => {
+          const stdout = captureStream();
+          const stderr = captureStream();
+          const startedAt = Date.now();
+          await assert.rejects(
+            () =>
+              main(
+                [
+                  'chats',
+                  'count',
+                  '--bridge-url',
+                  bridgeUrl,
+                  '--plain',
+                  '--ready-wait-ms',
+                  '30000',
+                ],
+                { stdout, stderr },
+              ),
+            /google_login_required/,
+          );
+          assert.ok(Date.now() - startedAt < 3000);
+          assert.match(stderr.text(), /login do Google/);
+        });
+      },
+    );
+  } finally {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test('CLI espera apenas janela curta quando Gemini abriu mas extensao nao conectou', async () => {
+  const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-cli-gemini-no-extension-'));
+  try {
+    await withEnv(
+      {
+        GEMINI_MD_EXPORT_CLI_BROWSER_LAUNCH_DRY_RUN: 'true',
+        GEMINI_MCP_BROWSER_LAUNCH_STATE_DIR: tmpRoot,
+        GEMINI_MD_EXPORT_EXISTING_TAB_GRACE_MS: '0',
+        GEMINI_MD_EXPORT_FAST_BROWSER_DIAGNOSTIC_MS: '100',
+        GEMINI_MD_EXPORT_GEMINI_EXTENSION_CONNECT_GRACE_MS: '300',
+        GEMINI_MD_EXPORT_ACTIVE_TAB_URL: 'https://gemini.google.com/app',
+      },
+      async () => {
+        await withServer((req, res, url) => {
+          if (url.pathname === '/agent/ready') {
+            sendJson(res, 200, {
+              ready: false,
+              connectedClientCount: 0,
+              selectableTabCount: 0,
+              commandReadyClientCount: 0,
+              blockingIssue: 'no_connected_clients',
+            });
+            return;
+          }
+          sendJson(res, 404, { error: `not found: ${url.pathname}` });
+        }, async (bridgeUrl) => {
+          const stdout = captureStream();
+          const stderr = captureStream();
+          const startedAt = Date.now();
+          await assert.rejects(
+            () =>
+              main(
+                [
+                  'chats',
+                  'count',
+                  '--bridge-url',
+                  bridgeUrl,
+                  '--plain',
+                  '--ready-wait-ms',
+                  '30000',
+                ],
+                { stdout, stderr },
+              ),
+            /extension_not_connected/,
+          );
+          assert.ok(Date.now() - startedAt < 3000);
+          assert.match(stderr.text(), /Gemini Web abriu, mas a extensão ainda não conectou/);
         });
       },
     );
@@ -1499,10 +1874,10 @@ test('CLI espera aba Gemini existente reconectar antes de abrir nova aba', async
             const ready = readyCalls >= 2;
             sendJson(res, 200, {
               ready,
-              connectedClientCount: ready ? 1 : 0,
+              connectedClientCount: 1,
               selectableTabCount: ready ? 1 : 0,
               commandReadyClientCount: ready ? 1 : 0,
-              blockingIssue: ready ? null : 'no_connected_clients',
+              blockingIssue: ready ? null : 'no_selectable_gemini_tab',
             });
             return;
           }

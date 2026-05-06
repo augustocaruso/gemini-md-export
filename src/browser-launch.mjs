@@ -414,6 +414,161 @@ export const resolveGeminiBrowserLaunchPlan = ({
   };
 };
 
+const splitBrowserUrlList = (value) =>
+  String(value || '')
+    .split(/\r?\n|,\s*(?=https?:|about:|chrome:|edge:|brave:|dia:)/i)
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+export const classifyGeminiBrowserUrl = (value) => {
+  const url = String(value || '').trim();
+  if (!url) return { kind: 'unknown', terminal: false, url: null };
+  try {
+    const parsed = new URL(url);
+    const hostname = parsed.hostname.toLowerCase();
+    const pathname = parsed.pathname.toLowerCase();
+    const continueUrl = parsed.searchParams.get('continue') || '';
+    const lowerContinue = continueUrl.toLowerCase();
+    if (
+      hostname.endsWith('google.com') &&
+      pathname.startsWith('/sorry') &&
+      lowerContinue.includes('gemini.google.com')
+    ) {
+      return { kind: 'google_sorry', terminal: true, url };
+    }
+    if (hostname === 'accounts.google.com') {
+      return { kind: 'google_login', terminal: true, url };
+    }
+    if (hostname === 'gemini.google.com') {
+      return { kind: 'gemini', terminal: false, url };
+    }
+    if (/^(about:blank|chrome:\/\/newtab|edge:\/\/newtab|brave:\/\/newtab|dia:\/\/)/i.test(url)) {
+      return { kind: 'loading', terminal: false, url };
+    }
+    return { kind: 'other', terminal: true, url, hostname };
+  } catch {
+    return { kind: 'unknown', terminal: false, url };
+  }
+};
+
+export const diagnoseGeminiBrowserTabs = ({ activeUrl = null, urls = [] } = {}) => {
+  const items = [
+    ...splitBrowserUrlList(activeUrl),
+    ...(Array.isArray(urls) ? urls : splitBrowserUrlList(urls)),
+  ];
+  const classified = items.map(classifyGeminiBrowserUrl);
+  const first = (...kinds) => classified.find((item) => kinds.includes(item.kind));
+  const relevant =
+    first('google_sorry') ||
+    first('google_login') ||
+    first('gemini') ||
+    first('loading') ||
+    null;
+  if (relevant) {
+    return {
+      ok: true,
+      ...relevant,
+      activeUrl: activeUrl || null,
+      urls: items,
+    };
+  }
+  const active = classifyGeminiBrowserUrl(activeUrl);
+  return {
+    ok: true,
+    ...active,
+    activeUrl: activeUrl || null,
+    urls: items,
+  };
+};
+
+const runOsaScript = (spawnSyncFn, lines, timeoutMs) =>
+  spawnSyncFn('osascript', lines.flatMap((line) => ['-e', line]), {
+    encoding: 'utf-8',
+    timeout: timeoutMs,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+export const readBrowserTabsForGeminiDiagnostics = ({
+  env = process.env,
+  platform = process.platform,
+  exists = existsSync,
+  spawnSyncFn = spawnSync,
+  timeoutMs = 700,
+} = {}) => {
+  const envUrls = env.GEMINI_MD_EXPORT_BROWSER_TAB_URLS || env.GME_BROWSER_TAB_URLS || '';
+  const envActiveUrl = env.GEMINI_MD_EXPORT_ACTIVE_TAB_URL || env.GME_ACTIVE_TAB_URL || '';
+  if (envUrls || envActiveUrl) {
+    const urls = splitBrowserUrlList(envUrls || envActiveUrl);
+    const activeUrl = envActiveUrl || urls[0] || null;
+    return {
+      ok: true,
+      source: 'env',
+      activeUrl,
+      urls,
+      diagnosis: diagnoseGeminiBrowserTabs({ activeUrl, urls }),
+    };
+  }
+
+  if (platform !== 'darwin') {
+    return {
+      ok: false,
+      source: 'unsupported-platform',
+      error: 'active-tab-diagnostics-unavailable',
+      diagnosis: diagnoseGeminiBrowserTabs(),
+    };
+  }
+
+  const plan = resolveGeminiBrowserLaunchPlan({ env, platform, exists, spawnSyncFn });
+  if (!plan.app) {
+    return {
+      ok: false,
+      source: 'macos-no-app',
+      browserKey: plan.browserKey,
+      browserName: plan.browserName,
+      error: 'browser-app-not-resolved',
+      diagnosis: diagnoseGeminiBrowserTabs(),
+    };
+  }
+
+  const allTabs = runOsaScript(
+    spawnSyncFn,
+    [
+      `tell application "${plan.app}"`,
+      'set out to ""',
+      'repeat with w in windows',
+      'repeat with t in tabs of w',
+      'set out to out & (URL of t as text) & linefeed',
+      'end repeat',
+      'end repeat',
+      'return out',
+      'end tell',
+    ],
+    timeoutMs,
+  );
+  const active = runOsaScript(
+    spawnSyncFn,
+    [`tell application "${plan.app}" to get URL of active tab of front window`],
+    timeoutMs,
+  );
+  const urls = allTabs.status === 0 ? splitBrowserUrlList(allTabs.stdout) : [];
+  const activeUrl = active.status === 0 ? String(active.stdout || '').trim() : urls[0] || null;
+  const diagnosis = diagnoseGeminiBrowserTabs({ activeUrl, urls });
+  return {
+    ok: allTabs.status === 0 || active.status === 0,
+    source: 'macos-osascript',
+    browserKey: plan.browserKey,
+    browserName: plan.browserName,
+    app: plan.app,
+    activeUrl,
+    urls,
+    diagnosis,
+    error:
+      allTabs.status === 0 || active.status === 0
+        ? null
+        : allTabs.error?.message || active.error?.message || allTabs.stderr || active.stderr || 'osascript failed',
+  };
+};
+
 const normalizeObserveMs = (value, fallback = DEFAULT_LAUNCH_OBSERVE_MS) => {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) return fallback;

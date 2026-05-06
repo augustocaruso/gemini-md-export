@@ -10,6 +10,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import {
   launchGeminiBrowser,
+  readBrowserTabsForGeminiDiagnostics,
   readBrowserLaunchState,
   writeBrowserLaunchState,
 } from '../src/browser-launch.mjs';
@@ -33,6 +34,8 @@ const DEFAULT_POLL_MS = 1200;
 const DEFAULT_READY_WAIT_MS = 30_000;
 const DEFAULT_READY_REQUEST_TIMEOUT_MS = 60_000;
 const DEFAULT_EXISTING_TAB_RECONNECT_GRACE_MS = 8_000;
+const DEFAULT_FAST_BROWSER_DIAGNOSTIC_MS = 2_000;
+const DEFAULT_GEMINI_EXTENSION_CONNECT_GRACE_MS = 5_000;
 const DEFAULT_TIMEOUT_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_COUNT_LOAD_MORE_TIMEOUT_MS = 15 * 60 * 1000;
 const DEFAULT_JOB_TIMEOUT_CLEANUP_MS = 45_000;
@@ -65,6 +68,18 @@ const readPackageVersion = () => {
 };
 
 const VERSION = readPackageVersion();
+
+const readExpectedBridgeProtocolVersion = () => {
+  try {
+    const bridgeVersionPath = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'bridge-version.json');
+    const bridgeVersion = JSON.parse(readFileSync(bridgeVersionPath, 'utf-8'));
+    return bridgeVersion.protocolVersion ?? null;
+  } catch {
+    return null;
+  }
+};
+
+const EXPECTED_BRIDGE_PROTOCOL_VERSION = readExpectedBridgeProtocolVersion();
 
 const ANSI = {
   reset: '\x1b[0m',
@@ -1267,35 +1282,267 @@ const startBridgeOnlyProcess = (flags) => {
   return true;
 };
 
-const ensureBridgeAvailable = async (flags, ui) => {
+const BRIDGE_PROCESS_RE = /gemini-md-export|mcp-server\.js|bridge-server\.js/i;
+
+const bridgeProcessInfo = (health = {}) => {
+  const processInfo = health.process || {};
+  return {
+    pid: Number(processInfo.pid ?? health.pid ?? 0) || null,
+    ppid: Number(processInfo.ppid ?? health.ppid ?? 0) || null,
+    platform: processInfo.platform ?? health.platform ?? null,
+    processName: processInfo.processName || null,
+    path: processInfo.path || null,
+    commandLine: processInfo.commandLine || null,
+    cwd: processInfo.cwd ?? health.cwd ?? null,
+    root: processInfo.root ?? health.root ?? null,
+    argv: Array.isArray(processInfo.argv)
+      ? processInfo.argv
+      : Array.isArray(health.argv)
+        ? health.argv
+        : [],
+    startedAt: processInfo.startedAt ?? health.startedAt ?? null,
+    uptimeMs: processInfo.uptimeMs ?? health.uptimeMs ?? null,
+  };
+};
+
+const bridgeHealthMismatch = (health = {}) => {
+  if (!health || health.legacy) return null;
+  const processInfo = bridgeProcessInfo(health);
+  if (health.name && health.name !== 'gemini-md-export') {
+    return {
+      kind: 'name',
+      actualName: health.name,
+      expectedName: 'gemini-md-export',
+      actualVersion: health.version || null,
+      expectedVersion: VERSION,
+      actualProtocolVersion: health.protocolVersion ?? null,
+      expectedProtocolVersion: EXPECTED_BRIDGE_PROTOCOL_VERSION,
+      process: processInfo,
+    };
+  }
+  if (health.version && health.version !== VERSION) {
+    return {
+      kind: 'version',
+      actualVersion: health.version,
+      expectedVersion: VERSION,
+      actualProtocolVersion: health.protocolVersion ?? null,
+      expectedProtocolVersion: EXPECTED_BRIDGE_PROTOCOL_VERSION,
+      process: processInfo,
+    };
+  }
+  if (
+    EXPECTED_BRIDGE_PROTOCOL_VERSION !== null &&
+    health.protocolVersion !== undefined &&
+    Number(health.protocolVersion) !== Number(EXPECTED_BRIDGE_PROTOCOL_VERSION)
+  ) {
+    return {
+      kind: 'protocol',
+      actualVersion: health.version || null,
+      expectedVersion: VERSION,
+      actualProtocolVersion: health.protocolVersion,
+      expectedProtocolVersion: EXPECTED_BRIDGE_PROTOCOL_VERSION,
+      process: processInfo,
+    };
+  }
+  return null;
+};
+
+const bridgeProcessLooksLikeExporter = (processInfo = {}) =>
+  BRIDGE_PROCESS_RE.test(
+    [
+      processInfo.processName,
+      processInfo.path,
+      processInfo.commandLine,
+      processInfo.cwd,
+      processInfo.root,
+      ...(Array.isArray(processInfo.argv) ? processInfo.argv : []),
+    ]
+      .filter(Boolean)
+      .join('\n'),
+  );
+
+const isSafeStaleBridgeTarget = (health, mismatch) => {
+  if (!mismatch || mismatch.kind === 'name') return false;
+  if (health?.name && health.name !== 'gemini-md-export') return false;
+  const processInfo = bridgeProcessInfo(health);
+  if (!processInfo.pid) return false;
+  if (processInfo.pid === process.pid || processInfo.pid === process.ppid) return false;
+  return bridgeProcessLooksLikeExporter(processInfo);
+};
+
+const staleBridgeMessage = (mismatch, { safe = false } = {}) => {
+  const processInfo = mismatch?.process || {};
+  const pid = processInfo.pid ? ` PID ${processInfo.pid}` : '';
+  const path = processInfo.root || processInfo.path || processInfo.commandLine || null;
+  const location = path ? `\nProcesso: ${path}` : '';
+  if (mismatch?.kind === 'name') {
+    return `A porta da bridge respondeu como ${mismatch.actualName || 'outro serviço'}, não como gemini-md-export.${location}`;
+  }
+  if (mismatch?.kind === 'protocol') {
+    return (
+      `Bridge local desatualizada${pid}: protocolo ${mismatch.actualProtocolVersion ?? '?'}; ` +
+      `esta CLI espera protocolo ${mismatch.expectedProtocolVersion ?? '?'}.${location}` +
+      (safe ? '' : '\nNão encontrei um alvo seguro para reiniciar automaticamente.')
+    );
+  }
+  return (
+    `Bridge local desatualizada${pid}: ${mismatch?.actualVersion || '?'} -> ${mismatch?.expectedVersion || VERSION}.` +
+    location +
+    (safe ? '' : '\nNão encontrei um alvo seguro para reiniciar automaticamente.')
+  );
+};
+
+const createStaleBridgeError = (health, mismatch, details = {}) => {
+  const err = new Error(
+    [
+      staleBridgeMessage(mismatch, details),
+      'Feche a sessão antiga do Gemini CLI/exporter ou rode cleanup stale-processes depois de conferir o PID.',
+    ]
+      .filter(Boolean)
+      .join('\n'),
+  );
+  err.code = 'stale_bridge_version';
+  err.data = {
+    bridge: health,
+    mismatch,
+    ...details,
+  };
+  return err;
+};
+
+const isPidAlive = (pid) => {
   try {
-    return await requestJson(flags.bridgeUrl, '/healthz', { timeoutMs: 1000 });
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err?.code === 'EPERM';
+  }
+};
+
+const waitForPidExit = async (pid, waitMs) => {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt <= waitMs) {
+    if (!isPidAlive(pid)) return { exited: true, waitedMs: Date.now() - startedAt };
+    await sleep(100);
+  }
+  return { exited: !isPidAlive(pid), waitedMs: Date.now() - startedAt };
+};
+
+const terminateStaleBridgeProcess = async (health, { waitMs = 4000 } = {}) => {
+  const processInfo = bridgeProcessInfo(health);
+  const pid = processInfo.pid;
+  if (!pid) throw new Error('A bridge antiga não informou PID.');
+  if (pid === process.pid) throw new Error(`Recusei encerrar o processo atual (PID ${pid}).`);
+  if (pid === process.ppid) throw new Error(`Recusei encerrar o processo pai (PID ${pid}).`);
+  try {
+    process.kill(pid, 'SIGTERM');
+  } catch (err) {
+    if (err?.code !== 'ESRCH') throw err;
+  }
+  const exit = await waitForPidExit(pid, waitMs);
+  return {
+    pid,
+    signal: 'SIGTERM',
+    ok: exit.exited,
+    exited: exit.exited,
+    waitedMs: exit.waitedMs,
+  };
+};
+
+const waitForFreshBridgeHealth = async (flags, { timeoutMs, lastError = null } = {}) => {
+  const startedAt = Date.now();
+  let latestError = lastError;
+  let latestHealth = null;
+  while (Date.now() - startedAt < timeoutMs) {
+    await sleep(120);
+    try {
+      const health = await requestJson(flags.bridgeUrl, '/healthz', { timeoutMs: 1000 });
+      const mismatch = bridgeHealthMismatch(health);
+      if (!mismatch) return health;
+      latestHealth = health;
+      latestError = createStaleBridgeError(health, mismatch, {
+        safe: isSafeStaleBridgeTarget(health, mismatch),
+      });
+    } catch (err) {
+      latestError = err;
+    }
+  }
+  const err = new Error(`Bridge local nao iniciou atualizada em ${timeoutMs}ms.`);
+  err.code = 'bridge_timeout';
+  err.data = {
+    cause: latestError?.message || String(latestError),
+    latestHealth,
+  };
+  throw err;
+};
+
+const startFreshBridgeOnly = async (flags, ui, firstError = null) => {
+  const address = localBridgeAddress(flags.bridgeUrl);
+  if (!address) throw firstError || new Error('Bridge URL não é local; não posso iniciar bridge automaticamente.');
+  if (!flags.startBridge) throw firstError || new Error('Bridge local indisponível e --no-start-bridge está ativo.');
+  if (shouldWriteInlineStatus(ui)) {
+    ui.stdout.write('Bridge local nao respondeu; iniciando bridge-only...\n');
+  } else {
+    setWaitNote(ui, 'Reiniciando bridge');
+  }
+  if (!startBridgeOnlyProcess(flags)) throw firstError || new Error('Não consegui iniciar bridge local.');
+  return waitForFreshBridgeHealth(flags, {
+    timeoutMs: flags.bridgeStartWaitMs,
+    lastError: firstError,
+  });
+};
+
+const recoverStaleBridge = async (flags, ui, health, mismatch) => {
+  const safe = isSafeStaleBridgeTarget(health, mismatch);
+  if (!flags.startBridge || !localBridgeAddress(flags.bridgeUrl) || !safe) {
+    throw createStaleBridgeError(health, mismatch, { safe });
+  }
+  if (shouldWriteInlineStatus(ui)) {
+    ui.stdout.write(`${staleBridgeMessage(mismatch, { safe: true })}\n`);
+    ui.stdout.write('Reiniciando bridge local...\n');
+  } else {
+    setWaitNote(ui, 'Atualizando bridge local', {
+      detail: `Bridge antiga detectada: ${mismatch.actualVersion || '?'} -> ${mismatch.expectedVersion || VERSION}`,
+    });
+  }
+  const terminated = await terminateStaleBridgeProcess(health, {
+    waitMs: Math.min(8000, Math.max(1000, Number(flags.bridgeStartWaitMs || 6000))),
+  });
+  if (!terminated.exited) {
+    const err = createStaleBridgeError(health, mismatch, { safe, terminated });
+    err.message = `${err.message}\nTentei SIGTERM no PID ${terminated.pid}, mas ele não encerrou em ${terminated.waitedMs}ms.`;
+    throw err;
+  }
+  setWaitNote(ui, 'Reiniciando bridge');
+  return startFreshBridgeOnly(flags, ui);
+};
+
+const ensureBridgeAvailable = async (flags, ui) => {
+  let health = null;
+  try {
+    health = await requestJson(flags.bridgeUrl, '/healthz', { timeoutMs: 1000 });
   } catch (firstError) {
     if (firstError.statusCode) {
       return { ok: true, legacy: true, statusCode: firstError.statusCode };
     }
-    if (!flags.startBridge) throw firstError;
-    const address = localBridgeAddress(flags.bridgeUrl);
-    if (!address) throw firstError;
-    if (ui.format !== 'json' && ui.format !== 'jsonl') {
-      ui.stdout.write('Bridge local nao respondeu; iniciando bridge-only...\n');
-    }
-    if (!startBridgeOnlyProcess(flags)) throw firstError;
-    const startedAt = Date.now();
-    let lastError = firstError;
-    while (Date.now() - startedAt < flags.bridgeStartWaitMs) {
-      await sleep(120);
-      try {
-        return await requestJson(flags.bridgeUrl, '/healthz', { timeoutMs: 1000 });
-      } catch (err) {
-        lastError = err;
-      }
-    }
-    const err = new Error(`Bridge local nao iniciou em ${flags.bridgeStartWaitMs}ms.`);
-    err.code = 'bridge_timeout';
-    err.data = { cause: lastError?.message || String(lastError) };
-    throw err;
+    return startFreshBridgeOnly(flags, ui, firstError);
   }
+  const mismatch = bridgeHealthMismatch(health);
+  if (mismatch) {
+    return await withWaitStatus(
+      ui,
+      {
+        message: 'Atualizando bridge local.',
+        intervalMs: 1000,
+        renderIntervalMs: DEFAULT_TUI_RENDER_INTERVAL_MS,
+        tuiKind: 'ready',
+        intervalMessage: (elapsedMs) =>
+          `Bridge antiga detectada: ${mismatch.actualVersion || '?'} -> ${mismatch.expectedVersion || VERSION}; ${formatDuration(elapsedMs)} decorridos.`,
+      },
+      () => recoverStaleBridge(flags, ui, health, mismatch),
+    );
+  }
+  return health;
 };
 
 const wantsColor = (ui) => ui.color && ui.format !== 'json' && ui.format !== 'jsonl';
@@ -1934,6 +2181,153 @@ const setWaitNote = (ui, note, { detail = null, issue = null } = {}) => {
   ui.waitIssue = issue || null;
 };
 
+const connectedClientCountFromReady = (ready = {}) =>
+  Number(ready.connectedClientCount ?? ready.connectedClients?.length ?? ready.clients?.length ?? 0) || 0;
+
+const browserDiagnosticMessage = (diagnosis = {}) => {
+  if (diagnosis.kind === 'google_sorry') {
+    return 'O Google abriu uma tela de verificação antes do Gemini. Resolva essa tela no navegador e rode o comando de novo.';
+  }
+  if (diagnosis.kind === 'google_login') {
+    return 'O navegador está no login do Google. Conclua o login e rode o comando de novo.';
+  }
+  if (diagnosis.kind === 'other') {
+    return `O navegador abriu, mas não chegou ao Gemini Web${diagnosis.url ? ` (${diagnosis.url})` : ''}.`;
+  }
+  if (diagnosis.kind === 'gemini') {
+    return 'Gemini Web abriu, mas a extensão ainda não conectou. Recarregue a aba ou a extensão do navegador.';
+  }
+  return null;
+};
+
+const browserDiagnosticBlockingIssue = (diagnosis = {}) => {
+  if (diagnosis.kind === 'google_sorry') return 'google_verification_required';
+  if (diagnosis.kind === 'google_login') return 'google_login_required';
+  if (diagnosis.kind === 'other') return 'browser_not_on_gemini';
+  if (diagnosis.kind === 'gemini') return 'extension_not_connected';
+  return null;
+};
+
+const attachBrowserDiagnosticToReady = (ready = {}, browserTabs = {}, { forceGemini = false } = {}) => {
+  const diagnosis = browserTabs?.diagnosis || {};
+  const blockingIssue = browserDiagnosticBlockingIssue(diagnosis);
+  if (!blockingIssue && !forceGemini) return ready;
+  const effectiveDiagnosis =
+    forceGemini && diagnosis.kind === 'gemini'
+      ? { ...diagnosis, terminal: true }
+      : diagnosis;
+  const message = browserDiagnosticMessage(effectiveDiagnosis);
+  return {
+    ...ready,
+    blockingIssue: blockingIssue || ready.blockingIssue,
+    browserDiagnostic: {
+      ...browserTabs,
+      diagnosis: effectiveDiagnosis,
+      message,
+    },
+    extensionReadiness: {
+      ...(ready.extensionReadiness || {}),
+      nextAction: {
+        ...(ready.extensionReadiness?.nextAction || {}),
+        message: message || ready.extensionReadiness?.nextAction?.message || null,
+      },
+    },
+  };
+};
+
+const readBrowserTabsQuietly = () => {
+  try {
+    return readBrowserTabsForGeminiDiagnostics({
+      timeoutMs: nonNegativeIntEnv(
+        process.env.GEMINI_MD_EXPORT_ACTIVE_TAB_DIAGNOSTIC_TIMEOUT_MS,
+        700,
+        3000,
+      ),
+    });
+  } catch (err) {
+    return {
+      ok: false,
+      error: err?.message || String(err),
+      diagnosis: { kind: 'unknown', terminal: false, url: null },
+    };
+  }
+};
+
+const requestFastReadyStatus = (bridgeUrl, flags) =>
+  requestReadyStatus(
+    bridgeUrl,
+    {
+      ...flags,
+      selfHeal: false,
+      allowReload: false,
+    },
+    { waitMs: 0 },
+  );
+
+const waitForReadyAfterBrowserWake = async (bridgeUrl, flags, ui, launch = null) => {
+  const hasBrowserDiagnosticOverride =
+    process.env.GEMINI_MD_EXPORT_ACTIVE_TAB_URL ||
+    process.env.GME_ACTIVE_TAB_URL ||
+    process.env.GEMINI_MD_EXPORT_BROWSER_TAB_URLS ||
+    process.env.GME_BROWSER_TAB_URLS;
+  if (launch?.dryRun === true && !hasBrowserDiagnosticOverride) {
+    if (flags.readyWaitMs <= 0) return requestFastReadyStatus(bridgeUrl, flags);
+    return requestReadyStatus(bridgeUrl, flags, { waitMs: flags.readyWaitMs });
+  }
+
+  const fastDiagnosticMs = nonNegativeIntEnv(
+    process.env.GEMINI_MD_EXPORT_FAST_BROWSER_DIAGNOSTIC_MS,
+    DEFAULT_FAST_BROWSER_DIAGNOSTIC_MS,
+    10_000,
+  );
+  const geminiGraceMs = Math.min(
+    Math.max(0, Number(flags.readyWaitMs || 0)),
+    nonNegativeIntEnv(
+      process.env.GEMINI_MD_EXPORT_GEMINI_EXTENSION_CONNECT_GRACE_MS,
+      DEFAULT_GEMINI_EXTENSION_CONNECT_GRACE_MS,
+      30_000,
+    ),
+  );
+  const startedAt = Date.now();
+  let latestReady = await requestFastReadyStatus(bridgeUrl, flags);
+  let latestTabs = readBrowserTabsQuietly();
+  let sawGeminiAt = latestTabs?.diagnosis?.kind === 'gemini' ? Date.now() : 0;
+
+  while (latestReady.ready !== true) {
+    const diagnosis = latestTabs?.diagnosis || {};
+    if (diagnosis.kind === 'google_sorry' || diagnosis.kind === 'google_login') {
+      return attachBrowserDiagnosticToReady(latestReady, latestTabs);
+    }
+    if (diagnosis.kind === 'gemini') {
+      if (!sawGeminiAt) sawGeminiAt = Date.now();
+      setWaitNote(ui, 'Aguardando a extensão no Gemini', {
+        detail: `limite ${formatDuration(geminiGraceMs)}`,
+        issue: latestReady.blockingIssue || null,
+      });
+      if (Date.now() - sawGeminiAt >= geminiGraceMs) {
+        return attachBrowserDiagnosticToReady(latestReady, latestTabs, { forceGemini: true });
+      }
+    } else if (diagnosis.kind === 'other' && Date.now() - startedAt >= fastDiagnosticMs) {
+      return attachBrowserDiagnosticToReady(latestReady, latestTabs);
+    } else if (Date.now() - startedAt >= fastDiagnosticMs && diagnosis.kind !== 'loading') {
+      return latestReady;
+    } else if (Date.now() - startedAt >= Math.max(fastDiagnosticMs, geminiGraceMs)) {
+      return latestReady;
+    }
+
+    await sleep(250);
+    const [ready, tabs] = await Promise.all([
+      requestFastReadyStatus(bridgeUrl, flags),
+      Promise.resolve(readBrowserTabsQuietly()),
+    ]);
+    latestReady = ready;
+    latestTabs = tabs;
+    if (latestTabs?.diagnosis?.kind === 'gemini' && !sawGeminiAt) sawGeminiAt = Date.now();
+  }
+
+  return latestReady;
+};
+
 const wakeBrowserFromCli = async (flags, ui, ready) => {
   if (flags.wakeBrowser === false || !shouldWakeBrowserForReady(ready)) {
     return null;
@@ -2018,13 +2412,16 @@ const readyWithCliWake = async (bridgeUrl, flags, ui) => {
   let cliBrowserWake = null;
   if (ready.ready !== true) {
     if (shouldWakeBrowserForReady(ready)) {
+      const connectedClientCount = connectedClientCountFromReady(ready);
       const existingTabGraceMs = Math.min(
         Math.max(0, Number(flags.readyWaitMs || 0)),
-        nonNegativeIntEnv(
-          process.env.GEMINI_MD_EXPORT_EXISTING_TAB_GRACE_MS,
-          DEFAULT_EXISTING_TAB_RECONNECT_GRACE_MS,
-          30_000,
-        ),
+        connectedClientCount > 0
+          ? nonNegativeIntEnv(
+              process.env.GEMINI_MD_EXPORT_EXISTING_TAB_GRACE_MS,
+              DEFAULT_EXISTING_TAB_RECONNECT_GRACE_MS,
+              30_000,
+            )
+          : 0,
       );
       if (existingTabGraceMs > 0) {
         setWaitNote(ui, 'Aguardando aba Gemini existente reconectar', {
@@ -2051,13 +2448,22 @@ const readyWithCliWake = async (bridgeUrl, flags, ui) => {
       cliBrowserWake = await wakeBrowserFromCli(flags, ui, ready);
       if (flags.readyWaitMs > 0) {
         setWaitNote(ui, 'Aguardando a extensao conectar', {
-          detail: `limite ${formatDuration(flags.readyWaitMs)}`,
+          detail: `limite ${formatDuration(
+            Math.min(
+              flags.readyWaitMs,
+              nonNegativeIntEnv(
+                process.env.GEMINI_MD_EXPORT_GEMINI_EXTENSION_CONNECT_GRACE_MS,
+                DEFAULT_GEMINI_EXTENSION_CONNECT_GRACE_MS,
+                30_000,
+              ),
+            ),
+          )}`,
           issue: ready.blockingIssue || null,
         });
         if (shouldWriteInlineStatus(ui)) {
-          ui.stdout.write(`Aguardando a extensao conectar (${formatDuration(flags.readyWaitMs)})...\n`);
+          ui.stdout.write('Aguardando a extensao conectar...\n');
         }
-        ready = await requestReadyStatus(bridgeUrl, flags, { waitMs: flags.readyWaitMs });
+        ready = await waitForReadyAfterBrowserWake(bridgeUrl, flags, ui, cliBrowserWake);
         setWaitNote(ui, ready.ready === true ? 'Gemini Web pronto' : 'Extensao ainda nao conectou', {
           issue: ready.blockingIssue || null,
         });
@@ -2093,6 +2499,7 @@ const ensureReady = async (bridgeUrl, flags, ui) => {
       [
         'Gemini Web ainda nao esta pronto.',
         `Motivo: ${ready.blockingIssue || 'desconhecido'}.`,
+        ready.browserDiagnostic?.message ||
         ready.extensionReadiness?.nextAction?.message ||
           ready.cliBrowserWake?.reason ||
           ready.cliBrowserWake?.error ||
@@ -2687,7 +3094,8 @@ const runBrowser = async (parsed, streams = {}) => {
     nextAction:
       ready.ready === true
         ? 'Bridge, extensao e aba Gemini parecem prontos.'
-        : ready.extensionReadiness?.nextAction?.message ||
+        : ready.browserDiagnostic?.message ||
+          ready.extensionReadiness?.nextAction?.message ||
           ready.cliBrowserWake?.reason ||
           ready.cliBrowserWake?.error ||
           'Verifique a extensao Chrome.',
