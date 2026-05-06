@@ -23,6 +23,12 @@ de debug e não deve ser apresentado como fluxo recomendado ao usuário final.
 - Quando o usuário pedir diretamente uma edição pontual, como "atualize este
   arquivo" ou "corrija este bug", execute o pedido sem ampliar o escopo para
   uma proposta maior.
+- Telemetria do `gemini-md-export` é separada da telemetria do Medical Notes
+  Workbench. Use o contrato
+  `gemini-md-export.workflow-telemetry-envelope.v1`, Worker
+  `gemini-md-export-telemetry`, token/KV próprios e siga
+  `docs/reference/telemetry.md`. Não aponte defaults do exporter para
+  `medical-notes-workbench-telemetry`.
 
 ## Contexto
 

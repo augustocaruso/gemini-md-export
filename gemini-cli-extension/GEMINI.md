@@ -53,8 +53,8 @@ or explicit `intent`; ask for `detail: "full"` only while debugging.
 - Background progress/cancel: call `gemini_job`.
 - Export directory and extension cache: call `gemini_config`.
 - Diagnostics/process cleanup/support bundle: `gemini_support`.
-- Telemetry status/preview/retry/opt-out: `/exporter:telemetry` or
-  `gemini-md-export telemetry`.
+- Telemetry: `/exporter:telemetry` or `gemini-md-export telemetry`. Use the
+  exporter receiver, not the Med Notes receiver.
 
 ## Skills
 

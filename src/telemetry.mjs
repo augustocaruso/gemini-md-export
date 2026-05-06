@@ -152,6 +152,8 @@ export const telemetryStatus = ({ configPath = null } = {}) => {
     sent_run_count: Array.isArray(sent.sent_run_ids) ? sent.sent_run_ids.length : 0,
     config_path: telemetryConfigPath(configPath),
     defaults_path: config.defaults_path,
+    endpoint_project: endpointProject(config.endpoint_url),
+    endpoint_warning: endpointWarning(config.endpoint_url),
   };
 };
 
@@ -740,6 +742,19 @@ const pathLabel = (value) => {
 };
 
 const redactEndpoint = (url) => redactSnippet(String(url || ''), 400);
+
+const endpointProject = (url) => {
+  const text = String(url || '').toLowerCase();
+  if (!text) return '';
+  if (text.includes('gemini-md-export')) return 'gemini-md-export';
+  if (text.includes('medical-notes-workbench') || text.includes('mednotes')) return 'medical-notes-workbench';
+  return 'custom';
+};
+
+const endpointWarning = (url) =>
+  endpointProject(url) === 'medical-notes-workbench'
+    ? 'endpoint_points_to_med_notes_receiver'
+    : '';
 
 const slug = (value) =>
   String(value || 'run')

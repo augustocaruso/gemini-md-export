@@ -6,6 +6,15 @@ do Obsidian. O caminho principal é extensão unpacked + MCP local + instaladore
 macOS/Windows via GitHub. O userscript gerado pelo build é legado
 de debug e não deve ser apresentado como fluxo recomendado ao usuário final.
 
+## Telemetria
+
+- Telemetria do `gemini-md-export` é separada da telemetria do Medical Notes
+  Workbench. Use o contrato
+  `gemini-md-export.workflow-telemetry-envelope.v1`, Worker
+  `gemini-md-export-telemetry`, token/KV próprios e siga
+  `docs/reference/telemetry.md`. Não aponte defaults do exporter para
+  `medical-notes-workbench-telemetry`.
+
 ## Contexto
 
 - Usuário final: um médico que usa Gemini web para conversas de estudo e

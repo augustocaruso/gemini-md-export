@@ -59,6 +59,7 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
     'capture-artifacts.toml',
   );
   const telemetryCommandPath = resolve(extensionDir, 'commands', 'exporter', 'telemetry.toml');
+  const telemetryDocPath = resolve(extensionDir, 'docs', 'reference', 'telemetry.md');
   const repairAuditScriptPath = resolve(extensionDir, 'scripts', 'vault-repair-audit.mjs');
   const repairScriptPath = resolve(extensionDir, 'scripts', 'vault-repair.mjs');
   const nativeHostManifestScriptPath = resolve(extensionDir, 'scripts', 'native-host-manifest.mjs');
@@ -101,6 +102,7 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.equal(existsSync(diagnosePageCommandPath), true);
   assert.equal(existsSync(captureArtifactsCommandPath), true);
   assert.equal(existsSync(telemetryCommandPath), true);
+  assert.equal(existsSync(telemetryDocPath), true);
   assert.equal(existsSync(repairAuditScriptPath), true);
   assert.equal(existsSync(repairScriptPath), true);
   assert.equal(existsSync(nativeHostManifestScriptPath), true);
@@ -194,6 +196,7 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   const telemetryCommand = readFileSync(telemetryCommandPath, 'utf-8');
   assert.match(telemetryCommand, /telemetry enable/);
   assert.match(telemetryCommand, /telemetry send/);
+  assert.match(readFileSync(telemetryDocPath, 'utf-8'), /gemini-md-export-telemetry/);
 
   const bridgeVersion = JSON.parse(readFileSync(bridgeVersionPath, 'utf-8'));
   assert.ok(browserManifest.host_permissions.includes('https://lh3.google.com/*'));

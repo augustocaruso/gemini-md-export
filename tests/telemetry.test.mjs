@@ -140,6 +140,20 @@ test('telemetry enable/status/disable pela CLI nao imprime token', async () => {
   });
 });
 
+test('telemetry status avisa quando endpoint aponta para receiver do Med Notes', async () => {
+  await withTelemetryHome(async () => {
+    enableTelemetry({
+      endpointUrl: 'https://medical-notes-workbench-telemetry.example.workers.dev/v1/telemetry/workflow-runs',
+      authToken: 'secret-token',
+    });
+
+    const status = telemetryStatus();
+
+    assert.equal(status.endpoint_project, 'medical-notes-workbench');
+    assert.equal(status.endpoint_warning, 'endpoint_points_to_med_notes_receiver');
+  });
+});
+
 test('preview cria envelope redigido sem rede', async () => {
   await withTelemetryHome(async () => {
     await recordTelemetryRun({

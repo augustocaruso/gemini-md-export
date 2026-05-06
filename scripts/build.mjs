@@ -271,6 +271,11 @@ if (existsSync(resolve(ROOT, 'gemini-cli-extension', 'skills'))) {
     { recursive: true },
   );
 }
+if (existsSync(resolve(ROOT, 'docs'))) {
+  cpSync(resolve(ROOT, 'docs'), resolve(geminiCliExtensionDir, 'docs'), {
+    recursive: true,
+  });
+}
 if (existsSync(resolve(ROOT, 'gemini-cli-extension', 'hooks'))) {
   cpSync(resolve(ROOT, 'gemini-cli-extension', 'hooks'), resolve(geminiCliExtensionDir, 'hooks'), {
     recursive: true,
@@ -376,6 +381,9 @@ if (existsSync(resolve(geminiCliExtensionDir, 'agents'))) {
 }
 if (existsSync(resolve(geminiCliExtensionDir, 'skills'))) {
   console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'skills')}`);
+}
+if (existsSync(resolve(geminiCliExtensionDir, 'docs'))) {
+  console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'docs')}`);
 }
 if (existsSync(resolve(geminiCliExtensionDir, 'scripts'))) {
   console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'scripts')}`);
