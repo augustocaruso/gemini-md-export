@@ -110,7 +110,7 @@ test('contagem longa aplica claim visual temporaria na aba', () => {
   assert.ok(block, '/agent/recent-chats deve existir');
   assert.match(block, /shouldTemporarilyClaimTab/);
   assert.match(block, /const temporaryClaimArgs = \{ \.\.\.args \}/);
-  assert.match(block, /ensureTabClaimForJob\(\s*client,\s*temporaryClaimArgs,\s*args\.countOnly \? 'GME Count' : 'GME List'/);
+  assert.match(block, /ensureTabClaimForJob\(\s*client,\s*temporaryClaimArgs,\s*args\.countOnly \? TAB_CLAIM_LABELS\.count : TAB_CLAIM_LABELS\.list/);
   assert.match(block, /claimVisibleAtMs = claim \? Date\.now\(\) : null/);
   assert.match(block, /waitForTabClaimMinimumVisibility\(claimVisibleAtMs, args\)/);
   assert.match(block, /temporaryClaimArgs\.ttlMs/);

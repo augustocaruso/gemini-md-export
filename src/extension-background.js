@@ -32,6 +32,11 @@ const TAB_CLAIM_COLORS = new Set([
   'cyan',
   'orange',
 ]);
+const TAB_CLAIM_DEFAULT_LABEL = '✨ Em uso';
+const TAB_CLAIM_BADGE_TEXT = '✓';
+const CLAIM_LABEL_MAX_GRAPHEMES = 16;
+const MANAGED_TAB_CLAIM_GROUP_TITLE_RE =
+  /^(?:GME(?:\s|$)|✨ Em uso$|🔎 Conferindo$|📥 Exportando$|🔄 Sincroniza$)/iu;
 const contentScriptSelfHealCooldowns = new Map();
 let lastContentScriptSelfHeal = null;
 let lastNativeHostProbe = null;
@@ -47,7 +52,10 @@ const clampText = (value, maxLength) =>
     .trim()
     .slice(0, maxLength);
 
-const sanitizeClaimLabel = (value) => clampText(value, 16) || 'GME';
+const sanitizeClaimLabel = (value) =>
+  Array.from(String(value || '').replace(/\s+/g, ' ').trim() || TAB_CLAIM_DEFAULT_LABEL)
+    .slice(0, CLAIM_LABEL_MAX_GRAPHEMES)
+    .join('');
 
 const sanitizeClaimColor = (value) => {
   const color = String(value || '').toLowerCase();
@@ -169,7 +177,8 @@ const scheduleTabClaimExpiryAlarm = (tabId, expiresAtMs) => {
   return { ok: true, tabId, when: expiresAtMs };
 };
 
-const looksLikeManagedClaimGroupTitle = (title) => /^GME(?:\s|$)/i.test(String(title || '').trim());
+const looksLikeManagedClaimGroupTitle = (title) =>
+  MANAGED_TAB_CLAIM_GROUP_TITLE_RE.test(String(title || '').trim());
 
 const releaseTrackedTabClaimByTabId = async (
   tabId,
@@ -1048,7 +1057,7 @@ const applyTabClaim = async (message, sender = {}) => {
     }
   }
 
-  await setActionBadge(tabId, 'GME');
+  await setActionBadge(tabId, TAB_CLAIM_BADGE_TEXT);
 
   const trackedClaim = {
     claimId,

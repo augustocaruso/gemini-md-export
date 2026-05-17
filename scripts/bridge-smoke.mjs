@@ -234,7 +234,7 @@ const syntheticCommandResult = (command, expectedChromeExtension, tabId) => {
         tabId,
         groupId: 9001,
         color: command.args?.color || 'blue',
-        label: command.args?.label || 'GME Smoke',
+        label: command.args?.label || '🧪 Teste',
         reason: 'bridge-smoke-fixture',
       },
     };
@@ -504,9 +504,10 @@ const runSmoke = async (options) => {
 
     if (options.destructiveFixture) {
       await runCheck(checks, 'destructive_fixture_claim_release', async () => {
+        const smokeLabel = encodeURIComponent('🧪 Teste');
         const claimPromise = requestJson(
           bridgeUrl,
-          `/agent/tabs?action=claim&clientId=${encodeURIComponent(clientId)}&label=GME%20Smoke&color=blue&ttlMs=120000&openIfMissing=false&allowReload=false`,
+          `/agent/tabs?action=claim&clientId=${encodeURIComponent(clientId)}&label=${smokeLabel}&color=blue&ttlMs=120000&openIfMissing=false&allowReload=false`,
           { timeoutMs: options.timeoutMs },
         );
         const claimCommands = await driveSyntheticCommands(

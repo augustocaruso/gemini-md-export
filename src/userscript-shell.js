@@ -442,7 +442,9 @@
   // do botão. Sobrevive reload da própria aba; some quando a aba é fechada.
   const TAB_IGNORE_SESSION_STORAGE_KEY = 'gemini-md-export.ignoreThisTab.v1';
   const TAB_IGNORE_CHANGED_EVENT = 'gm-md-export:tab-ignored-changed';
-  const TAB_CLAIM_TITLE_PREFIX_RE = /^\[GME(?: [^\]]+)?\]\s+/;
+  const TAB_CLAIM_DEFAULT_LABEL = '✨ Em uso';
+  const TAB_CLAIM_TITLE_PREFIX_RE = /^\[(?:✨ Em uso|🔎 Conferindo|📥 Exportando|🔄 Sincroniza)\]\s+/u;
+  const LEGACY_TAB_CLAIM_TITLE_PREFIX_RE = /^\[GME(?: [^\]]+)?\]\s+/;
   const isExtensionContext =
     typeof chrome !== 'undefined' &&
     !!chrome.runtime?.id &&
@@ -2842,10 +2844,23 @@
     };
   };
 
-  const restoreTabClaimTitleFallback = () => {
+  const escapeRegExp = (value) => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  const stripTabClaimTitlePrefix = (title, label = '') => {
+    let text = String(title || '');
+    const cleanLabel = String(label || '').replace(/[\[\]]/g, '').trim();
+    if (cleanLabel) {
+      const dynamicRe = new RegExp(`^\\[${escapeRegExp(cleanLabel)}\\]\\s+`, 'u');
+      text = text.replace(dynamicRe, '');
+    }
+    return text.replace(TAB_CLAIM_TITLE_PREFIX_RE, '').replace(LEGACY_TAB_CLAIM_TITLE_PREFIX_RE, '');
+  };
+
+  const restoreTabClaimTitleFallback = (claim = state.tabClaim) => {
     if (!state.tabClaimOriginalTitle) {
-      if (TAB_CLAIM_TITLE_PREFIX_RE.test(document.title || '')) {
-        document.title = String(document.title || '').replace(TAB_CLAIM_TITLE_PREFIX_RE, '');
+      const restored = stripTabClaimTitlePrefix(document.title, claim?.label || '');
+      if (restored !== String(document.title || '')) {
+        document.title = restored;
       }
       return;
     }
@@ -2853,16 +2868,18 @@
       state.tabClaimOriginalTitle = '';
       return;
     }
-    if (TAB_CLAIM_TITLE_PREFIX_RE.test(document.title || '')) {
+    if (stripTabClaimTitlePrefix(document.title, claim?.label || '') !== String(document.title || '')) {
       document.title = state.tabClaimOriginalTitle;
     }
     state.tabClaimOriginalTitle = '';
   };
 
   const applyTabClaimTitleFallback = (claim) => {
-    const label = String(claim?.label || 'GME').replace(/[\[\]]/g, '').trim() || 'GME';
+    const label =
+      String(claim?.label || TAB_CLAIM_DEFAULT_LABEL).replace(/[\[\]]/g, '').trim() ||
+      TAB_CLAIM_DEFAULT_LABEL;
     const current = String(document.title || '');
-    const baseTitle = current.replace(TAB_CLAIM_TITLE_PREFIX_RE, '') || current || 'Gemini';
+    const baseTitle = stripTabClaimTitlePrefix(current, label) || current || 'Gemini';
     if (!state.tabClaimOriginalTitle) {
       state.tabClaimOriginalTitle = baseTitle;
     }
@@ -2940,7 +2957,7 @@
     state.tabClaim = {
       claimId: claim.claimId,
       sessionId: claim.sessionId || null,
-      label: claim.label || 'GME',
+      label: claim.label || TAB_CLAIM_DEFAULT_LABEL,
       color: claim.color || 'green',
       expiresAt: claim.expiresAt || null,
       claimedAt: new Date().toISOString(),
@@ -3982,7 +3999,7 @@
     const scrapeStartedAt = Date.now();
     const turns = options.turns || scrapeTurns(doc);
     timings.extractMarkdownMs = Date.now() - scrapeStartedAt;
-    counters.turnCount = turns.length;
+    counters.turnCount = turns.filter((turn) => turn?.role === 'assistant').length;
     if (!chatId) {
       throw new Error('Chat ID não encontrado para a conversa.');
     }
@@ -3994,7 +4011,8 @@
       chatId,
       title: scrapeTitleFromDocument(doc),
       url,
-      exportedAt: new Date().toISOString(),
+      dateExported: portableIsoSeconds(new Date()),
+      turnCount: counters.turnCount,
       model: scrapeModelFromDocument(doc),
     };
 
@@ -4412,7 +4430,7 @@
       const claim = {
         claimId,
         sessionId: args.sessionId || null,
-        label: args.label || 'GME',
+        label: args.label || TAB_CLAIM_DEFAULT_LABEL,
         color: args.color || 'green',
         expiresAt: args.expiresAt || null,
       };

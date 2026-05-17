@@ -571,12 +571,13 @@ test('CLI chats count carrega ate o fim sem despejar lista no chat', async () =>
       return;
     }
     if (url.pathname === '/agent/tabs' && url.searchParams.get('action') === 'claim') {
+      assert.equal(url.searchParams.get('label'), '🔎 Conferindo');
       sendJson(res, 200, {
         ok: true,
         claim: {
           claimId: 'count-claim',
           tabId: 101,
-          label: 'GME Count',
+          label: '🔎 Conferindo',
         },
       });
       return;
@@ -748,7 +749,7 @@ test('CLI chats count --result-json reativa RESULT_JSON explicitamente', async (
         claim: {
           claimId: 'count-claim',
           tabId: 101,
-          label: 'GME Count',
+          label: '🔎 Conferindo',
         },
       });
       return;
@@ -802,7 +803,7 @@ test('CLI chats count nao transforma contagem parcial em total', async () => {
         claim: {
           claimId: 'count-claim',
           tabId: 101,
-          label: 'GME Count',
+          label: '🔎 Conferindo',
         },
       });
       return;
@@ -874,7 +875,7 @@ test('CLI chats count espera e tenta de novo quando a aba esta ocupada', async (
         claim: {
           claimId: 'count-claim',
           tabId: 101,
-          label: 'GME Count',
+          label: '🔎 Conferindo',
         },
       });
       return;
@@ -958,7 +959,7 @@ test('CLI chats count --tui mostra contagem indeterminada com feedback humano', 
         claim: {
           claimId: 'count-claim',
           tabId: 101,
-          label: 'GME Count',
+          label: '🔎 Conferindo',
         },
       });
       return;
@@ -978,7 +979,7 @@ test('CLI chats count --tui mostra contagem indeterminada com feedback humano', 
             },
             serverClaim: {
               claimId: 'count-claim',
-              label: 'GME Count',
+              label: '🔎 Conferindo',
             },
           },
         ],
@@ -1176,7 +1177,7 @@ test('CLI chats count libera claim propria quando a bridge cai durante a contage
         claim: {
           claimId: 'count-claim',
           tabId: 101,
-          label: 'GME Count',
+          label: '🔎 Conferindo',
         },
       });
       return;

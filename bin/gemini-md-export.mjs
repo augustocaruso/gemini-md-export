@@ -46,6 +46,7 @@ const DEFAULT_COUNT_LOAD_MORE_BROWSER_TIMEOUT_MS = 30_000;
 const DEFAULT_COUNT_LOAD_MORE_BROWSER_ROUNDS = 12;
 const DEFAULT_COUNT_MAX_NO_GROWTH_ROUNDS = 8;
 const DEFAULT_BROWSER_LAUNCH_LOCK_GRACE_MS = 2_000;
+const TAB_CLAIM_COUNT_LABEL = '🔎 Conferindo';
 const TERMINAL_STATUSES = new Set(['completed', 'completed_with_errors', 'failed', 'cancelled']);
 
 const EXIT = {
@@ -2871,7 +2872,7 @@ const claimCliTabForCount = async (flags = {}, countTimeoutMs) => {
       sessionId: flags.sessionId,
       index: flags.index,
       preferRecent: true,
-      label: 'GME Count',
+      label: TAB_CLAIM_COUNT_LABEL,
       color: 'purple',
       ttlMs,
       openIfMissing: false,

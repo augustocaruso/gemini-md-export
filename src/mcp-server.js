@@ -105,7 +105,14 @@ const TAB_CLAIM_MIN_VISIBLE_MS = Math.max(
   Math.min(15_000, Number(process.env.GEMINI_MCP_TAB_CLAIM_MIN_VISIBLE_MS || 5000)),
 );
 const TAB_CLAIM_COLORS = ['green', 'blue', 'yellow', 'purple', 'cyan', 'orange', 'pink'];
-const TAB_CLAIM_LABEL_PREFIX = 'GME';
+const TAB_CLAIM_LABEL_MAX_GRAPHEMES = 16;
+const TAB_CLAIM_LABELS = Object.freeze({
+  generic: '✨ Em uso',
+  count: '🔎 Conferindo',
+  list: '🔎 Conferindo',
+  export: '📥 Exportando',
+  sync: '🔄 Sincroniza',
+});
 const CLIENT_DEGRADED_HEARTBEAT_MS = Number(
   process.env.GEMINI_MCP_CLIENT_DEGRADED_HEARTBEAT_MS || 20_000,
 );
@@ -2103,15 +2110,12 @@ const colorForSession = (sessionId) => {
   return TAB_CLAIM_COLORS[Math.abs(hash) % TAB_CLAIM_COLORS.length] || 'green';
 };
 
-const labelForSession = (sessionId, provided) => {
-  const text = String(provided || '').replace(/\s+/g, ' ').trim();
-  if (text) return text.slice(0, 16);
-  const suffix = String(sessionId || PROCESS_SESSION_ID)
-    .replace(/[^a-z0-9]/gi, '')
-    .slice(-4)
-    .toUpperCase();
-  return `${TAB_CLAIM_LABEL_PREFIX}${suffix ? ` ${suffix}` : ''}`.slice(0, 16);
+const clampClaimLabel = (value, fallback = TAB_CLAIM_LABELS.generic) => {
+  const text = String(value || '').replace(/\s+/g, ' ').trim() || fallback;
+  return Array.from(text).slice(0, TAB_CLAIM_LABEL_MAX_GRAPHEMES).join('');
 };
+
+const labelForSession = (_sessionId, provided) => clampClaimLabel(provided);
 
 const clientSelectorProperties = () => ({
   clientId: { type: 'string' },
@@ -3310,7 +3314,7 @@ const autoReleaseTabClaimForJob = async (job, reason) => {
   return job.tabClaimRelease;
 };
 
-const ensureTabClaimForJob = async (client, args = {}, label = 'GME Job') => {
+const ensureTabClaimForJob = async (client, args = {}, label = TAB_CLAIM_LABELS.generic) => {
   const sessionId = normalizeSessionId(args.sessionId || args._proxySessionId);
   const existingSessionClaim = claimForSession(sessionId);
   if (existingSessionClaim?.clientId === client.clientId && args.renewExistingClaim === false) {
@@ -8428,7 +8432,7 @@ const legacyRawTools = [
         },
         label: {
           type: 'string',
-          description: 'Rótulo curto mostrado no Tab Group, por exemplo GME A.',
+          description: 'Rótulo curto mostrado no Tab Group, por exemplo 📥 Exportando.',
         },
         color: {
           type: 'string',
@@ -8897,7 +8901,7 @@ const legacyRawTools = [
     call: async (args = {}) => {
       const client = requireClient(args);
       assertNoRunningBrowserExportJob(client);
-      await ensureTabClaimForJob(client, args, 'GME Export');
+      await ensureTabClaimForJob(client, args, TAB_CLAIM_LABELS.export);
       return toolTextResult(startRecentChatsExportJob(client, args));
     },
   },
@@ -8992,7 +8996,7 @@ const legacyRawTools = [
     call: async (args = {}) => {
       const client = requireClient(args);
       assertNoRunningBrowserExportJob(client);
-      await ensureTabClaimForJob(client, args, 'GME Missing');
+      await ensureTabClaimForJob(client, args, TAB_CLAIM_LABELS.export);
       return toolTextResult(
         startRecentChatsExportJob(client, {
           ...args,
@@ -9086,7 +9090,7 @@ const legacyRawTools = [
     call: async (args = {}) => {
       const client = requireClient(args);
       assertNoRunningBrowserExportJob(client);
-      await ensureTabClaimForJob(client, args, 'GME Sync');
+      await ensureTabClaimForJob(client, args, TAB_CLAIM_LABELS.sync);
       return toolTextResult(
         startRecentChatsExportJob(client, {
           ...args,
@@ -9163,7 +9167,7 @@ const legacyRawTools = [
     call: async (args = {}) => {
       const client = requireClient(args);
       assertNoRunningBrowserExportJob(client);
-      await ensureTabClaimForJob(client, args, 'GME Reexport');
+      await ensureTabClaimForJob(client, args, TAB_CLAIM_LABELS.export);
       return toolTextResult(startDirectChatsExportJob(client, args));
     },
   },
@@ -9290,7 +9294,7 @@ const legacyRawTools = [
     },
     call: async (args = {}) => {
       const client = requireNotebookClient(args);
-      const claim = await ensureTabClaimForJob(client, args, 'GME Notebook');
+      const claim = await ensureTabClaimForJob(client, args, TAB_CLAIM_LABELS.export);
       let result = null;
       try {
         result = await exportNotebookForClient(client, args);
@@ -11077,7 +11081,7 @@ const bridgeServer = createServer(async (req, res) => {
           claim = await ensureTabClaimForJob(
             client,
             temporaryClaimArgs,
-            args.countOnly ? 'GME Count' : 'GME List',
+            args.countOnly ? TAB_CLAIM_LABELS.count : TAB_CLAIM_LABELS.list,
           );
           claimVisibleAtMs = claim ? Date.now() : null;
         }
@@ -11115,7 +11119,7 @@ const bridgeServer = createServer(async (req, res) => {
       const selector = clientSelectorFromSearchParams(url.searchParams);
       const client = requireClient(selector);
       assertNoRunningBrowserExportJob(client);
-      await ensureTabClaimForJob(client, selector, 'GME Export');
+      await ensureTabClaimForJob(client, selector, TAB_CLAIM_LABELS.export);
       sendAgentJson(
         res,
         202,
@@ -11150,7 +11154,7 @@ const bridgeServer = createServer(async (req, res) => {
       const selector = clientSelectorFromSearchParams(url.searchParams);
       const client = requireClient(selector);
       assertNoRunningBrowserExportJob(client);
-      await ensureTabClaimForJob(client, selector, 'GME Missing');
+      await ensureTabClaimForJob(client, selector, TAB_CLAIM_LABELS.export);
       sendAgentJson(
         res,
         202,
@@ -11190,7 +11194,7 @@ const bridgeServer = createServer(async (req, res) => {
       const selector = clientSelectorFromSearchParams(url.searchParams);
       const client = requireClient(selector);
       assertNoRunningBrowserExportJob(client);
-      await ensureTabClaimForJob(client, selector, 'GME Sync');
+      await ensureTabClaimForJob(client, selector, TAB_CLAIM_LABELS.sync);
       sendAgentJson(
         res,
         202,
@@ -11243,7 +11247,7 @@ const bridgeServer = createServer(async (req, res) => {
       };
       const client = requireClient(selector);
       assertNoRunningBrowserExportJob(client);
-      await ensureTabClaimForJob(client, selector, 'GME Reexport');
+      await ensureTabClaimForJob(client, selector, TAB_CLAIM_LABELS.export);
       sendAgentJson(
         res,
         202,
@@ -11435,7 +11439,7 @@ const bridgeServer = createServer(async (req, res) => {
         autoReleaseClaim: parseOptionalBoolean(url.searchParams.get('autoReleaseClaim')),
       };
       const client = requireNotebookClient(args);
-      const claim = await ensureTabClaimForJob(client, args, 'GME Notebook');
+      const claim = await ensureTabClaimForJob(client, args, TAB_CLAIM_LABELS.export);
       let result = null;
       try {
         result = await exportNotebookForClient(client, args);
