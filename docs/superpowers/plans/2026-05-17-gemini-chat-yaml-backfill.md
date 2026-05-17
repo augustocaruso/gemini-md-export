@@ -4,7 +4,7 @@
 
 **Goal:** Normalize raw Gemini chat Markdown files to a canonical YAML schema and backfill `date_created` / `date_last_message` from Google Gemini Activity.
 
-**Architecture:** Keep metadata normalization separate from contaminated-content repair. New exports should emit the canonical YAML directly, while a dedicated backfill runner scans existing raw chat files, matches them against Takeout/My Activity records, reports the proposed changes, and only rewrites files with `--apply` after creating backups.
+**Architecture:** Keep metadata normalization separate from contaminated-content repair. New exports should emit the canonical YAML directly, while a dedicated backfill runner scans existing raw chat files, first matches them against the authenticated My Activity web UI, later accepts Takeout records when the export email arrives, reports the proposed changes, and only rewrites files with `--apply` after creating backups.
 
 **Tech Stack:** Node.js ESM, built-in `node:test`, existing MV3 Chrome extension build, local MCP bridge, Markdown frontmatter parsing with the repo's lightweight parser style.
 
@@ -45,11 +45,12 @@ Rules:
 
 - Modify `src/extract.mjs`: emit canonical frontmatter for new exports.
 - Modify `src/userscript-shell.js`: pass `dateExported` and assistant-response `turnCount` into `buildDocument`.
+- Create `src/activity-content-script.js`: authenticated My Activity scraper for `myactivity.google.com/product/gemini`.
 - Create `gemini-cli-extension/scripts/chat-metadata-backfill.mjs`: CLI runner for dry-run/apply metadata normalization.
 - Create `tests/chat-metadata-backfill.test.mjs`: fixtures and assertions for the new runner.
+- Modify `src/extension-background.js` and `src/mcp-server.js`: route backfill queries to the My Activity tab and return sanitized matches.
 - Modify `bin/gemini-md-export.mjs`: expose `metadata backfill`.
-- Modify `scripts/build.mjs`: package the new runner and, if live My Activity mode is implemented in the same pass, package the activity content script.
-- Optionally create `src/activity-content-script.js`: live My Activity fallback that scans authenticated `myactivity.google.com/product/gemini` pages.
+- Modify `scripts/build.mjs`: package the new runner and the My Activity content script.
 - Modify `README.md` and `gemini-cli-extension/GEMINI.md`: document the canonical YAML and command.
 
 ## Task 1: New Export YAML
@@ -123,7 +124,78 @@ node --test tests/extract.test.mjs
 
 Expected: pass.
 
-## Task 2: Backfill Runner With Takeout
+## Task 2: Live My Activity Scraper First
+
+**Files:**
+- Create: `src/activity-content-script.js`
+- Modify: `scripts/build.mjs`
+- Modify: `src/extension-background.js`
+- Modify: `src/mcp-server.js`
+- Test: `tests/content-script.test.mjs`
+- Test: `tests/bridge-smoke.test.mjs`
+- Test: `tests/gemini-cli-extension.test.mjs`
+
+- [ ] **Step 1: Add extension manifest/build tests**
+
+Add tests proving the MV3 bundle includes:
+
+- content script match `https://myactivity.google.com/product/gemini*`;
+- host permission `https://myactivity.google.com/*`;
+- packaged `activity-content-script.js`.
+
+Run:
+
+```bash
+node --test tests/gemini-cli-extension.test.mjs
+```
+
+Expected: fail until the build includes the new script and permission.
+
+- [ ] **Step 2: Implement the activity content script**
+
+Create `src/activity-content-script.js` with a tiny message API:
+
+- listens for `chrome.runtime.onMessage` type `gemini-md-export/activity-scan`;
+- scans currently loaded Gemini Activity cards;
+- for likely candidates, opens `Item details`;
+- extracts date/time from the card/details view;
+- scores candidate prompt/response text inside the page;
+- returns only sanitized evidence: `date`, `score`, `textHash`, `promptCoverage`, `assistantCoverage`, `candidateCount`, and `source: "my-activity-web"`.
+
+Do not log prompt or response bodies to the browser console.
+
+- [ ] **Step 3: Package and permission the script**
+
+In `scripts/build.mjs`:
+
+- read `src/activity-content-script.js`;
+- write it to `dist/extension/activity-content-script.js`;
+- add it to `manifest.content_scripts`;
+- add `https://myactivity.google.com/*` to `host_permissions`;
+- copy it into the Gemini CLI browser-extension bundle.
+
+- [ ] **Step 4: Add bridge/MCP route**
+
+Expose a local agent endpoint that can:
+
+- find an existing `https://myactivity.google.com/product/gemini` tab or open one;
+- ask the content script to scan for one raw chat candidate at a time;
+- return sanitized match results to the backfill runner.
+
+The endpoint must be opt-in and must not expose prompt or response bodies in HTTP logs, flight logs, telemetry, or JSON reports.
+
+- [ ] **Step 5: Verify**
+
+Run:
+
+```bash
+npm run build
+node --test tests/content-script.test.mjs tests/bridge-smoke.test.mjs tests/gemini-cli-extension.test.mjs
+```
+
+Expected: pass.
+
+## Task 3: Backfill Runner Using My Activity Web
 
 **Files:**
 - Create: `gemini-cli-extension/scripts/chat-metadata-backfill.mjs`
@@ -138,11 +210,11 @@ Create tests for:
 - `exported_at` migrates to `date_exported`;
 - `source` is removed;
 - `turn_count` equals assistant heading count;
-- Takeout match fills `date_created` and `date_last_message`;
+- My Activity web match fills `date_created` and `date_last_message`;
 - ambiguous duplicate prompt leaves dates unchanged and reports `ambiguous`;
 - wiki/derived note is skipped.
 
-Use temp directories and write Markdown fixtures directly inside the test.
+Use temp directories and write Markdown fixtures directly inside the test. Stub the My Activity bridge endpoint so tests do not need a real browser.
 
 Run:
 
@@ -154,11 +226,11 @@ Expected: fail because the runner does not exist yet.
 
 - [ ] **Step 2: Implement argument parsing**
 
-Support:
+Support live scraping first:
 
 ```text
 node gemini-cli-extension/scripts/chat-metadata-backfill.mjs <vault-or-folder>
-  --takeout <MyActivity.json>
+  --use-my-activity
   --apply
   --report <report.json>
   --backup-dir <dir>
@@ -171,6 +243,7 @@ Defaults:
 - report path `<vault>/.gemini-md-export-metadata/backfill-report.json`;
 - backup dir `<vault>/.gemini-md-export-metadata/backups/<YYYYMMDD-HHMMSS>`;
 - repeated `--path` limits work to explicit files.
+- `--use-my-activity` is the default while Takeout is unavailable; keep the flag for clarity in reports and commands.
 
 - [ ] **Step 3: Implement raw-chat detection**
 
@@ -183,27 +256,21 @@ A file is eligible only when all are true:
 
 Skipped files must appear in the report with `status: "skipped"` and `reason`.
 
-- [ ] **Step 4: Parse Takeout activity**
+- [ ] **Step 4: Query My Activity matches**
 
-Accept Google My Activity JSON forms commonly exported by Takeout/Data Portability:
+For each eligible raw chat:
 
-- top-level array of activity objects;
-- object with an array property containing activity objects.
-
-For each activity item, extract:
-
-- `time` as UTC ISO;
-- visible text fields such as `title`, `description`, `details`, `subtitles`, and nested string values;
-- whether the item belongs to Gemini/Bard by checking product/title fields for `Gemini`, `Gemini Apps`, or `bard`.
-
-Keep full text only in memory. The report should store hashes, score, timestamps, and lengths, not prompt/response bodies.
+- build a sanitized in-memory candidate from first user message, last user message, assistant response samples, and `chat_id`;
+- call the local My Activity endpoint;
+- store only sanitized match evidence in the report;
+- continue scanning other files if one candidate is unresolved or ambiguous.
 
 - [ ] **Step 5: Score matches**
 
 For each raw chat:
 
 - extract first user message, all user messages, and assistant response samples from the Markdown body;
-- compare against Activity text using normalized whitespace and longest-common-substring coverage;
+- compare against My Activity card/details text using normalized whitespace and longest-common-substring coverage;
 - require strong first-prompt coverage for `date_created`;
 - require strong coverage of the last user prompt plus assistant-response confirmation when available for `date_last_message`;
 - if multiple items tie above threshold, mark `ambiguous`;
@@ -238,7 +305,55 @@ node --test tests/chat-metadata-backfill.test.mjs
 
 Expected: pass.
 
-## Task 3: CLI Command
+## Task 4: Takeout Import After Email Arrives
+
+**Files:**
+- Modify: `gemini-cli-extension/scripts/chat-metadata-backfill.mjs`
+- Test: `tests/chat-metadata-backfill.test.mjs`
+
+- [ ] **Step 1: Add Takeout fixture tests**
+
+Add tests proving `--takeout <MyActivity.json>`:
+
+- parses Google Activity JSON;
+- fills the same match model used by My Activity web scraping;
+- does not require browser/bridge readiness;
+- takes precedence over live scraping when both are supplied and scores tie.
+
+- [ ] **Step 2: Parse Takeout activity**
+
+Accept Google My Activity JSON forms commonly exported by Takeout/Data Portability:
+
+- top-level array of activity objects;
+- object with an array property containing activity objects.
+
+For each activity item, extract:
+
+- `time` as UTC ISO;
+- visible text fields such as `title`, `description`, `details`, `subtitles`, and nested string values;
+- whether the item belongs to Gemini/Bard by checking product/title fields for `Gemini`, `Gemini Apps`, or `bard`.
+
+Keep full text only in memory. The report should store hashes, score, timestamps, and lengths, not prompt/response bodies.
+
+- [ ] **Step 3: Merge sources**
+
+When both `--takeout` and `--use-my-activity` are supplied:
+
+- normalize both sources into the same candidate shape;
+- prefer Takeout for equal scores because it is exportable and easier to audit;
+- include `source: "takeout"` or `source: "my-activity-web"` in report evidence.
+
+- [ ] **Step 4: Verify**
+
+Run:
+
+```bash
+node --test tests/chat-metadata-backfill.test.mjs
+```
+
+Expected: pass.
+
+## Task 5: CLI Command
 
 **Files:**
 - Modify: `bin/gemini-md-export.mjs`
@@ -249,7 +364,8 @@ Expected: pass.
 Add tests that:
 
 - `gemini-md-export help metadata` lists `metadata backfill`;
-- `metadata backfill <vault> --takeout <file>` spawns `chat-metadata-backfill.mjs`;
+- `metadata backfill <vault> --use-my-activity` spawns `chat-metadata-backfill.mjs`;
+- `metadata backfill <vault> --takeout <file>` remains supported once Takeout arrives;
 - unknown metadata subcommands return a usage error.
 
 - [ ] **Step 2: Wire the command**
@@ -257,6 +373,7 @@ Add tests that:
 Add command shape:
 
 ```bash
+gemini-md-export metadata backfill <vault-or-folder> --use-my-activity [--apply]
 gemini-md-export metadata backfill <vault-or-folder> --takeout <MyActivity.json> [--apply]
 ```
 
@@ -272,73 +389,7 @@ node --test tests/gemini-cli-tui.test.mjs
 
 Expected: pass.
 
-## Task 4: Live My Activity Fallback
-
-**Files:**
-- Create: `src/activity-content-script.js`
-- Modify: `scripts/build.mjs`
-- Modify: `src/extension-background.js`
-- Modify: `src/mcp-server.js`
-- Test: `tests/content-script.test.mjs`
-- Test: `tests/bridge-smoke.test.mjs`
-
-- [ ] **Step 1: Add extension manifest support**
-
-In `scripts/build.mjs` add:
-
-- content script match: `https://myactivity.google.com/product/gemini*`;
-- host permission: `https://myactivity.google.com/*`;
-- packaged file: `activity-content-script.js`.
-
-- [ ] **Step 2: Implement the activity content script**
-
-The script must:
-
-- listen for `chrome.runtime.onMessage` type `gemini-md-export/activity-scan`;
-- scan visible Gemini Activity cards;
-- open `Item details` for candidate cards;
-- score matches inside the page using query text sent by the local runner/MCP;
-- return only sanitized evidence: `chatId`, `date`, `score`, `textHash`, `promptCoverage`, `assistantCoverage`, and `candidateCount`.
-
-Do not log prompt or response bodies to the browser console.
-
-- [ ] **Step 3: Add bridge/MCP route**
-
-Expose a local agent endpoint that can:
-
-- find or open a My Activity tab;
-- send candidate queries to the activity content script;
-- return sanitized match results to the backfill runner.
-
-The endpoint must be opt-in from the runner, used only when no Takeout file is provided or when `--use-my-activity` is passed.
-
-- [ ] **Step 4: Add runner integration**
-
-Extend the backfill runner with:
-
-```bash
-gemini-md-export metadata backfill <vault> --use-my-activity
-```
-
-Behavior:
-
-- require local bridge/extension readiness;
-- send only candidate text needed for scoring;
-- merge live Activity matches with Takeout matches when both are present;
-- prefer Takeout if scores tie.
-
-- [ ] **Step 5: Verify**
-
-Run:
-
-```bash
-npm run build
-node --test tests/content-script.test.mjs tests/bridge-smoke.test.mjs
-```
-
-Expected: pass.
-
-## Task 5: Docs And Gemini CLI Command
+## Task 6: Docs And Gemini CLI Command
 
 **Files:**
 - Modify: `README.md`
@@ -353,8 +404,8 @@ Document:
 - canonical YAML schema;
 - `turn_count` semantics as number of Gemini responses;
 - UTC `Z` date format;
-- Takeout command;
-- live My Activity fallback command;
+- My Activity web scraping command as the first implementation path;
+- Takeout command as the later stable/offline path once the email arrives;
 - dry-run/apply behavior and backup location.
 
 - [ ] **Step 2: Add Gemini CLI command**
@@ -362,13 +413,13 @@ Document:
 Create `/exporter:backfill-metadata` command that tells the agent to call:
 
 ```bash
-node "${extensionPath}/bin/gemini-md-export.mjs" metadata backfill "<vaultDir>" --takeout "<MyActivity.json>"
+node "${extensionPath}/bin/gemini-md-export.mjs" metadata backfill "<vaultDir>" --use-my-activity
 ```
 
 or:
 
 ```bash
-node "${extensionPath}/bin/gemini-md-export.mjs" metadata backfill "<vaultDir>" --use-my-activity
+node "${extensionPath}/bin/gemini-md-export.mjs" metadata backfill "<vaultDir>" --takeout "<MyActivity.json>"
 ```
 
 The command must say explicitly that `--apply` is required to mutate files.
@@ -383,7 +434,7 @@ node --test tests/gemini-cli-extension.test.mjs
 
 Expected: pass.
 
-## Task 6: Full Verification
+## Task 7: Full Verification
 
 **Files:**
 - No new files.
@@ -398,26 +449,40 @@ npm test
 
 Expected: build succeeds and all `node --test tests/*.test.mjs` tests pass.
 
-- [ ] **Step 2: Manual dry-run smoke**
+- [ ] **Step 2: Manual My Activity dry-run smoke**
 
 Create a temporary vault fixture and run:
 
 ```bash
-node gemini-cli-extension/scripts/chat-metadata-backfill.mjs /tmp/gme-vault-fixture --takeout /tmp/gme-takeout-fixture.json --report /tmp/gme-report.json
+node gemini-cli-extension/scripts/chat-metadata-backfill.mjs /tmp/gme-vault-fixture --use-my-activity --report /tmp/gme-report-live.json
 ```
 
 Expected:
 
+- My Activity tab is opened or reused;
 - no Markdown files changed;
+- report uses `source: "my-activity-web"`;
 - report contains proposed canonical YAML changes;
 - unresolved/ambiguous cases are reported without dates.
 
-- [ ] **Step 3: Manual apply smoke**
+After the Takeout email/file arrives, also run:
+
+```bash
+node gemini-cli-extension/scripts/chat-metadata-backfill.mjs /tmp/gme-vault-fixture --takeout /tmp/gme-takeout-fixture.json --report /tmp/gme-report-takeout.json
+```
+
+Expected:
+
+- no browser/bridge is required;
+- report uses `source: "takeout"`;
+- no Markdown files changed without `--apply`.
+
+- [ ] **Step 3: Manual My Activity apply smoke**
 
 Run:
 
 ```bash
-node gemini-cli-extension/scripts/chat-metadata-backfill.mjs /tmp/gme-vault-fixture --takeout /tmp/gme-takeout-fixture.json --apply --report /tmp/gme-report-apply.json
+node gemini-cli-extension/scripts/chat-metadata-backfill.mjs /tmp/gme-vault-fixture --use-my-activity --apply --report /tmp/gme-report-apply.json
 ```
 
 Expected:
@@ -426,4 +491,3 @@ Expected:
 - backups are created;
 - Markdown bodies are byte-for-byte unchanged;
 - YAML matches the canonical contract.
-
