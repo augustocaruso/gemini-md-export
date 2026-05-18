@@ -69,10 +69,12 @@ The runner builds in-memory candidates with `{ chatId, firstPrompt, lastPrompt, 
 When the Google export arrives, the same runner accepts:
 
 ```bash
-gemini-md-export metadata backfill <vaultDir> --takeout <MyActivity.json> --report <report.json>
+gemini-md-export metadata backfill <vaultDir> --takeout <Minhaatividade.html|MyActivity.json> --report <report.json>
 ```
 
-Takeout is normalized into the same match shape as the live My Activity scraper and does not require browser/bridge readiness.
+The observed Google Takeout shape for Gemini Apps is `Minha atividade/Gemini Apps/Minhaatividade.html`: one HTML card per Gemini Activity item, with prompt text, model response text, attachments, and a local timestamp such as `17 de mai. de 2026, 13:58:18 BRT`, but no `gemini.google.com/app/<chatId>` URL. That means the offline path must infer `chat_id` by scoring the HTML card text against the already-exported Markdown candidates `{ chatId, firstPrompt, lastPrompt, assistantSamples }`.
+
+Takeout is normalized into the same match shape as the live My Activity scraper and does not require browser/bridge readiness. Reports must store only source, dates, scores, hashes, and lengths.
 
 ## Manifest Permission And Reload
 
@@ -362,9 +364,11 @@ Expected: pass.
 
 - [ ] **Step 1: Add Takeout fixture tests**
 
-Add tests proving `--takeout <MyActivity.json>`:
+Add tests proving `--takeout <Minhaatividade.html|MyActivity.json>`:
 
 - parses Google Activity JSON;
+- parses Google Takeout `Minhaatividade.html` for Gemini Apps;
+- matches HTML activity cards to exported Markdown chats by content when the Takeout has no `chat_id`;
 - fills the same match model used by My Activity web scraping;
 - does not require browser/bridge readiness;
 - takes precedence over live scraping when both are supplied and scores tie.
@@ -375,6 +379,14 @@ Accept Google My Activity JSON forms commonly exported by Takeout/Data Portabili
 
 - top-level array of activity objects;
 - object with an array property containing activity objects.
+
+Also accept the concrete Takeout HTML shape:
+
+- split `outer-cell` activity cards from `Minhaatividade.html`;
+- extract the Portuguese/BRT timestamp and convert it to UTC `YYYY-MM-DDTHH:mm:ssZ`;
+- normalize visible card text in memory;
+- score cards against candidate prompts/responses;
+- skip low-confidence or tied matches instead of inventing dates.
 
 For each activity item, extract:
 
@@ -423,7 +435,7 @@ Add command shape:
 
 ```bash
 gemini-md-export metadata backfill <vault-or-folder> --use-my-activity [--apply]
-gemini-md-export metadata backfill <vault-or-folder> --takeout <MyActivity.json> [--apply]
+gemini-md-export metadata backfill <vault-or-folder> --takeout <Minhaatividade.html|MyActivity.json> [--apply]
 ```
 
 Forward unrecognized backfill-specific flags to `chat-metadata-backfill.mjs` the same way `repair-vault` delegates to its runner.
@@ -517,13 +529,13 @@ Expected:
 After the Takeout email/file arrives, also run:
 
 ```bash
-node gemini-cli-extension/scripts/chat-metadata-backfill.mjs /tmp/gme-vault-fixture --takeout /tmp/gme-takeout-fixture.json --report /tmp/gme-report-takeout.json
+node gemini-cli-extension/scripts/chat-metadata-backfill.mjs /tmp/gme-vault-fixture --takeout /tmp/gme-takeout-fixture.html --report /tmp/gme-report-takeout.json
 ```
 
 Expected:
 
 - no browser/bridge is required;
-- report uses `source: "takeout"`;
+- report uses `source: "takeout-html"` or `source: "takeout"`;
 - no Markdown files changed without `--apply`.
 
 - [ ] **Step 3: Manual My Activity apply smoke**

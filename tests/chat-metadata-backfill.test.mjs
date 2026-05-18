@@ -197,3 +197,81 @@ Primeira resposta sensível
     rmSync(vault, { recursive: true, force: true });
   }
 });
+
+test('metadata backfill usa Takeout HTML de Gemini Apps sem chat_id por matching de conteúdo', () => {
+  const vault = makeVault();
+  const reportPath = resolve(vault, 'report.json');
+  const takeoutPath = resolve(vault, 'Minhaatividade.html');
+  const chatPath = writeChat(
+    vault,
+    'b8e7c075effe9457',
+    `---
+chat_id: b8e7c075effe9457
+title: "Exemplo"
+url: https://gemini.google.com/app/b8e7c075effe9457
+date_exported: 2026-05-17T18:55:08Z
+tags: [gemini-export]
+---
+
+## 🧑 Usuário
+
+Primeiro prompt sensível de fixture HTML
+
+---
+
+## 🤖 Gemini
+
+Primeira resposta sensível de fixture HTML
+
+---
+
+## 🧑 Usuário
+
+Último prompt sensível de fixture HTML
+
+---
+
+## 🤖 Gemini
+
+Última resposta sensível de fixture HTML
+`,
+  );
+
+  writeFileSync(
+    takeoutPath,
+    `<!doctype html><html><body>
+<div class="outer-cell mdl-cell mdl-cell--12-col mdl-shadow--2dp"><div class="mdl-grid">
+<div class="header-cell mdl-cell mdl-cell--12-col"><p class="mdl-typography--title">Gemini Apps<br></p></div>
+<div class="content-cell mdl-cell mdl-cell--6-col mdl-typography--body-1">Prompted&nbsp;Primeiro prompt sensível de fixture HTML<br>10 de mai. de 2026, 03:46:09 BRT<br><p>Primeira resposta sensível de fixture HTML</p><br></div>
+<div class="content-cell mdl-cell mdl-cell--12-col mdl-typography--caption"><b>Produtos:</b><br>&emsp;Gemini Apps</div>
+</div></div>
+<div class="outer-cell mdl-cell mdl-cell--12-col mdl-shadow--2dp"><div class="mdl-grid">
+<div class="header-cell mdl-cell mdl-cell--12-col"><p class="mdl-typography--title">Gemini Apps<br></p></div>
+<div class="content-cell mdl-cell mdl-cell--6-col mdl-typography--body-1">Prompted&nbsp;Último prompt sensível de fixture HTML<br>10 de mai. de 2026, 04:12:31 BRT<br><p>Última resposta sensível de fixture HTML</p><br></div>
+<div class="content-cell mdl-cell mdl-cell--12-col mdl-typography--caption"><b>Produtos:</b><br>&emsp;Gemini Apps</div>
+</div></div>
+</body></html>`,
+    'utf-8',
+  );
+
+  try {
+    execFileSync(process.execPath, [SCRIPT, vault, '--takeout', takeoutPath, '--report', reportPath], {
+      cwd: resolve('.'),
+      stdio: 'pipe',
+      encoding: 'utf-8',
+    });
+
+    const updated = readFileSync(chatPath, 'utf-8');
+    assert.match(updated, /\ndate_created: 2026-05-10T06:46:09Z\n/);
+    assert.match(updated, /\ndate_last_message: 2026-05-10T07:12:31Z\n/);
+
+    const reportText = readFileSync(reportPath, 'utf-8');
+    const report = JSON.parse(reportText);
+    assert.equal(report.items[0].status, 'matched');
+    assert.equal(report.items[0].evidence[0].source, 'takeout-html');
+    assert.doesNotMatch(reportText, /Primeiro prompt sensível/);
+    assert.doesNotMatch(reportText, /Última resposta sensível/);
+  } finally {
+    rmSync(vault, { recursive: true, force: true });
+  }
+});

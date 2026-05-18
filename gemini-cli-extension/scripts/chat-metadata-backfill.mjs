@@ -18,11 +18,11 @@ const URL_CHAT_ID_RE = /\/app\/([a-f0-9]{12,})/i;
 
 const usage = () => `Uso:
   gemini-md-export metadata backfill <vaultDir> --use-my-activity --report <report.json>
-  gemini-md-export metadata backfill <vaultDir> --takeout <MyActivity.json> --report <report.json>
+  gemini-md-export metadata backfill <vaultDir> --takeout <Minhaatividade.html|MyActivity.json> --report <report.json>
 
 Opções:
   --use-my-activity        usa uma aba My Activity conectada pela extensão
-  --takeout <json>         usa arquivo offline do Google Takeout/My Activity
+  --takeout <arquivo>      usa arquivo offline do Google Takeout/My Activity
   --bridge-url <url>       bridge local (default: ${DEFAULT_BRIDGE_URL})
   --report <json>          caminho do relatório/checkpoint
   --limit <n>              limita quantidade de chats processados
@@ -143,6 +143,13 @@ const sectionsForRole = (body, role) => {
 
 const sampleText = (value, max = 1200) => String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
 
+const normalizeComparableText = (value) =>
+  String(value || '')
+    .normalize('NFKC')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+
 const collectMarkdownFiles = (root) => {
   const files = [];
   const visit = (dir) => {
@@ -239,6 +246,7 @@ const groupActivityMatches = (matches = []) => {
       kind: match.kind || 'unknown',
       date,
       score: Number(match.score || 0),
+      source: match.source || null,
       textHash: match.textHash || null,
       sampleHash: match.sampleHash || null,
       sampleLength: match.sampleLength || null,
@@ -275,7 +283,171 @@ const collectTakeoutObjects = (value, out = []) => {
   return out;
 };
 
-const loadTakeoutMatches = (path) => {
+const decodeHtmlEntities = (value) =>
+  String(value || '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&emsp;/gi, ' ')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/&apos;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&amp;/gi, '&')
+    .replace(/&#x([0-9a-f]+);/gi, (_match, hex) => String.fromCodePoint(Number.parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_match, dec) => String.fromCodePoint(Number.parseInt(dec, 10)));
+
+const htmlToPlainText = (html) =>
+  decodeHtmlEntities(
+    String(html || '')
+      .replace(/<\s*br\s*\/?\s*>/gi, '\n')
+      .replace(/<\/(p|div|li|tr|table|h[1-6])\s*>/gi, '\n')
+      .replace(/<[^>]+>/g, ' '),
+  )
+    .replace(/\r/g, '')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n[ \t]+/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim();
+
+const TAKEOUT_MONTHS_PT = new Map([
+  ['jan', 1],
+  ['jan.', 1],
+  ['janeiro', 1],
+  ['fev', 2],
+  ['fev.', 2],
+  ['fevereiro', 2],
+  ['mar', 3],
+  ['mar.', 3],
+  ['março', 3],
+  ['marco', 3],
+  ['abr', 4],
+  ['abr.', 4],
+  ['abril', 4],
+  ['mai', 5],
+  ['mai.', 5],
+  ['maio', 5],
+  ['jun', 6],
+  ['jun.', 6],
+  ['junho', 6],
+  ['jul', 7],
+  ['jul.', 7],
+  ['julho', 7],
+  ['ago', 8],
+  ['ago.', 8],
+  ['agosto', 8],
+  ['set', 9],
+  ['set.', 9],
+  ['setembro', 9],
+  ['out', 10],
+  ['out.', 10],
+  ['outubro', 10],
+  ['nov', 11],
+  ['nov.', 11],
+  ['novembro', 11],
+  ['dez', 12],
+  ['dez.', 12],
+  ['dezembro', 12],
+]);
+
+const parseTakeoutDate = (text) => {
+  const match = String(text || '').match(
+    /(\d{1,2})\s+de\s+([A-Za-zÀ-ÿ.]+)\s+de\s+(\d{4}),\s+(\d{1,2}):(\d{2}):(\d{2})\s+([A-Z]{2,5})/i,
+  );
+  if (!match) return null;
+  const [, dayText, monthText, yearText, hourText, minuteText, secondText, zoneText] = match;
+  const month = TAKEOUT_MONTHS_PT.get(monthText.toLowerCase());
+  if (!month) return null;
+  const zone = zoneText.toUpperCase();
+  const offsetHours = zone === 'BRT' ? -3 : zone === 'UTC' || zone === 'GMT' ? 0 : null;
+  if (offsetHours === null) return null;
+  const date = new Date(
+    Date.UTC(
+      Number(yearText),
+      month - 1,
+      Number(dayText),
+      Number(hourText) - offsetHours,
+      Number(minuteText),
+      Number(secondText),
+    ),
+  );
+  return portableIsoSeconds(date);
+};
+
+const parseTakeoutHtmlItems = (html) => {
+  const cards = String(html || '').match(/<div class="outer-cell\b[\s\S]*?(?=<div class="outer-cell\b|<\/body>|<\/html>|$)/g) || [];
+  return cards
+    .map((card) => {
+      const text = htmlToPlainText(card);
+      const date = parseTakeoutDate(text);
+      if (!date || !/Gemini Apps/i.test(text)) return null;
+      return {
+        date,
+        text,
+        comparableText: normalizeComparableText(text),
+        textHash: hashText(text),
+        sampleLength: text.length,
+      };
+    })
+    .filter(Boolean);
+};
+
+const candidateNeedles = (candidate) => {
+  const needles = [];
+  const add = (kind, value, weight) => {
+    const text = sampleText(value, 500);
+    const comparable = normalizeComparableText(text);
+    if (comparable.length >= 16) needles.push({ kind, text, comparable, weight, length: comparable.length });
+  };
+  add('created', candidate.scoring?.firstPrompt, 0.62);
+  add('last_message', candidate.scoring?.lastPrompt, 0.62);
+  for (const sample of candidate.scoring?.assistantSamples || []) add('assistant', sample, 0.42);
+  return needles;
+};
+
+const scoreTakeoutItemForCandidate = (item, candidate) => {
+  const hits = [];
+  let score = 0;
+  for (const needle of candidateNeedles(candidate)) {
+    if (!item.comparableText.includes(needle.comparable)) continue;
+    hits.push(needle);
+    score += needle.weight;
+  }
+  const promptHits = hits.filter((hit) => hit.kind === 'created' || hit.kind === 'last_message');
+  const assistantHits = hits.filter((hit) => hit.kind === 'assistant');
+  const hasLongPrompt = promptHits.some((hit) => hit.length >= 48);
+  if (!promptHits.length) return null;
+  if (!hasLongPrompt && !assistantHits.length) return null;
+  const kinds = new Set(promptHits.map((hit) => hit.kind));
+  const kind = kinds.size === 1 ? Array.from(kinds)[0] : 'unknown';
+  return {
+    chatId: candidate.chatId,
+    date: item.date,
+    kind,
+    score: Math.min(1, Number(score.toFixed(2))),
+    source: 'takeout-html',
+    textHash: item.textHash,
+    sampleHash: hashText(hits.map((hit) => `${hit.kind}:${hit.text}`).join('\n')),
+    sampleLength: item.sampleLength,
+  };
+};
+
+const matchTakeoutHtmlItems = (items, candidates = []) => {
+  const matches = [];
+  for (const item of items) {
+    const scored = candidates
+      .map((candidate) => scoreTakeoutItemForCandidate(item, candidate))
+      .filter(Boolean)
+      .sort((a, b) => b.score - a.score);
+    const [best, runnerUp] = scored;
+    if (!best || best.score < 0.72) continue;
+    if (runnerUp && runnerUp.score >= best.score - 0.05) continue;
+    matches.push(best);
+  }
+  return matches;
+};
+
+const loadTakeoutJsonMatches = (path) => {
   if (!path) return [];
   const parsed = JSON.parse(readFileSync(path, 'utf-8'));
   const matches = [];
@@ -297,6 +469,15 @@ const loadTakeoutMatches = (path) => {
     });
   }
   return matches;
+};
+
+const loadTakeoutMatches = (path, candidates = []) => {
+  if (!path) return [];
+  const text = readFileSync(path, 'utf-8');
+  if (/^\s*</.test(text) || /\.html?$/i.test(path)) {
+    return matchTakeoutHtmlItems(parseTakeoutHtmlItems(text), candidates);
+  }
+  return loadTakeoutJsonMatches(path);
 };
 
 const loadPreviousCheckpoint = (reportPath) => {
@@ -353,6 +534,7 @@ const reportItem = (candidate, status, dates, evidence = []) => ({
     kind: item.kind || 'unknown',
     date: item.date || null,
     score: item.score ?? null,
+    source: item.source || null,
     textHash: item.textHash || null,
     sampleHash: item.sampleHash || null,
     sampleLength: item.sampleLength || null,
@@ -373,7 +555,7 @@ const run = async () => {
   const matches = [];
   let activityCheckpoint = loadPreviousCheckpoint(reportPath);
   let activityError = null;
-  if (args.takeout) matches.push(...loadTakeoutMatches(resolve(expandUserPath(args.takeout))));
+  if (args.takeout) matches.push(...loadTakeoutMatches(resolve(expandUserPath(args.takeout)), selected));
   if (args.useMyActivity && selected.length) {
     try {
       const activity = await requestActivityScan({
