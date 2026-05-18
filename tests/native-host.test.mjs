@@ -79,6 +79,35 @@ test('script renderiza manifesto native host com extension id informado', async 
   child.kill();
 });
 
+test('script renderiza manifesto native host com caminho Windows escapado', async () => {
+  const windowsHostPath =
+    'C:\\Users\\leo\\.gemini\\extensions\\gemini-md-export\\bin\\gemini-md-export-native-host.mjs';
+  const child = spawn(
+    process.execPath,
+    [
+      resolve(ROOT, 'scripts', 'native-host-manifest.mjs'),
+      '--extension-id',
+      'bpdmkcbcnhgbofiodbachaimkjodjpji',
+      '--print',
+    ],
+    {
+      cwd: ROOT,
+      env: {
+        ...process.env,
+        GEMINI_MD_EXPORT_NATIVE_HOST_PATH: windowsHostPath,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
+  );
+  const [chunk] = await once(child.stdout, 'data');
+  const manifest = JSON.parse(chunk.toString('utf-8'));
+  assert.equal(manifest.path, windowsHostPath);
+  assert.deepEqual(manifest.allowed_origins, [
+    'chrome-extension://bpdmkcbcnhgbofiodbachaimkjodjpji/',
+  ]);
+  child.kill();
+});
+
 test('script conhece caminho Dia para native messaging no macOS', () => {
   const source = readFileSync(resolve(ROOT, 'scripts', 'native-host-manifest.mjs'), 'utf-8');
   assert.match(source, /chrome\|edge\|brave\|dia/);
