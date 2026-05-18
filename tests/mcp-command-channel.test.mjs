@@ -107,14 +107,25 @@ test('MCP nao escolhe cliente My Activity de build antigo apos reload da extensa
 
 test('MCP acorda My Activity reaproveitando aba existente antes de abrir outra', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const ensureActivityBlock = source.match(
+    /const ensureActivityClientForScan = async \(args = \{\}\) => \{[\s\S]*?\n\};\n\nconst scanActivityWithClient/,
+  )?.[0] || '';
 
   assert.match(source, /ACTIVITY_GEMINI_URL = 'https:\/\/myactivity\.google\.com\/product\/gemini'/);
+  assert.match(source, /ACTIVITY_PRE_LAUNCH_WAIT_MS/);
   assert.match(source, /const waitForActivityClient = async/);
   assert.match(source, /targetUrl:\s*ACTIVITY_GEMINI_URL/);
   assert.match(source, /openIfMissing !== false/);
   assert.match(source, /reason:\s*'activity-client-already-connected'/);
+  assert.match(ensureActivityBlock, /const existingClient = await waitForActivityClient/);
+  assert.match(ensureActivityBlock, /args\.preLaunchWaitMs \?\? ACTIVITY_PRE_LAUNCH_WAIT_MS/);
+  assert.match(ensureActivityBlock, /reason:\s*'activity-client-connected-before-launch'/);
   assert.match(source, /const launchMatchesTarget = \(launch = \{\}\) => \{[\s\S]*?return launch\.targetUrl === targetUrl;/);
   assert.doesNotMatch(source, /return !launch\.targetUrl \|\| launch\.targetUrl === targetUrl/);
+  assert.ok(
+    ensureActivityBlock.indexOf('activity-client-connected-before-launch') <
+      ensureActivityBlock.indexOf('launchChromeForGemini'),
+  );
 });
 
 test('browser_status expõe saúde da bridge MCP/Chrome', () => {

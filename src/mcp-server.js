@@ -254,6 +254,9 @@ const BROWSER_LAUNCH_COOLDOWN_MS = Number(
 const BROWSER_STATUS_WAKE_WAIT_MS = Number(
   process.env.GEMINI_MCP_BROWSER_STATUS_WAKE_WAIT_MS || 8_000,
 );
+const ACTIVITY_PRE_LAUNCH_WAIT_MS = Number(
+  process.env.GEMINI_MCP_ACTIVITY_PRE_LAUNCH_WAIT_MS || 4_500,
+);
 const PRIMARY_BRIDGE_HEALTH_TIMEOUT_MS = Number(
   process.env.GEMINI_MCP_PRIMARY_BRIDGE_HEALTH_TIMEOUT_MS || 1200,
 );
@@ -3804,6 +3807,20 @@ const ensureActivityClientForScan = async (args = {}) => {
     if (err?.code !== 'activity_client_missing' || args.openIfMissing === false) {
       throw err;
     }
+  }
+
+  const existingClient = await waitForActivityClient(
+    selector,
+    args.preLaunchWaitMs ?? ACTIVITY_PRE_LAUNCH_WAIT_MS,
+  );
+  if (existingClient) {
+    return {
+      client: existingClient,
+      browserWake: {
+        attempted: false,
+        reason: 'activity-client-connected-before-launch',
+      },
+    };
   }
 
   const launchResult = await launchChromeForGemini({
