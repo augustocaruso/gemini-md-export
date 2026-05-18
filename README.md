@@ -217,12 +217,15 @@ sobrescritos quando a gravação acontece via MCP local.
 
 ```markdown
 ---
+type: gemini_chat
 chat_id: b8e7c075effe9457
 title: "Exemplo"
 url: https://gemini.google.com/app/b8e7c075effe9457
-exported_at: 2026-04-22T18:32:11.245Z
+date_created: 2026-05-10T06:46:09Z
+date_last_message: 2026-05-10T07:12:31Z
+date_exported: 2026-05-17T18:55:08Z
+turn_count: 6
 model: "2.5 Pro"
-source: gemini-web
 tags: [gemini-export]
 ---
 
@@ -235,6 +238,29 @@ tags: [gemini-export]
 ## 🤖 Gemini
 
 ...resposta...
+```
+
+As datas ficam em UTC com `Z` e precisão de segundos. `turn_count` é o número
+de respostas do Gemini, não o total de mensagens. Em exports novos,
+`date_exported` sai direto do navegador; `date_created` e
+`date_last_message` podem ser preenchidos depois pelo backfill de metadados.
+
+Para normalizar YAML antigo e tentar recuperar datas pelo My Activity:
+
+```bash
+gemini-md-export metadata backfill "/caminho/do/vault" --use-my-activity --report "/caminho/do/report.json"
+```
+
+Esse fluxo usa a extensão MV3 também em
+`https://myactivity.google.com/product/gemini`. Depois de instalar uma versão
+que adiciona essa permissão, recarregue manualmente o card da extensão em
+`chrome://extensions`/`edge://extensions` se o navegador ainda estiver com o
+runtime antigo. O relatório não grava prompts, respostas, HTML ou Markdown cru:
+somente hashes, tamanhos, scores, contagens e status. Quando o arquivo offline
+do Takeout chegar, o mesmo normalizador aceita:
+
+```bash
+gemini-md-export metadata backfill "/caminho/do/vault" --takeout "/caminho/MyActivity.json" --report "/caminho/do/report.json"
 ```
 
 ## CLI, MCP e Gemini CLI

@@ -174,6 +174,8 @@ const BRIDGE_ASSET_HOST_BACKOFF_MAX_MS = Math.max(
   BRIDGE_ASSET_HOST_BACKOFF_BASE_MS,
   Math.min(10 * 60_000, Number(process.env.GEMINI_MCP_ASSET_HOST_BACKOFF_MAX_MS || 30_000)),
 );
+const GEMINI_BRIDGE_PAGE_ORIGIN = 'https://gemini.google.com';
+const ACTIVITY_BRIDGE_PAGE_ORIGIN = 'https://myactivity.google.com';
 const ALLOWED_BRIDGE_PAGE_ORIGIN = 'https://gemini.google.com';
 const CHROMIUM_EXTENSION_ID_RE = /^[a-p]{32}$/;
 const RECENT_CHATS_CACHE_MAX_AGE_MS = Number(
@@ -1850,18 +1852,44 @@ const sendJson = (res, statusCode, payload) => {
   res.end(JSON.stringify(payload));
 };
 
-const isAllowedBridgeOrigin = (origin) => {
+const isAllowedExtensionBridgeOrigin = (origin) => {
   if (!origin) return true;
   try {
     const parsed = new URL(origin);
-    if (parsed.origin === ALLOWED_BRIDGE_PAGE_ORIGIN) return true;
-    // Dia/Chromium podem emitir fetch de content script com Origin
-    // chrome-extension://<id>; sem isto o heartbeat morre antes da aba aparecer.
     return parsed.protocol === 'chrome-extension:' && CHROMIUM_EXTENSION_ID_RE.test(parsed.hostname);
   } catch {
     return false;
   }
 };
+
+const isAllowedGeminiBridgeOrigin = (origin) => {
+  if (!origin) return true;
+  try {
+    const parsed = new URL(origin);
+    if (parsed.origin === GEMINI_BRIDGE_PAGE_ORIGIN) return true;
+    // Dia/Chromium podem emitir fetch de content script com Origin
+    // chrome-extension://<id>; sem isto o heartbeat morre antes da aba aparecer.
+    return isAllowedExtensionBridgeOrigin(origin);
+  } catch {
+    return false;
+  }
+};
+
+const isAllowedActivityBridgeOrigin = (origin) => {
+  if (!origin) return true;
+  try {
+    const parsed = new URL(origin);
+    return (
+      parsed.origin === ACTIVITY_BRIDGE_PAGE_ORIGIN ||
+      isAllowedExtensionBridgeOrigin(origin)
+    );
+  } catch {
+    return false;
+  }
+};
+
+const isAllowedBridgeOrigin = (origin) =>
+  isAllowedGeminiBridgeOrigin(origin) || isAllowedActivityBridgeOrigin(origin);
 
 const bridgeCorsHeaders = (req) => {
   const origin = req.headers.origin;
@@ -1877,6 +1905,13 @@ const bridgeCorsHeaders = (req) => {
 const requireAllowedBridgeOrigin = (req) => {
   if (isAllowedBridgeOrigin(req.headers.origin)) return;
   const error = new Error(`Origin não autorizada para o bridge: ${req.headers.origin}`);
+  error.statusCode = 403;
+  throw error;
+};
+
+const requireGeminiBridgeOrigin = (req) => {
+  if (isAllowedGeminiBridgeOrigin(req.headers.origin)) return;
+  const error = new Error(`Origin não autorizada para endpoint de escrita: ${req.headers.origin}`);
   error.statusCode = 403;
   throw error;
 };
@@ -2420,6 +2455,7 @@ const upsertClient = (payload, meta = {}) => {
     payload.protocolVersion !== undefined ? payload.protocolVersion : next.protocolVersion ?? null;
   next.buildStamp = payload.buildStamp || payload.page?.buildStamp || next.buildStamp || null;
   next.tabClaim = payload.tabClaim || next.tabClaim || null;
+  next.kind = payload.kind || payload.clientKind || payload.page?.kind || next.kind || 'gemini';
   next.page = payload.page || next.page || null;
   next.commandPoll = payload.commandPoll || next.commandPoll || null;
   preserveReconnectConversationCache(next, payload);
@@ -3333,6 +3369,16 @@ const ensureTabClaimForJob = async (client, args = {}, label = TAB_CLAIM_LABELS.
   return result.claim;
 };
 
+const clientIsActivityClient = (client) => {
+  if (!client) return false;
+  if (client.kind === 'activity' || client.page?.kind === 'activity') return true;
+  try {
+    return new URL(client.page?.url || '').origin === ACTIVITY_BRIDGE_PAGE_ORIGIN;
+  } catch {
+    return false;
+  }
+};
+
 const buildBridgeHealth = (client, now = Date.now()) => {
   if (!client) {
     return {
@@ -3346,7 +3392,8 @@ const buildBridgeHealth = (client, now = Date.now()) => {
   const longPollConnected = !!client.pendingPoll;
   const pagePolling = client.commandPoll?.polling ?? null;
   const queuedCommands = client.queue?.length || 0;
-  const versionMatches = clientMatchesExpectedBrowserExtension(client);
+  const activityClient = clientIsActivityClient(client);
+  const versionMatches = activityClient || clientMatchesExpectedBrowserExtension(client);
 
   let status = 'healthy';
   let blockingIssue = null;
@@ -3377,6 +3424,7 @@ const buildBridgeHealth = (client, now = Date.now()) => {
     status,
     blockingIssue,
     action,
+    clientKind: activityClient ? 'activity' : 'gemini',
     heartbeatAgeMs,
     staleAfterMs: CLIENT_STALE_MS,
     eventStreamConnected,
@@ -3398,6 +3446,7 @@ const buildBridgeHealth = (client, now = Date.now()) => {
 
 const summarizeClient = (client) => ({
   clientId: client.clientId,
+  kind: client.kind || client.page?.kind || 'gemini',
   tabId: client.tabId ?? null,
   windowId: client.windowId ?? null,
   isActiveTab: client.isActiveTab ?? null,
@@ -3611,6 +3660,7 @@ const clientHasConcreteTabIdentity = (client) =>
 
 const clientIsSelectableGeminiTab = (client) =>
   isLiveClient(client) &&
+  !clientIsActivityClient(client) &&
   clientHasConcreteTabIdentity(client) &&
   clientMatchesExpectedBrowserExtension(client);
 
@@ -3618,8 +3668,58 @@ const getSelectableGeminiClients = () => {
   const liveClients = getLiveClients();
   const healthyTabs = liveClients.filter(clientIsSelectableGeminiTab);
   if (healthyTabs.length > 0) return healthyTabs;
-  const matchingClients = liveClients.filter(clientMatchesExpectedBrowserExtension);
-  return matchingClients.length > 0 ? matchingClients : liveClients;
+  const geminiClients = liveClients.filter((client) => !clientIsActivityClient(client));
+  const matchingClients = geminiClients.filter(clientMatchesExpectedBrowserExtension);
+  return matchingClients.length > 0 ? matchingClients : geminiClients;
+};
+
+const getActivityClients = () =>
+  getLiveClients()
+    .filter(clientIsActivityClient)
+    .sort(
+      (a, b) =>
+        Number(!!b.eventStream?.res && !b.eventStream.res.destroyed) -
+          Number(!!a.eventStream?.res && !a.eventStream.res.destroyed) ||
+        Number(!!b.pendingPoll) - Number(!!a.pendingPoll) ||
+        b.lastSeenAt - a.lastSeenAt,
+    );
+
+const activityClientMissingError = () => {
+  const error = new Error(
+    'Nenhuma aba do My Activity conectada à extensão. Abra https://myactivity.google.com/product/gemini e, se a extensão foi atualizada agora, recarregue manualmente o card da extensão no navegador.',
+  );
+  error.code = 'activity_client_missing';
+  return error;
+};
+
+const requireActivityClient = (selector = {}) => {
+  cleanupStaleClients();
+  const activityClients = getActivityClients();
+  if (selector.clientId) {
+    const selected = activityClients.find((client) => client.clientId === selector.clientId);
+    if (selected) return selected;
+    throw activityClientMissingError();
+  }
+  const ready = activityClients.find(
+    (client) =>
+      (!!client.eventStream?.res && !client.eventStream.res.destroyed) ||
+      !!client.pendingPoll ||
+      client.commandPoll?.polling === true,
+  );
+  if (ready) return ready;
+  if (activityClients[0]) return activityClients[0];
+  throw activityClientMissingError();
+};
+
+const scanActivityWithClient = async (args = {}) => {
+  const client = requireActivityClient({ clientId: args.activityClientId || args.clientId });
+  const result = await enqueueCommand(client.clientId, 'activity-scan-batch', args, {
+    timeoutMs: Math.max(60_000, Number(args.timeoutMs || 10 * 60_000)),
+  });
+  return {
+    ...result,
+    client: summarizeClient(client),
+  };
 };
 
 const tabSelectionDiagnostics = (liveClients, selectableClients) => {
@@ -10707,8 +10807,12 @@ const bridgeServer = createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
 
   if (req.method === 'OPTIONS') {
-    if (url.pathname === '/bridge/pick-directory' || url.pathname === '/bridge/save-files') {
-      if (!isAllowedBridgeOrigin(req.headers.origin)) {
+    if (
+      url.pathname === '/bridge/pick-directory' ||
+      url.pathname === '/bridge/save-files' ||
+      url.pathname === '/bridge/fetch-asset'
+    ) {
+      if (!isAllowedGeminiBridgeOrigin(req.headers.origin)) {
         sendBridgeJson(req, res, 403, { error: 'origin not allowed' });
         return;
       }
@@ -10744,6 +10848,25 @@ const bridgeServer = createServer(async (req, res) => {
       clients: getLiveClients().length,
       idleLifecycle: bridgeIdleLifecycleSnapshot(),
     });
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/agent/activity-scan') {
+    try {
+      const args = await readJsonBody(req);
+      const result = await scanActivityWithClient(args);
+      sendAgentJson(res, 200, result);
+    } catch (err) {
+      sendAgentJson(res, err.code === 'activity_client_missing' ? 503 : 500, {
+        ok: false,
+        error: err.message,
+        code: err.code || null,
+        nextAction:
+          err.code === 'activity_client_missing'
+            ? 'Abra o My Activity em https://myactivity.google.com/product/gemini. Se a extensão acabou de ganhar permissão nova, recarregue manualmente o card da extensão no navegador e recarregue a página.'
+            : null,
+      });
+    }
     return;
   }
 
@@ -11585,7 +11708,7 @@ const bridgeServer = createServer(async (req, res) => {
 
   if (req.method === 'POST' && url.pathname === '/bridge/pick-directory') {
     try {
-      requireAllowedBridgeOrigin(req);
+      requireGeminiBridgeOrigin(req);
       await readJsonBody(req);
       const picked = await chooseExportDirectory();
       sendBridgeJson(req, res, 200, {
@@ -11604,7 +11727,7 @@ const bridgeServer = createServer(async (req, res) => {
 
   if (req.method === 'POST' && url.pathname === '/bridge/save-files') {
     try {
-      requireAllowedBridgeOrigin(req);
+      requireGeminiBridgeOrigin(req);
       const payload = await readJsonBody(req);
       const files = writeExportFiles(payload);
       sendBridgeJson(req, res, 200, {
@@ -11623,7 +11746,7 @@ const bridgeServer = createServer(async (req, res) => {
 
   if (req.method === 'POST' && url.pathname === '/bridge/fetch-asset') {
     try {
-      requireAllowedBridgeOrigin(req);
+      requireGeminiBridgeOrigin(req);
       const payload = await readJsonBody(req);
       sendBridgeJson(req, res, 200, await fetchAssetForBridge(payload.source));
     } catch (err) {

@@ -197,6 +197,7 @@ const usage = () =>
     '  export-dir get|set    Consulta ou altera diretorio de export.',
     '  cleanup stale-processes Diagnostica/limpa processos antigos seguros.',
     '  repair-vault <path>   Executa reparo local de vault.',
+    '  metadata backfill <vaultDir>  Normaliza YAML e busca datas dos chats.',
     '  telemetry enable|status|preview|send|disable  Telemetria, status e opt-out.',
     '  help [comando]        Mostra ajuda global ou de um comando.',
     '',
@@ -212,6 +213,7 @@ const usage = () =>
     '  gemini-md-export job status job-123 --json',
     '  gemini-md-export job trace job-123 --tui --result-json',
     '  gemini-md-export export selected --selection-file ~/.gemini-md-export/selections/latest.json --expected-count 10 --tui',
+    '  gemini-md-export metadata backfill "/path/to/vault" --use-my-activity --report report.json',
     '  gemini-md-export telemetry status --tui --result-json',
     '',
     'Dentro do Gemini CLI:',
@@ -676,6 +678,26 @@ const repairVaultHelp = () =>
     ...commonOptionHelp(),
   ].join('\n');
 
+const metadataHelp = () =>
+  [
+    'gemini-md-export metadata',
+    '',
+    'Uso:',
+    '  gemini-md-export metadata backfill <vaultDir> --use-my-activity --report <report.json>',
+    '  gemini-md-export metadata backfill <vaultDir> --takeout <MyActivity.json> --report <report.json>',
+    '',
+    'Normaliza o YAML dos chats Gemini e tenta preencher date_created/date_last_message.',
+    'O relatorio guarda checkpoint e evidencias sanitizadas: hashes, tamanhos, scores e status.',
+    '',
+    'Opcoes:',
+    '  --use-my-activity       Usa a aba My Activity conectada pela extensao.',
+    '  --takeout <file.json>   Usa arquivo offline do Google Takeout/My Activity.',
+    '  --report <file.json>    Grava relatorio/checkpoint.',
+    '  --limit <n>             Limita quantidade de chats processados.',
+    '',
+    ...commonOptionHelp(),
+  ].join('\n');
+
 const telemetryHelp = () =>
   [
     'gemini-md-export telemetry',
@@ -720,6 +742,7 @@ const helpForParsed = (parsed) => {
   if (command === 'export-dir') return exportDirHelp();
   if (command === 'cleanup') return cleanupHelp();
   if (command === 'repair-vault') return repairVaultHelp();
+  if (command === 'metadata') return metadataHelp();
   if (command === 'telemetry') return telemetryHelp();
   return usage();
 };
@@ -743,6 +766,7 @@ const parseArgs = (argv) => {
       bridgeExitWhenIdle: true,
       startBridge: true,
       extraRepairArgs: [],
+      useMyActivity: false,
       chatIds: [],
       browser:
         process.env.GEMINI_MCP_BROWSER || process.env.GME_BROWSER
@@ -781,7 +805,12 @@ const parseArgs = (argv) => {
     else if (arg === '--payload-level') out.flags.payloadLevel = value();
     else if (arg === '--since') out.flags.since = value();
     else if (arg === '--limit') {
-      if (out.command === 'telemetry' || out.command === 'job' || out.command === 'chats') {
+      if (
+        out.command === 'telemetry' ||
+        out.command === 'job' ||
+        out.command === 'chats' ||
+        out.command === 'metadata'
+      ) {
         out.flags.limit = Number(value());
       }
       else out.flags.maxChats = Number(value());
@@ -864,6 +893,8 @@ const parseArgs = (argv) => {
     else if (arg === '--artifact-open-wait-ms') out.flags.artifactOpenWaitMs = Number(value());
     else if (arg === '--save-html') out.flags.saveHtml = true;
     else if (arg === '--no-save-html') out.flags.saveHtml = false;
+    else if (arg === '--use-my-activity') out.flags.useMyActivity = true;
+    else if (arg === '--takeout') out.flags.takeout = value();
     else if (arg === '--audit-only' || arg === '--include-notes') out.flags.extraRepairArgs.push(arg);
     else if (arg === '--report') {
       const report = value();
@@ -1237,6 +1268,12 @@ const repairScriptPath = () =>
   firstExistingPath([
     resolve(packageRoot(), 'scripts', 'vault-repair.mjs'),
     resolve(packageRoot(), 'gemini-cli-extension', 'scripts', 'vault-repair.mjs'),
+  ]);
+
+const metadataScriptPath = () =>
+  firstExistingPath([
+    resolve(packageRoot(), 'scripts', 'chat-metadata-backfill.mjs'),
+    resolve(packageRoot(), 'gemini-cli-extension', 'scripts', 'chat-metadata-backfill.mjs'),
   ]);
 
 const localBridgeAddress = (bridgeUrl) => {
@@ -3949,6 +3986,37 @@ const runRepairVault = async (parsed, streams = {}) => {
   return { exitCode, result: { ok: exitCode === 0, scriptPath, vaultDir } };
 };
 
+const runMetadata = async (parsed, streams = {}) => {
+  const subcommand = parsed.positionals[0];
+  if (subcommand !== 'backfill') {
+    throw usageError('Uso: gemini-md-export metadata backfill <vaultDir> [--use-my-activity|--takeout <json>] --report <report.json>.');
+  }
+  const vaultDir = parsed.flags.vaultDir || parsed.positionals[1];
+  if (!vaultDir) throw usageError('Informe vaultDir para metadata backfill.');
+  const scriptPath = metadataScriptPath();
+  if (!scriptPath) throw new Error('scripts/chat-metadata-backfill.mjs nao encontrado no pacote.');
+  const args = [scriptPath, vaultDir];
+  if (parsed.flags.useMyActivity) args.push('--use-my-activity');
+  if (parsed.flags.takeout) args.push('--takeout', parsed.flags.takeout);
+  if (parsed.flags.bridgeUrl) args.push('--bridge-url', parsed.flags.bridgeUrl);
+  if (parsed.flags.report) args.push('--report', parsed.flags.report);
+  if (Number.isFinite(parsed.flags.limit) && parsed.flags.limit > 0) {
+    args.push('--limit', String(parsed.flags.limit));
+  }
+  const stdout = streams.stdout || process.stdout;
+  const stderr = streams.stderr || process.stderr;
+  const child = spawn(process.execPath, args, {
+    cwd: packageRoot(),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  child.stdout.on('data', (chunk) => stdout.write(chunk));
+  child.stderr.on('data', (chunk) => stderr.write(chunk));
+  const exitCode = await new Promise((resolveExit) => {
+    child.on('exit', (code) => resolveExit(code ?? EXIT.JOB_FAILED));
+  });
+  return { exitCode, result: { ok: exitCode === 0, scriptPath, vaultDir } };
+};
+
 const runTelemetry = async (parsed, streams = {}) => {
   const subcommand = parsed.positionals[0] || 'status';
   if (!['enable', 'disable', 'status', 'preview', 'send'].includes(subcommand)) {
@@ -4049,6 +4117,7 @@ const runParsedCommand = (parsed, streams = {}) => {
   if (parsed.command === 'export-dir') return runExportDir(parsed, streams);
   if (parsed.command === 'cleanup') return runCleanup(parsed, streams);
   if (parsed.command === 'repair-vault') return runRepairVault(parsed, streams);
+  if (parsed.command === 'metadata') return runMetadata(parsed, streams);
   if (parsed.command === 'telemetry') return runTelemetry(parsed, streams);
   throw usageError(`Comando desconhecido: ${parsed.command}.`);
 };

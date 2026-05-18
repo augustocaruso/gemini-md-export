@@ -1,0 +1,21 @@
+description = "Normaliza YAML de chats Gemini e preenche datas via My Activity ou Takeout."
+prompt = """
+Atualize metadados das notas Markdown exportadas do Gemini.
+
+Argumentos do usuario: {{args}}
+
+Contrato:
+- Se o usuario nao informou uma pasta/vault, pergunte antes de prosseguir.
+- Use primeiro o runner local:
+  `${extensionPath}/bin/gemini-md-export.mjs metadata backfill <vaultDir> --use-my-activity --report <report.json>`.
+- Se o usuario informou arquivo Takeout/My Activity, use:
+  `${extensionPath}/bin/gemini-md-export.mjs metadata backfill <vaultDir> --takeout <MyActivity.json> --report <report.json>`.
+- O runner normaliza o YAML mesmo quando nao encontra datas confiaveis.
+- O relatorio/checkpoint nao deve conter prompt, resposta, HTML ou Markdown cru:
+  somente hashes, tamanhos, scores, contagens e status.
+- Se My Activity nao estiver conectado, explique que o usuario deve abrir
+  https://myactivity.google.com/product/gemini e recarregar manualmente o card
+  da extensao se a permissao nova ainda nao entrou no runtime do navegador.
+- Ao final, reporte contagens de arquivos atualizados, matched/unresolved e o
+  caminho do relatorio.
+"""

@@ -70,6 +70,7 @@ Use bundled Agent Skills for detailed workflows: `gemini-chat-inventory`,
 - `/exporter:capture-artifacts`: capture artifact HTML files plus manifest.
 - `/exporter:repair-vault`: audit and repair contaminated raw exports/wiki
   cases.
+- `/exporter:metadata-backfill`: normalize raw chat YAML and backfill dates.
 - `/exporter:telemetry`: telemetry status, preview, retry and opt-out.
 
 ## CLI/TUI Export UI
@@ -87,7 +88,11 @@ bridges unless `--no-exit-when-idle` is set.
   `gemini-md-export --help` for flags.
 - CLI subcommands include `browser status`, `diagnose page`, `tabs`,
   `chats count`, `chats list`, `export ...`, `job ...`, `export-dir`, `cleanup`,
-  `repair-vault`, and `telemetry enable/status/preview/send/disable`.
+  `repair-vault`, `metadata backfill`, and
+  `telemetry enable/status/preview/send/disable`.
+- Metadata backfill: `gemini-md-export metadata backfill <vaultDir> --use-my-activity --report <report.json>`;
+  `--takeout <MyActivity.json>` when available. New My Activity permission may
+  require extension-card reload. Reports: hashes, sizes, scores, counts, status.
 - Automation: `--json` for final JSON only, `--jsonl` for events. Avoid
   custom-command shell injection for long sync jobs.
 
@@ -97,20 +102,17 @@ bridges unless `--no-exit-when-idle` is set.
   chats", use the CLI. MCP `gemini_export` returns `code: "use_cli"` with the
   exact command instead of starting a hidden job.
 - Do not call `gemini_ready`/`gemini_tabs` repeatedly before long exports. For
-  multiple tabs, use `gemini-md-export tabs list --tui --result-json`, then
-  `tabs claim --index <n> --tui --result-json`, and rerun with the
-  claim/session.
+  multiple tabs, use CLI `tabs list --tui --result-json`, `tabs claim --index <n> --tui --result-json`,
+  then rerun with the claim/session.
 - MCP browser tools intentionally refuse normal count/export paths unless the
   call has explicit diagnostic/control intent. Treat that refusal as final.
 - If a CLI command reports multiple Gemini tabs, keep using CLI tab commands.
   Do not switch to `gemini_tabs`; the user explicitly wants to avoid MCP JSON
   cards.
-- Do not run `kill`, reload, cleanup, or a new export after interruption before
-  checking `gemini-md-export job list --active --tui --result-json` and using
-  `job status ... --tui --result-json` or `job cancel --wait --tui --result-json`.
+- After interruption, check `gemini-md-export job list --active --tui --result-json`;
+  then status/cancel before kill, reload, cleanup, or new export.
 - Never report success when `RESULT_JSON.status` is `completed_with_errors`,
-  `failed`, or `cancelled`, or when full-history was not verified. Mention
-  `failures`, `reportFile`, and resume.
+  `failed`, `cancelled`, or full-history was not verified. Mention failures/report.
 - Never answer "N chats ao todo" unless `totalKnown=true` or
   `countIsTotal=true`; otherwise answer "pelo menos N" and say the sidebar end
   was not confirmed.
@@ -118,14 +120,10 @@ bridges unless `--no-exit-when-idle` is set.
   Report the concise CLI result. Diagnostics only happen if the user asks next.
 - Never run `cleanup stale-processes` before normal count/export. Cleanup is
   diagnostic-only; do not recommend `kill <pid>` after CLI timeouts.
-- Do not ask for manual extension reload before trying self-heal with
-  `gemini_ready { "action": "status", "diagnostic": true, "selfHeal": true, "allowReload": true }`.
+- Before manual extension reload, try self-heal with diagnostic `gemini_ready`.
 - If multiple Gemini tabs are connected, prefer CLI tab commands for count/export.
   For MCP diagnostics, use `gemini_tabs` with `intent: "tab_management"`.
-- Dia is a first-class browser target. Use `--browser dia` when auto-detection
-  picks another profile. `doctor --browser dia --tui --result-json` reports our
-  extension, Playwright Extension when installed, native host, bridge, and
-  connected tabs.
+- Dia is a first-class browser target; use `--browser dia` when needed.
 - Keep Markdown/assets inside the vault when `vaultDir` is known.
 - Integrity beats speed: never save if DOM belongs to another chat ID.
 - Report media warnings honestly.

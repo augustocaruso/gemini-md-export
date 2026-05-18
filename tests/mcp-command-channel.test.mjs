@@ -58,6 +58,27 @@ test('MCP protocolo v2 usa SSE para comandos e snapshot separado', () => {
   assert.match(source, /CHROMIUM_EXTENSION_ID_RE\.test\(parsed\.hostname\)/);
 });
 
+test('MCP permite cliente My Activity sem liberar endpoints de escrita', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+
+  assert.match(source, /GEMINI_BRIDGE_PAGE_ORIGIN = 'https:\/\/gemini\.google\.com'/);
+  assert.match(source, /ACTIVITY_BRIDGE_PAGE_ORIGIN = 'https:\/\/myactivity\.google\.com'/);
+  assert.match(source, /isAllowedActivityBridgeOrigin/);
+  assert.match(source, /requireGeminiBridgeOrigin/);
+  assert.match(source, /url\.pathname === '\/agent\/activity-scan'/);
+  assert.match(source, /'activity-scan-batch'/);
+  assert.match(source, /activity_client_missing/);
+
+  const pickDirectoryBlock = source.match(
+    /req\.method === 'POST' && url\.pathname === '\/bridge\/pick-directory'[\s\S]*?return;\n  \}/,
+  )?.[0] || '';
+  const saveFilesBlock = source.match(
+    /req\.method === 'POST' && url\.pathname === '\/bridge\/save-files'[\s\S]*?return;\n  \}/,
+  )?.[0] || '';
+  assert.match(pickDirectoryBlock, /requireGeminiBridgeOrigin\(req\)/);
+  assert.match(saveFilesBlock, /requireGeminiBridgeOrigin\(req\)/);
+});
+
 test('browser_status expõe saúde da bridge MCP/Chrome', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
 

@@ -27,6 +27,11 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   const bridgeVersionPath = resolve(extensionDir, 'bridge-version.json');
   const browserManifestPath = resolve(extensionDir, 'browser-extension', 'manifest.json');
   const artifactCapturePath = resolve(extensionDir, 'browser-extension', 'artifact-capture.js');
+  const activityContentScriptPath = resolve(
+    extensionDir,
+    'browser-extension',
+    'activity-content-script.js',
+  );
   const offscreenHtmlPath = resolve(extensionDir, 'browser-extension', 'offscreen.html');
   const offscreenScriptPath = resolve(extensionDir, 'browser-extension', 'offscreen.js');
   const nativeHostBinPath = resolve(extensionDir, 'bin', 'gemini-md-export-native-host.mjs');
@@ -46,6 +51,12 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   ];
   const syncCommandPath = resolve(extensionDir, 'commands', 'sync.toml');
   const repairCommandPath = resolve(extensionDir, 'commands', 'exporter', 'repair-vault.toml');
+  const metadataBackfillCommandPath = resolve(
+    extensionDir,
+    'commands',
+    'exporter',
+    'metadata-backfill.toml',
+  );
   const diagnosePageCommandPath = resolve(
     extensionDir,
     'commands',
@@ -62,6 +73,11 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   const telemetryDocPath = resolve(extensionDir, 'docs', 'reference', 'telemetry.md');
   const repairAuditScriptPath = resolve(extensionDir, 'scripts', 'vault-repair-audit.mjs');
   const repairScriptPath = resolve(extensionDir, 'scripts', 'vault-repair.mjs');
+  const metadataBackfillScriptPath = resolve(
+    extensionDir,
+    'scripts',
+    'chat-metadata-backfill.mjs',
+  );
   const nativeHostManifestScriptPath = resolve(extensionDir, 'scripts', 'native-host-manifest.mjs');
   const hookScriptPath = resolve(
     extensionDir,
@@ -85,6 +101,7 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.equal(existsSync(bridgeVersionPath), true);
   assert.equal(existsSync(browserManifestPath), true);
   assert.equal(existsSync(artifactCapturePath), true);
+  assert.equal(existsSync(activityContentScriptPath), true);
   assert.equal(existsSync(offscreenHtmlPath), true);
   assert.equal(existsSync(offscreenScriptPath), true);
   assert.equal(existsSync(nativeHostBinPath), true);
@@ -99,12 +116,14 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.equal(existsSync(repairAgentPath), true);
   assert.equal(existsSync(syncCommandPath), true);
   assert.equal(existsSync(repairCommandPath), true);
+  assert.equal(existsSync(metadataBackfillCommandPath), true);
   assert.equal(existsSync(diagnosePageCommandPath), true);
   assert.equal(existsSync(captureArtifactsCommandPath), true);
   assert.equal(existsSync(telemetryCommandPath), true);
   assert.equal(existsSync(telemetryDocPath), true);
   assert.equal(existsSync(repairAuditScriptPath), true);
   assert.equal(existsSync(repairScriptPath), true);
+  assert.equal(existsSync(metadataBackfillScriptPath), true);
   assert.equal(existsSync(nativeHostManifestScriptPath), true);
   assert.equal(existsSync(hookScriptPath), true);
 
@@ -126,6 +145,19 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.ok(
     browserManifest.host_permissions.includes('https://*.usercontent.goog/*'),
     'browser extension precisa conseguir diagnosticar iframes scf.usercontent.goog',
+  );
+  assert.ok(
+    browserManifest.host_permissions.includes('https://myactivity.google.com/*'),
+    'browser extension precisa acessar My Activity para backfill de datas',
+  );
+  assert.ok(
+    browserManifest.content_scripts.some(
+      (entry) =>
+        entry.js?.includes('activity-content-script.js') &&
+        entry.run_at === 'document_idle' &&
+        entry.matches?.includes('https://myactivity.google.com/product/gemini*'),
+    ),
+    'browser extension precisa registrar content script dedicado no My Activity',
   );
   assert.ok(
     browserManifest.content_scripts.some(

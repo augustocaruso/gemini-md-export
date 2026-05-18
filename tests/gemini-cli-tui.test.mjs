@@ -315,6 +315,63 @@ test('CLI --version imprime versao sem tocar na bridge', async () => {
   assert.equal(stderr.text(), '');
 });
 
+test('CLI metadata backfill expõe ajuda e delega ao runner local', async () => {
+  const helpStdout = captureStream();
+  const help = await main(['help', 'metadata'], {
+    stdout: helpStdout,
+    stderr: captureStream(),
+  });
+  assert.equal(help.exitCode, 0);
+  assert.match(helpStdout.text(), /metadata backfill/);
+  assert.match(helpStdout.text(), /--use-my-activity/);
+  assert.match(helpStdout.text(), /--takeout/);
+
+  const vault = mkdtempSync(resolve(tmpdir(), 'gme-cli-metadata-'));
+  const reportPath = resolve(vault, 'report.json');
+  const chatPath = resolve(vault, 'b8e7c075effe9457.md');
+  writeFileSync(
+    chatPath,
+    [
+      '---',
+      'chat_id: b8e7c075effe9457',
+      'url: https://gemini.google.com/app/b8e7c075effe9457',
+      'exported_at: 2026-05-17T18:55:08.245Z',
+      'source: gemini-web',
+      'tags: [gemini-export]',
+      '---',
+      '',
+      '## 🧑 Usuário',
+      '',
+      'Pergunta',
+      '',
+      '---',
+      '',
+      '## 🤖 Gemini',
+      '',
+      'Resposta',
+      '',
+    ].join('\n'),
+    'utf-8',
+  );
+
+  try {
+    const stdout = captureStream();
+    const run = await main(['metadata', 'backfill', vault, '--report', reportPath], {
+      stdout,
+      stderr: captureStream(),
+    });
+    assert.equal(run.exitCode, 0);
+    assert.match(stdout.text(), /Backfill metadata/);
+    const updated = readFileSync(chatPath, 'utf-8');
+    assert.match(updated, /^---\ntype: gemini_chat\n/);
+    assert.match(updated, /\ndate_exported: 2026-05-17T18:55:08Z\n/);
+    assert.match(updated, /\nturn_count: 1\n/);
+    assert.equal(existsSync(reportPath), true);
+  } finally {
+    rmSync(vault, { recursive: true, force: true });
+  }
+});
+
 test('CLI expõe ajuda contextual para comandos e subcomandos', async () => {
   const syncStdout = captureStream();
   const jobStdout = captureStream();

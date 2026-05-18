@@ -4,7 +4,7 @@
 
 **Goal:** Normalize raw Gemini chat Markdown files to a canonical YAML schema and backfill `date_created` / `date_last_message` from Google Gemini Activity.
 
-**Architecture:** Keep metadata normalization separate from contaminated-content repair. New exports should emit the canonical YAML directly, while a dedicated backfill runner scans existing raw chat files, first matches them against the authenticated My Activity web UI, later accepts Takeout records when the export email arrives, reports the proposed changes, and only rewrites files with `--apply` after creating backups.
+**Architecture:** Keep metadata normalization separate from contaminated-content repair. New exports emit the canonical YAML directly. A dedicated backfill runner scans existing raw chat files, normalizes their YAML, first matches them against the authenticated My Activity web UI through the MV3 extension/bridge, and later accepts Takeout records when the export email arrives.
 
 **Tech Stack:** Node.js ESM, built-in `node:test`, existing MV3 Chrome extension build, local MCP bridge, Markdown frontmatter parsing with the repo's lightweight parser style.
 
@@ -40,6 +40,47 @@ Rules:
 - `date_last_message` is the last matched Gemini Activity item that confirms a Gemini response for the chat. If the available Activity timestamp is the prompt event time, use that timestamp and record the limitation in the JSON report, not in the YAML.
 - If a date cannot be matched confidently, omit that date field and report the file as `unresolved` or `ambiguous`.
 - Scope is raw chats only. Wiki notes, consolidated notes, or manually edited derived notes must be skipped.
+
+## My Activity Bridge Client
+
+Closed implementation direction:
+
+- The runtime scraper is the MV3 extension, not Playwright.
+- `src/activity-content-script.js` runs on `https://myactivity.google.com/product/gemini*`.
+- The My Activity page connects to the local bridge as `kind: "activity"` and exposes `activity-scan-batch`.
+- The bridge accepts My Activity origin only for heartbeat/events/command result style client communication.
+- Sensitive endpoints such as `pick-directory`, `save-files`, and `fetch-asset` remain restricted to Gemini/chrome-extension origins.
+- Scan results are sanitized: dates, score, hashes, sample lengths, card indexes, and checkpoints only.
+
+## Scanner And Checkpoint
+
+The default live path is resumable and exhaustive:
+
+```bash
+gemini-md-export metadata backfill <vaultDir> --use-my-activity --report <report.json>
+```
+
+The runner builds in-memory candidates with `{ chatId, firstPrompt, lastPrompt, assistantSamples }`, sends them to the Activity client, and records checkpoint fields such as `lastSeenActivityToken`, `loadedCardCount`, and `resolvedChatIds`. Files without confident matches are still normalized and reported as `unresolved`; date fields are omitted.
+
+`date_last_message` means the timestamp of the latest Gemini Activity item that confirms the last known Gemini response. It is not a promise that the timestamp is the exact end of model generation.
+
+## Takeout Later
+
+When the Google export arrives, the same runner accepts:
+
+```bash
+gemini-md-export metadata backfill <vaultDir> --takeout <MyActivity.json> --report <report.json>
+```
+
+Takeout is normalized into the same match shape as the live My Activity scraper and does not require browser/bridge readiness.
+
+## Manifest Permission And Reload
+
+`https://myactivity.google.com/*` is a new MV3 host permission. A browser runtime that loaded an older manifest will not inject the Activity content script. Readiness/bridge errors should return a concrete action: open `https://myactivity.google.com/product/gemini` and, if the new permission has not reached the loaded runtime, reload the extension card manually in `chrome://extensions` / `edge://extensions`.
+
+## Privacy Gate
+
+Prompts and responses may exist only in memory during scoring. Reports, telemetry, flight recorder events, and operational logs must contain only hashes, sizes, scores, counts, timestamps, file paths, and status. Tests must fail if sensitive prompt/response text appears in report output.
 
 ## File Structure
 

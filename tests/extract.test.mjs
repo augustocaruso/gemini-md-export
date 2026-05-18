@@ -80,13 +80,21 @@ test('buildFrontmatter: campos obrigatórios presentes', () => {
   const fm = buildFrontmatter({
     chatId: 'abc',
     url: 'https://gemini.google.com/app/abc',
-    exportedAt: '2026-04-22T18:32:11.245Z',
+    dateCreated: '2026-04-20T12:00:00Z',
+    dateLastMessage: '2026-04-22T18:31:44Z',
+    dateExported: '2026-04-22T18:32:11Z',
+    turnCount: 6,
   });
   assert.match(fm, /^---\n/);
+  assert.match(fm, /\ntype: gemini_chat\n/);
   assert.match(fm, /\nchat_id: abc\n/);
   assert.match(fm, /\nurl: https:\/\/gemini\.google\.com\/app\/abc\n/);
-  assert.match(fm, /\nexported_at: 2026-04-22T18:32:11\.245Z\n/);
-  assert.match(fm, /\nsource: gemini-web\n/);
+  assert.match(fm, /\ndate_created: 2026-04-20T12:00:00Z\n/);
+  assert.match(fm, /\ndate_last_message: 2026-04-22T18:31:44Z\n/);
+  assert.match(fm, /\ndate_exported: 2026-04-22T18:32:11Z\n/);
+  assert.match(fm, /\nturn_count: 6\n/);
+  assert.doesNotMatch(fm, /\nexported_at:/);
+  assert.doesNotMatch(fm, /\nsource:/);
   assert.match(fm, /\ntags: \[gemini-export\]\n/);
   assert.match(fm, /\n---\n\n$/);
 });
@@ -96,14 +104,14 @@ test('buildFrontmatter: title opcional', () => {
     chatId: 'x',
     title: 'Meu título',
     url: 'u',
-    exportedAt: 't',
+    dateExported: '2026-04-22T18:32:11Z',
   });
   assert.match(withTitle, /\ntitle: "Meu título"\n/);
 
   const withoutTitle = buildFrontmatter({
     chatId: 'x',
     url: 'u',
-    exportedAt: 't',
+    dateExported: '2026-04-22T18:32:11Z',
   });
   assert.doesNotMatch(withoutTitle, /title:/);
 });
@@ -113,7 +121,7 @@ test('buildFrontmatter: escape de aspas no title', () => {
     chatId: 'x',
     title: 'Aspas "internas" aqui',
     url: 'u',
-    exportedAt: 't',
+    dateExported: '2026-04-22T18:32:11Z',
   });
   assert.match(fm, /\ntitle: "Aspas \\"internas\\" aqui"\n/);
 });
@@ -122,7 +130,8 @@ test('buildFrontmatter: model opcional', () => {
   const withModel = buildFrontmatter({
     chatId: 'x',
     url: 'u',
-    exportedAt: 't',
+    dateExported: '2026-04-22T18:32:11Z',
+    turnCount: 2,
     model: '2.5 Pro',
   });
   assert.match(withModel, /\nmodel: "2\.5 Pro"\n/);
@@ -130,9 +139,26 @@ test('buildFrontmatter: model opcional', () => {
   const withoutModel = buildFrontmatter({
     chatId: 'x',
     url: 'u',
-    exportedAt: 't',
+    dateExported: '2026-04-22T18:32:11Z',
   });
   assert.doesNotMatch(withoutModel, /model:/);
+});
+
+test('buildDocument: turn_count conta respostas da IA', () => {
+  const doc = buildDocument({
+    meta: {
+      chatId: 'abc',
+      url: 'https://gemini.google.com/app/abc',
+      dateExported: '2026-04-22T18:32:11Z',
+    },
+    turns: [
+      { role: 'user', text: 'pergunta 1' },
+      { role: 'assistant', text: 'resposta 1' },
+      { role: 'user', text: 'pergunta 2' },
+      { role: 'assistant', text: 'resposta 2' },
+    ],
+  });
+  assert.match(doc, /\nturn_count: 2\n/);
 });
 
 // --- normalizeWhitespace ------------------------------------------------
