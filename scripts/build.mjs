@@ -38,6 +38,7 @@ const notebookReturnPlanSrc = readFileSync(
 );
 const batchSessionSrc = readFileSync(resolve(ROOT, 'src/batch-session.mjs'), 'utf-8');
 const domRunnerSrc = readFileSync(resolve(ROOT, 'src/dom-runner.mjs'), 'utf-8');
+const progressDockUiSrc = readFileSync(resolve(ROOT, 'src/progress-dock-ui.mjs'), 'utf-8');
 const shellSrc = readFileSync(resolve(ROOT, 'src/userscript-shell.js'), 'utf-8');
 const artifactCaptureSrc = readFileSync(resolve(ROOT, 'src/artifact-capture.js'), 'utf-8');
 const activityContentScriptSrc = readFileSync(
@@ -72,11 +73,16 @@ const inlineableDomRunner = domRunnerSrc
   .replace(/^export\s+const\s+/gm, 'const ')
   .replace(/^export\s+function\s+/gm, 'function ')
   .replace(/^export\s+\{[^}]*\};?\s*$/gm, '');
+const inlineableProgressDockUi = progressDockUiSrc
+  .replace(/^export\s+const\s+/gm, 'const ')
+  .replace(/^export\s+function\s+/gm, 'function ')
+  .replace(/^export\s+\{[^}]*\};?\s*$/gm, '');
 
 const extractMarker = '/* __INLINE_EXTRACT_MODULE__ */';
 const notebookReturnPlanMarker = '/* __INLINE_NOTEBOOK_RETURN_PLAN__ */';
 const batchSessionMarker = '/* __INLINE_BATCH_SESSION_MODULE__ */';
 const domRunnerMarker = '/* __INLINE_DOM_RUNNER_MODULE__ */';
+const progressDockUiMarker = '/* __INLINE_PROGRESS_DOCK_UI__ */';
 if (!shellSrc.includes(extractMarker)) {
   console.error(`[build] marker "${extractMarker}" não encontrado em userscript-shell.js`);
   process.exit(1);
@@ -93,6 +99,16 @@ if (!shellSrc.includes(batchSessionMarker)) {
 }
 if (!shellSrc.includes(domRunnerMarker)) {
   console.error(`[build] marker "${domRunnerMarker}" não encontrado em userscript-shell.js`);
+  process.exit(1);
+}
+if (!shellSrc.includes(progressDockUiMarker)) {
+  console.error(`[build] marker "${progressDockUiMarker}" não encontrado em userscript-shell.js`);
+  process.exit(1);
+}
+if (!activityContentScriptSrc.includes(progressDockUiMarker)) {
+  console.error(
+    `[build] marker "${progressDockUiMarker}" não encontrado em activity-content-script.js`,
+  );
   process.exit(1);
 }
 
@@ -112,6 +128,10 @@ const domRunnerBanner =
   '  // ============================================================\n' +
   '  // Inlined from src/dom-runner.mjs (auto-generated — do not edit)\n' +
   '  // ============================================================\n';
+const progressDockUiBanner =
+  '  // ============================================================\n' +
+  '  // Inlined from src/progress-dock-ui.mjs (auto-generated — do not edit)\n' +
+  '  // ============================================================\n';
 const inlinedExtract =
   extractBanner + inlineable.split('\n').map((l) => (l ? '  ' + l : l)).join('\n');
 const inlinedNotebookReturnPlan =
@@ -123,6 +143,9 @@ const inlinedBatchSession =
 const inlinedDomRunner =
   domRunnerBanner +
   inlineableDomRunner.split('\n').map((l) => (l ? '  ' + l : l)).join('\n');
+const inlinedProgressDockUi =
+  progressDockUiBanner +
+  inlineableProgressDockUi.split('\n').map((l) => (l ? '  ' + l : l)).join('\n');
 
 // Carimbo de build curto (YYYYMMDD-HHMM) — ajuda a confirmar visualmente
 // se a extensão/userscript carregado é a versão recém-compilada (útil quando
@@ -136,6 +159,7 @@ const output = shellSrc
   .replace(notebookReturnPlanMarker, inlinedNotebookReturnPlan)
   .replace(batchSessionMarker, inlinedBatchSession)
   .replace(domRunnerMarker, inlinedDomRunner)
+  .replace(progressDockUiMarker, inlinedProgressDockUi)
   .replace(/__VERSION__/g, pkg.version)
   .replace(/__EXTENSION_PROTOCOL_VERSION__/g, String(bridgeVersion.protocolVersion))
   .replace(/__BUILD_STAMP__/g, buildStamp);
@@ -205,6 +229,7 @@ writeFileSync(resolve(extensionDir, 'artifact-capture.js'), artifactCaptureSrc, 
 writeFileSync(
   resolve(extensionDir, 'activity-content-script.js'),
   activityContentScriptSrc
+    .replace(progressDockUiMarker, inlinedProgressDockUi)
     .replace(/__VERSION__/g, pkg.version)
     .replace(/__EXTENSION_PROTOCOL_VERSION__/g, String(bridgeVersion.protocolVersion))
     .replace(/__BUILD_STAMP__/g, buildStamp),

@@ -36,6 +36,31 @@ test('service worker recarrega abas Gemini antes de reinjetar apos update/reload
   assert.ok(helperSource.indexOf('reloadGeminiTabs(reason)') < helperSource.indexOf('selfHealGeminiTabs'));
 });
 
+test('service worker recarrega abas My Activity quando o runtime da extensao muda', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'extension-background.js'), 'utf-8');
+
+  assert.match(source, /ACTIVITY_TAB_URL_PATTERN = 'https:\/\/myactivity\.google\.com\/product\/gemini\*'/);
+  assert.match(source, /MANAGED_CONTENT_TAB_URL_PATTERNS = \[GEMINI_TAB_URL_PATTERN, ACTIVITY_TAB_URL_PATTERN\]/);
+  assert.match(source, /chrome\.tabs\.query\(\{ url: MANAGED_CONTENT_TAB_URL_PATTERNS \}/);
+});
+
+test('service worker detecta build novo no start e recarrega content scripts gerenciados', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'extension-background.js'), 'utf-8');
+
+  assert.match(source, /LAST_RUNTIME_BUILD_KEY = 'gemini-md-export\.lastRuntimeBuild\.v1'/);
+  assert.match(source, /refreshManagedTabsIfRuntimeChanged/);
+  assert.match(
+    source,
+    /refreshManagedTabsIfRuntimeChanged[\s\S]*reloadThenSelfHealGeminiTabs\(\{\s*reason: 'extension-runtime-changed'/,
+  );
+  assert.match(source, /const consumedPendingReload = await consumePendingGeminiTabsReload\(\);/);
+  assert.match(source, /if \(!consumedPendingReload\) \{[\s\S]*await refreshManagedTabsIfRuntimeChanged\(\);/);
+  assert.match(
+    source,
+    /setTimeout\(\(\) => \{[\s\S]*handleServiceWorkerStart\(\);/,
+  );
+});
+
 test('content script responde ping do service worker e evita dupla injecao do mesmo build', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'userscript-shell.js'), 'utf-8');
 

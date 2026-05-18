@@ -1,6 +1,8 @@
 (function () {
   'use strict';
 
+  /* __INLINE_PROGRESS_DOCK_UI__ */
+
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const BRIDGE_BASE_URL =
     pageWindow.__GEMINI_MCP_BRIDGE_URL || 'http://127.0.0.1:47283';
@@ -311,7 +313,44 @@
       return /item details|detalhes|detalhe|details/i.test(label);
     }) || null;
 
+  const detailDialogs = () => Array.from(document.querySelectorAll('[role="dialog"]'));
+
+  const closeButtonForDialog = (dialog) =>
+    dialog
+      ? Array.from(dialog.querySelectorAll('button,[role="button"]')).find((el) =>
+          /close|fechar|dismiss/i.test(`${el.getAttribute('aria-label') || ''} ${el.textContent || ''}`),
+        )
+      : null;
+
+  const waitForDialogDismissal = async (dialog, beforeCount, timeoutMs = 900) => {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      const currentCount = detailDialogs().length;
+      if (!dialog?.isConnected || currentCount < beforeCount) return true;
+      await sleep(30);
+    }
+    return !dialog?.isConnected || detailDialogs().length < beforeCount;
+  };
+
+  const closeOpenDetails = async () => {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const dialogs = detailDialogs();
+      const dialog = dialogs.at(-1);
+      if (!dialog) return;
+      const closeButton = closeButtonForDialog(dialog);
+      try {
+        if (closeButton) closeButton.click();
+        else document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      } catch {
+        // Sem efeito em alguns DOMs de teste.
+      }
+      const dismissed = await waitForDialogDismissal(dialog, dialogs.length);
+      if (!dismissed) return;
+    }
+  };
+
   const openDetailsForCard = async (card) => {
+    await closeOpenDetails();
     const before = document.querySelectorAll('[role="dialog"],[data-gm-activity-details]').length;
     const button = detailsButtonFor(card);
     if (button) {
@@ -327,21 +366,6 @@
     return card.querySelector('[data-gm-activity-details]') || null;
   };
 
-  const closeOpenDetails = () => {
-    const dialog = Array.from(document.querySelectorAll('[role="dialog"]')).at(-1);
-    const closeButton = dialog
-      ? Array.from(dialog.querySelectorAll('button,[role="button"]')).find((el) =>
-          /close|fechar|dismiss/i.test(`${el.getAttribute('aria-label') || ''} ${el.textContent || ''}`),
-        )
-      : null;
-    try {
-      if (closeButton) closeButton.click();
-      else document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-    } catch {
-      // Sem efeito em alguns DOMs de teste.
-    }
-  };
-
   const isDarkTheme = () => {
     try {
       return pageWindow.matchMedia?.('(prefers-color-scheme: dark)')?.matches === true;
@@ -351,127 +375,26 @@
   };
 
   const ensureActivityProgressDock = () => {
-    let dock = document.getElementById(PROGRESS_DOCK_ID);
-    if (dock) return dock;
-
-    dock = document.createElement('div');
-    dock.id = PROGRESS_DOCK_ID;
-    dock.hidden = true;
-    Object.assign(dock.style, {
-      position: 'fixed',
-      left: '50%',
-      bottom: '18px',
-      transform: 'translateX(-50%)',
-      zIndex: '10002',
-      display: 'none',
-      pointerEvents: 'none',
-      width: 'min(360px, calc(100vw - 24px))',
+    return ensureSharedProgressDock({
+      dockId: PROGRESS_DOCK_ID,
+      initialTitle: 'Buscando datas',
     });
-    dock.innerHTML = `
-      <style>
-        #${PROGRESS_DOCK_ID} .gm-dock-card {
-          font-family: var(--gm-font);
-          display: flex;
-          flex-direction: column;
-          gap: 8px;
-          padding: 12px 14px;
-          border-radius: 18px;
-          background: var(--gm-dock-bg);
-          color: var(--gm-dock-text);
-          border: 1px solid var(--gm-dock-border);
-          box-shadow: 0 10px 30px rgba(0,0,0,0.16);
-          backdrop-filter: blur(10px);
-        }
-        #${PROGRESS_DOCK_ID} .gm-dock-track {
-          height: 6px;
-          background: var(--gm-dock-track);
-          border-radius: 999px;
-          overflow: hidden;
-          position: relative;
-        }
-        #${PROGRESS_DOCK_ID} .gm-dock-bar {
-          height: 100%;
-          width: 0%;
-          background: var(--gm-accent);
-          border-radius: 999px;
-          position: relative;
-          overflow: hidden;
-          transition: width 420ms cubic-bezier(0.22, 0.61, 0.36, 1);
-          will-change: width;
-        }
-        #${PROGRESS_DOCK_ID} .gm-dock-bar::after {
-          content: "";
-          position: absolute;
-          inset: 0;
-          background: linear-gradient(
-            90deg,
-            rgba(255,255,255,0) 0%,
-            rgba(255,255,255,0.55) 50%,
-            rgba(255,255,255,0) 100%
-          );
-          transform: translateX(-100%);
-          animation: gm-dock-shimmer 1500ms linear infinite;
-        }
-        #${PROGRESS_DOCK_ID}.gm-dock-done .gm-dock-bar::after {
-          animation: none;
-          opacity: 0;
-        }
-        @keyframes gm-dock-shimmer {
-          0%   { transform: translateX(-100%); }
-          100% { transform: translateX(100%); }
-        }
-      </style>
-      <div class="gm-dock-card">
-        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
-          <strong id="${PROGRESS_DOCK_ID}-title" style="font-size:12px;font-weight:600;letter-spacing:0.01em;">Buscando datas</strong>
-          <span id="${PROGRESS_DOCK_ID}-count" style="font-size:11px;color:var(--gm-dock-muted);white-space:nowrap;"></span>
-        </div>
-        <div id="${PROGRESS_DOCK_ID}-label" style="font-size:12px;color:var(--gm-dock-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
-        <div class="gm-dock-track">
-          <div id="${PROGRESS_DOCK_ID}-bar" class="gm-dock-bar"></div>
-        </div>
-      </div>
-    `;
-    document.body.appendChild(dock);
-    return dock;
   };
 
   const updateActivityProgressDock = () => {
     const dock = ensureActivityProgressDock();
     const progress = state.activityProgress;
     if (!progress) {
-      dock.hidden = true;
-      dock.style.display = 'none';
+      setSharedProgressDockVisible(dock, false);
       dock.classList.remove('gm-dock-done');
       return;
     }
 
-    const dark = isDarkTheme();
-    const vars = dark
-      ? {
-          '--gm-dock-bg': 'rgba(31,35,41,0.94)',
-          '--gm-dock-text': '#e8eaed',
-          '--gm-dock-muted': '#aab4be',
-          '--gm-dock-border': 'rgba(255,255,255,0.08)',
-          '--gm-dock-track': 'rgba(255,255,255,0.08)',
-          '--gm-font': '"Google Sans Text","Google Sans",Roboto,"Segoe UI",system-ui,sans-serif',
-          '--gm-accent': '#8ab4f8',
-        }
-      : {
-          '--gm-dock-bg': 'rgba(255,255,255,0.94)',
-          '--gm-dock-text': '#202124',
-          '--gm-dock-muted': '#5f6368',
-          '--gm-dock-border': 'rgba(60,64,67,0.12)',
-          '--gm-dock-track': 'rgba(60,64,67,0.12)',
-          '--gm-font': '"Google Sans Text","Google Sans",Roboto,"Segoe UI",system-ui,sans-serif',
-          '--gm-accent': '#1a73e8',
-        };
-    Object.entries(vars).forEach(([key, value]) => dock.style.setProperty(key, value));
+    applySharedProgressDockTheme(dock, { dark: isDarkTheme() });
 
-    const titleEl = document.getElementById(`${PROGRESS_DOCK_ID}-title`);
-    const countEl = document.getElementById(`${PROGRESS_DOCK_ID}-count`);
-    const labelEl = document.getElementById(`${PROGRESS_DOCK_ID}-label`);
-    const barEl = document.getElementById(`${PROGRESS_DOCK_ID}-bar`);
+    const { titleEl, countEl, labelEl, barEl } = getSharedProgressDockElements({
+      dockId: PROGRESS_DOCK_ID,
+    });
     const candidateTotal = Math.max(0, Number(progress.candidateTotal || 0));
     const resolved = Math.max(0, Number(progress.resolvedCount || 0));
     const scanned = Math.max(0, Number(progress.scannedCardCount || 0));
@@ -493,8 +416,7 @@
     if (barEl) barEl.style.width = `${width}%`;
     if (status === 'completed') dock.classList.add('gm-dock-done');
     else dock.classList.remove('gm-dock-done');
-    dock.hidden = false;
-    dock.style.display = 'block';
+    setSharedProgressDockVisible(dock, true);
   };
 
   const beginActivityProgress = ({ candidateTotal = 0, maxCards = DEFAULT_MAX_CARDS } = {}) => {
@@ -588,7 +510,7 @@
         }
       }
       lastSeenActivityToken = extractCardDate(card) || hashText(card.textContent || '');
-      closeOpenDetails();
+      await closeOpenDetails();
       const resolvedCount = Array.from(new Set(matches.map((match) => match.chatId))).length;
       options.onProgress?.({
         scannedCardCount: cardIndex + 1,
@@ -661,6 +583,7 @@
         window.scrollTo(0, document.documentElement.scrollHeight || document.body.scrollHeight || 0);
         await sleep(SCROLL_SETTLE_MS);
       }
+      await closeOpenDetails();
       finishActivityProgress({ status: 'completed', resolvedCount: checkpoint.resolvedChatIds.length });
       return {
         ok: true,
@@ -669,6 +592,7 @@
         checkpoint,
       };
     } catch (err) {
+      await closeOpenDetails();
       finishActivityProgress({ status: 'failed' });
       throw err;
     }
@@ -712,6 +636,18 @@
         contentScript: true,
         serviceWorker: response?.ok === true,
       };
+    }
+    if (command.type === 'reload-extension-self') {
+      return extensionSendMessage(
+        {
+          type: 'RELOAD_SELF',
+          reason: command.args?.reason || 'activity-bridge-command',
+          expectedExtensionVersion: command.args?.expectedExtensionVersion || null,
+          expectedProtocolVersion: command.args?.expectedProtocolVersion || null,
+          expectedBuildStamp: command.args?.expectedBuildStamp || null,
+        },
+        { timeoutMs: 3500 },
+      );
     }
     if (command.type === 'claim-tab') {
       const args = command.args || {};

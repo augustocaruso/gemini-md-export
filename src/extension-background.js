@@ -5,10 +5,13 @@
 
 const EXTENSION_PROTOCOL_VERSION = Number('__EXTENSION_PROTOCOL_VERSION__');
 const PENDING_GEMINI_TABS_RELOAD_KEY = 'gemini-md-export.pendingGeminiTabsReload';
+const LAST_RUNTIME_BUILD_KEY = 'gemini-md-export.lastRuntimeBuild.v1';
 const TAB_CLAIMS_STORAGE_KEY = 'gemini-md-export.tabClaims.v1';
 const TAB_CLAIM_ALARM_PREFIX = 'gemini-md-export.tabClaimExpiry.';
 const TAB_GROUP_NONE = -1;
 const GEMINI_TAB_URL_PATTERN = 'https://gemini.google.com/*';
+const ACTIVITY_TAB_URL_PATTERN = 'https://myactivity.google.com/product/gemini*';
+const MANAGED_CONTENT_TAB_URL_PATTERNS = [GEMINI_TAB_URL_PATTERN, ACTIVITY_TAB_URL_PATTERN];
 const CONTENT_SCRIPT_FILE = 'content.js';
 const CONTENT_SCRIPT_PING_TYPE = 'gemini-md-export/content-ping';
 const NATIVE_HOST_NAME = 'com.augustocaruso.gemini_md_export';
@@ -1135,7 +1138,7 @@ const reloadGeminiTabs = (reason = 'manual') =>
       return;
     }
 
-    chrome.tabs.query({ url: 'https://gemini.google.com/*' }, (tabs = []) => {
+    chrome.tabs.query({ url: MANAGED_CONTENT_TAB_URL_PATTERNS }, (tabs = []) => {
       if (chrome.runtime.lastError) {
         resolve({
           ok: false,
@@ -1155,7 +1158,7 @@ const reloadGeminiTabs = (reason = 'manual') =>
         reloaded += 1;
       }
 
-      console.log('[gemini-md-export/ext]', 'abas Gemini recarregadas', {
+      console.log('[gemini-md-export/ext]', 'abas Gemini/My Activity recarregadas', {
         reason,
         reloaded,
       });
@@ -1189,10 +1192,52 @@ const reloadThenSelfHealGeminiTabs = async ({
   return lastContentScriptSelfHeal;
 };
 
+const runtimeBuildSnapshot = () => {
+  const runtime = currentRuntimeInfo();
+  return {
+    extensionVersion: runtime.extensionVersion || runtime.version || null,
+    protocolVersion: runtime.protocolVersion ?? null,
+    buildStamp: runtime.buildStamp || null,
+  };
+};
+
+const sameRuntimeBuild = (left = {}, right = {}) =>
+  String(left.extensionVersion || '') === String(right.extensionVersion || '') &&
+  String(left.protocolVersion ?? '') === String(right.protocolVersion ?? '') &&
+  String(left.buildStamp || '') === String(right.buildStamp || '');
+
+const rememberCurrentRuntimeBuild = async ({ reason = 'runtime-build-observed' } = {}) => {
+  const current = runtimeBuildSnapshot();
+  await storageSetKey(LAST_RUNTIME_BUILD_KEY, {
+    ...current,
+    reason,
+    observedAt: new Date().toISOString(),
+  });
+  return current;
+};
+
+const refreshManagedTabsIfRuntimeChanged = async () => {
+  const previous = await storageGet(LAST_RUNTIME_BUILD_KEY);
+  const current = runtimeBuildSnapshot();
+  await rememberCurrentRuntimeBuild({ reason: 'runtime-start' });
+  if (previous && sameRuntimeBuild(previous, current)) {
+    return { ok: true, status: 'unchanged', previous, current };
+  }
+  await cleanupStaleTabClaimVisuals('extension-runtime-changed');
+  setTimeout(() => {
+    reloadThenSelfHealGeminiTabs({
+      reason: 'extension-runtime-changed',
+      force: true,
+    });
+  }, 500);
+  return { ok: true, status: 'scheduled', previous: previous || null, current };
+};
+
 const consumePendingGeminiTabsReload = async () => {
   const pending = await storageGet(PENDING_GEMINI_TABS_RELOAD_KEY);
-  if (!pending) return;
+  if (!pending) return false;
   await storageRemove(PENDING_GEMINI_TABS_RELOAD_KEY);
+  await rememberCurrentRuntimeBuild({ reason: pending.reason || 'extension-self-reload' });
   await cleanupStaleTabClaimVisuals(pending.reason || 'extension-self-reload');
   setTimeout(() => {
     reloadThenSelfHealGeminiTabs({
@@ -1200,11 +1245,19 @@ const consumePendingGeminiTabsReload = async () => {
       force: true,
     });
   }, 500);
+  return true;
+};
+
+const handleServiceWorkerStart = async () => {
+  restoreTabClaimExpiryAlarms('service-worker-start');
+  const consumedPendingReload = await consumePendingGeminiTabsReload();
+  if (!consumedPendingReload) {
+    await refreshManagedTabsIfRuntimeChanged();
+  }
 };
 
 setTimeout(() => {
-  restoreTabClaimExpiryAlarms('service-worker-start');
-  consumePendingGeminiTabsReload();
+  handleServiceWorkerStart();
 }, 250);
 
 chrome.alarms?.onAlarm?.addListener?.((alarm) => {

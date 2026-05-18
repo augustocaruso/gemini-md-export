@@ -3393,7 +3393,7 @@ const buildBridgeHealth = (client, now = Date.now()) => {
   const pagePolling = client.commandPoll?.polling ?? null;
   const queuedCommands = client.queue?.length || 0;
   const activityClient = clientIsActivityClient(client);
-  const versionMatches = activityClient || clientMatchesExpectedBrowserExtension(client);
+  const versionMatches = clientMatchesExpectedBrowserExtension(client);
 
   let status = 'healthy';
   let blockingIssue = null;
@@ -3678,6 +3678,8 @@ const getActivityClients = () =>
     .filter(clientIsActivityClient)
     .sort(
       (a, b) =>
+        Number(clientMatchesExpectedBrowserExtension(b)) -
+          Number(clientMatchesExpectedBrowserExtension(a)) ||
         Number(!!b.eventStream?.res && !b.eventStream.res.destroyed) -
           Number(!!a.eventStream?.res && !a.eventStream.res.destroyed) ||
         Number(!!b.pendingPoll) - Number(!!a.pendingPoll) ||
@@ -3692,22 +3694,46 @@ const activityClientMissingError = () => {
   return error;
 };
 
+const activityClientVersionMismatchError = (activityClients = []) => {
+  const error = new Error(
+    'A aba do My Activity conectada não bate com a versão/build esperados da extensão. Recarregue o card da extensão no navegador e recarregue a página do My Activity.',
+  );
+  error.code = 'activity_client_version_mismatch';
+  error.data = {
+    expectedChromeExtension: EXPECTED_CHROME_EXTENSION_INFO,
+    clients: activityClients.map((client) => ({
+      clientId: client.clientId,
+      tabId: client.tabId ?? null,
+      extensionVersion: client.extensionVersion ?? null,
+      protocolVersion: client.protocolVersion ?? null,
+      buildStamp: clientBuildStamp(client),
+      page: client.page || null,
+    })),
+  };
+  return error;
+};
+
 const requireActivityClient = (selector = {}) => {
   cleanupStaleClients();
   const activityClients = getActivityClients();
+  const matchingClients = activityClients.filter(clientMatchesExpectedBrowserExtension);
   if (selector.clientId) {
     const selected = activityClients.find((client) => client.clientId === selector.clientId);
-    if (selected) return selected;
+    if (selected && clientMatchesExpectedBrowserExtension(selected)) return selected;
+    if (selected) throw activityClientVersionMismatchError([selected]);
     throw activityClientMissingError();
   }
-  const ready = activityClients.find(
+  if (activityClients.length > 0 && matchingClients.length === 0) {
+    throw activityClientVersionMismatchError(activityClients);
+  }
+  const ready = matchingClients.find(
     (client) =>
       (!!client.eventStream?.res && !client.eventStream.res.destroyed) ||
       !!client.pendingPoll ||
       client.commandPoll?.polling === true,
   );
   if (ready) return ready;
-  if (activityClients[0]) return activityClients[0];
+  if (matchingClients[0]) return matchingClients[0];
   throw activityClientMissingError();
 };
 

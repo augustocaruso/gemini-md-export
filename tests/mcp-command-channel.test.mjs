@@ -81,6 +81,30 @@ test('MCP permite cliente My Activity sem liberar endpoints de escrita', () => {
   assert.match(saveFilesBlock, /requireGeminiBridgeOrigin\(req\)/);
 });
 
+test('MCP nao escolhe cliente My Activity de build antigo apos reload da extensao', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const buildHealthBlock = source.match(
+    /const buildBridgeHealth = \(client, now = Date\.now\(\)\) => \{[\s\S]*?return \{[\s\S]*?\n  \};\n\};/,
+  )?.[0] || '';
+  const getActivityClientsBlock = source.match(
+    /const getActivityClients = \(\) =>[\s\S]*?;\n\nconst activityClientMissingError/,
+  )?.[0] || '';
+  const requireActivityClientBlock = source.match(
+    /const requireActivityClient = \(selector = \{\}\) => \{[\s\S]*?\n\};\n\nconst scanActivityWithClient/,
+  )?.[0] || '';
+
+  assert.match(buildHealthBlock, /const versionMatches = clientMatchesExpectedBrowserExtension\(client\)/);
+  assert.doesNotMatch(buildHealthBlock, /activityClient\s*\|\|\s*clientMatchesExpectedBrowserExtension/);
+  assert.match(getActivityClientsBlock, /Number\(clientMatchesExpectedBrowserExtension\(b\)\)/);
+  assert.match(getActivityClientsBlock, /Number\(clientMatchesExpectedBrowserExtension\(a\)\)/);
+  assert.match(source, /activity_client_version_mismatch/);
+  assert.match(requireActivityClientBlock, /const matchingClients = activityClients\.filter\(clientMatchesExpectedBrowserExtension\)/);
+  assert.match(requireActivityClientBlock, /if \(selected && clientMatchesExpectedBrowserExtension\(selected\)\) return selected/);
+  assert.match(requireActivityClientBlock, /if \(selected\) throw activityClientVersionMismatchError\(\[selected\]\)/);
+  assert.match(requireActivityClientBlock, /matchingClients\.find/);
+  assert.doesNotMatch(requireActivityClientBlock, /if \(activityClients\[0\]\) return activityClients\[0\]/);
+});
+
 test('browser_status expõe saúde da bridge MCP/Chrome', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
 

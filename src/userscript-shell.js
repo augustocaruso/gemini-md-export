@@ -25,6 +25,7 @@
   /* __INLINE_NOTEBOOK_RETURN_PLAN__ */
   /* __INLINE_BATCH_SESSION_MODULE__ */
   /* __INLINE_DOM_RUNNER_MODULE__ */
+  /* __INLINE_PROGRESS_DOCK_UI__ */
 
   // --- config -----------------------------------------------------------
 
@@ -5899,102 +5900,10 @@
   };
 
   const ensureProgressDock = () => {
-    let dock = document.getElementById(PROGRESS_DOCK_ID);
-    if (dock) return dock;
-
-    dock = document.createElement('div');
-    dock.id = PROGRESS_DOCK_ID;
-    dock.hidden = true;
-    Object.assign(dock.style, {
-      position: 'fixed',
-      left: '50%',
-      bottom: '18px',
-      transform: 'translateX(-50%)',
-      zIndex: '10002',
-      display: 'none',
-      pointerEvents: 'none',
-      width: 'min(360px, calc(100vw - 24px))',
+    return ensureSharedProgressDock({
+      dockId: PROGRESS_DOCK_ID,
+      initialTitle: 'Baixando conversas',
     });
-
-    // Estilos do dock injetados como <style> próprio do nó porque keyframes
-    // não funcionam via style inline. O shimmer é o que dá a sensação de
-    // fluidez quando o `current` ainda não mudou (ex.: hidratação longa de
-    // uma única conversa) — uma faixa diagonal varre a parte preenchida e
-    // mantém o feedback vivo.
-    setHtml(
-      dock,
-      `
-        <style>
-          #${PROGRESS_DOCK_ID} .gm-dock-card {
-            font-family: var(--gm-font);
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-            padding: 12px 14px;
-            border-radius: 18px;
-            background: var(--gm-dock-bg);
-            color: var(--gm-dock-text);
-            border: 1px solid var(--gm-dock-border);
-            box-shadow: 0 10px 30px rgba(0,0,0,0.16);
-            backdrop-filter: blur(10px);
-          }
-          #${PROGRESS_DOCK_ID} .gm-dock-track {
-            height: 6px;
-            background: var(--gm-dock-track);
-            border-radius: 999px;
-            overflow: hidden;
-            position: relative;
-          }
-          #${PROGRESS_DOCK_ID} .gm-dock-bar {
-            height: 100%;
-            width: 0%;
-            background: var(--gm-accent);
-            border-radius: 999px;
-            position: relative;
-            overflow: hidden;
-            /* Easing Material para movimento natural de avanço; mais longo
-               que .18s pra conseguir ler o crescimento mesmo em incrementos
-               pequenos vindos do "creep" assintótico. */
-            transition: width 420ms cubic-bezier(0.22, 0.61, 0.36, 1);
-            will-change: width;
-          }
-          #${PROGRESS_DOCK_ID} .gm-dock-bar::after {
-            content: "";
-            position: absolute;
-            inset: 0;
-            background: linear-gradient(
-              90deg,
-              rgba(255,255,255,0) 0%,
-              rgba(255,255,255,0.55) 50%,
-              rgba(255,255,255,0) 100%
-            );
-            transform: translateX(-100%);
-            animation: gm-dock-shimmer 1500ms linear infinite;
-          }
-          #${PROGRESS_DOCK_ID}.gm-dock-done .gm-dock-bar::after {
-            animation: none;
-            opacity: 0;
-          }
-          @keyframes gm-dock-shimmer {
-            0%   { transform: translateX(-100%); }
-            100% { transform: translateX(100%); }
-          }
-        </style>
-        <div class="gm-dock-card">
-          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
-            <strong id="${PROGRESS_DOCK_ID}-title" style="font-size:12px;font-weight:600;letter-spacing:0.01em;">Baixando conversas</strong>
-            <span id="${PROGRESS_DOCK_ID}-count" style="font-size:11px;color:var(--gm-dock-muted);white-space:nowrap;"></span>
-          </div>
-          <div id="${PROGRESS_DOCK_ID}-label" style="font-size:12px;color:var(--gm-dock-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
-          <div class="gm-dock-track">
-            <div id="${PROGRESS_DOCK_ID}-bar" class="gm-dock-bar"></div>
-          </div>
-        </div>
-      `,
-    );
-
-    document.body.appendChild(dock);
-    return dock;
   };
 
   // "Creep" assintótico: entre uma chamada de updateExportProgress e a
@@ -6137,39 +6046,16 @@
     const dock = ensureProgressDock();
     if (!state.isExporting || !state.progress) {
       stopProgressCreep();
-      dock.hidden = true;
-      dock.style.display = 'none';
+      setSharedProgressDockVisible(dock, false);
       dock.classList.remove('gm-dock-done');
       return;
     }
 
-    const dark = isDarkTheme();
-    const vars = dark
-      ? {
-          '--gm-dock-bg': 'rgba(31,35,41,0.94)',
-          '--gm-dock-text': '#e8eaed',
-          '--gm-dock-muted': '#aab4be',
-          '--gm-dock-border': 'rgba(255,255,255,0.08)',
-          '--gm-dock-track': 'rgba(255,255,255,0.08)',
-          '--gm-font': '"Google Sans Text","Google Sans",Roboto,"Segoe UI",system-ui,sans-serif',
-          '--gm-accent': '#8ab4f8',
-        }
-      : {
-          '--gm-dock-bg': 'rgba(255,255,255,0.94)',
-          '--gm-dock-text': '#202124',
-          '--gm-dock-muted': '#5f6368',
-          '--gm-dock-border': 'rgba(60,64,67,0.12)',
-          '--gm-dock-track': 'rgba(60,64,67,0.12)',
-          '--gm-font': '"Google Sans Text","Google Sans",Roboto,"Segoe UI",system-ui,sans-serif',
-          '--gm-accent': '#1a73e8',
-        };
+    applySharedProgressDockTheme(dock, { dark: isDarkTheme() });
 
-    Object.entries(vars).forEach(([key, value]) => dock.style.setProperty(key, value));
-
-    const titleEl = document.getElementById(`${PROGRESS_DOCK_ID}-title`);
-    const countEl = document.getElementById(`${PROGRESS_DOCK_ID}-count`);
-    const labelEl = document.getElementById(`${PROGRESS_DOCK_ID}-label`);
-    const barEl = document.getElementById(`${PROGRESS_DOCK_ID}-bar`);
+    const { titleEl, countEl, labelEl, barEl } = getSharedProgressDockElements({
+      dockId: PROGRESS_DOCK_ID,
+    });
 
     if (titleEl) {
       titleEl.textContent = progressTitleFor(state.progress);
@@ -6201,8 +6087,7 @@
       }
     }
 
-    dock.hidden = false;
-    dock.style.display = 'block';
+    setSharedProgressDockVisible(dock, true);
   };
 
   const beginExportProgress = async ({
