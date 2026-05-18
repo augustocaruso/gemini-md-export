@@ -78,6 +78,14 @@ Takeout is normalized into the same match shape as the live My Activity scraper 
 
 `https://myactivity.google.com/*` is a new MV3 host permission. A browser runtime that loaded an older manifest will not inject the Activity content script. Readiness/bridge errors should return a concrete action: open `https://myactivity.google.com/product/gemini` and, if the new permission has not reached the loaded runtime, reload the extension card manually in `chrome://extensions` / `edge://extensions`.
 
+## Activity UX
+
+The live My Activity scan reuses the extension's existing visual language:
+
+- the MCP applies the same tab-claim visual path used by Gemini tabs, so the My Activity tab is marked with Tab Group/badge while the scan runs;
+- `src/activity-content-script.js` renders the same `gm-md-export-progress-dock` pattern used by long exports, with a moving bar, shimmer, resolved-chat count, loaded/scanned item text, and terminal "Concluído"/"Falhou" states;
+- the visual claim is best-effort and auto-released after the scan, so a claim failure does not block YAML normalization.
+
 ## Privacy Gate
 
 Prompts and responses may exist only in memory during scoring. Reports, telemetry, flight recorder events, and operational logs must contain only hashes, sizes, scores, counts, timestamps, file paths, and status. Tests must fail if sensitive prompt/response text appears in report output.

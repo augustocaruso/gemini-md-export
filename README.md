@@ -255,7 +255,9 @@ Esse fluxo usa a extensão MV3 também em
 `https://myactivity.google.com/product/gemini`. Depois de instalar uma versão
 que adiciona essa permissão, recarregue manualmente o card da extensão em
 `chrome://extensions`/`edge://extensions` se o navegador ainda estiver com o
-runtime antigo. O relatório não grava prompts, respostas, HTML ou Markdown cru:
+runtime antigo. Durante a varredura, a aba My Activity usa o mesmo indicador
+visual de claim da extensão (Tab Group/badge) e o mesmo dock de progresso usado
+nos exports longos. O relatório não grava prompts, respostas, HTML ou Markdown cru:
 somente hashes, tamanhos, scores, contagens e status. Quando o arquivo offline
 do Takeout chegar, o mesmo normalizador aceita:
 

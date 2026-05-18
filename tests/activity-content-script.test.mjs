@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { JSDOM } from 'jsdom';
 
-const loadHarness = (html) => {
+const loadHarness = (html, options = {}) => {
   const dom = new JSDOM(`<!doctype html><html><body>${html}</body></html>`, {
     url: 'https://myactivity.google.com/product/gemini',
     runScripts: 'outside-only',
@@ -18,8 +18,12 @@ const loadHarness = (html) => {
     close() {}
   };
   dom.window.scrollTo = () => {};
+  if (options.chrome) {
+    dom.window.chrome = options.chrome;
+  }
   dom.window.__GEMINI_MD_ACTIVITY_DISABLE_AUTO_START__ = true;
   dom.window.eval(readFileSync(resolve('src', 'activity-content-script.js'), 'utf-8'));
+  dom.window.__geminiMdActivityDebug._window = dom.window;
   return dom.window.__geminiMdActivityDebug;
 };
 
@@ -87,4 +91,90 @@ test('activity content script converte data textual local para UTC sem milissegu
     if (originalTz === undefined) delete process.env.TZ;
     else process.env.TZ = originalTz;
   }
+});
+
+test('activity content script reaproveita claim visual da extensao', async () => {
+  const messages = [];
+  const debug = loadHarness('<div>Gemini Apps</div>', {
+    chrome: {
+      runtime: {
+        sendMessage(message, callback) {
+          messages.push(message);
+          if (message.type === 'GET_EXTENSION_INFO') {
+            callback({
+              ok: true,
+              extensionVersion: '0.8.49',
+              protocolVersion: 2,
+              buildStamp: '20260518-0058',
+              tabId: 42,
+              windowId: 7,
+              isActiveTab: true,
+            });
+            return;
+          }
+          if (message.type === 'gemini-md-export/claim-tab') {
+            callback({
+              ok: true,
+              visual: { mode: 'tab-group', tabId: 42, groupId: 99 },
+            });
+            return;
+          }
+          if (message.type === 'gemini-md-export/release-tab-claim') {
+            callback({ ok: true, released: { tabId: 42 } });
+            return;
+          }
+          callback({ ok: false, reason: 'unexpected-message' });
+        },
+      },
+    },
+  });
+
+  const info = await debug.executeCommand({ type: 'get-extension-info' });
+  const claim = await debug.executeCommand({
+    type: 'claim-tab',
+    args: {
+      claimId: 'claim-activity-test',
+      sessionId: 'test-session',
+      label: '🔎 Conferindo',
+      color: 'blue',
+      expiresAt: '2026-05-18T01:10:00Z',
+    },
+  });
+  const release = await debug.executeCommand({
+    type: 'release-tab-claim',
+    args: { claimId: 'claim-activity-test', reason: 'test' },
+  });
+
+  assert.equal(info.tabId, 42);
+  assert.equal(claim.ok, true);
+  assert.equal(release.ok, true);
+  assert.equal(messages.some((message) => message.type === 'gemini-md-export/claim-tab'), true);
+  assert.equal(messages.some((message) => message.type === 'gemini-md-export/release-tab-claim'), true);
+});
+
+test('activity content script usa dock de progresso existente para o scan', async () => {
+  const debug = loadHarness('<div>Gemini Apps</div>');
+
+  debug._private.beginActivityProgress({
+    candidateTotal: 3,
+    maxCards: 100,
+  });
+  debug._private.updateActivityProgress({
+    scannedCardCount: 12,
+    loadedCardCount: 40,
+    resolvedCount: 1,
+    phase: 'scanning',
+  });
+
+  const dock = debug._window.document.getElementById('gm-md-export-progress-dock');
+  assert.ok(dock);
+  assert.equal(dock.hidden, false);
+  assert.match(dock.textContent, /Buscando datas/);
+  assert.match(dock.textContent, /1 de 3/);
+  assert.match(dock.textContent, /12 itens lidos/);
+  assert.match(dock.querySelector('.gm-dock-bar')?.getAttribute('style') || '', /width:\s*12%/);
+
+  debug._private.finishActivityProgress({ status: 'completed' });
+  assert.match(dock.textContent, /Conclu/);
+  assert.match(dock.querySelector('.gm-dock-bar')?.getAttribute('style') || '', /width:\s*100%/);
 });

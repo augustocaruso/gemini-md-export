@@ -11,6 +11,8 @@
   const DEFAULT_MAX_CARDS = 1000;
   const DEFAULT_MAX_SCROLL_ROUNDS = 80;
   const MATCH_THRESHOLD = 0.58;
+  const PROGRESS_DOCK_ID = 'gm-md-export-progress-dock';
+  const TAB_CLAIM_DEFAULT_LABEL = '🔎 Conferindo';
 
   const state = {
     started: false,
@@ -19,6 +21,16 @@
     heartbeatInFlight: false,
     eventSource: null,
     commandResultCache: new Map(),
+    extensionInfoLoadedAt: 0,
+    extensionVersion: null,
+    protocolVersion: null,
+    buildStamp: null,
+    tabId: null,
+    windowId: null,
+    isActiveTab: null,
+    tabClaim: null,
+    activityProgress: null,
+    activityProgressHideTimer: 0,
   };
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -63,6 +75,62 @@
     } finally {
       clearTimeout(timer);
     }
+  };
+
+  const extensionSendMessage = (message, { timeoutMs = 5000 } = {}) =>
+    new Promise((resolve) => {
+      if (typeof chrome === 'undefined' || !chrome?.runtime?.sendMessage) {
+        resolve({ ok: false, reason: 'runtime-message-unavailable' });
+        return;
+      }
+      let settled = false;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      };
+      const timer = setTimeout(() => {
+        finish({ ok: false, reason: 'runtime-message-timeout' });
+      }, timeoutMs);
+      try {
+        chrome.runtime.sendMessage(message, (response) => {
+          const lastError = chrome.runtime.lastError;
+          if (lastError) {
+            finish({ ok: false, reason: lastError.message || String(lastError) });
+            return;
+          }
+          finish(response || { ok: false, reason: 'empty-runtime-response' });
+        });
+      } catch (err) {
+        finish({ ok: false, reason: err?.message || String(err) });
+      }
+    });
+
+  const refreshExtensionInfo = async ({ force = false } = {}) => {
+    const now = Date.now();
+    if (!force && state.extensionInfoLoadedAt && now - state.extensionInfoLoadedAt < 30_000) {
+      return {
+        ok: true,
+        extensionVersion: state.extensionVersion,
+        protocolVersion: state.protocolVersion,
+        buildStamp: state.buildStamp,
+        tabId: state.tabId,
+        windowId: state.windowId,
+        isActiveTab: state.isActiveTab,
+      };
+    }
+    const response = await extensionSendMessage({ type: 'GET_EXTENSION_INFO' }, { timeoutMs: 3500 });
+    if (response?.ok) {
+      state.extensionVersion = response.extensionVersion || response.version || null;
+      state.protocolVersion = response.protocolVersion ?? null;
+      state.buildStamp = response.buildStamp || null;
+      state.tabId = response.tabId ?? null;
+      state.windowId = response.windowId ?? null;
+      state.isActiveTab = response.isActiveTab ?? null;
+      state.extensionInfoLoadedAt = now;
+    }
+    return response;
   };
 
   const normalizeText = (value) =>
@@ -274,6 +342,207 @@
     }
   };
 
+  const isDarkTheme = () => {
+    try {
+      return pageWindow.matchMedia?.('(prefers-color-scheme: dark)')?.matches === true;
+    } catch {
+      return false;
+    }
+  };
+
+  const ensureActivityProgressDock = () => {
+    let dock = document.getElementById(PROGRESS_DOCK_ID);
+    if (dock) return dock;
+
+    dock = document.createElement('div');
+    dock.id = PROGRESS_DOCK_ID;
+    dock.hidden = true;
+    Object.assign(dock.style, {
+      position: 'fixed',
+      left: '50%',
+      bottom: '18px',
+      transform: 'translateX(-50%)',
+      zIndex: '10002',
+      display: 'none',
+      pointerEvents: 'none',
+      width: 'min(360px, calc(100vw - 24px))',
+    });
+    dock.innerHTML = `
+      <style>
+        #${PROGRESS_DOCK_ID} .gm-dock-card {
+          font-family: var(--gm-font);
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+          padding: 12px 14px;
+          border-radius: 18px;
+          background: var(--gm-dock-bg);
+          color: var(--gm-dock-text);
+          border: 1px solid var(--gm-dock-border);
+          box-shadow: 0 10px 30px rgba(0,0,0,0.16);
+          backdrop-filter: blur(10px);
+        }
+        #${PROGRESS_DOCK_ID} .gm-dock-track {
+          height: 6px;
+          background: var(--gm-dock-track);
+          border-radius: 999px;
+          overflow: hidden;
+          position: relative;
+        }
+        #${PROGRESS_DOCK_ID} .gm-dock-bar {
+          height: 100%;
+          width: 0%;
+          background: var(--gm-accent);
+          border-radius: 999px;
+          position: relative;
+          overflow: hidden;
+          transition: width 420ms cubic-bezier(0.22, 0.61, 0.36, 1);
+          will-change: width;
+        }
+        #${PROGRESS_DOCK_ID} .gm-dock-bar::after {
+          content: "";
+          position: absolute;
+          inset: 0;
+          background: linear-gradient(
+            90deg,
+            rgba(255,255,255,0) 0%,
+            rgba(255,255,255,0.55) 50%,
+            rgba(255,255,255,0) 100%
+          );
+          transform: translateX(-100%);
+          animation: gm-dock-shimmer 1500ms linear infinite;
+        }
+        #${PROGRESS_DOCK_ID}.gm-dock-done .gm-dock-bar::after {
+          animation: none;
+          opacity: 0;
+        }
+        @keyframes gm-dock-shimmer {
+          0%   { transform: translateX(-100%); }
+          100% { transform: translateX(100%); }
+        }
+      </style>
+      <div class="gm-dock-card">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;">
+          <strong id="${PROGRESS_DOCK_ID}-title" style="font-size:12px;font-weight:600;letter-spacing:0.01em;">Buscando datas</strong>
+          <span id="${PROGRESS_DOCK_ID}-count" style="font-size:11px;color:var(--gm-dock-muted);white-space:nowrap;"></span>
+        </div>
+        <div id="${PROGRESS_DOCK_ID}-label" style="font-size:12px;color:var(--gm-dock-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"></div>
+        <div class="gm-dock-track">
+          <div id="${PROGRESS_DOCK_ID}-bar" class="gm-dock-bar"></div>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(dock);
+    return dock;
+  };
+
+  const updateActivityProgressDock = () => {
+    const dock = ensureActivityProgressDock();
+    const progress = state.activityProgress;
+    if (!progress) {
+      dock.hidden = true;
+      dock.style.display = 'none';
+      dock.classList.remove('gm-dock-done');
+      return;
+    }
+
+    const dark = isDarkTheme();
+    const vars = dark
+      ? {
+          '--gm-dock-bg': 'rgba(31,35,41,0.94)',
+          '--gm-dock-text': '#e8eaed',
+          '--gm-dock-muted': '#aab4be',
+          '--gm-dock-border': 'rgba(255,255,255,0.08)',
+          '--gm-dock-track': 'rgba(255,255,255,0.08)',
+          '--gm-font': '"Google Sans Text","Google Sans",Roboto,"Segoe UI",system-ui,sans-serif',
+          '--gm-accent': '#8ab4f8',
+        }
+      : {
+          '--gm-dock-bg': 'rgba(255,255,255,0.94)',
+          '--gm-dock-text': '#202124',
+          '--gm-dock-muted': '#5f6368',
+          '--gm-dock-border': 'rgba(60,64,67,0.12)',
+          '--gm-dock-track': 'rgba(60,64,67,0.12)',
+          '--gm-font': '"Google Sans Text","Google Sans",Roboto,"Segoe UI",system-ui,sans-serif',
+          '--gm-accent': '#1a73e8',
+        };
+    Object.entries(vars).forEach(([key, value]) => dock.style.setProperty(key, value));
+
+    const titleEl = document.getElementById(`${PROGRESS_DOCK_ID}-title`);
+    const countEl = document.getElementById(`${PROGRESS_DOCK_ID}-count`);
+    const labelEl = document.getElementById(`${PROGRESS_DOCK_ID}-label`);
+    const barEl = document.getElementById(`${PROGRESS_DOCK_ID}-bar`);
+    const candidateTotal = Math.max(0, Number(progress.candidateTotal || 0));
+    const resolved = Math.max(0, Number(progress.resolvedCount || 0));
+    const scanned = Math.max(0, Number(progress.scannedCardCount || 0));
+    const loaded = Math.max(scanned, Number(progress.loadedCardCount || 0));
+    const maxCards = Math.max(1, Number(progress.maxCards || loaded || 1));
+    const status = progress.status || 'running';
+    const width = status === 'completed' ? 100 : Math.min(100, Math.round((scanned / maxCards) * 100));
+
+    if (titleEl) titleEl.textContent = 'Buscando datas';
+    if (countEl) {
+      countEl.textContent = candidateTotal > 0 ? `${Math.min(resolved, candidateTotal)} de ${candidateTotal}` : '';
+    }
+    if (labelEl) {
+      if (status === 'completed') labelEl.textContent = 'Concluído';
+      else if (status === 'failed') labelEl.textContent = 'Falhou';
+      else if (loaded > scanned) labelEl.textContent = `${scanned} itens lidos · ${loaded} carregados`;
+      else labelEl.textContent = `${scanned} itens lidos`;
+    }
+    if (barEl) barEl.style.width = `${width}%`;
+    if (status === 'completed') dock.classList.add('gm-dock-done');
+    else dock.classList.remove('gm-dock-done');
+    dock.hidden = false;
+    dock.style.display = 'block';
+  };
+
+  const beginActivityProgress = ({ candidateTotal = 0, maxCards = DEFAULT_MAX_CARDS } = {}) => {
+    if (state.activityProgressHideTimer) {
+      clearTimeout(state.activityProgressHideTimer);
+      state.activityProgressHideTimer = 0;
+    }
+    state.activityProgress = {
+      status: 'running',
+      phase: 'scanning',
+      candidateTotal,
+      maxCards,
+      scannedCardCount: 0,
+      loadedCardCount: 0,
+      resolvedCount: 0,
+    };
+    updateActivityProgressDock();
+  };
+
+  const updateActivityProgress = (patch = {}) => {
+    if (!state.activityProgress) beginActivityProgress();
+    state.activityProgress = {
+      ...state.activityProgress,
+      ...patch,
+      status: patch.status || state.activityProgress?.status || 'running',
+    };
+    updateActivityProgressDock();
+  };
+
+  const finishActivityProgress = ({ status = 'completed', resolvedCount = null } = {}) => {
+    if (!state.activityProgress) beginActivityProgress();
+    const maxCards = Math.max(1, Number(state.activityProgress.maxCards || DEFAULT_MAX_CARDS));
+    state.activityProgress = {
+      ...state.activityProgress,
+      status,
+      resolvedCount: resolvedCount ?? state.activityProgress.resolvedCount ?? 0,
+      scannedCardCount: status === 'completed' ? maxCards : state.activityProgress.scannedCardCount,
+    };
+    updateActivityProgressDock();
+    if (state.activityProgressHideTimer) clearTimeout(state.activityProgressHideTimer);
+    state.activityProgressHideTimer = setTimeout(() => {
+      state.activityProgress = null;
+      state.activityProgressHideTimer = 0;
+      updateActivityProgressDock();
+    }, 3200);
+    state.activityProgressHideTimer?.unref?.();
+  };
+
   const sanitizedMatch = ({ candidate, card, score, cardIndex }) => ({
     chatId: String(candidate.chatId || ''),
     date: extractCardDate(card),
@@ -320,6 +589,13 @@
       }
       lastSeenActivityToken = extractCardDate(card) || hashText(card.textContent || '');
       closeOpenDetails();
+      const resolvedCount = Array.from(new Set(matches.map((match) => match.chatId))).length;
+      options.onProgress?.({
+        scannedCardCount: cardIndex + 1,
+        loadedCardCount,
+        resolvedCount,
+        phase: 'scanning',
+      });
       const allResolved = Array.from(candidateMap.keys()).every((chatId) => {
         const required = requiredKinds.get(chatId) || new Set();
         const found = foundKinds.get(chatId) || new Set();
@@ -343,43 +619,71 @@
       0,
       Math.min(DEFAULT_MAX_SCROLL_ROUNDS, Number(args.maxScrollRounds || DEFAULT_MAX_SCROLL_ROUNDS)),
     );
-    const allMatches = [];
-    let checkpoint = {
-      lastSeenActivityToken: args.resume?.lastSeenActivityToken || null,
-      loadedCardCount: 0,
-      resolvedChatIds: [],
-    };
-    let previousCount = -1;
-    for (let round = 0; round <= maxScrollRounds; round += 1) {
-      const partial = await scanLoadedCards(candidates, { maxCards });
-      for (const match of partial.matches) {
-        if (!allMatches.some((existing) => existing.chatId === match.chatId && existing.date === match.date)) {
-          allMatches.push(match);
-        }
-      }
-      checkpoint = {
-        lastSeenActivityToken: partial.lastSeenActivityToken || checkpoint.lastSeenActivityToken,
-        loadedCardCount: partial.loadedCardCount,
-        resolvedChatIds: Array.from(new Set(allMatches.map((match) => match.chatId))).sort(),
+    beginActivityProgress({ candidateTotal: candidates.length, maxCards });
+    try {
+      const allMatches = [];
+      let checkpoint = {
+        lastSeenActivityToken: args.resume?.lastSeenActivityToken || null,
+        loadedCardCount: 0,
+        resolvedChatIds: [],
       };
-      if (checkpoint.resolvedChatIds.length >= candidates.length) break;
-      if (partial.loadedCardCount >= maxCards) break;
-      if (partial.loadedCardCount === previousCount) break;
-      previousCount = partial.loadedCardCount;
-      window.scrollTo(0, document.documentElement.scrollHeight || document.body.scrollHeight || 0);
-      await sleep(SCROLL_SETTLE_MS);
+      let previousCount = -1;
+      for (let round = 0; round <= maxScrollRounds; round += 1) {
+        const partial = await scanLoadedCards(candidates, {
+          maxCards,
+          onProgress: (progress) => {
+            updateActivityProgress({
+              ...progress,
+              resolvedCount: Array.from(new Set(allMatches.map((match) => match.chatId))).length,
+            });
+          },
+        });
+        for (const match of partial.matches) {
+          if (!allMatches.some((existing) => existing.chatId === match.chatId && existing.date === match.date)) {
+            allMatches.push(match);
+          }
+        }
+        checkpoint = {
+          lastSeenActivityToken: partial.lastSeenActivityToken || checkpoint.lastSeenActivityToken,
+          loadedCardCount: partial.loadedCardCount,
+          resolvedChatIds: Array.from(new Set(allMatches.map((match) => match.chatId))).sort(),
+        };
+        updateActivityProgress({
+          scannedCardCount: partial.loadedCardCount,
+          loadedCardCount: partial.loadedCardCount,
+          resolvedCount: checkpoint.resolvedChatIds.length,
+          phase: 'scrolling',
+        });
+        if (checkpoint.resolvedChatIds.length >= candidates.length) break;
+        if (partial.loadedCardCount >= maxCards) break;
+        if (partial.loadedCardCount === previousCount) break;
+        previousCount = partial.loadedCardCount;
+        window.scrollTo(0, document.documentElement.scrollHeight || document.body.scrollHeight || 0);
+        await sleep(SCROLL_SETTLE_MS);
+      }
+      finishActivityProgress({ status: 'completed', resolvedCount: checkpoint.resolvedChatIds.length });
+      return {
+        ok: true,
+        source: 'my-activity-web',
+        matches: allMatches,
+        checkpoint,
+      };
+    } catch (err) {
+      finishActivityProgress({ status: 'failed' });
+      throw err;
     }
-    return {
-      ok: true,
-      source: 'my-activity-web',
-      matches: allMatches,
-      checkpoint,
-    };
   };
 
   const buildHeartbeatPayload = () => ({
     clientId: state.clientId,
     kind: 'activity',
+    extensionVersion: state.extensionVersion,
+    protocolVersion: state.protocolVersion,
+    buildStamp: state.buildStamp,
+    tabId: state.tabId,
+    windowId: state.windowId,
+    isActiveTab: state.isActiveTab,
+    tabClaim: state.tabClaim,
     page: {
       kind: 'activity',
       url: location.href,
@@ -401,6 +705,74 @@
     });
 
   const executeCommand = async (command) => {
+    if (command.type === 'get-extension-info') {
+      const response = await refreshExtensionInfo({ force: true });
+      return {
+        ...(response || { ok: false, reason: 'empty-extension-info-response' }),
+        contentScript: true,
+        serviceWorker: response?.ok === true,
+      };
+    }
+    if (command.type === 'claim-tab') {
+      const args = command.args || {};
+      const claim = {
+        claimId: String(args.claimId || '').trim(),
+        sessionId: args.sessionId || null,
+        label: args.label || TAB_CLAIM_DEFAULT_LABEL,
+        color: args.color || 'blue',
+        expiresAt: args.expiresAt || null,
+      };
+      if (!claim.claimId) return { ok: false, reason: 'claim-id-required' };
+      const response = await extensionSendMessage(
+        {
+          type: 'gemini-md-export/claim-tab',
+          ...claim,
+        },
+        { timeoutMs: 5000 },
+      );
+      if (response?.ok) {
+        state.tabClaim = {
+          ...claim,
+          tabId: response.tabId ?? response.visual?.tabId ?? state.tabId,
+          windowId: response.windowId ?? state.windowId,
+          visual: response.visual || response,
+        };
+      }
+      return response || { ok: false, reason: 'empty-claim-response' };
+    }
+    if (command.type === 'release-tab-claim') {
+      const response = await extensionSendMessage(
+        {
+          type: 'gemini-md-export/release-tab-claim',
+          tabId: command.args?.tabId ?? state.tabId,
+          claimId: command.args?.claimId || state.tabClaim?.claimId || null,
+          reason: command.args?.reason || 'activity-bridge-command',
+        },
+        { timeoutMs: 5000 },
+      );
+      if (response?.ok) state.tabClaim = null;
+      return response || { ok: false, reason: 'empty-release-response' };
+    }
+    if (command.type === 'release-tab-claim-by-tab-id') {
+      const requestedTabId = Number(command.args?.tabId);
+      const response = await extensionSendMessage(
+        {
+          type: 'gemini-md-export/release-tab-claim',
+          tabId: Number.isInteger(requestedTabId) ? requestedTabId : state.tabId,
+          claimId: command.args?.claimId || state.tabClaim?.claimId || null,
+          reason: command.args?.reason || 'activity-bridge-command-tab-id-release',
+        },
+        { timeoutMs: 5000 },
+      );
+      const targetsThisTab =
+        Number.isInteger(requestedTabId) &&
+        Number.isInteger(Number(state.tabId)) &&
+        requestedTabId === Number(state.tabId);
+      const claimMatches =
+        !command.args?.claimId || !state.tabClaim?.claimId || state.tabClaim.claimId === command.args.claimId;
+      if (response?.ok && targetsThisTab && claimMatches) state.tabClaim = null;
+      return response || { ok: false, reason: 'empty-release-response' };
+    }
     if (command.type === 'activity-scan-batch') {
       return scanActivityPage(command.args || {});
     }
@@ -431,6 +803,7 @@
     if (!state.started || state.heartbeatInFlight) return;
     state.heartbeatInFlight = true;
     try {
+      await refreshExtensionInfo();
       const response = await bridgeRequest('/bridge/heartbeat', {
         method: 'POST',
         payload: buildHeartbeatPayload(),
@@ -512,9 +885,14 @@
 
   pageWindow.__geminiMdActivityDebug = {
     scanActivityPage,
+    executeCommand,
     startBridgeClient,
     stopBridgeClient,
     _private: {
+      beginActivityProgress,
+      updateActivityProgress,
+      finishActivityProgress,
+      buildHeartbeatPayload,
       extractCardDate,
       hashText,
       normalizeText,

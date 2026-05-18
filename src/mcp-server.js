@@ -3713,12 +3713,58 @@ const requireActivityClient = (selector = {}) => {
 
 const scanActivityWithClient = async (args = {}) => {
   const client = requireActivityClient({ clientId: args.activityClientId || args.clientId });
-  const result = await enqueueCommand(client.clientId, 'activity-scan-batch', args, {
-    timeoutMs: Math.max(60_000, Number(args.timeoutMs || 10 * 60_000)),
-  });
+  let claim = null;
+  let claimVisibleAtMs = null;
+  let tabClaimWarning = null;
+  let tabClaimRelease = null;
+  if (args.claimVisual !== false) {
+    try {
+      const claimed = await claimTabForClient(client, {
+        ...args,
+        label: args.claimLabel || TAB_CLAIM_LABELS.count,
+        color: args.claimColor || 'blue',
+        force: args.forceClaim === true || args.force === true,
+      });
+      claim = claimed.claim || null;
+      claimVisibleAtMs = Date.now();
+    } catch (err) {
+      tabClaimWarning = {
+        ok: false,
+        code: err?.code || 'activity_tab_claim_failed',
+        message: err?.message || String(err),
+      };
+    }
+  }
+  const scanClient = claim?.clientId ? clients.get(claim.clientId) || client : client;
+  let result;
+  try {
+    result = await enqueueCommand(scanClient.clientId, 'activity-scan-batch', args, {
+      timeoutMs: Math.max(60_000, Number(args.timeoutMs || 10 * 60_000)),
+    });
+  } finally {
+    if (claim?.claimId && shouldAutoReleaseTabClaim(args)) {
+      try {
+        await waitForTabClaimMinimumVisibility(claimVisibleAtMs, args);
+        tabClaimRelease = await releaseTabClaim({
+          claimId: claim.claimId,
+          reason: 'activity-scan-complete',
+        });
+      } catch (err) {
+        tabClaimRelease = {
+          ok: false,
+          claimId: claim.claimId,
+          code: err?.code || 'activity_tab_claim_release_failed',
+          message: err?.message || String(err),
+        };
+      }
+    }
+  }
   return {
     ...result,
-    client: summarizeClient(client),
+    client: summarizeClient(scanClient),
+    tabClaim: claim,
+    tabClaimWarning,
+    tabClaimRelease,
   };
 };
 

@@ -67,6 +67,8 @@ test('MCP permite cliente My Activity sem liberar endpoints de escrita', () => {
   assert.match(source, /requireGeminiBridgeOrigin/);
   assert.match(source, /url\.pathname === '\/agent\/activity-scan'/);
   assert.match(source, /'activity-scan-batch'/);
+  assert.match(source, /claimTabForClient\(client,[\s\S]*TAB_CLAIM_LABELS\.count/);
+  assert.match(source, /releaseTabClaim\(\{[\s\S]*activity-scan-complete/);
   assert.match(source, /activity_client_missing/);
 
   const pickDirectoryBlock = source.match(
