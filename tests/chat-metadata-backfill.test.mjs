@@ -122,6 +122,7 @@ Primeira resposta sensível
 `,
   );
 
+  let activityPayload = null;
   const server = createServer(async (req, res) => {
     if (req.method !== 'POST' || req.url !== '/agent/activity-scan') {
       res.writeHead(404).end();
@@ -129,9 +130,7 @@ Primeira resposta sensível
     }
     let body = '';
     for await (const chunk of req) body += chunk;
-    const payload = JSON.parse(body);
-    assert.equal(payload.candidates[0].chatId, 'b8e7c075effe9457');
-    assert.match(payload.candidates[0].firstPrompt, /Primeiro prompt sensível/);
+    activityPayload = JSON.parse(body);
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(
       JSON.stringify({
@@ -177,6 +176,10 @@ Primeira resposta sensível
       ],
       { cwd: resolve('.'), stdio: 'pipe', encoding: 'utf-8' },
     );
+
+    assert.equal(activityPayload.candidates[0].chatId, 'b8e7c075effe9457');
+    assert.match(activityPayload.candidates[0].firstPrompt, /Primeiro prompt sensível/);
+    assert.equal(activityPayload.openIfMissing, true);
 
     const updated = readFileSync(chatPath, 'utf-8');
     assert.match(updated, /\ndate_created: 2026-05-10T06:46:09Z\n/);

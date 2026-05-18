@@ -267,11 +267,16 @@ test('script Windows captura janela ativa, abre minimizado e tenta devolver foco
 
 test('launcher macOS usa open -g -a Chrome para reduzir troca de foco', async () => {
   const calls = [];
+  const syncCalls = [];
   const result = await launchGeminiBrowser({
     platform: 'darwin',
     profileDirectory: 'Default',
     env: {},
     exists: (candidate) => candidate === '/Applications/Google Chrome.app',
+    spawnSyncFn: (command, args) => {
+      syncCalls.push({ command, args });
+      return { status: 0, stdout: '', stderr: '' };
+    },
     spawnFn: (command, args, options) => {
       calls.push({ command, args, options });
       return { unref() {} };
@@ -290,12 +295,46 @@ test('launcher macOS usa open -g -a Chrome para reduzir troca de foco', async ()
   ]);
 });
 
+test('launcher macOS recarrega aba My Activity existente em vez de abrir duplicata', async () => {
+  const calls = [];
+  const syncCalls = [];
+  const result = await launchGeminiBrowser({
+    platform: 'darwin',
+    targetUrl: 'https://myactivity.google.com/product/gemini',
+    env: {},
+    exists: (candidate) => candidate === '/Applications/Google Chrome.app',
+    spawnSyncFn: (command, args, options) => {
+      syncCalls.push({ command, args, options });
+      return {
+        status: 0,
+        stdout: 'https://myactivity.google.com/product/gemini\n',
+        stderr: '',
+      };
+    },
+    spawnFn: (command, args, options) => {
+      calls.push({ command, args, options });
+      return { unref() {} };
+    },
+  });
+
+  assert.equal(result.reusedExistingTab, true);
+  assert.equal(result.openedNewTab, false);
+  assert.equal(result.targetUrl, 'https://myactivity.google.com/product/gemini');
+  assert.equal(calls.length, 0);
+  assert.equal(syncCalls[0].command, 'osascript');
+  assert.equal(syncCalls[0].options.timeout, 5000);
+  assert.match(syncCalls[0].args.join('\n'), /set URL of t to currentUrl/);
+  assert.doesNotMatch(syncCalls[0].args.join('\n'), /set active tab index/);
+  assert.doesNotMatch(syncCalls[0].args.join('\n'), /set index of w to 1/);
+});
+
 test('launcher macOS não envia profile arg quando perfil não foi configurado', async () => {
   const calls = [];
   const result = await launchGeminiBrowser({
     platform: 'darwin',
     env: {},
     exists: (candidate) => candidate === '/Applications/Google Chrome.app',
+    spawnSyncFn: () => ({ status: 0, stdout: '', stderr: '' }),
     spawnFn: (command, args, options) => {
       calls.push({ command, args, options });
       return { unref() {} };

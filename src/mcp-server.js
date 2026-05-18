@@ -176,6 +176,7 @@ const BRIDGE_ASSET_HOST_BACKOFF_MAX_MS = Math.max(
 );
 const GEMINI_BRIDGE_PAGE_ORIGIN = 'https://gemini.google.com';
 const ACTIVITY_BRIDGE_PAGE_ORIGIN = 'https://myactivity.google.com';
+const ACTIVITY_GEMINI_URL = 'https://myactivity.google.com/product/gemini';
 const ALLOWED_BRIDGE_PAGE_ORIGIN = 'https://gemini.google.com';
 const CHROMIUM_EXTENSION_ID_RE = /^[a-p]{32}$/;
 const RECENT_CHATS_CACHE_MAX_AGE_MS = Number(
@@ -2802,13 +2803,38 @@ const requireNotebookClient = (selector = {}) => {
 let lastBrowserLaunchAt = 0;
 let lastBrowserLaunchResult = null;
 
-const launchChromeForGemini = async ({ profileDirectory } = {}) => {
+const launchChromeForGemini = async ({ profileDirectory, targetUrl } = {}) => {
   const now = Date.now();
+  const launchMatchesTarget = (launch = {}) => {
+    if (!targetUrl) return true;
+    return launch.targetUrl === targetUrl;
+  };
+  const reuseProbe = await launchGeminiBrowser({
+    profileDirectory,
+    targetUrl,
+    reuseExistingOnly: true,
+  });
+  if (reuseProbe?.reusedExistingTab) {
+    lastBrowserLaunchAt = now;
+    lastBrowserLaunchResult = reuseProbe;
+    try {
+      writeBrowserLaunchState({
+        source: 'mcp',
+        lastAttemptAt: now,
+        profileDirectory: profileDirectory || null,
+        ...reuseProbe,
+      });
+    } catch (err) {
+      log('[browser-launch]', 'failed to write shared launch state', err?.message || String(err));
+    }
+    return reuseProbe;
+  }
+
   const sharedRecentLaunch = describeRecentBrowserLaunch(readBrowserLaunchState(), {
     now,
     cooldownMs: BROWSER_LAUNCH_COOLDOWN_MS,
   });
-  if (sharedRecentLaunch) {
+  if (sharedRecentLaunch && launchMatchesTarget(sharedRecentLaunch.previousLaunch)) {
     return {
       attempted: false,
       supported: true,
@@ -2821,7 +2847,8 @@ const launchChromeForGemini = async ({ profileDirectory } = {}) => {
   if (
     lastBrowserLaunchResult &&
     BROWSER_LAUNCH_COOLDOWN_MS > 0 &&
-    now - lastBrowserLaunchAt < BROWSER_LAUNCH_COOLDOWN_MS
+    now - lastBrowserLaunchAt < BROWSER_LAUNCH_COOLDOWN_MS &&
+    launchMatchesTarget(lastBrowserLaunchResult)
   ) {
     return {
       ...lastBrowserLaunchResult,
@@ -2833,7 +2860,7 @@ const launchChromeForGemini = async ({ profileDirectory } = {}) => {
     };
   }
 
-  const result = await launchGeminiBrowser({ profileDirectory });
+  const result = await launchGeminiBrowser({ profileDirectory, targetUrl });
   lastBrowserLaunchAt = now;
   lastBrowserLaunchResult = result;
   try {
@@ -3686,6 +3713,31 @@ const getActivityClients = () =>
         b.lastSeenAt - a.lastSeenAt,
     );
 
+const activityClientCommandReady = (client) =>
+  !!client &&
+  clientMatchesExpectedBrowserExtension(client) &&
+  ((!!client.eventStream?.res && !client.eventStream.res.destroyed) ||
+    !!client.pendingPoll ||
+    client.commandPoll?.polling === true);
+
+const waitForActivityClient = async (selector = {}, timeoutMs = BROWSER_STATUS_WAKE_WAIT_MS) => {
+  const startedAt = Date.now();
+  const waitLimitMs = normalizeWaitMs(timeoutMs, BROWSER_STATUS_WAKE_WAIT_MS, 120_000);
+  while (Date.now() - startedAt <= waitLimitMs) {
+    cleanupStaleClients();
+    const activityClients = getActivityClients();
+    const candidates = selector.clientId
+      ? activityClients.filter((client) => client.clientId === selector.clientId)
+      : activityClients;
+    const ready = candidates.find(activityClientCommandReady);
+    if (ready) return ready;
+    const matching = candidates.find(clientMatchesExpectedBrowserExtension);
+    if (matching) return matching;
+    await sleep(CHROME_GUARD_CONFIG.pollIntervalMs || 500);
+  }
+  return null;
+};
+
 const activityClientMissingError = () => {
   const error = new Error(
     'Nenhuma aba do My Activity conectada à extensão. Abra https://myactivity.google.com/product/gemini e, se a extensão foi atualizada agora, recarregue manualmente o card da extensão no navegador.',
@@ -3737,8 +3789,40 @@ const requireActivityClient = (selector = {}) => {
   throw activityClientMissingError();
 };
 
+const ensureActivityClientForScan = async (args = {}) => {
+  const selector = { clientId: args.activityClientId || args.clientId };
+  try {
+    const client = requireActivityClient(selector);
+    return {
+      client,
+      browserWake: {
+        attempted: false,
+        reason: 'activity-client-already-connected',
+      },
+    };
+  } catch (err) {
+    if (err?.code !== 'activity_client_missing' || args.openIfMissing === false) {
+      throw err;
+    }
+  }
+
+  const launchResult = await launchChromeForGemini({
+    profileDirectory: CHROME_GUARD_CONFIG.profileDirectory,
+    targetUrl: ACTIVITY_GEMINI_URL,
+  });
+  const client = await waitForActivityClient(selector, args.waitMs);
+  if (!client) throw activityClientMissingError();
+  return {
+    client,
+    browserWake: {
+      ...launchResult,
+      connectedAfterWake: getActivityClients().length,
+    },
+  };
+};
+
 const scanActivityWithClient = async (args = {}) => {
-  const client = requireActivityClient({ clientId: args.activityClientId || args.clientId });
+  const { client, browserWake } = await ensureActivityClientForScan(args);
   let claim = null;
   let claimVisibleAtMs = null;
   let tabClaimWarning = null;
@@ -3788,6 +3872,7 @@ const scanActivityWithClient = async (args = {}) => {
   return {
     ...result,
     client: summarizeClient(scanClient),
+    browserWake,
     tabClaim: claim,
     tabClaimWarning,
     tabClaimRelease,

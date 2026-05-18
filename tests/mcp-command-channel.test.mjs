@@ -105,6 +105,18 @@ test('MCP nao escolhe cliente My Activity de build antigo apos reload da extensa
   assert.doesNotMatch(requireActivityClientBlock, /if \(activityClients\[0\]\) return activityClients\[0\]/);
 });
 
+test('MCP acorda My Activity reaproveitando aba existente antes de abrir outra', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+
+  assert.match(source, /ACTIVITY_GEMINI_URL = 'https:\/\/myactivity\.google\.com\/product\/gemini'/);
+  assert.match(source, /const waitForActivityClient = async/);
+  assert.match(source, /targetUrl:\s*ACTIVITY_GEMINI_URL/);
+  assert.match(source, /openIfMissing !== false/);
+  assert.match(source, /reason:\s*'activity-client-already-connected'/);
+  assert.match(source, /const launchMatchesTarget = \(launch = \{\}\) => \{[\s\S]*?return launch\.targetUrl === targetUrl;/);
+  assert.doesNotMatch(source, /return !launch\.targetUrl \|\| launch\.targetUrl === targetUrl/);
+});
+
 test('browser_status expõe saúde da bridge MCP/Chrome', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
 

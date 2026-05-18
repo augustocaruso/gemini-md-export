@@ -26,6 +26,7 @@ Opções:
   --bridge-url <url>       bridge local (default: ${DEFAULT_BRIDGE_URL})
   --report <json>          caminho do relatório/checkpoint
   --limit <n>              limita quantidade de chats processados
+  --no-open-if-missing     não abre/recarrega My Activity automaticamente
 `;
 
 const expandUserPath = (value) => {
@@ -43,6 +44,7 @@ const parseArgs = (argv) => {
     report: '',
     bridgeUrl: DEFAULT_BRIDGE_URL,
     limit: 0,
+    openIfMissing: true,
   };
   const positionals = [];
   for (let index = 0; index < argv.length; index += 1) {
@@ -57,6 +59,8 @@ const parseArgs = (argv) => {
     else if (arg === '--report') args.report = value();
     else if (arg === '--bridge-url') args.bridgeUrl = value().replace(/\/+$/, '');
     else if (arg === '--limit') args.limit = Math.max(0, Number(value()) || 0);
+    else if (arg === '--open-if-missing') args.openIfMissing = true;
+    else if (arg === '--no-open-if-missing') args.openIfMissing = false;
     else if (arg === '--help' || arg === '-h') {
       process.stdout.write(usage());
       process.exit(0);
@@ -305,7 +309,7 @@ const loadPreviousCheckpoint = (reportPath) => {
   }
 };
 
-const requestActivityScan = async ({ bridgeUrl, candidates, resume }) => {
+const requestActivityScan = async ({ bridgeUrl, candidates, resume, openIfMissing = true }) => {
   const response = await fetch(`${bridgeUrl}/agent/activity-scan`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -317,6 +321,7 @@ const requestActivityScan = async ({ bridgeUrl, candidates, resume }) => {
         assistantSamples: candidate.scoring.assistantSamples,
       })),
       resume: resume || null,
+      openIfMissing,
     }),
   });
   const text = await response.text();
@@ -375,6 +380,7 @@ const run = async () => {
         bridgeUrl: args.bridgeUrl,
         candidates: selected,
         resume: activityCheckpoint,
+        openIfMissing: args.openIfMissing,
       });
       matches.push(...(activity.matches || []));
       activityCheckpoint = activity.checkpoint || activityCheckpoint || null;

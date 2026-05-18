@@ -694,6 +694,7 @@ const metadataHelp = () =>
     '  --takeout <file.json>   Usa arquivo offline do Google Takeout/My Activity.',
     '  --report <file.json>    Grava relatorio/checkpoint.',
     '  --limit <n>             Limita quantidade de chats processados.',
+    '  --no-open-if-missing    Nao abre/recarrega My Activity automaticamente.',
     '',
     ...commonOptionHelp(),
   ].join('\n');
@@ -4000,6 +4001,8 @@ const runMetadata = async (parsed, streams = {}) => {
   if (parsed.flags.takeout) args.push('--takeout', parsed.flags.takeout);
   if (parsed.flags.bridgeUrl) args.push('--bridge-url', parsed.flags.bridgeUrl);
   if (parsed.flags.report) args.push('--report', parsed.flags.report);
+  if (parsed.flags.openIfMissing === false) args.push('--no-open-if-missing');
+  else if (parsed.flags.openIfMissing === true) args.push('--open-if-missing');
   if (Number.isFinite(parsed.flags.limit) && parsed.flags.limit > 0) {
     args.push('--limit', String(parsed.flags.limit));
   }
