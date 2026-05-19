@@ -301,7 +301,9 @@ test('CLI --help na posicao inicial sai com sucesso', async () => {
   assert.match(stdout.text(), /export selected/);
   assert.match(stdout.text(), /export reexport/);
   assert.match(stdout.text(), /export notebook/);
-  assert.match(stdout.text(), /repair-vault/);
+  assert.match(stdout.text(), /fix-vault/);
+  assert.doesNotMatch(stdout.text(), /repair-vault/);
+  assert.doesNotMatch(stdout.text(), /metadata backfill/);
   assert.equal(stderr.text(), '');
 });
 
@@ -315,19 +317,21 @@ test('CLI --version imprime versao sem tocar na bridge', async () => {
   assert.equal(stderr.text(), '');
 });
 
-test('CLI metadata backfill expõe ajuda e delega ao runner local', async () => {
+test('CLI fix-vault expõe ajuda pública única e executa backfill com Takeout', async () => {
   const helpStdout = captureStream();
-  const help = await main(['help', 'metadata'], {
+  const help = await main(['help', 'fix-vault'], {
     stdout: helpStdout,
     stderr: captureStream(),
   });
   assert.equal(help.exitCode, 0);
-  assert.match(helpStdout.text(), /metadata backfill/);
+  assert.match(helpStdout.text(), /fix-vault/);
   assert.match(helpStdout.text(), /--use-my-activity/);
   assert.match(helpStdout.text(), /--takeout/);
+  assert.doesNotMatch(helpStdout.text(), /repair-vault/);
 
-  const vault = mkdtempSync(resolve(tmpdir(), 'gme-cli-metadata-'));
-  const reportPath = resolve(vault, 'report.json');
+  const vault = mkdtempSync(resolve(tmpdir(), 'gme-cli-fix-vault-'));
+  const reportPath = resolve(vault, 'fix-report.json');
+  const takeoutPath = resolve(vault, 'Minhaatividade.html');
   const chatPath = resolve(vault, 'b8e7c075effe9457.md');
   writeFileSync(
     chatPath,
@@ -342,31 +346,56 @@ test('CLI metadata backfill expõe ajuda e delega ao runner local', async () => 
       '',
       '## 🧑 Usuário',
       '',
-      'Pergunta',
+      'Explique o mecanismo dos ISRS com detalhes clinicos',
       '',
       '---',
       '',
       '## 🤖 Gemini',
       '',
-      'Resposta',
+      'Os ISRS bloqueiam o transportador de serotonina e aumentam serotonina sinaptica.',
       '',
+    ].join('\n'),
+    'utf-8',
+  );
+  writeFileSync(
+    takeoutPath,
+    [
+      '<html><body>',
+      '<div class="outer-cell">',
+      '<div>Gemini Apps</div>',
+      '<div>Explique o mecanismo dos ISRS com detalhes clinicos</div>',
+      '<div>Os ISRS bloqueiam o transportador de serotonina e aumentam serotonina sinaptica.</div>',
+      '<div>10 de mai. de 2026, 06:46:09 BRT</div>',
+      '</div>',
+      '</body></html>',
     ].join('\n'),
     'utf-8',
   );
 
   try {
     const stdout = captureStream();
-    const run = await main(['metadata', 'backfill', vault, '--report', reportPath], {
+    const run = await main(
+      ['fix-vault', vault, '--takeout', takeoutPath, '--report', reportPath, '--no-open-if-missing'],
+      {
       stdout,
       stderr: captureStream(),
-    });
+      },
+    );
     assert.equal(run.exitCode, 0);
-    assert.match(stdout.text(), /Backfill metadata/);
+    assert.match(stdout.text(), /Fix vault/);
+    assert.match(stdout.text(), /My Activity/);
+    assert.doesNotMatch(stdout.text(), /preliminaryReportPath/);
     const updated = readFileSync(chatPath, 'utf-8');
     assert.match(updated, /^---\ntype: gemini_chat\n/);
+    assert.match(updated, /\ndate_created: 2026-05-10T09:46:09Z\n/);
+    assert.match(updated, /\ndate_last_message: 2026-05-10T09:46:09Z\n/);
     assert.match(updated, /\ndate_exported: 2026-05-17T18:55:08Z\n/);
     assert.match(updated, /\nturn_count: 1\n/);
     assert.equal(existsSync(reportPath), true);
+    const report = JSON.parse(readFileSync(reportPath, 'utf-8'));
+    assert.equal(report.schema, 'gemini-md-export.fix-vault-report.v1');
+    assert.equal(report.summary.metadata.matched, 1);
+    assert.equal(report.summary.repair.takeoutEvidence.matched, 1);
   } finally {
     rmSync(vault, { recursive: true, force: true });
   }

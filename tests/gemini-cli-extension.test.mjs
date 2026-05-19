@@ -50,6 +50,7 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
     'gemini-tabs-and-browser',
   ];
   const syncCommandPath = resolve(extensionDir, 'commands', 'sync.toml');
+  const fixVaultCommandPath = resolve(extensionDir, 'commands', 'exporter', 'fix-vault.toml');
   const repairCommandPath = resolve(extensionDir, 'commands', 'exporter', 'repair-vault.toml');
   const metadataBackfillCommandPath = resolve(
     extensionDir,
@@ -115,8 +116,9 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   }
   assert.equal(existsSync(repairAgentPath), true);
   assert.equal(existsSync(syncCommandPath), true);
-  assert.equal(existsSync(repairCommandPath), true);
-  assert.equal(existsSync(metadataBackfillCommandPath), true);
+  assert.equal(existsSync(fixVaultCommandPath), true);
+  assert.equal(existsSync(repairCommandPath), false);
+  assert.equal(existsSync(metadataBackfillCommandPath), false);
   assert.equal(existsSync(diagnosePageCommandPath), true);
   assert.equal(existsSync(captureArtifactsCommandPath), true);
   assert.equal(existsSync(telemetryCommandPath), true);
@@ -211,13 +213,13 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.doesNotMatch(syncCommand, /acompanhe com `gemini_job`/);
   assert.match(syncCommand, /nao liste todo o historico/i);
 
-  const repairCommand = readFileSync(repairCommandPath, 'utf-8');
-  assert.match(repairCommand, /gemini-vault-repair/);
-  assert.match(repairCommand, /vault-repair\.mjs/);
-  assert.match(repairCommand, /vault-repair-audit\.mjs/);
-  assert.match(repairCommand, /relatorio preliminar/);
-  assert.match(repairCommand, /nao deve chamar outro subagent/);
-  assert.match(repairCommand, /uniao\s+deduplicada/);
+  const fixVaultCommand = readFileSync(fixVaultCommandPath, 'utf-8');
+  assert.match(fixVaultCommand, /gemini-md-export\.mjs fix-vault/);
+  assert.match(fixVaultCommand, /--takeout/);
+  assert.match(fixVaultCommand, /My Activity/);
+  assert.match(fixVaultCommand, /vault-repair\.mjs/);
+  assert.match(fixVaultCommand, /chat-metadata-backfill\.mjs/);
+  assert.match(fixVaultCommand, /nao exponha `repair-vault`/i);
 
   const captureArtifactsCommand = readFileSync(captureArtifactsCommandPath, 'utf-8');
   assert.match(captureArtifactsCommand, /--save-html/);
@@ -341,6 +343,78 @@ test('auditor coleta todos os links Gemini de origem em nota wiki consolidada', 
     ]);
     assert.deepEqual(note.wikiFooterGeminiSourceLinks, note.geminiSourceLinks);
     assert.deepEqual(note.wikiFooterMissingSourceLinks, []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('repair runner aceita Takeout como evidencia sanitizada de integridade', () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'gemini-md-export-repair-takeout-'));
+  const chatId = 'b8e7c075effe9457';
+  const notePath = resolve(root, `${chatId}.md`);
+  const takeoutPath = resolve(root, 'Minhaatividade.html');
+  const reportDir = resolve(root, 'repair-report');
+
+  try {
+    writeFileSync(
+      notePath,
+      [
+        '---',
+        `chat_id: ${chatId}`,
+        'title: "ISRS"',
+        `url: https://gemini.google.com/app/${chatId}`,
+        'source: gemini-web',
+        'tags: [gemini-export]',
+        '---',
+        '',
+        '## 🧑 Usuário',
+        '',
+        'Explique o mecanismo dos ISRS com detalhes clinicos',
+        '',
+        '---',
+        '',
+        '## 🤖 Gemini',
+        '',
+        'Os ISRS bloqueiam o transportador de serotonina e aumentam serotonina sinaptica.',
+        '',
+      ].join('\n'),
+      'utf-8',
+    );
+    writeFileSync(
+      takeoutPath,
+      [
+        '<html><body>',
+        '<div class="outer-cell">',
+        '<div>Gemini Apps</div>',
+        '<div>Explique o mecanismo dos ISRS com detalhes clinicos</div>',
+        '<div>Os ISRS bloqueiam o transportador de serotonina e aumentam serotonina sinaptica.</div>',
+        '<div>10 de mai. de 2026, 06:46:09 BRT</div>',
+        '</div>',
+        '</body></html>',
+      ].join('\n'),
+      'utf-8',
+    );
+
+    const scriptPath = resolve(ROOT, 'gemini-cli-extension', 'scripts', 'vault-repair.mjs');
+    const output = execFileSync(
+      process.execPath,
+      [scriptPath, '--dry-run', '--takeout', takeoutPath, '--report-dir', reportDir, root],
+      { encoding: 'utf-8' },
+    );
+    const summary = JSON.parse(output);
+    const preliminary = JSON.parse(readFileSync(summary.preliminaryReportPath, 'utf-8'));
+    const item = preliminary.itemsNeedingDirectVerificationFirst.find(
+      (candidate) => candidate.chatId === chatId,
+    );
+    const serialized = JSON.stringify(preliminary);
+
+    assert.equal(preliminary.takeoutEvidence.summary.itemsIndexed, 1);
+    assert.equal(preliminary.takeoutEvidence.summary.matched, 1);
+    assert.equal(item.takeoutEvidence.status, 'matched');
+    assert.equal(item.takeoutEvidence.dateCreated, '2026-05-10T09:46:09Z');
+    assert.equal(item.takeoutEvidence.dateLastMessage, '2026-05-10T09:46:09Z');
+    assert.doesNotMatch(serialized, /Explique o mecanismo dos ISRS/);
+    assert.doesNotMatch(serialized, /bloqueiam o transportador/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

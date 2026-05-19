@@ -539,13 +539,15 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   só aparecem com `GEMINI_MCP_DEBUG=true` ou `GEMINI_MCP_LOG_LEVEL=info`; erros
   acionáveis vão na resposta da tool/status e relatórios de job, não em spam de
   terminal.
-  A extensão Gemini CLI também publica o subagent
-  `agents/gemini-vault-repair.md` e o comando
-  `commands/exporter/repair-vault.toml`. Use esse subagent quando o usuário
-  quiser reparar notas já salvas com conteúdo possivelmente trocado: ele deve
-  preferir `scripts/vault-repair.mjs`, que roda o auditor, reexporta cada raw
-  export pelo `chatId`, compara apenas o corpo Markdown, preserva o YAML
-  original byte-for-byte e só troca o corpo quando houver contaminação real.
+  A extensão Gemini CLI publica o comando público
+  `commands/exporter/fix-vault.toml`. `repair-vault` não deve existir como
+  slash command público; o subagent `agents/gemini-vault-repair.md` é subfluxo
+  interno do fix-vault. Use esse subagent quando o usuário quiser reparar notas
+  já salvas com conteúdo possivelmente trocado: ele deve preferir
+  `scripts/vault-repair.mjs`, que roda o auditor, aceita `--takeout` como
+  evidência sanitizada, reexporta cada raw export pelo `chatId`, compara apenas
+  o corpo Markdown, preserva o YAML original byte-for-byte e só troca o corpo
+  quando houver contaminação real.
   Diferença só em YAML/frontmatter não é divergência de conteúdo, porque esses
   metadados podem ter sido enriquecidos manualmente no vault. O runner cria
   backup antes de sobrescrever e nunca sobrescreve nota com sinais de

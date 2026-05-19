@@ -878,7 +878,7 @@ disponível sem passar por MCP.
   - `job cancel`;
   - `export-dir get/set`;
   - `cleanup stale-processes`;
-  - `repair-vault`.
+  - `fix-vault`.
 - Saída humana por padrão, com TUI/progresso bonito quando o terminal for
   interativo:
   - painel de status do job;
@@ -971,7 +971,7 @@ fazer o que faz melhor:
   - `export reexport`;
   - `export notebook`;
   - `doctor`;
-  - `repair-vault`.
+  - `fix-vault`.
 - `gemini-md-export --help` e `<comando> --help` viram a fonte da verdade para
   sintaxe, flags, formatos de saída e exit codes.
 - Bridge local continua sendo a integração com Chrome/Gemini Web: HTTP/SSE,

@@ -4,7 +4,11 @@
 
 **Goal:** Normalize raw Gemini chat Markdown files to a canonical YAML schema and backfill `date_created` / `date_last_message` from Google Gemini Activity.
 
-**Architecture:** Keep metadata normalization separate from contaminated-content repair. New exports emit the canonical YAML directly. A dedicated backfill runner scans existing raw chat files, normalizes their YAML, first matches them against the authenticated My Activity web UI through the MV3 extension/bridge, and later accepts Takeout records when the export email arrives.
+**Architecture:** New exports emit the canonical YAML directly. For the back
+catalog, the public entrypoint is now `fix-vault`: it runs integrity audit,
+canonical YAML normalization, Takeout matching, and My Activity matching in one
+human-facing flow. The lower-level metadata and repair runners remain internal
+implementation pieces.
 
 **Tech Stack:** Node.js ESM, built-in `node:test`, existing MV3 Chrome extension build, local MCP bridge, Markdown frontmatter parsing with the repo's lightweight parser style.
 
@@ -57,10 +61,10 @@ Closed implementation direction:
 The default live path is resumable and exhaustive:
 
 ```bash
-gemini-md-export metadata backfill <vaultDir> --use-my-activity --report <report.json>
+gemini-md-export fix-vault <vaultDir> --report <report.json>
 ```
 
-The runner builds in-memory candidates with `{ chatId, firstPrompt, lastPrompt, assistantSamples }`, sends them to the Activity client, and records checkpoint fields such as `lastSeenActivityToken`, `loadedCardCount`, and `resolvedChatIds`. Files without confident matches are still normalized and reported as `unresolved`; date fields are omitted.
+The internal metadata runner builds in-memory candidates with `{ chatId, firstPrompt, lastPrompt, assistantSamples }`, sends them to the Activity client, and records checkpoint fields such as `lastSeenActivityToken`, `loadedCardCount`, and `resolvedChatIds`. Files without confident matches are still normalized and reported as `unresolved`; date fields are omitted.
 
 `date_last_message` means the timestamp of the latest Gemini Activity item that confirms the last known Gemini response. It is not a promise that the timestamp is the exact end of model generation.
 
@@ -69,7 +73,7 @@ The runner builds in-memory candidates with `{ chatId, firstPrompt, lastPrompt, 
 When the Google export arrives, the same runner accepts:
 
 ```bash
-gemini-md-export metadata backfill <vaultDir> --takeout <Minhaatividade.html|MyActivity.json> --report <report.json>
+gemini-md-export fix-vault <vaultDir> --takeout <Minhaatividade.html|MyActivity.json> --report <report.json>
 ```
 
 The observed Google Takeout shape for Gemini Apps is `Minha atividade/Gemini Apps/Minhaatividade.html`: one HTML card per Gemini Activity item, with prompt text, model response text, attachments, and a local timestamp such as `17 de mai. de 2026, 13:58:18 BRT`, but no `gemini.google.com/app/<chatId>` URL. That means the offline path must infer `chat_id` by scoring the HTML card text against the already-exported Markdown candidates `{ chatId, firstPrompt, lastPrompt, assistantSamples }`.
@@ -424,21 +428,24 @@ Expected: pass.
 
 Add tests that:
 
-- `gemini-md-export help metadata` lists `metadata backfill`;
-- `metadata backfill <vault> --use-my-activity` spawns `chat-metadata-backfill.mjs`;
-- `metadata backfill <vault> --takeout <file>` remains supported once Takeout arrives;
-- unknown metadata subcommands return a usage error.
+- `gemini-md-export --help` lists `fix-vault`;
+- public help does not list `repair-vault` or `metadata backfill`;
+- `gemini-md-export help fix-vault` explains Takeout and My Activity;
+- `fix-vault <vault> --takeout <file>` calls the internal repair audit and
+  metadata backfill runners, writes a combined report, and guides the user if
+  My Activity is unavailable.
 
 - [ ] **Step 2: Wire the command**
 
 Add command shape:
 
 ```bash
-gemini-md-export metadata backfill <vault-or-folder> --use-my-activity [--apply]
-gemini-md-export metadata backfill <vault-or-folder> --takeout <Minhaatividade.html|MyActivity.json> [--apply]
+gemini-md-export fix-vault <vault-or-folder> --report <report.json>
+gemini-md-export fix-vault <vault-or-folder> --takeout <Minhaatividade.html|MyActivity.json> --report <report.json>
 ```
 
-Forward unrecognized backfill-specific flags to `chat-metadata-backfill.mjs` the same way `repair-vault` delegates to its runner.
+The public command calls `vault-repair.mjs` and `chat-metadata-backfill.mjs`
+internally. `repair-vault` is no longer a public slash command.
 
 - [ ] **Step 3: Verify**
 
@@ -455,7 +462,7 @@ Expected: pass.
 **Files:**
 - Modify: `README.md`
 - Modify: `gemini-cli-extension/GEMINI.md`
-- Create: `gemini-cli-extension/commands/exporter/backfill-metadata.toml`
+- Create: `gemini-cli-extension/commands/exporter/fix-vault.toml`
 - Test: `tests/gemini-cli-extension.test.mjs`
 
 - [ ] **Step 1: Update README**
@@ -465,25 +472,26 @@ Document:
 - canonical YAML schema;
 - `turn_count` semantics as number of Gemini responses;
 - UTC `Z` date format;
-- My Activity web scraping command as the first implementation path;
-- Takeout command as the later stable/offline path once the email arrives;
-- dry-run/apply behavior and backup location.
+- `fix-vault` as the single public back catalog command;
+- Takeout as offline evidence first, then My Activity for remaining dates;
+- privacy rule: reports store hashes, sizes, scores, counts, dates and status.
 
 - [ ] **Step 2: Add Gemini CLI command**
 
-Create `/exporter:backfill-metadata` command that tells the agent to call:
+Create `/exporter:fix-vault` command that tells the agent to call:
 
 ```bash
-node "${extensionPath}/bin/gemini-md-export.mjs" metadata backfill "<vaultDir>" --use-my-activity
+node "${extensionPath}/bin/gemini-md-export.mjs" fix-vault "<vaultDir>" --report "<report.json>"
 ```
 
 or:
 
 ```bash
-node "${extensionPath}/bin/gemini-md-export.mjs" metadata backfill "<vaultDir>" --takeout "<MyActivity.json>"
+node "${extensionPath}/bin/gemini-md-export.mjs" fix-vault "<vaultDir>" --takeout "<Minhaatividade.html|MyActivity.json>" --report "<report.json>"
 ```
 
-The command must say explicitly that `--apply` is required to mutate files.
+The command must say explicitly that `repair-vault` is not public; repair is an
+internal subflow of `fix-vault`.
 
 - [ ] **Step 3: Verify bundle tests**
 

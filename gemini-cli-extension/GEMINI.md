@@ -68,9 +68,8 @@ Use bundled Agent Skills for detailed workflows: `gemini-chat-inventory`,
   vault path from context.
 - `/exporter:diagnose-page`: diagnose artifact iframes.
 - `/exporter:capture-artifacts`: capture artifact HTML files plus manifest.
-- `/exporter:repair-vault`: audit and repair contaminated raw exports/wiki
-  cases.
-- `/exporter:metadata-backfill`: normalize raw chat YAML and backfill dates.
+- `/exporter:fix-vault`: fix the back catalog in one flow: audit integrity,
+  normalize raw chat YAML and backfill dates via Takeout/My Activity.
 - `/exporter:telemetry`: telemetry status, preview, retry and opt-out.
 
 ## CLI/TUI Export UI
@@ -88,11 +87,11 @@ bridges unless `--no-exit-when-idle` is set.
   `gemini-md-export --help` for flags.
 - CLI subcommands include `browser status`, `diagnose page`, `tabs`,
   `chats count`, `chats list`, `export ...`, `job ...`, `export-dir`, `cleanup`,
-  `repair-vault`, `metadata backfill`, and
-  `telemetry enable/status/preview/send/disable`.
-- Metadata backfill: `gemini-md-export metadata backfill <vaultDir> --use-my-activity --report <report.json>`;
-  `--takeout <MyActivity.json>` when available. New My Activity permission may
-  require extension-card reload. Reports: hashes, sizes, scores, counts, status.
+  `fix-vault`, and `telemetry enable/status/preview/send/disable`.
+- Fix vault: `gemini-md-export fix-vault <vaultDir> --takeout <Minhaatividade.html|MyActivity.json> --report <report.json>`.
+  It uses Takeout first, then My Activity for remaining dates. New My Activity
+  permission may require extension-card reload. Reports: hashes, sizes, scores,
+  counts, dates and status only.
 - Automation: `--json` for final JSON only, `--jsonl` for events. Avoid
   custom-command shell injection for long sync jobs.
 

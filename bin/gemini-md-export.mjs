@@ -5,7 +5,7 @@ import { spawn } from 'node:child_process';
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { homedir } from 'node:os';
-import { dirname, resolve } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import {
@@ -196,8 +196,7 @@ const usage = () =>
     '  job trace <jobId>     Resume o trace tecnico sanitizado de um job.',
     '  export-dir get|set    Consulta ou altera diretorio de export.',
     '  cleanup stale-processes Diagnostica/limpa processos antigos seguros.',
-    '  repair-vault <path>   Executa reparo local de vault.',
-    '  metadata backfill <vaultDir>  Normaliza YAML e busca datas dos chats.',
+    '  fix-vault <path>      Corrige o back catalog: auditoria, YAML e datas.',
     '  telemetry enable|status|preview|send|disable  Telemetria, status e opt-out.',
     '  help [comando]        Mostra ajuda global ou de um comando.',
     '',
@@ -213,7 +212,7 @@ const usage = () =>
     '  gemini-md-export job status job-123 --json',
     '  gemini-md-export job trace job-123 --tui --result-json',
     '  gemini-md-export export selected --selection-file ~/.gemini-md-export/selections/latest.json --expected-count 10 --tui',
-    '  gemini-md-export metadata backfill "/path/to/vault" --use-my-activity --report report.json',
+    '  gemini-md-export fix-vault "/path/to/vault" --takeout "/path/to/Minhaatividade.html" --report report.json',
     '  gemini-md-export telemetry status --tui --result-json',
     '',
     'Dentro do Gemini CLI:',
@@ -678,20 +677,42 @@ const repairVaultHelp = () =>
     ...commonOptionHelp(),
   ].join('\n');
 
+const fixVaultHelp = () =>
+  [
+    'gemini-md-export fix-vault',
+    '',
+    'Uso:',
+    '  gemini-md-export fix-vault <vaultDir> [--takeout <Minhaatividade.html|MyActivity.json>] [--report <report.json>]',
+    '',
+    'Corrige o back catalog em um unico fluxo: audita integridade, normaliza o',
+    'YAML canonico dos chats e preenche datas com Takeout primeiro e My Activity',
+    'para o que sobrar.',
+    '',
+    'Opcoes:',
+    '  --takeout <file>       Usa arquivo offline do Google Takeout/My Activity.',
+    '  --use-my-activity      Usa My Activity pela extensao para datas remanescentes. Default.',
+    '  --no-my-activity       Nao tenta My Activity; usa apenas Takeout e normalizacao local.',
+    '  --report <file.json>   Grava relatorio combinado do fix-vault.',
+    '  --limit <n>            Limita quantidade de chats no backfill de metadados.',
+    '  --no-open-if-missing   Nao abre/recarrega My Activity automaticamente.',
+    '',
+    ...commonOptionHelp(),
+  ].join('\n');
+
 const metadataHelp = () =>
   [
     'gemini-md-export metadata',
     '',
     'Uso:',
     '  gemini-md-export metadata backfill <vaultDir> --use-my-activity --report <report.json>',
-    '  gemini-md-export metadata backfill <vaultDir> --takeout <MyActivity.json> --report <report.json>',
+    '  gemini-md-export metadata backfill <vaultDir> --takeout <Minhaatividade.html|MyActivity.json> --report <report.json>',
     '',
     'Normaliza o YAML dos chats Gemini e tenta preencher date_created/date_last_message.',
     'O relatorio guarda checkpoint e evidencias sanitizadas: hashes, tamanhos, scores e status.',
     '',
     'Opcoes:',
     '  --use-my-activity       Usa a aba My Activity conectada pela extensao.',
-    '  --takeout <file.json>   Usa arquivo offline do Google Takeout/My Activity.',
+    '  --takeout <file>        Usa arquivo offline do Google Takeout/My Activity.',
     '  --report <file.json>    Grava relatorio/checkpoint.',
     '  --limit <n>             Limita quantidade de chats processados.',
     '  --no-open-if-missing    Nao abre/recarrega My Activity automaticamente.',
@@ -742,8 +763,7 @@ const helpForParsed = (parsed) => {
   if (command === 'job') return jobHelp();
   if (command === 'export-dir') return exportDirHelp();
   if (command === 'cleanup') return cleanupHelp();
-  if (command === 'repair-vault') return repairVaultHelp();
-  if (command === 'metadata') return metadataHelp();
+  if (command === 'fix-vault') return fixVaultHelp();
   if (command === 'telemetry') return telemetryHelp();
   return usage();
 };
@@ -810,7 +830,8 @@ const parseArgs = (argv) => {
         out.command === 'telemetry' ||
         out.command === 'job' ||
         out.command === 'chats' ||
-        out.command === 'metadata'
+        out.command === 'metadata' ||
+        out.command === 'fix-vault'
       ) {
         out.flags.limit = Number(value());
       }
@@ -895,7 +916,9 @@ const parseArgs = (argv) => {
     else if (arg === '--save-html') out.flags.saveHtml = true;
     else if (arg === '--no-save-html') out.flags.saveHtml = false;
     else if (arg === '--use-my-activity') out.flags.useMyActivity = true;
+    else if (arg === '--no-my-activity') out.flags.noMyActivity = true;
     else if (arg === '--takeout') out.flags.takeout = value();
+    else if (arg === '--skip-browser-check') out.flags.skipBrowserCheck = true;
     else if (arg === '--audit-only' || arg === '--include-notes') out.flags.extraRepairArgs.push(arg);
     else if (arg === '--report') {
       const report = value();
@@ -3973,6 +3996,8 @@ const runRepairVault = async (parsed, streams = {}) => {
   const scriptPath = repairScriptPath();
   if (!scriptPath) throw new Error('scripts/vault-repair.mjs nao encontrado no pacote.');
   const args = [scriptPath, ...parsed.flags.extraRepairArgs, vaultDir];
+  if (parsed.flags.takeout) args.splice(args.length - 1, 0, '--takeout', parsed.flags.takeout);
+  if (parsed.flags.skipBrowserCheck) args.splice(args.length - 1, 0, '--skip-browser-check');
   const stdout = streams.stdout || process.stdout;
   const stderr = streams.stderr || process.stderr;
   const child = spawn(process.execPath, args, {
@@ -3985,6 +4010,160 @@ const runRepairVault = async (parsed, streams = {}) => {
     child.on('exit', (code) => resolveExit(code ?? EXIT.JOB_FAILED));
   });
   return { exitCode, result: { ok: exitCode === 0, scriptPath, vaultDir } };
+};
+
+const reportTimestamp = () =>
+  new Date()
+    .toISOString()
+    .replace(/[-:]/g, '')
+    .replace(/\..+$/, '')
+    .replace('T', '-');
+
+const runNodeScript = async ({ scriptPath, args, streams, streamStdout = true }) => {
+  const stdout = streams.stdout || process.stdout;
+  const stderr = streams.stderr || process.stderr;
+  let stdoutText = '';
+  let stderrText = '';
+  const child = spawn(process.execPath, [scriptPath, ...args], {
+    cwd: packageRoot(),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  child.stdout.on('data', (chunk) => {
+    stdoutText += String(chunk);
+    if (streamStdout) stdout.write(chunk);
+  });
+  child.stderr.on('data', (chunk) => {
+    stderrText += String(chunk);
+    stderr.write(chunk);
+  });
+  const exitCode = await new Promise((resolveExit) => {
+    child.on('exit', (code) => resolveExit(code ?? EXIT.JOB_FAILED));
+  });
+  return { exitCode, stdoutText, stderrText };
+};
+
+const readJsonIfExists = (filePath) => {
+  if (!filePath || !existsSync(filePath)) return null;
+  try {
+    return JSON.parse(readFileSync(filePath, 'utf-8'));
+  } catch {
+    return null;
+  }
+};
+
+const parseJsonText = (text) => {
+  try {
+    return text ? JSON.parse(text) : null;
+  } catch {
+    return null;
+  }
+};
+
+const runFixVault = async (parsed, streams = {}) => {
+  const vaultDir = parsed.flags.vaultDir || parsed.positionals[0];
+  if (!vaultDir) throw usageError('Informe vaultDir para fix-vault.');
+  const resolvedVaultDir = resolve(vaultDir);
+  if (!existsSync(resolvedVaultDir)) throw new Error(`Vault nao encontrado: ${resolvedVaultDir}`);
+  const repairPath = repairScriptPath();
+  const metadataPath = metadataScriptPath();
+  if (!repairPath) throw new Error('scripts/vault-repair.mjs nao encontrado no pacote.');
+  if (!metadataPath) throw new Error('scripts/chat-metadata-backfill.mjs nao encontrado no pacote.');
+
+  const reportPath = resolve(
+    parsed.flags.report ||
+      `${resolvedVaultDir}/.gemini-md-export-fix/fix-vault-${reportTimestamp()}.json`,
+  );
+  const reportDir = dirname(reportPath);
+  const repairReportDir = resolve(reportDir, 'repair');
+  const metadataReportPath = resolve(reportDir, 'metadata-backfill.json');
+  mkdirSync(reportDir, { recursive: true });
+
+  const repairArgs = ['--dry-run', '--skip-browser-check', '--report-dir', repairReportDir];
+  if (parsed.flags.takeout) repairArgs.push('--takeout', parsed.flags.takeout);
+  repairArgs.push(resolvedVaultDir);
+
+  const metadataArgs = [resolvedVaultDir, '--report', metadataReportPath, '--bridge-url', parsed.flags.bridgeUrl];
+  if (parsed.flags.takeout) metadataArgs.push('--takeout', parsed.flags.takeout);
+  if (!parsed.flags.noMyActivity) metadataArgs.push('--use-my-activity');
+  if (parsed.flags.openIfMissing === false) metadataArgs.push('--no-open-if-missing');
+  else if (parsed.flags.openIfMissing === true) metadataArgs.push('--open-if-missing');
+  if (Number.isFinite(parsed.flags.limit) && parsed.flags.limit > 0) {
+    metadataArgs.push('--limit', String(parsed.flags.limit));
+  }
+
+  const stdout = streams.stdout || process.stdout;
+  stdout.write('Fix vault: auditando integridade do catalogo...\n');
+  const repair = await runNodeScript({
+    scriptPath: repairPath,
+    args: repairArgs,
+    streams,
+    streamStdout: false,
+  });
+  stdout.write('Fix vault: normalizando YAML e preenchendo datas...\n');
+  const metadata = repair.exitCode === 0
+    ? await runNodeScript({
+        scriptPath: metadataPath,
+        args: metadataArgs,
+        streams,
+      })
+    : { exitCode: EXIT.JOB_FAILED, stdoutText: '', stderrText: 'repair_failed' };
+
+  const repairOutput = parseJsonText(repair.stdoutText) || {};
+  const repairSummary = readJsonIfExists(repairOutput.preliminaryReportPath);
+  const metadataReport = readJsonIfExists(metadataReportPath);
+  const activityError = metadataReport?.activityError || null;
+  const warnings = [];
+  if (activityError) {
+    warnings.push({
+      code: activityError.code || 'my_activity_unavailable',
+      message: activityError.message || 'My Activity nao ficou disponivel.',
+      nextAction:
+        'Abra https://myactivity.google.com/product/gemini, confirme que a extensao foi recarregada e rode fix-vault de novo para datas remanescentes.',
+    });
+    stdout.write(
+      'Aviso: My Activity nao ficou disponivel. Abra https://myactivity.google.com/product/gemini, recarregue a extensao se necessario e rode fix-vault de novo para datas remanescentes.\n',
+    );
+  }
+
+  const combined = {
+    schema: 'gemini-md-export.fix-vault-report.v1',
+    generatedAt: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+    vaultDir: resolvedVaultDir,
+    takeout: parsed.flags.takeout ? basename(parsed.flags.takeout) : null,
+    ok: repair.exitCode === 0 && metadata.exitCode === 0,
+    steps: [
+      {
+        name: 'repair-audit',
+        status: repair.exitCode === 0 ? 'completed' : 'failed',
+        exitCode: repair.exitCode,
+        reportDir: repairReportDir,
+      },
+      {
+        name: 'metadata-backfill',
+        status: metadata.exitCode === 0 ? 'completed' : 'failed',
+        exitCode: metadata.exitCode,
+        reportPath: metadataReportPath,
+      },
+    ],
+    reports: {
+      repairPreliminaryReport: repairOutput.preliminaryReportPath || null,
+      metadataReport: metadataReportPath,
+    },
+    summary: {
+      repair: {
+        verificationQueueSize: repairSummary?.verificationQueueSize || 0,
+        wikiReviewQueueSize: repairSummary?.wikiReviewQueueSize || 0,
+        takeoutEvidence: repairSummary?.takeoutEvidence?.summary || { enabled: false },
+      },
+      metadata: metadataReport?.summary || null,
+    },
+    warnings,
+  };
+  writeFileSync(reportPath, `${JSON.stringify(combined, null, 2)}\n`, 'utf-8');
+  stdout.write(`Fix vault: relatorio combinado em ${reportPath}\n`);
+
+  const exitCode = repair.exitCode || metadata.exitCode || EXIT.OK;
+  return { exitCode, result: combined };
 };
 
 const runMetadata = async (parsed, streams = {}) => {
@@ -4119,6 +4298,7 @@ const runParsedCommand = (parsed, streams = {}) => {
   if (parsed.command === 'job') return runJob(parsed, streams);
   if (parsed.command === 'export-dir') return runExportDir(parsed, streams);
   if (parsed.command === 'cleanup') return runCleanup(parsed, streams);
+  if (parsed.command === 'fix-vault') return runFixVault(parsed, streams);
   if (parsed.command === 'repair-vault') return runRepairVault(parsed, streams);
   if (parsed.command === 'metadata') return runMetadata(parsed, streams);
   if (parsed.command === 'telemetry') return runTelemetry(parsed, streams);
