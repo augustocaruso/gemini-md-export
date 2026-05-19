@@ -6,6 +6,7 @@
 // --- constantes ---------------------------------------------------------
 
 const TURN_SELECTOR = 'user-query, model-response';
+const HIDDEN_STYLE_RE = /(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*(?:hidden|collapse))\b/i;
 
 // Labels de acessibilidade que o Gemini injeta como nós de texto.
 // Match case-insensitive, com ou sem ponto final, PT e EN.
@@ -47,6 +48,36 @@ const MEDIA_SELECTOR = [
   'embed',
   'a[href]',
 ].join(',');
+
+const isHiddenInConversationDom = (node) => {
+  let el = node?.nodeType === 1 ? node : node?.parentElement;
+  while (el && el.nodeType === 1) {
+    if (el.hidden || el.getAttribute?.('aria-hidden') === 'true' || el.hasAttribute?.('inert')) {
+      return true;
+    }
+    if (HIDDEN_STYLE_RE.test(el.getAttribute?.('style') || '')) return true;
+
+    const win = el.ownerDocument?.defaultView;
+    const style = typeof win?.getComputedStyle === 'function' ? win.getComputedStyle(el) : null;
+    if (
+      style &&
+      (style.display === 'none' ||
+        style.visibility === 'hidden' ||
+        style.visibility === 'collapse')
+    ) {
+      return true;
+    }
+    el = el.parentElement;
+  }
+  return false;
+};
+
+const collectTurnNodes = (root) => {
+  const nodes = [];
+  if (root?.matches?.(TURN_SELECTOR)) nodes.push(root);
+  nodes.push(...Array.from(root.querySelectorAll(TURN_SELECTOR)));
+  return nodes.filter((node) => !isHiddenInConversationDom(node));
+};
 
 // --- chat id ------------------------------------------------------------
 
@@ -557,7 +588,7 @@ export const roleOf = (el) => {
  * @returns {Array<{role: 'user' | 'assistant', text: string}>}
  */
 export const scrapeTurns = (doc) => {
-  const nodes = doc.querySelectorAll(TURN_SELECTOR);
+  const nodes = collectTurnNodes(doc);
   const out = [];
   nodes.forEach((n) => {
     const role = roleOf(n);

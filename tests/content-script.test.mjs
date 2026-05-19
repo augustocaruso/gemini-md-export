@@ -980,3 +980,29 @@ test('waitForChatToLoad aguarda DOM novo antes de liberar export', { timeout: 50
 
   window.close();
 });
+
+test('exportPayload ignora chat antigo escondido no DOM da rota anterior', async () => {
+  const currentChatId = 'b8e7c075effe9457';
+  const { dom, runtimeErrors } = createGeminiMediaDom(`
+    <section style="display: none">
+      <user-query><div>pergunta do chat antigo</div></user-query>
+      <model-response><div>resposta do chat antigo</div></model-response>
+    </section>
+    <main>
+      <user-query><div>pergunta atual</div></user-query>
+      <model-response><div>resposta atual</div></model-response>
+    </main>
+  `);
+  const { window } = dom;
+  window.history.replaceState({}, '', `/app/${currentChatId}`);
+  const debug = await evaluateContentScript(window);
+
+  const payload = await debug.exportPayload();
+  assert.equal(payload.turns.length, 2);
+  assert.match(payload.content, /pergunta atual/);
+  assert.match(payload.content, /resposta atual/);
+  assert.doesNotMatch(payload.content, /chat antigo/);
+  assert.deepEqual(runtimeErrors, []);
+
+  window.close();
+});

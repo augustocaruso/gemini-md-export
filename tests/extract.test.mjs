@@ -542,6 +542,22 @@ test('scrapeTurns: extrai user e assistant em ordem', () => {
   assert.match(turns[3].text, /resposta 2/);
 });
 
+test('scrapeTurns: ignora turnos de chat antigo escondido no DOM', () => {
+  const doc = makeDoc(`
+    <section style="display: none">
+      <user-query><p>pergunta do chat antigo</p></user-query>
+      <model-response><p>resposta do chat antigo</p></model-response>
+    </section>
+    <main>
+      <user-query><p>pergunta atual</p></user-query>
+      <model-response><p>resposta atual</p></model-response>
+    </main>
+  `);
+  const turns = scrapeTurns(doc);
+  assert.equal(turns.length, 2);
+  assert.deepEqual(turns.map((turn) => turn.text), ['pergunta atual', 'resposta atual']);
+});
+
 test('scrapeTurns: ignora turnos vazios', () => {
   const doc = makeDoc(`
     <user-query></user-query>

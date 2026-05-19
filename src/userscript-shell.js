@@ -976,9 +976,35 @@
   };
 
   const CONVERSATION_TURN_DOM_SELECTOR = 'user-query, model-response';
+  const HIDDEN_CONVERSATION_STYLE_RE =
+    /(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*(?:hidden|collapse))\b/i;
+
+  const isHiddenConversationDomNode = (node) => {
+    let el = node?.nodeType === 1 ? node : node?.parentElement;
+    while (el && el.nodeType === 1) {
+      if (el.hidden || el.getAttribute?.('aria-hidden') === 'true' || el.hasAttribute?.('inert')) {
+        return true;
+      }
+      if (HIDDEN_CONVERSATION_STYLE_RE.test(el.getAttribute?.('style') || '')) return true;
+      const style =
+        typeof pageWindow.getComputedStyle === 'function' ? pageWindow.getComputedStyle(el) : null;
+      if (
+        style &&
+        (style.display === 'none' ||
+          style.visibility === 'hidden' ||
+          style.visibility === 'collapse')
+      ) {
+        return true;
+      }
+      el = el.parentElement;
+    }
+    return false;
+  };
 
   const conversationDomNodes = (doc = document) =>
-    Array.from(doc.querySelectorAll(CONVERSATION_TURN_DOM_SELECTOR));
+    Array.from(doc.querySelectorAll(CONVERSATION_TURN_DOM_SELECTOR)).filter(
+      (node) => !isHiddenConversationDomNode(node),
+    );
 
   const conversationDomSignature = (doc = document) => {
     const nodes = conversationDomNodes(doc);
