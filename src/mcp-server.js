@@ -90,6 +90,11 @@ const validateMcpExportPayload = async (payload, input = {}) => {
   return validateMcpExportPayloadBeforeWrite(payload, input);
 };
 
+const validateExportTabLeaseForJob = async (tab) => {
+  const { validateExportTabLease } = await loadMcpExportWorkflows();
+  return validateExportTabLease(tab);
+};
+
 const {
   selectReconnectSourcesForTab,
   shouldIncludeHeartbeatJobProgress,
@@ -3033,6 +3038,41 @@ const tryNativeBrowserBrokerTabsAction = async (action, args = {}) => {
   return null;
 };
 
+const shouldRequireNativeExportTabLease = (label, args = {}) =>
+  shouldUseNativeBrowserBroker() &&
+  (args.requireNativeExportLease === true ||
+    label === TAB_CLAIM_LABELS.export ||
+    label === TAB_CLAIM_LABELS.sync);
+
+const validateNativeExportTabLeaseForJob = async (args = {}, localClaim = null) => {
+  if (!shouldUseNativeBrowserBroker()) return localClaim;
+  const nativeClaim = await nativeBrowserBroker.claim(
+    {
+      tabId: args.tabId ?? localClaim?.tabId ?? null,
+      claimId: args.claimId || localClaim?.claimId || null,
+    },
+    { allowFallback: false },
+  );
+  if (nativeClaim?.ok === false) {
+    const error = new Error(
+      nativeClaim.error?.message ||
+        nativeClaim.error ||
+        'Native browser broker did not return a claimed tab.',
+    );
+    error.code = nativeClaim.error?.code || nativeClaim.code || 'native_broker_claim_failed';
+    error.data = nativeClaim;
+    throw error;
+  }
+  const result = nativeClaim?.result && typeof nativeClaim.result === 'object' ? nativeClaim.result : {};
+  if (result.ok === false) {
+    const error = new Error(result.error || result.code || 'native_broker_claim_rejected');
+    error.code = result.code || 'native_broker_claim_rejected';
+    error.data = nativeClaim;
+    throw error;
+  }
+  return validateExportTabLeaseForJob(result.tab || result);
+};
+
 const requireClient = (selector = {}) => {
   cleanupStaleClients();
   cleanupExpiredTabClaims();
@@ -3827,13 +3867,22 @@ const ensureTabClaimForJob = async (client, args = {}, label = TAB_CLAIM_LABELS.
   const existingSessionClaim = claimForSession(sessionId);
   if (existingSessionClaim?.clientId === client.clientId && args.renewExistingClaim === false) {
     client.lastTabClaimWarning = null;
-    return summarizeTabClaim(existingSessionClaim);
+    const claim = summarizeTabClaim(existingSessionClaim);
+    if (shouldRequireNativeExportTabLease(label, args)) {
+      await validateNativeExportTabLeaseForJob(args, claim);
+    }
+    return claim;
   }
   if (args.autoClaim === false) {
     client.lastTabClaimWarning = null;
-    return existingSessionClaim?.clientId === client.clientId
-      ? summarizeTabClaim(existingSessionClaim)
-      : null;
+    const claim =
+      existingSessionClaim?.clientId === client.clientId
+        ? summarizeTabClaim(existingSessionClaim)
+        : null;
+    if (shouldRequireNativeExportTabLease(label, args)) {
+      await validateNativeExportTabLeaseForJob(args, claim);
+    }
+    return claim;
   }
   try {
     const result = await claimGeminiTabForClient(client, {
@@ -3842,6 +3891,9 @@ const ensureTabClaimForJob = async (client, args = {}, label = TAB_CLAIM_LABELS.
       label: args.label || label,
     });
     client.lastTabClaimWarning = null;
+    if (shouldRequireNativeExportTabLease(label, args)) {
+      await validateNativeExportTabLeaseForJob(args, result.claim);
+    }
     return result.claim;
   } catch (err) {
     const warning = {
@@ -3851,7 +3903,7 @@ const ensureTabClaimForJob = async (client, args = {}, label = TAB_CLAIM_LABELS.
       label: args.label || label,
     };
     client.lastTabClaimWarning = warning;
-    if (args.requireTabClaim === true) throw err;
+    if (args.requireTabClaim === true || shouldRequireNativeExportTabLease(label, args)) throw err;
     return null;
   }
 };

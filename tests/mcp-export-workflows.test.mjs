@@ -1,0 +1,106 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+const ROOT = resolve(new URL('..', import.meta.url).pathname);
+
+const loadModule = async () => import('../build/ts/mcp/export-workflows.js');
+
+const markdownFor = (chatId, body = '## 🧑 Usuário\n\nPergunta sensível\n\n---\n\n## 🤖 Gemini\n\nResposta sensível\n') => `---
+type: gemini_chat
+chat_id: ${chatId}
+title: "Teste"
+url: https://gemini.google.com/app/${chatId}
+turn_count: 1
+tags: [gemini-export]
+---
+
+${body}`;
+
+test('MCP export integrity accepts proven chat snapshot before write', async () => {
+  const { validateMcpExportPayloadBeforeWrite } = await loadModule();
+  const result = validateMcpExportPayloadBeforeWrite(
+    {
+      chatId: 'b8e7c075effe9457',
+      title: 'Teste',
+      url: 'https://gemini.google.com/app/b8e7c075effe9457',
+      filename: 'b8e7c075effe9457.md',
+      content: markdownFor('b8e7c075effe9457'),
+      turns: [
+        { role: 'user', text: 'Pergunta sensível' },
+        { role: 'assistant', text: 'Resposta sensível' },
+      ],
+      metrics: { counters: { turnCount: 1 } },
+    },
+    { expectedChatId: 'b8e7c075effe9457' },
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.snapshot.chatId, 'b8e7c075effe9457');
+  assert.equal(result.assistantTurnCount, 1);
+  assert.equal(result.snapshot.turns.length, 2);
+  assert.equal(result.evidence[0].confidence, 'strong');
+  assert.doesNotMatch(JSON.stringify(result.evidence), /Pergunta sensível|Resposta sensível/);
+});
+
+test('MCP export integrity blocks mismatched chat identity before write', async () => {
+  const { validateMcpExportPayloadBeforeWrite } = await loadModule();
+  const result = validateMcpExportPayloadBeforeWrite(
+    {
+      chatId: 'aaaaaaaaaaaa',
+      filename: 'aaaaaaaaaaaa.md',
+      content: markdownFor('aaaaaaaaaaaa'),
+    },
+    { expectedChatId: 'bbbbbbbbbbbb' },
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'chat_id_mismatch');
+  assert.equal(result.requestedChatId, 'bbbbbbbbbbbb');
+  assert.equal(result.observedChatId, 'aaaaaaaaaaaa');
+  assert.doesNotMatch(JSON.stringify(result.evidence), /Pergunta sensível|Resposta sensível/);
+});
+
+test('MCP export integrity rejects synthetic or missing chat identity', async () => {
+  const { validateMcpExportPayloadBeforeWrite } = await loadModule();
+  const result = validateMcpExportPayloadBeforeWrite({
+    chatId: 'chat-0',
+    filename: 'chat-0.md',
+    content: markdownFor('chat-0'),
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'identity_unproven');
+});
+
+test('export workflow rejects unclaimed native broker tabs', async () => {
+  const { validateExportTabLease } = await loadModule();
+
+  assert.throws(
+    () =>
+      validateExportTabLease({
+        tabId: 42,
+        url: 'https://gemini.google.com/app/abc123456789',
+      }),
+    /claimed_debuggable_tab_required/,
+  );
+});
+
+test('MCP validates export payload before writing files', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const block = source.match(
+    /const downloadConversationItemForClient = async[\s\S]*?\nconst isTransientTabBusyError/,
+  )?.[0];
+  assert.ok(block, 'downloadConversationItemForClient deve existir');
+
+  const validateIndex = block.indexOf('validateMcpExportPayload(result.payload');
+  const writeIndex = block.indexOf('writeExportPayloadBundle(result.payload');
+  assert.ok(validateIndex > -1, 'MCP deve validar payload antes de gravar');
+  assert.ok(writeIndex > -1, 'MCP deve gravar payload depois de validar');
+  assert.ok(validateIndex < writeIndex, 'validacao precisa acontecer antes de writeExportPayloadBundle');
+  assert.match(block, /integrity: \{/);
+  assert.match(source, /validateExportTabLeaseForJob/);
+  assert.match(source, /validateNativeExportTabLeaseForJob/);
+  assert.match(source, /shouldRequireNativeExportTabLease/);
+});
