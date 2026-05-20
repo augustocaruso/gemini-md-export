@@ -101,6 +101,10 @@ const {
   toActiveClaimableGeminiClient,
 } = await import(compiledTsModuleUrl('mcp', 'tab-selection.js'));
 const {
+  createNativeBrowserBrokerClient,
+  shouldUseNativeBrowserBroker,
+} = await import(compiledTsModuleUrl('mcp', 'native-browser-broker.js'));
+const {
   assertClaimedReadyGeminiTab,
   classifyGeminiClientLifecycle,
   getGeminiClientLifecycle,
@@ -110,6 +114,7 @@ const SERVER_NAME = 'gemini-md-export';
 const SERVER_VERSION = pkg.version;
 const EXTENSION_PROTOCOL_VERSION = Number(bridgeVersion.protocolVersion);
 const PROTOCOL_VERSION = '2025-03-26';
+const nativeBrowserBroker = createNativeBrowserBrokerClient();
 const PROCESS_STARTED_AT = new Date();
 const PROCESS_SESSION_ID =
   process.env.GEMINI_MCP_SESSION_ID ||
@@ -2954,6 +2959,79 @@ const toolTextResult = (structuredContent, { isError = false } = {}) => ({
   structuredContent,
   isError,
 });
+
+const nativeBrowserBrokerToolResult = (response, action) => {
+  if (!response) return null;
+  if (response.ok === false && response.allowFallback === true) return null;
+  if (response.ok === false) {
+    return {
+      ok: false,
+      action,
+      source: 'native-browser-broker',
+      code: response.error?.code || response.code || 'native_broker_failed',
+      error: response.error?.message || response.error || 'Native browser broker failed.',
+      nativeBroker: response,
+    };
+  }
+
+  const result = response.result && typeof response.result === 'object' ? response.result : {};
+  const tabs = Array.isArray(result.tabs) ? result.tabs : [];
+  return {
+    ok: result.ok !== false,
+    action,
+    source: 'native-browser-broker',
+    ...result,
+    connectedTabCount:
+      action === 'list' || action === 'status'
+        ? tabs.filter((item) => item?.state === 'debuggable').length
+        : undefined,
+    nativeBroker: {
+      ok: response.ok,
+    },
+  };
+};
+
+const tryNativeBrowserBrokerTabsAction = async (action, args = {}) => {
+  if (!shouldUseNativeBrowserBroker()) return null;
+  if (action === 'list') {
+    return nativeBrowserBrokerToolResult(
+      await nativeBrowserBroker.listTabs({ allowFallback: true }),
+      action,
+    );
+  }
+  if (action === 'status') {
+    return nativeBrowserBrokerToolResult(
+      await nativeBrowserBroker.status({ allowFallback: true }),
+      action,
+    );
+  }
+  if (action === 'claim') {
+    if (args.clientId || args.index || args.chatId) return null;
+    return nativeBrowserBrokerToolResult(
+      await nativeBrowserBroker.claim(
+        {
+          tabId: args.tabId ?? null,
+          claimId: args.claimId || null,
+        },
+        { allowFallback: true },
+      ),
+      action,
+    );
+  }
+  if (action === 'release') {
+    return nativeBrowserBrokerToolResult(
+      await nativeBrowserBroker.release(
+        {
+          tabId: args.tabId ?? null,
+          claimId: args.claimId || null,
+        },
+        { allowFallback: true },
+      ),
+      action,
+    );
+  }
+  return null;
+};
 
 const requireClient = (selector = {}) => {
   cleanupStaleClients();
@@ -9395,6 +9473,16 @@ const legacyRawTools = [
     },
     call: async (args = {}) => {
       cleanupStaleClients();
+      const nativeTabs = await tryNativeBrowserBrokerTabsAction('list', args);
+      if (
+        nativeTabs &&
+        (nativeTabs.ok === false ||
+          args.openIfMissing !== true ||
+          nativeTabs.connectedTabCount > 0 ||
+          (Array.isArray(nativeTabs.tabs) && nativeTabs.tabs.length > 0))
+      ) {
+        return toolTextResult(nativeTabs, { isError: nativeTabs.ok === false });
+      }
       let launchResult = null;
       let allLiveClients = getLiveClients();
       let selectableClients = getSelectableGeminiClients();
@@ -9512,6 +9600,8 @@ const legacyRawTools = [
       additionalProperties: false,
     },
     call: async (args = {}) => {
+      const nativeClaim = await tryNativeBrowserBrokerTabsAction('claim', args);
+      if (nativeClaim) return toolTextResult(nativeClaim, { isError: nativeClaim.ok === false });
       const client = await selectClaimableClient(args);
       return toolTextResult(await claimGeminiTabForClient(client, args));
     },
@@ -9528,7 +9618,11 @@ const legacyRawTools = [
       },
       additionalProperties: false,
     },
-    call: async (args = {}) => toolTextResult(await releaseTabClaim(args)),
+    call: async (args = {}) => {
+      const nativeRelease = await tryNativeBrowserBrokerTabsAction('release', args);
+      if (nativeRelease) return toolTextResult(nativeRelease, { isError: nativeRelease.ok === false });
+      return toolTextResult(await releaseTabClaim(args));
+    },
   },
   {
     name: 'gemini_mcp_diagnose_processes',

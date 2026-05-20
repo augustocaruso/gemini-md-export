@@ -446,6 +446,17 @@ test('MCP implementa afinidade confiável por claim de aba', () => {
   assert.doesNotMatch(buildSource, /'alarms'/);
 });
 
+test('MCP prefere native browser broker antes de fallback por heartbeat', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+
+  assert.match(source, /createNativeBrowserBrokerClient/);
+  assert.match(source, /shouldUseNativeBrowserBroker/);
+  assert.match(source, /tryNativeBrowserBrokerTabsAction/);
+  assert.match(source, /nativeBrowserBroker\.listTabs/);
+  assert.match(source, /nativeBrowserBroker\.claim/);
+  assert.doesNotMatch(source, /lastHeartbeatAt[^\n]+claimGeminiTabForClient/);
+});
+
 test('browser_status diagnostica e tenta self-heal sem depender do guard wrapper', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const statusBlock = source.match(
