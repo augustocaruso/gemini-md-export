@@ -55,6 +55,24 @@
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -960 960 960" width="18" height="18" fill="currentColor" aria-hidden="true" focusable="false">' +
     '<path d="M160-160q-33 0-56.5-23.5T80-240v-480q0-33 23.5-56.5T160-800h240l80 80h320q33 0 56.5 23.5T880-640v400q0 33-23.5 56.5T800-160H160Zm0-80h640v-400H447l-80-80H160v480Zm0 0v-480 480Z"/>' +
     '</svg>';
+  // Material Symbols outline 24px, currentColor. Usados nos itens do menu do
+  // top-bar pra casar com o vocabulário visual do menu nativo do Gemini
+  // (cada item = ícone outline + label).
+  const MENU_DOWNLOAD_ICON_SVG =
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -960 960 960" width="20" height="20" fill="currentColor" aria-hidden="true" focusable="false">' +
+    '<path d="M480-336 288-528l51-51 105 105v-342h72v342l105-105 51 51-192 192ZM263-192q-29.7 0-50.85-21.15Q191-234.3 191-264v-72h72v72h434v-72h72v72q0 29.7-21.15 50.85Q726.7-192 697-192H263Z"/>' +
+    '</svg>';
+  // visibility_off outline — semanticamente "esta aba está oculta para a
+  // bridge". Inverso (visibility) seria "visível à bridge"; preferimos
+  // sempre o off porque o item descreve a AÇÃO de ignorar.
+  const MENU_VISIBILITY_OFF_ICON_SVG =
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -960 960 960" width="20" height="20" fill="currentColor" aria-hidden="true" focusable="false">' +
+    '<path d="m644-428-58-58q9-47-27-88t-93-32l-58-58q17-8 34.5-12t37.5-4q75 0 127.5 52.5T660-500q0 20-4 37.5T644-428Zm128 126-58-56q38-29 67.5-63.5T832-500q-50-101-143.5-160.5T480-720q-29 0-57 4t-55 12l-62-62q41-17 84-25.5t90-8.5q151 0 269 83.5T920-500q-23 59-60.5 109.5T772-302Zm-20 246L624-184q-35 11-70.5 17.5T480-160q-151 0-269-83.5T40-460q21-53 53-98.5t73-81.5L56-760l56-56 696 696-56 60ZM222-637q-29 26-53 57t-41 80q50 101 143.5 160.5T480-280q20 0 39-2.5t39-5.5l-36-38q-11 3-21 4.5t-21 1.5q-75 0-127.5-52.5T300-500q0-11 1.5-21t4.5-21l-84-95Zm319 93Zm-151 75Z"/>' +
+    '</svg>';
+  const MENU_CHECK_ICON_SVG =
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -960 960 960" width="18" height="18" fill="currentColor" aria-hidden="true" focusable="false">' +
+    '<path d="M382-240 154-468l57-57 171 171 367-367 57 57-424 424Z"/>' +
+    '</svg>';
   const TOAST_ID = `${UI_ID_PREFIX}-toast`;
   const MODAL_ID = `${UI_ID_PREFIX}-modal`;
   const MODAL_LIST_ID = `${UI_ID_PREFIX}-list`;
@@ -8170,20 +8188,28 @@
     menu.style.overflowY = 'auto';
   };
 
+  // Layout dos itens do menu casa com o menu nativo do Gemini (kebab da
+  // conversa): linha em pílula com ícone outline 20px + label, padding
+  // generoso (12 vertical, 14 horizontal), hover em background sutil dentro
+  // do próprio item. Sem divider entre itens, sem subtitle: cada item é
+  // uma ação atômica.
   const styleMenuItem = (el) => {
     Object.assign(el.style, {
-      display: 'block',
+      display: 'flex',
+      alignItems: 'center',
+      gap: '14px',
       width: '100%',
       textAlign: 'left',
-      padding: '10px 12px',
+      padding: '12px 14px',
       background: 'transparent',
       color: 'var(--gm-menu-text)',
       border: '0',
-      borderRadius: '12px',
+      borderRadius: '999px',
       cursor: 'pointer',
-      fontSize: '13px',
+      fontSize: '14px',
       fontFamily: 'var(--gm-menu-font)',
-      lineHeight: '1.35',
+      fontWeight: '500',
+      lineHeight: '20px',
       transition: 'background-color 180ms cubic-bezier(0.22, 0.61, 0.36, 1)',
     });
     el.addEventListener('mouseenter', () => {
@@ -8201,62 +8227,64 @@
     });
   };
 
+  const buildMenuItemIcon = (svgMarkup) => {
+    const icon = document.createElement('span');
+    icon.setAttribute('aria-hidden', 'true');
+    Object.assign(icon.style, {
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      flex: '0 0 20px',
+      width: '20px',
+      height: '20px',
+      color: 'var(--gm-menu-text)',
+    });
+    setHtml(icon, svgMarkup);
+    return icon;
+  };
+
+  const buildMenuItemLabel = (text) => {
+    const label = document.createElement('span');
+    label.textContent = text;
+    Object.assign(label.style, {
+      flex: '1 1 auto',
+      fontWeight: '500',
+      color: 'var(--gm-menu-text)',
+      whiteSpace: 'nowrap',
+      overflow: 'hidden',
+      textOverflow: 'ellipsis',
+    });
+    return label;
+  };
+
+  // Menu nativo do Gemini não tem subtitle nem state-text; só um indicador
+  // visual quando o item está "ativo" (checkmark ao final, como
+  // `menuitemcheckbox` Material). Mantemos esse padrão pro toggle "Ignorar
+  // esta aba".
   const renderIgnoreMenuItem = (item) => {
     const ignored = isTabIgnored();
     item.setAttribute('aria-checked', ignored ? 'true' : 'false');
     item.dataset.checked = ignored ? '1' : '0';
     while (item.firstChild) item.removeChild(item.firstChild);
 
-    const row = document.createElement('span');
-    Object.assign(row.style, {
-      display: 'flex',
-      alignItems: 'center',
-      gap: '10px',
-    });
+    item.appendChild(buildMenuItemIcon(MENU_VISIBILITY_OFF_ICON_SVG));
+    item.appendChild(buildMenuItemLabel('Ignorar esta aba'));
 
-    const check = document.createElement('span');
-    check.textContent = ignored ? '✓' : '';
-    Object.assign(check.style, {
+    const trailing = document.createElement('span');
+    trailing.setAttribute('aria-hidden', 'true');
+    Object.assign(trailing.style, {
       display: 'inline-flex',
       alignItems: 'center',
       justifyContent: 'center',
       flex: '0 0 18px',
       width: '18px',
       height: '18px',
-      fontWeight: '700',
-      fontSize: '13px',
       color: 'var(--gm-menu-accent)',
+      // visibility (não display) para não causar shift quando o toggle muda
       visibility: ignored ? 'visible' : 'hidden',
     });
-    const label = document.createElement('span');
-    label.textContent = 'Ignorar esta aba';
-    Object.assign(label.style, {
-      flex: '1 1 auto',
-      fontWeight: '500',
-      color: 'var(--gm-menu-text)',
-    });
-    row.appendChild(check);
-    row.appendChild(label);
-
-    const sub = document.createElement('span');
-    sub.textContent = ignored
-      ? 'A conexão local está desligada nesta aba.'
-      : 'Desliga a conexão local só nesta aba.';
-    Object.assign(sub.style, {
-      display: 'block',
-      marginTop: '3px',
-      paddingLeft: '28px',
-      fontSize: '11px',
-      lineHeight: '1.35',
-      color: 'var(--gm-menu-muted)',
-      // Trava altura: as duas variantes do texto têm comprimentos parecidos
-      // mas podem quebrar para nº diferente de linhas; min-height absorve a
-      // diferença para o item não pular ao alternar o toggle.
-      minHeight: '30px',
-    });
-
-    item.appendChild(row);
-    item.appendChild(sub);
+    setHtml(trailing, MENU_CHECK_ICON_SVG);
+    item.appendChild(trailing);
   };
 
   const openTopBarMenu = (btn) => {
@@ -8270,43 +8298,34 @@
     Object.entries(palette).forEach(([k, v]) => menu.style.setProperty(k, v));
     Object.assign(menu.style, {
       position: 'fixed',
-      // Largura fixa: re-render do toggle "Ignorar esta aba" troca a
-      // submessage e fazia o popover ricochetear entre minWidth e maxWidth.
-      // Travar em 280px elimina o jump sem precisar normalizar texto.
-      width: '280px',
+      // Largura fixa pra não ricochetear entre estados do toggle. Reduzida
+      // depois que o subtitle saiu — agora cabe confortavelmente em ~240px
+      // e fica mais próximo da largura do menu nativo do Gemini.
+      width: '252px',
       boxSizing: 'border-box',
-      padding: '6px',
+      padding: '8px',
       background: 'var(--gm-menu-bg)',
       color: 'var(--gm-menu-text)',
       border: '1px solid var(--gm-menu-border)',
       borderRadius: '16px',
       boxShadow: 'var(--gm-menu-shadow)',
       fontFamily: 'var(--gm-menu-font)',
-      fontSize: '13px',
+      fontSize: '14px',
       zIndex: String(MENU_ZINDEX),
       backdropFilter: 'blur(14px)',
       WebkitBackdropFilter: 'blur(14px)',
-      // Garante que itens internos tenham referência de var caso sejam
-      // re-renderizados (ex.: toggle "Ignorar"), evitando perder a paleta.
     });
 
     const exportItem = document.createElement('button');
     exportItem.type = 'button';
     exportItem.setAttribute('role', 'menuitem');
     exportItem.dataset.role = 'gm-menu-export';
-    exportItem.textContent = 'Baixar como Markdown';
     styleMenuItem(exportItem);
-    exportItem.style.fontWeight = '500';
+    exportItem.appendChild(buildMenuItemIcon(MENU_DOWNLOAD_ICON_SVG));
+    exportItem.appendChild(buildMenuItemLabel('Baixar como Markdown'));
     exportItem.addEventListener('click', () => {
       closeTopBarMenu();
       safeOpenExportModal();
-    });
-
-    const divider = document.createElement('div');
-    Object.assign(divider.style, {
-      height: '1px',
-      margin: '4px 6px',
-      background: 'var(--gm-menu-divider)',
     });
 
     const ignoreItem = document.createElement('button');
@@ -8332,7 +8351,6 @@
     });
 
     menu.appendChild(exportItem);
-    menu.appendChild(divider);
     menu.appendChild(ignoreItem);
     document.body.appendChild(menu);
     positionTopBarMenu(menu, btn);
