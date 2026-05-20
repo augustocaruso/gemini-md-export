@@ -57,11 +57,18 @@ test('my activity content script responde ping do service worker', () => {
 
 test('service worker recarrega abas Gemini antes de reinjetar apos update/reload', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'extension-background.ts'), 'utf-8');
+  const policySource = readFileSync(
+    resolve(ROOT, 'src', 'browser', 'background', 'managed-tabs-reload-policy.ts'),
+    'utf-8',
+  );
 
   assert.match(source, /GEMINI_TAB_RELOAD_SETTLE_MS/);
   assert.match(source, /LAST_MANAGED_TABS_RELOAD_KEY/);
   assert.match(source, /MANAGED_TABS_RELOAD_COOLDOWN_MS/);
   assert.match(source, /markManagedTabsReload/);
+  assert.match(source, /managedTabsReloadRuntimeKey/);
+  assert.match(source, /decideManagedTabsReload/);
+  assert.match(policySource, /already-reloaded-current-runtime/);
   assert.match(source, /status: 'cooldown'/);
   assert.match(source, /reloadThenSelfHealGeminiTabs/);
   assert.match(
@@ -76,7 +83,12 @@ test('service worker recarrega abas Gemini antes de reinjetar apos update/reload
   const helperStart = source.indexOf('const reloadThenSelfHealGeminiTabs');
   const helperEnd = source.indexOf('const consumePendingGeminiTabsReload', helperStart);
   const helperSource = source.slice(helperStart, helperEnd);
-  assert.ok(helperSource.indexOf('reloadGeminiTabs(reason)') < helperSource.indexOf('selfHealGeminiTabs'));
+  assert.ok(helperSource.indexOf('reloadGeminiTabs(reason') < helperSource.indexOf('selfHealGeminiTabs'));
+  assert.match(helperSource, /if \(reload\?\.skipped === true\)/);
+  assert.ok(
+    helperSource.indexOf('if (reload?.skipped === true)') <
+      helperSource.indexOf('selfHealGeminiTabs'),
+  );
 });
 
 test('service worker recarrega abas My Activity quando o runtime da extensao muda', () => {

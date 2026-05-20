@@ -8,6 +8,10 @@
 
 import { activateTabWithDebugger } from './browser/shared/chrome-debugger.js';
 import { createNativeBrokerPort } from './browser/background/native-broker-client.js';
+import {
+  decideManagedTabsReload,
+  managedTabsReloadRuntimeKey,
+} from './browser/background/managed-tabs-reload-policy.js';
 
 const EXTENSION_PROTOCOL_VERSION = Number('__EXTENSION_PROTOCOL_VERSION__');
 const PENDING_GEMINI_TABS_RELOAD_KEY = 'gemini-md-export.pendingGeminiTabsReload';
@@ -67,6 +71,7 @@ let offscreenIdleCloseTimer = 0;
 const tabBrokerRegistry = new Map();
 const tabClaimExpiryTimers = new Map();
 const artifactCaptureCache = [];
+let managedTabsReloadInFlight = null;
 
 const nativeBrokerPort = createNativeBrokerPort({
   chromeApi: chrome,
@@ -1326,47 +1331,58 @@ chrome.runtime.onStartup?.addListener?.(() => {
   }, 800);
 });
 
-const markManagedTabsReload = async (reason) => {
-  const previous = await storageGet(LAST_MANAGED_TABS_RELOAD_KEY);
-  const now = Date.now();
-  const previousReloadedAtMs = Number(previous?.reloadedAtMs || 0);
-  if (
-    previousReloadedAtMs > 0 &&
-    now - previousReloadedAtMs < MANAGED_TABS_RELOAD_COOLDOWN_MS
-  ) {
+const markManagedTabsReload = async (reason, { force = false } = {}) => {
+  if (managedTabsReloadInFlight && force !== true) {
     return {
       ok: false,
-      status: 'cooldown',
+      status: 'in-flight',
       reason,
-      previous,
-      cooldownMs: MANAGED_TABS_RELOAD_COOLDOWN_MS - (now - previousReloadedAtMs),
+      previous: managedTabsReloadInFlight,
     };
   }
-  const current = {
+  const previous = await storageGet(LAST_MANAGED_TABS_RELOAD_KEY);
+  const decision = decideManagedTabsReload({
+    previous,
+    runtimeKey: managedTabsReloadRuntimeKey(runtimeBuildSnapshot()),
     reason,
-    reloadedAtMs: now,
-    reloadedAt: new Date(now).toISOString(),
-  };
-  await storageSetKey(LAST_MANAGED_TABS_RELOAD_KEY, current);
-  return { ok: true, status: 'marked', current, previous: previous || null };
+    cooldownMs: MANAGED_TABS_RELOAD_COOLDOWN_MS,
+    force,
+  });
+  if (decision.ok !== true) return decision;
+  managedTabsReloadInFlight = decision.current;
+  await storageSetKey(LAST_MANAGED_TABS_RELOAD_KEY, decision.current);
+  return decision;
 };
 
-const reloadGeminiTabs = (reason = 'manual') =>
+const finishManagedTabsReload = async (reloadLease, patch = {}) => {
+  if (reloadLease?.current?.reloadId && managedTabsReloadInFlight?.reloadId === reloadLease.current.reloadId) {
+    managedTabsReloadInFlight = null;
+  }
+  if (!reloadLease?.current) return;
+  await storageSetKey(LAST_MANAGED_TABS_RELOAD_KEY, {
+    ...reloadLease.current,
+    ...patch,
+    completedAt: new Date().toISOString(),
+  });
+};
+
+const reloadGeminiTabs = (reason = 'manual', { force = false } = {}) =>
   new Promise((resolve) => {
     if (!chrome.tabs?.query || !chrome.tabs?.reload) {
       resolve({ ok: false, reason: 'tabs-api-unavailable', reloaded: 0 });
       return;
     }
 
-    markManagedTabsReload(reason).then((reloadLease) => {
-      if (reloadLease?.status === 'cooldown') {
+    markManagedTabsReload(reason, { force }).then((reloadLease) => {
+      if (reloadLease?.ok === false) {
         resolve({
           ok: true,
-          status: 'cooldown',
+          status: reloadLease.status,
           reason,
           skipped: true,
           reloaded: 0,
           cooldownMs: reloadLease.cooldownMs,
+          skipReason: reloadLease.status,
           previous: reloadLease.previous || null,
         });
         return;
@@ -1374,6 +1390,11 @@ const reloadGeminiTabs = (reason = 'manual') =>
 
       chrome.tabs.query({ url: MANAGED_CONTENT_TAB_URL_PATTERNS }, (tabs = []) => {
       if (chrome.runtime.lastError) {
+        finishManagedTabsReload(reloadLease, {
+          ok: false,
+          error: chrome.runtime.lastError.message,
+          reloaded: 0,
+        }).finally(() => {});
         resolve({
           ok: false,
           reason: chrome.runtime.lastError.message,
@@ -1396,6 +1417,7 @@ const reloadGeminiTabs = (reason = 'manual') =>
         reason,
         reloaded,
       });
+      finishManagedTabsReload(reloadLease, { reloaded }).finally(() => {});
       resolve({ ok: true, reason, reloaded });
       });
     });
@@ -1404,9 +1426,20 @@ const reloadGeminiTabs = (reason = 'manual') =>
 const reloadThenSelfHealGeminiTabs = async ({
   reason = 'extension-runtime-refresh',
   force = true,
+  forceReload = false,
   settleMs = GEMINI_TAB_RELOAD_SETTLE_MS,
 } = {}) => {
-  const reload = await reloadGeminiTabs(reason);
+  const reload = await reloadGeminiTabs(reason, { force: forceReload });
+  if (reload?.skipped === true) {
+    lastContentScriptSelfHeal = {
+      ok: true,
+      reason,
+      status: reload.skipReason || reload.status || 'reload-skipped',
+      reload,
+      reloaded: 0,
+    };
+    return lastContentScriptSelfHeal;
+  }
   if (reload?.reloaded > 0 && settleMs > 0) {
     await sleep(settleMs);
   }
