@@ -403,7 +403,10 @@ test('modal virtualiza lista grande sem renderizar todas as conversas', { timeou
     'lista virtualizada não deve criar um nó por conversa',
   );
 
-  list.scrollTop = 78 * 120;
+  // Casa com `MODAL_VIRTUAL_ITEM_HEIGHT` no script (58 desde a UI lr26).
+  // Buffer 10 atrás. floor(58*120 / 58) - 10 = 110, então rendered window
+  // começa em Chat 111 — e a regex casa "Chat 11" como substring.
+  list.scrollTop = 58 * 120;
   list.dispatchEvent(new window.Event('scroll', { bubbles: true }));
   await new Promise((resolve) => window.setTimeout(resolve, 50));
 

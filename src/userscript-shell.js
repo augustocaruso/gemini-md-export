@@ -459,7 +459,12 @@
     'tab-claim-v1',
   ];
   const MODAL_VIRTUALIZATION_THRESHOLD = 120;
-  const MODAL_VIRTUAL_ITEM_HEIGHT = 78;
+  // Altura efetiva por item no modo virtual = `.gm-conversation-item`
+  // min-height (56px) + `is-virtual` margin-bottom (2px). Quando esse
+  // valor mente para mais (ex.: 78 com items hoje em 58), o spacer
+  // inferior infla, o scrollHeight fica gigante e o scroll parece preso
+  // em "vazio" quando o usuário sai da janela renderizada.
+  const MODAL_VIRTUAL_ITEM_HEIGHT = 58;
   const MODAL_VIRTUAL_BUFFER = 10;
   const BRIDGE_CLIENT_STALE_MS = 45000;
   const BRIDGE_FILE_TIMEOUT_MS = 60000;
