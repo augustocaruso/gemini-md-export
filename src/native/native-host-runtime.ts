@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { decodeNativeFrameBuffer, encodeNativeFrame } from './frame.js';
+import { createBrokerIpcServer, defaultBrokerIpcPath } from './local-ipc.js';
+import type { NativeBrokerRequest, NativeBrokerResponse } from './protocol.js';
 
 const DEFAULT_BRIDGE_URL = process.env.GEMINI_MD_EXPORT_BRIDGE_URL || 'http://127.0.0.1:47283';
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
@@ -12,7 +14,7 @@ type NativeHostCommand = Readonly<{
   id?: string | null;
   command?: string | null;
   type?: string | null;
-  payload?: Record<string, unknown> | null;
+  payload?: unknown;
   ok?: boolean;
   code?: string;
 }>;
@@ -42,6 +44,31 @@ const makeError = (code: string, message: string, data: Record<string, unknown> 
   error: message,
   ...data,
 });
+
+const toBrokerResponse = (
+  request: Pick<NativeBrokerRequest, 'id'>,
+  result: { ok?: boolean; code?: string; error?: string; [key: string]: unknown },
+): NativeBrokerResponse => {
+  if (result.ok === false) {
+    const message = result.error || result.code || 'native_broker_error';
+    return {
+      id: request.id,
+      ok: false,
+      error: {
+        code: result.code || 'native_broker_error',
+        message,
+        retryable: false,
+        nextAction: message,
+        data: result,
+      },
+    };
+  }
+  return {
+    id: request.id,
+    ok: true,
+    result,
+  };
+};
 
 const withTimeout = async <T>(
   promise: (signal: AbortSignal) => Promise<T>,
@@ -178,7 +205,10 @@ const handleCommand = async (
 ) => {
   if (message?.ok === false && message.code) return message;
   const command = String(message.command || message.type || '').trim();
-  const payload = message.payload || {};
+  const payload =
+    message.payload && typeof message.payload === 'object'
+      ? (message.payload as Record<string, unknown>)
+      : {};
 
   if (command === 'ping') {
     return {
@@ -244,6 +274,22 @@ export const startNativeHostRuntime = (options: NativeHostRuntimeOptions = {}): 
   const writeNativeMessage = (message: unknown) => {
     stdout.write(encodeNativeFrame(message));
   };
+
+  const handleBrokerIpcRequest = async (
+    request: NativeBrokerRequest,
+  ): Promise<NativeBrokerResponse> => {
+    const result = await handleCommand(request, { root, bridgeUrl });
+    return toBrokerResponse(request, result);
+  };
+
+  if (process.env.GEMINI_MD_EXPORT_NATIVE_BROKER_IPC !== 'disabled') {
+    createBrokerIpcServer({
+      path: process.env.GEMINI_MD_EXPORT_NATIVE_BROKER_IPC || defaultBrokerIpcPath(),
+      handleRequest: handleBrokerIpcRequest,
+    }).catch(() => {
+      // Native Messaging request handling still works if IPC cannot bind.
+    });
+  }
 
   const handleNativeMessage = async (message: unknown) => {
     const command = message as NativeHostCommand;
