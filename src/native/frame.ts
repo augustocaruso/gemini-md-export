@@ -1,6 +1,6 @@
 const MAX_NATIVE_FRAME_BYTES = 16 * 1024 * 1024;
 
-export const encodeNativeFrame = (message: unknown): Buffer => {
+export const encodeNativeFrame = (message: unknown): Buffer<ArrayBufferLike> => {
   const payload = Buffer.from(JSON.stringify(message), 'utf-8');
   const header = Buffer.alloc(4);
   header.writeUInt32LE(payload.length, 0);
@@ -8,8 +8,8 @@ export const encodeNativeFrame = (message: unknown): Buffer => {
 };
 
 export const decodeNativeFrameBuffer = (
-  buffer: Buffer,
-): { messages: unknown[]; remaining: Buffer } => {
+  buffer: Buffer<ArrayBufferLike>,
+): { messages: unknown[]; remaining: Buffer<ArrayBufferLike> } => {
   const messages: unknown[] = [];
   let offset = 0;
   while (buffer.length - offset >= 4) {

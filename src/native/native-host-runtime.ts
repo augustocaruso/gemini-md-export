@@ -1,0 +1,281 @@
+import { spawn, type ChildProcess } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { decodeNativeFrameBuffer, encodeNativeFrame } from './frame.js';
+
+const DEFAULT_BRIDGE_URL = process.env.GEMINI_MD_EXPORT_BRIDGE_URL || 'http://127.0.0.1:47283';
+const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
+const NATIVE_PROTOCOL_VERSION = 1;
+
+type NativeHostCommand = Readonly<{
+  id?: string | null;
+  command?: string | null;
+  type?: string | null;
+  payload?: Record<string, unknown> | null;
+  ok?: boolean;
+  code?: string;
+}>;
+
+type NativeHostRuntimeOptions = Readonly<{
+  stdin?: NodeJS.ReadableStream;
+  stdout?: NodeJS.WritableStream;
+  root?: string;
+  bridgeUrl?: string;
+}>;
+
+let bridgeProcess: ChildProcess | null = null;
+
+const runtimeRoot = () => resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
+
+const readPackageVersion = (root: string) => {
+  try {
+    return JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf-8')).version || '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+};
+
+const makeError = (code: string, message: string, data: Record<string, unknown> = {}) => ({
+  ok: false,
+  code,
+  error: message,
+  ...data,
+});
+
+const withTimeout = async <T>(
+  promise: (signal: AbortSignal) => Promise<T>,
+  timeoutMs: number,
+  message = 'Timeout falando com native host.',
+): Promise<T> => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await promise(controller.signal);
+  } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new Error(message);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+const bridgeFetch = async ({
+  bridgeUrl = DEFAULT_BRIDGE_URL,
+  path = '/healthz',
+  method = 'GET',
+  payload = undefined,
+  timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+}: {
+  bridgeUrl?: string;
+  path?: string;
+  method?: string;
+  payload?: unknown;
+  timeoutMs?: number;
+} = {}) => {
+  if (!String(path || '').startsWith('/')) {
+    return makeError('invalid_path', 'Caminho da bridge precisa começar com /.');
+  }
+  const url = new URL(path, bridgeUrl);
+  try {
+    return await withTimeout(
+      async (signal) => {
+        const response = await fetch(url, {
+          method,
+          headers: payload ? { 'content-type': 'text/plain;charset=UTF-8' } : undefined,
+          body: payload === undefined ? undefined : JSON.stringify(payload),
+          signal,
+        });
+        const text = await response.text();
+        const data = text ? JSON.parse(text) : null;
+        return {
+          ok: response.ok,
+          status: response.status,
+          data,
+          text: response.ok ? undefined : text,
+        };
+      },
+      Math.max(100, Number(timeoutMs) || DEFAULT_REQUEST_TIMEOUT_MS),
+      `Timeout falando com a bridge em ${timeoutMs}ms.`,
+    );
+  } catch (err) {
+    return makeError('bridge_fetch_failed', err instanceof Error ? err.message : String(err), {
+      bridgeUrl,
+      path,
+    });
+  }
+};
+
+const startBridge = (
+  root: string,
+  {
+    host = '127.0.0.1',
+    port = 47283,
+    keepAliveMs = 900_000,
+    exitWhenIdle = true,
+  }: {
+    host?: string;
+    port?: number;
+    keepAliveMs?: number;
+    exitWhenIdle?: boolean;
+  } = {},
+) => {
+  if (bridgeProcess && !bridgeProcess.killed && bridgeProcess.exitCode === null) {
+    return {
+      ok: true,
+      alreadyRunning: true,
+      pid: bridgeProcess.pid,
+    };
+  }
+
+  const args = [
+    resolve(root, 'src', 'bridge-server.js'),
+    '--bridge-only',
+    '--host',
+    String(host),
+    '--port',
+    String(port),
+    '--keep-alive-ms',
+    String(keepAliveMs),
+  ];
+  if (exitWhenIdle) args.push('--exit-when-idle');
+
+  bridgeProcess = spawn(process.execPath, args, {
+    cwd: root,
+    stdio: ['ignore', 'ignore', 'ignore'],
+    detached: true,
+  });
+  bridgeProcess.unref();
+  return {
+    ok: true,
+    started: true,
+    pid: bridgeProcess.pid,
+    host,
+    port,
+  };
+};
+
+const stringPayload = (payload: Record<string, unknown>, key: string, fallback: string) => {
+  const value = payload[key];
+  return typeof value === 'string' && value ? value : fallback;
+};
+
+const numberPayload = (payload: Record<string, unknown>, key: string, fallback: number) => {
+  const value = Number(payload[key]);
+  return Number.isFinite(value) ? value : fallback;
+};
+
+const boolPayload = (payload: Record<string, unknown>, key: string, fallback = false) => {
+  const value = payload[key];
+  return typeof value === 'boolean' ? value : fallback;
+};
+
+const handleCommand = async (
+  message: NativeHostCommand,
+  { root, bridgeUrl }: { root: string; bridgeUrl: string },
+) => {
+  if (message?.ok === false && message.code) return message;
+  const command = String(message.command || message.type || '').trim();
+  const payload = message.payload || {};
+
+  if (command === 'ping') {
+    return {
+      ok: true,
+      transport: 'nativeMessaging',
+      nativeProtocolVersion: NATIVE_PROTOCOL_VERSION,
+      version: readPackageVersion(root),
+      pid: process.pid,
+      node: process.version,
+    };
+  }
+
+  if (command === 'healthz') {
+    return bridgeFetch({
+      bridgeUrl: stringPayload(payload, 'bridgeUrl', bridgeUrl),
+      path: '/healthz',
+      timeoutMs: numberPayload(payload, 'timeoutMs', 2500),
+    });
+  }
+
+  if (command === 'ready') {
+    const params = new URLSearchParams({
+      detail: stringPayload(payload, 'detail', 'compact'),
+      wakeBrowser: boolPayload(payload, 'wakeBrowser') ? 'true' : 'false',
+      selfHeal: boolPayload(payload, 'selfHeal') ? 'true' : 'false',
+    });
+    return bridgeFetch({
+      bridgeUrl: stringPayload(payload, 'bridgeUrl', bridgeUrl),
+      path: `/agent/ready?${params.toString()}`,
+      timeoutMs: numberPayload(payload, 'timeoutMs', 5000),
+    });
+  }
+
+  if (command === 'startBridge') {
+    return startBridge(root, {
+      host: stringPayload(payload, 'host', '127.0.0.1'),
+      port: numberPayload(payload, 'port', 47283),
+      keepAliveMs: numberPayload(payload, 'keepAliveMs', 900_000),
+      exitWhenIdle: boolPayload(payload, 'exitWhenIdle', true),
+    });
+  }
+
+  if (command === 'proxyHttp') {
+    return bridgeFetch({
+      bridgeUrl: stringPayload(payload, 'bridgeUrl', bridgeUrl),
+      path: stringPayload(payload, 'path', '/'),
+      method: stringPayload(payload, 'method', 'GET'),
+      payload: payload.payload,
+      timeoutMs: numberPayload(payload, 'timeoutMs', DEFAULT_REQUEST_TIMEOUT_MS),
+    });
+  }
+
+  return makeError('unknown_command', `Comando native desconhecido: ${command || '(vazio)'}`);
+};
+
+export const startNativeHostRuntime = (options: NativeHostRuntimeOptions = {}): void => {
+  const stdin = (options.stdin || process.stdin) as NodeJS.ReadableStream;
+  const stdout = options.stdout || process.stdout;
+  const root = options.root || runtimeRoot();
+  const bridgeUrl = options.bridgeUrl || DEFAULT_BRIDGE_URL;
+  let inputBuffer: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+
+  const writeNativeMessage = (message: unknown) => {
+    stdout.write(encodeNativeFrame(message));
+  };
+
+  const handleNativeMessage = async (message: unknown) => {
+    const command = message as NativeHostCommand;
+    const id = command?.id ?? null;
+    try {
+      const result = await handleCommand(command, { root, bridgeUrl });
+      writeNativeMessage({ id, ...result });
+    } catch (err) {
+      writeNativeMessage({
+        id,
+        ...makeError('native_host_error', err instanceof Error ? err.message : String(err)),
+      });
+    }
+  };
+
+  stdin.on('data', (chunk: Buffer | string) => {
+    try {
+      inputBuffer = Buffer.concat([inputBuffer, Buffer.from(chunk as Buffer)]);
+      const decoded = decodeNativeFrameBuffer(inputBuffer);
+      inputBuffer = decoded.remaining;
+      for (const message of decoded.messages) {
+        handleNativeMessage(message);
+      }
+    } catch (err) {
+      inputBuffer = Buffer.alloc(0);
+      writeNativeMessage(
+        makeError('invalid_native_frame', err instanceof Error ? err.message : String(err)),
+      );
+    }
+  });
+
+  stdin.on('end', () => {
+    process.exit(0);
+  });
+};

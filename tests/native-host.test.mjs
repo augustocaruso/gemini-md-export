@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import test from 'node:test';
 
@@ -36,6 +36,12 @@ test('native host responde ping no protocolo length-prefixed do Chrome', async (
   assert.equal(response.nativeProtocolVersion, 1);
 
   child.stdin.end();
+});
+
+test('native host runtime is implemented in TypeScript', () => {
+  assert.equal(existsSync(resolve(ROOT, 'src', 'native', 'native-host-runtime.ts')), true);
+  const wrapper = readFileSync(resolve(ROOT, 'src', 'native-host.mjs'), 'utf-8');
+  assert.match(wrapper, /import\(['"]\.\.\/build\/ts\/native\/native-host-runtime\.js['"]\)/);
 });
 
 test('service worker expõe probe de native messaging sem acoplar ao fluxo principal', () => {

@@ -2,13 +2,35 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
+
+const listFilesRecursive = (dir) => {
+  if (!existsSync(dir)) return [];
+  const files = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const fullPath = resolve(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...listFilesRecursive(fullPath));
+    } else if (entry.isFile()) {
+      files.push(fullPath);
+    }
+  }
+  return files;
+};
 
 test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   const extensionDir = resolve(ROOT, 'dist', 'gemini-cli-extension');
@@ -23,6 +45,27 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   const tabSessionPath = resolve(extensionDir, 'src', 'tab-session.mjs');
   const timeoutDiagnosticsPath = resolve(extensionDir, 'src', 'timeout-diagnostics.mjs');
   const telemetryPath = resolve(extensionDir, 'src', 'telemetry.mjs');
+  const compiledTakeoutAdapterPath = resolve(
+    extensionDir,
+    'build',
+    'ts',
+    'takeout',
+    'takeout-adapter.js',
+  );
+  const compiledMetadataEvidencePath = resolve(
+    extensionDir,
+    'build',
+    'ts',
+    'core',
+    'metadata-evidence.js',
+  );
+  const compiledNativeHostRuntimePath = resolve(
+    extensionDir,
+    'build',
+    'ts',
+    'native',
+    'native-host-runtime.js',
+  );
   const nativeHostPath = resolve(extensionDir, 'src', 'native-host.mjs');
   const bridgeVersionPath = resolve(extensionDir, 'bridge-version.json');
   const browserManifestPath = resolve(extensionDir, 'browser-extension', 'manifest.json');
@@ -34,6 +77,13 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   );
   const offscreenHtmlPath = resolve(extensionDir, 'browser-extension', 'offscreen.html');
   const offscreenScriptPath = resolve(extensionDir, 'browser-extension', 'offscreen.js');
+  const chromeDebuggerPath = resolve(
+    extensionDir,
+    'browser-extension',
+    'browser',
+    'shared',
+    'chrome-debugger.js',
+  );
   const nativeHostBinPath = resolve(extensionDir, 'bin', 'gemini-md-export-native-host.mjs');
   const nativeManifestTemplatePath = resolve(
     extensionDir,
@@ -71,7 +121,9 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
     'capture-artifacts.toml',
   );
   const telemetryCommandPath = resolve(extensionDir, 'commands', 'exporter', 'telemetry.toml');
+  const docsDir = resolve(extensionDir, 'docs');
   const telemetryDocPath = resolve(extensionDir, 'docs', 'reference', 'telemetry.md');
+  const superpowersDocsPath = resolve(extensionDir, 'docs', 'superpowers');
   const repairAuditScriptPath = resolve(extensionDir, 'scripts', 'vault-repair-audit.mjs');
   const repairScriptPath = resolve(extensionDir, 'scripts', 'vault-repair.mjs');
   const metadataBackfillScriptPath = resolve(
@@ -98,6 +150,9 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.equal(existsSync(tabSessionPath), true);
   assert.equal(existsSync(timeoutDiagnosticsPath), true);
   assert.equal(existsSync(telemetryPath), true);
+  assert.equal(existsSync(compiledTakeoutAdapterPath), true);
+  assert.equal(existsSync(compiledMetadataEvidencePath), true);
+  assert.equal(existsSync(compiledNativeHostRuntimePath), true);
   assert.equal(existsSync(nativeHostPath), true);
   assert.equal(existsSync(bridgeVersionPath), true);
   assert.equal(existsSync(browserManifestPath), true);
@@ -105,6 +160,7 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.equal(existsSync(activityContentScriptPath), true);
   assert.equal(existsSync(offscreenHtmlPath), true);
   assert.equal(existsSync(offscreenScriptPath), true);
+  assert.equal(existsSync(chromeDebuggerPath), true);
   assert.equal(existsSync(nativeHostBinPath), true);
   assert.equal(existsSync(nativeManifestTemplatePath), true);
   assert.equal(existsSync(hooksConfigPath), true);
@@ -123,6 +179,13 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.equal(existsSync(captureArtifactsCommandPath), true);
   assert.equal(existsSync(telemetryCommandPath), true);
   assert.equal(existsSync(telemetryDocPath), true);
+  assert.equal(existsSync(superpowersDocsPath), false);
+  assert.deepEqual(
+    listFilesRecursive(docsDir).filter((filePath) =>
+      filePath.split('/').includes('superpowers') || filePath.split('/').includes('plans'),
+    ),
+    [],
+  );
   assert.equal(existsSync(repairAuditScriptPath), true);
   assert.equal(existsSync(repairScriptPath), true);
   assert.equal(existsSync(metadataBackfillScriptPath), true);
@@ -153,6 +216,14 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
     'browser extension precisa acessar My Activity para backfill de datas',
   );
   assert.ok(
+    browserManifest.host_permissions.includes('https://www.google.com/sorry/*'),
+    'browser extension precisa detectar tela de verificacao do Google',
+  );
+  assert.ok(
+    browserManifest.host_permissions.includes('https://accounts.google.com/*'),
+    'browser extension precisa detectar login do Google antes do Gemini',
+  );
+  assert.ok(
     browserManifest.content_scripts.some(
       (entry) =>
         entry.js?.includes('activity-content-script.js') &&
@@ -160,6 +231,16 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
         entry.matches?.includes('https://myactivity.google.com/product/gemini*'),
     ),
     'browser extension precisa registrar content script dedicado no My Activity',
+  );
+  assert.ok(
+    browserManifest.content_scripts.some(
+      (entry) =>
+        entry.js?.includes('google-blocker-content-script.js') &&
+        entry.run_at === 'document_idle' &&
+        entry.matches?.includes('https://www.google.com/sorry/*') &&
+        entry.matches?.includes('https://accounts.google.com/*'),
+    ),
+    'browser extension precisa registrar content script para bloqueios Google',
   );
   assert.ok(
     browserManifest.content_scripts.some(
@@ -240,6 +321,7 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.ok(browserManifest.permissions.includes('scripting'));
   assert.ok(browserManifest.permissions.includes('nativeMessaging'));
   assert.ok(browserManifest.permissions.includes('offscreen'));
+  assert.ok(browserManifest.permissions.includes('debugger'));
   assert.equal(browserManifest.permissions.includes('alarms'), false);
   assert.equal(browserManifest.version, bridgeVersion.extensionVersion);
   assert.equal(typeof bridgeVersion.protocolVersion, 'number');
