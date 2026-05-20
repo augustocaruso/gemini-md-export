@@ -7,6 +7,7 @@
 // native messaging ou automações.
 
 import { activateTabWithDebugger } from './browser/shared/chrome-debugger.js';
+import { createNativeBrokerPort } from './browser/background/native-broker-client.js';
 
 const EXTENSION_PROTOCOL_VERSION = Number('__EXTENSION_PROTOCOL_VERSION__');
 const PENDING_GEMINI_TABS_RELOAD_KEY = 'gemini-md-export.pendingGeminiTabsReload';
@@ -64,6 +65,18 @@ let offscreenIdleCloseTimer = 0;
 const tabBrokerRegistry = new Map();
 const tabClaimExpiryTimers = new Map();
 const artifactCaptureCache = [];
+
+const nativeBrokerPort = createNativeBrokerPort({
+  chromeApi: chrome,
+  hostName: NATIVE_HOST_NAME,
+  onStatus: (status) => {
+    lastNativeHostProbe = {
+      ...(lastNativeHostProbe || {}),
+      nativeBroker: status,
+      checkedAt: new Date().toISOString(),
+    };
+  },
+});
 
 const clampText = (value, maxLength) =>
   String(value || '')
@@ -866,11 +879,22 @@ const nativeHostRequest = (command, payload = {}, { timeoutMs = NATIVE_HOST_REQU
     }
   });
 
+const ensureNativeBrokerPort = ({ reason = 'manual' } = {}) => {
+  try {
+    const port = nativeBrokerPort.ensureConnected();
+    return { ok: true, reason, connected: !!port };
+  } catch (err) {
+    return { ok: false, reason, error: err?.message || String(err) };
+  }
+};
+
 const probeNativeHost = async ({ reason = 'manual', timeoutMs = NATIVE_HOST_REQUEST_TIMEOUT_MS } = {}) => {
   const startedAt = Date.now();
+  const nativeBroker = ensureNativeBrokerPort({ reason });
   const result = await nativeHostRequest('ping', {}, { timeoutMs });
   lastNativeHostProbe = {
     ...result,
+    nativeBroker,
     hostName: NATIVE_HOST_NAME,
     reason,
     checkedAt: new Date().toISOString(),

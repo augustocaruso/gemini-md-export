@@ -52,6 +52,28 @@ test('service worker expõe probe de native messaging sem acoplar ao fluxo princ
   assert.match(source, /nativeHost:\s*lastNativeHostProbe/);
 });
 
+test('service worker opens persistent native broker port and exposes tab commands', () => {
+  const backgroundSource = readFileSync(resolve(ROOT, 'src', 'extension-background.ts'), 'utf-8');
+  const brokerSource = readFileSync(
+    resolve(ROOT, 'src', 'browser', 'background', 'native-broker-client.ts'),
+    'utf-8',
+  );
+  assert.match(backgroundSource, /ensureNativeBrokerPort/);
+  assert.match(backgroundSource, /createNativeBrokerPort/);
+  assert.match(brokerSource, /tabs\.list/);
+  assert.match(brokerSource, /tabs\.claim/);
+  assert.match(brokerSource, /claimDebuggableGeminiTab/);
+  assert.match(brokerSource, /classifyBrowserTabs/);
+});
+
+test('native host forwards local ipc requests to the extension port', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'native', 'native-host-runtime.ts'), 'utf-8');
+  assert.match(source, /pendingExtensionRequests/);
+  assert.match(source, /sendToExtension/);
+  assert.match(source, /extension\.hello/);
+  assert.match(source, /extension_unavailable/);
+});
+
 test('content script prefere native proxy para bridgeRequest com fallback HTTP', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'userscript-shell.ts'), 'utf-8');
   assert.match(source, /bridgeTransportState/);

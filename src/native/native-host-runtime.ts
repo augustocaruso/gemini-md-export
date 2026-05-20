@@ -4,7 +4,12 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { decodeNativeFrameBuffer, encodeNativeFrame } from './frame.js';
 import { createBrokerIpcServer, defaultBrokerIpcPath } from './local-ipc.js';
-import type { NativeBrokerRequest, NativeBrokerResponse } from './protocol.js';
+import {
+  nativeBrokerError,
+  nativeBrokerOk,
+  type NativeBrokerRequest,
+  type NativeBrokerResponse,
+} from './protocol.js';
 
 const DEFAULT_BRIDGE_URL = process.env.GEMINI_MD_EXPORT_BRIDGE_URL || 'http://127.0.0.1:47283';
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
@@ -199,6 +204,8 @@ const boolPayload = (payload: Record<string, unknown>, key: string, fallback = f
   return typeof value === 'boolean' ? value : fallback;
 };
 
+const isTabBrokerCommand = (command: unknown) => String(command || '').startsWith('tabs.');
+
 const handleCommand = async (
   message: NativeHostCommand,
   { root, bridgeUrl }: { root: string; bridgeUrl: string },
@@ -275,9 +282,80 @@ export const startNativeHostRuntime = (options: NativeHostRuntimeOptions = {}): 
     stdout.write(encodeNativeFrame(message));
   };
 
+  const pendingExtensionRequests = new Map<
+    string,
+    {
+      resolve(value: NativeBrokerResponse): void;
+      reject(error: Error): void;
+      timer: NodeJS.Timeout;
+    }
+  >();
+  let extensionConnected = false;
+
+  const sendToExtension = (
+    request: NativeBrokerRequest,
+    timeoutMs = 5000,
+  ): Promise<NativeBrokerResponse> =>
+    new Promise((resolve, reject) => {
+      if (!extensionConnected) {
+        reject(new Error('extension_unavailable'));
+        return;
+      }
+      const timer = setTimeout(() => {
+        pendingExtensionRequests.delete(request.id);
+        reject(new Error('extension_request_timeout'));
+      }, timeoutMs);
+      pendingExtensionRequests.set(request.id, { resolve, reject, timer });
+      writeNativeMessage(request);
+    });
+
+  const handleMessageFromExtension = async (
+    message: NativeHostCommand | NativeBrokerRequest | NativeBrokerResponse,
+  ) => {
+    if (message && typeof message === 'object' && 'ok' in message) {
+      const response = message as NativeBrokerResponse;
+      const pending = pendingExtensionRequests.get(response.id);
+      if (pending) {
+        pendingExtensionRequests.delete(response.id);
+        clearTimeout(pending.timer);
+        pending.resolve(response);
+      }
+      return null;
+    }
+
+    if (message && typeof message === 'object' && 'command' in message && message.command === 'extension.hello') {
+      extensionConnected = true;
+      return nativeBrokerOk(message as NativeBrokerRequest, { connected: true });
+    }
+
+    return handleCommand(message as NativeHostCommand, { root, bridgeUrl });
+  };
+
   const handleBrokerIpcRequest = async (
     request: NativeBrokerRequest,
   ): Promise<NativeBrokerResponse> => {
+    if (isTabBrokerCommand(request.command)) {
+      try {
+        return await sendToExtension(request);
+      } catch (err) {
+        const code =
+          err instanceof Error && err.message === 'extension_request_timeout'
+            ? 'extension_request_timeout'
+            : 'extension_unavailable';
+        const message =
+          code === 'extension_request_timeout'
+            ? 'A extensao nao respondeu ao comando de aba a tempo.'
+            : 'A extensao ainda nao abriu a porta nativa do broker.';
+        return nativeBrokerError(request, code, message, {
+          retryable: true,
+          nextAction:
+            code === 'extension_request_timeout'
+              ? 'Tente novamente depois que a aba do Gemini terminar de carregar.'
+              : 'Abra ou recarregue uma aba Gemini com a extensao instalada.',
+          data: { error: err instanceof Error ? err.message : String(err) },
+        });
+      }
+    }
     const result = await handleCommand(request, { root, bridgeUrl });
     return toBrokerResponse(request, result);
   };
@@ -295,7 +373,8 @@ export const startNativeHostRuntime = (options: NativeHostRuntimeOptions = {}): 
     const command = message as NativeHostCommand;
     const id = command?.id ?? null;
     try {
-      const result = await handleCommand(command, { root, bridgeUrl });
+      const result = await handleMessageFromExtension(command);
+      if (result === null) return;
       writeNativeMessage({ id, ...result });
     } catch (err) {
       writeNativeMessage({
