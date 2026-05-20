@@ -13,7 +13,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import readline from 'node:readline';
@@ -58,6 +58,53 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
 const pkg = JSON.parse(readFileSync(resolve(ROOT, 'package.json'), 'utf-8'));
 const bridgeVersion = JSON.parse(readFileSync(resolve(ROOT, 'bridge-version.json'), 'utf-8'));
+let mcpExportWorkflowsPromise = null;
+let mcpCommandLeasePromise = null;
+
+const compiledTsModuleUrl = (...segments) => {
+  const modulePath = resolve(ROOT, 'build', 'ts', ...segments);
+  if (!existsSync(modulePath)) {
+    throw new Error(
+      `Modulo TypeScript compilado nao encontrado: build/ts/${segments.join('/')} (rode npm run build:ts).`,
+    );
+  }
+  return pathToFileURL(modulePath).href;
+};
+
+const loadMcpExportWorkflows = () => {
+  mcpExportWorkflowsPromise ||= import(
+    compiledTsModuleUrl('mcp', 'export-workflows.js')
+  );
+  return mcpExportWorkflowsPromise;
+};
+
+const loadMcpCommandLease = () => {
+  mcpCommandLeasePromise ||= import(
+    compiledTsModuleUrl('mcp', 'command-lease.js')
+  );
+  return mcpCommandLeasePromise;
+};
+
+const validateMcpExportPayload = async (payload, input = {}) => {
+  const { validateMcpExportPayloadBeforeWrite } = await loadMcpExportWorkflows();
+  return validateMcpExportPayloadBeforeWrite(payload, input);
+};
+
+const {
+  selectReconnectSourcesForTab,
+  shouldIncludeHeartbeatJobProgress,
+} = await import(compiledTsModuleUrl('mcp', 'tab-runtime.js'));
+const {
+  assertActiveClaimableGeminiClient,
+  explainActiveClaimableGeminiClientRejection,
+  getActiveClaimableGeminiClients,
+  toActiveClaimableGeminiClient,
+} = await import(compiledTsModuleUrl('mcp', 'tab-selection.js'));
+const {
+  assertClaimedReadyGeminiTab,
+  classifyGeminiClientLifecycle,
+  getGeminiClientLifecycle,
+} = await import(compiledTsModuleUrl('mcp', 'client-lifecycle.js'));
 
 const SERVER_NAME = 'gemini-md-export';
 const SERVER_VERSION = pkg.version;
@@ -122,6 +169,10 @@ const COMMAND_CHANNEL_FAILURE_COOLDOWN_MS = Math.max(
 );
 const LONG_POLL_TIMEOUT_MS = 25_000;
 const SSE_KEEPALIVE_MS = Number(process.env.GEMINI_MCP_SSE_KEEPALIVE_MS || 15_000);
+const SSE_COMMAND_FAILURE_BACKOFF_MS = Math.max(
+  5000,
+  Math.min(300_000, Number(process.env.GEMINI_MCP_SSE_COMMAND_FAILURE_BACKOFF_MS || 60_000)),
+);
 const COMMAND_TIMEOUT_MS = Number(process.env.GEMINI_MCP_COMMAND_TIMEOUT_MS || 180_000);
 const DEFAULT_EXPORT_HYDRATION_LOAD_WAIT_MS = 2500;
 const DEFAULT_EXPORT_HYDRATION_TOP_SETTLE_MS = 8000;
@@ -129,6 +180,14 @@ const DEFAULT_EXPORT_HYDRATION_STALL_TIMEOUT_MS = 45_000;
 const DEFAULT_EXPORT_HYDRATION_MAX_TOTAL_MS = 10 * 60_000;
 const EXPORT_COMMAND_TIMEOUT_MS = Number(
   process.env.GEMINI_MCP_EXPORT_COMMAND_TIMEOUT_MS || 15 * 60_000,
+);
+const EXPORT_COMMAND_STALE_ABORT_MS = Math.max(
+  CLIENT_STALE_MS + 15_000,
+  Math.min(10 * 60_000, Number(process.env.GEMINI_MCP_EXPORT_COMMAND_STALE_ABORT_MS || 90_000)),
+);
+const EXPORT_TAB_ACTIVATION_TIMEOUT_MS = Math.max(
+  3000,
+  Math.min(30_000, Number(process.env.GEMINI_MCP_EXPORT_TAB_ACTIVATION_TIMEOUT_MS || 8000)),
 );
 const COMMAND_DISPATCH_TIMEOUT_MS = Number(
   process.env.GEMINI_MCP_COMMAND_DISPATCH_TIMEOUT_MS || 20_000,
@@ -1986,6 +2045,20 @@ const closeEventStream = (client) => {
   client.eventStream = null;
 };
 
+const clientEventStreamUsable = (client) =>
+  !!client?.eventStream?.res &&
+  !client.eventStream.res.destroyed &&
+  Date.now() >= Number(client.sseDisabledUntil || 0);
+
+const disableClientSseCommandChannel = (clientId, reason = 'command-timeout') => {
+  const client = clients.get(clientId);
+  if (!client) return null;
+  client.sseDisabledUntil = Date.now() + SSE_COMMAND_FAILURE_BACKOFF_MS;
+  client.sseDisabledReason = reason;
+  closeEventStream(client);
+  return client;
+};
+
 const sendClientEvent = (client, event, payload = {}) => {
   if (!client?.eventStream?.res || client.eventStream.res.destroyed) {
     if (client) client.eventStream = null;
@@ -2061,8 +2134,7 @@ const cleanupStaleClients = () => {
   for (const [clientId, client] of clients.entries()) {
     if (now - client.lastSeenAt <= CLIENT_STALE_MS) continue;
     if (hasPendingCommandForClient(clientId)) {
-      client.lastSeenAt = now;
-      client.lastSeenAtExtendedByCommandAt = new Date(now).toISOString();
+      client.retainedByPendingCommandAt = new Date(now).toISOString();
       continue;
     }
     removeClient(clientId);
@@ -2293,6 +2365,17 @@ const summarizeTabClaims = () => {
   return [...tabClaims.values()].map(summarizeTabClaim);
 };
 
+const summarizeRawTabClaims = () => {
+  cleanupExpiredTabClaims();
+  return [...tabClaims.values()].map((claim) => ({
+    claimId: claim.claimId,
+    clientId: claim.clientId,
+    tabId: claim.tabId ?? null,
+    sessionId: claim.sessionId,
+    expiresAtMs: claim.expiresAtMs,
+  }));
+};
+
 const claimForSession = (sessionId) => {
   cleanupExpiredTabClaims();
   const claimId = sessionClaims.get(normalizeSessionId(sessionId));
@@ -2379,27 +2462,54 @@ const ambiguousTabsError = (liveClients, selector = {}) => {
   return error;
 };
 
-const reconnectSourceForClient = (client) => {
-  if (!client) return null;
-  return Array.from(clients.values())
-    .filter((candidate) => candidate.clientId !== client.clientId)
-    .filter((candidate) => {
-      const sameTab =
-        client.tabId !== null &&
-        client.tabId !== undefined &&
-        candidate.tabId !== null &&
-        candidate.tabId !== undefined &&
-        Number(client.tabId) === Number(candidate.tabId);
-      if (sameTab) return true;
-      const claim = claimForClient(candidate);
-      return claim ? clientCarriesClaim(client, claim) : false;
-    })
-    .sort((a, b) => (b.conversations?.length || 0) - (a.conversations?.length || 0))[0] || null;
+const tabRuntimeClientState = (client) => {
+  if (!client?.clientId) return null;
+  const claim = claimForClient(client) || clientTabClaim(client) || null;
+  return {
+    clientId: client.clientId,
+    tabId: client.tabId ?? null,
+    claimId: claim?.claimId || null,
+    sessionId: claim?.sessionId || client.tabClaim?.sessionId || client.summary?.tabClaim?.sessionId || null,
+    conversationCount: Array.isArray(client.conversations) ? client.conversations.length : 0,
+    hasPendingCommand: hasPendingCommandForClient(client.clientId),
+    lastSeenAt: client.lastSeenAt || null,
+  };
+};
+
+const reconnectSourcesForClient = (client) => {
+  const nextClient = tabRuntimeClientState(client);
+  if (!nextClient) {
+    return {
+      abortClients: [],
+      cacheSource: null,
+      selection: { abortClientIds: [], cacheSourceClientId: null },
+    };
+  }
+  const candidates = Array.from(clients.values()).map(tabRuntimeClientState).filter(Boolean);
+  const selection = selectReconnectSourcesForTab({ nextClient, candidates });
+  return {
+    abortClients: selection.abortClientIds
+      .map((clientId) => clients.get(clientId))
+      .filter(Boolean),
+    cacheSource: selection.cacheSourceClientId
+      ? clients.get(selection.cacheSourceClientId) || null
+      : null,
+    selection,
+  };
 };
 
 const preserveReconnectConversationCache = (client, payload = {}) => {
-  const source = reconnectSourceForClient(client);
-  if (!source?.conversations?.length) return;
+  const { abortClients, cacheSource } = reconnectSourcesForClient(client);
+  for (const source of abortClients) {
+    abortPendingCommandsForClient(source.clientId, {
+      code: 'client_reconnected_during_command',
+      reason: 'client-reconnected-same-tab',
+      replacementClientId: client.clientId,
+    });
+  }
+  const source = cacheSource;
+  if (!source) return;
+  if (!source.conversations?.length) return;
   const incomingCount = Array.isArray(payload.conversations) ? payload.conversations.length : 0;
   const currentCount = client.conversations?.length || 0;
   if (Math.max(incomingCount, currentCount) >= source.conversations.length) return;
@@ -2481,6 +2591,7 @@ const upsertClient = (payload, meta = {}) => {
   clients.set(next.clientId, next);
   const claim = claimForClient(next);
   if (claim) rebindTabClaimToClient(claim, next, 'client-upsert');
+  rebroadcastActiveBrowserExportJobForClient(next, 'client-upsert');
   return next;
 };
 
@@ -2540,18 +2651,25 @@ const flushQueuedCommand = (client, { allowSse = true } = {}) => {
   if (!client?.queue?.length) return null;
   const command = takeQueuedCommand(client);
   if (!command) return null;
-  if (allowSse && sendClientEvent(client, 'command', { command })) {
+  if (allowSse && clientEventStreamUsable(client) && sendClientEvent(client, 'command', { command })) {
+    const pending = pendingCommands.get(command.id);
+    if (pending) pending.delivery = 'sse';
     return 'sse';
   }
   if (!client.pendingPoll) {
     client.queue.unshift(command);
     const pending = pendingCommands.get(command.id);
-    if (pending) pending.dispatchedAt = null;
+    if (pending) {
+      pending.dispatchedAt = null;
+      pending.delivery = null;
+    }
     return null;
   }
   const { res, timer } = client.pendingPoll;
   clearTimeout(timer);
   client.pendingPoll = null;
+  const pending = pendingCommands.get(command.id);
+  if (pending) pending.delivery = 'long-poll';
   sendJson(res, 200, { command });
   return 'long-poll';
 };
@@ -2560,6 +2678,56 @@ const removeQueuedCommand = (clientId, commandId) => {
   const client = clients.get(clientId);
   if (!client?.queue?.length) return;
   client.queue = client.queue.filter((command) => command.id !== commandId);
+};
+
+const abortPendingCommandsForClient = (
+  clientId,
+  { code = 'client_command_aborted', message = null, reason = null, replacementClientId = null } = {},
+) => {
+  let aborted = 0;
+  for (const [commandId, pending] of pendingCommands.entries()) {
+    if (pending.clientId !== clientId) continue;
+    pendingCommands.delete(commandId);
+    removeQueuedCommand(clientId, commandId);
+    if (pending.timer) clearTimeout(pending.timer);
+    if (pending.dispatchTimer) clearTimeout(pending.dispatchTimer);
+    if (pending.staleTimer) clearInterval(pending.staleTimer);
+    const error = new Error(
+      message ||
+        `A aba do Gemini reconectou durante ${pending.type}. Vou tentar continuar pela nova conexão.`,
+    );
+    error.code = code;
+    error.commandType = pending.type;
+    error.commandDispatched = !!pending.dispatchedAt;
+    error.clientId = clientId;
+    error.replacementClientId = replacementClientId;
+    error.reason = reason;
+    decorateErrorWithTimeoutContext(error, {
+      layer: 'browser',
+      operation: pending.type,
+      timeoutMs: 0,
+    });
+    markClientCommandTimeout(clientId, pending.type, {
+      dispatched: !!pending.dispatchedAt,
+      code,
+    });
+    if (pending.delivery === 'sse') {
+      disableClientSseCommandChannel(clientId, reason || code);
+    }
+    recordFlightEvent('command_aborted_for_client_reconnect', {
+      commandId,
+      clientId,
+      nextClientId: replacementClientId,
+      type: pending.type,
+      dispatched: !!pending.dispatchedAt,
+      delivery: pending.delivery || null,
+      code,
+      reason,
+    });
+    pending.reject(error);
+    aborted += 1;
+  }
+  return aborted;
 };
 
 const markClientCommandTimeout = (clientId, type, { dispatched = false, code = 'command_timeout' } = {}) => {
@@ -2608,6 +2776,7 @@ const enqueueCommand = (clientId, type, args = {}, options = {}) => {
     type,
     timeoutMs: options.timeoutMs || COMMAND_TIMEOUT_MS,
     dispatchTimeoutMs: options.dispatchTimeoutMs ?? COMMAND_DISPATCH_TIMEOUT_MS,
+    staleAbortMs: options.staleAbortMs || null,
   });
 
   return new Promise((resolve, reject) => {
@@ -2616,19 +2785,34 @@ const enqueueCommand = (clientId, type, args = {}, options = {}) => {
       0,
       Number(options.dispatchTimeoutMs ?? COMMAND_DISPATCH_TIMEOUT_MS),
     );
+    const staleAbortMs = Math.max(0, Number(options.staleAbortMs || 0));
+    const staleCheckIntervalMs = Math.max(
+      500,
+      Math.min(10_000, Number(options.staleCheckIntervalMs || 2500)),
+    );
     const pending = {
       clientId,
       resolve,
       reject,
       timer: null,
       dispatchTimer: null,
+      staleTimer: null,
       type,
       dispatchedAt: null,
+      delivery: null,
+    };
+    const clearPendingTimers = () => {
+      if (pending.timer) clearTimeout(pending.timer);
+      if (pending.dispatchTimer) clearTimeout(pending.dispatchTimer);
+      if (pending.staleTimer) clearInterval(pending.staleTimer);
+      pending.timer = null;
+      pending.dispatchTimer = null;
+      pending.staleTimer = null;
     };
     const timer = setTimeout(() => {
       pendingCommands.delete(command.id);
       removeQueuedCommand(clientId, command.id);
-      if (pending.dispatchTimer) clearTimeout(pending.dispatchTimer);
+      clearPendingTimers();
       const error = new Error(`Timeout aguardando resposta do comando ${type}.`);
       error.code = 'command_timeout';
       error.commandType = type;
@@ -2642,22 +2826,71 @@ const enqueueCommand = (clientId, type, args = {}, options = {}) => {
         dispatched: !!pending.dispatchedAt,
         code: 'command_timeout',
       });
+      if (pending.delivery === 'sse') {
+        disableClientSseCommandChannel(clientId, 'command-timeout');
+      }
       recordFlightEvent('command_timeout', {
         commandId: command.id,
         clientId,
         type,
         dispatched: !!pending.dispatchedAt,
+        delivery: pending.delivery || null,
       });
       reject(error);
     }, timeoutMs);
 
     pending.timer = timer;
+    if (staleAbortMs > 0) {
+      pending.staleTimer = setInterval(() => {
+        if (!pendingCommands.has(command.id)) {
+          clearPendingTimers();
+          return;
+        }
+        if (!pending.dispatchedAt) return;
+        const watchedClient = clients.get(clientId);
+        const staleForMs = Date.now() - Number(watchedClient?.lastSeenAt || 0);
+        if (staleForMs <= staleAbortMs) return;
+
+        pendingCommands.delete(command.id);
+        removeQueuedCommand(clientId, command.id);
+        clearPendingTimers();
+        const error = new Error(
+          `A aba do Gemini parou de responder durante ${type}. Recarregue a aba e tente novamente; nenhum arquivo foi salvo por este comando.`,
+        );
+        error.code = 'client_stale_during_command';
+        error.commandType = type;
+        error.commandDispatched = true;
+        error.clientId = clientId;
+        error.staleForMs = staleForMs;
+        decorateErrorWithTimeoutContext(error, {
+          layer: 'browser',
+          operation: type,
+          timeoutMs: staleAbortMs,
+        });
+        markClientCommandTimeout(clientId, type, {
+          dispatched: true,
+          code: 'client_stale_during_command',
+        });
+        if (pending.delivery === 'sse') {
+          disableClientSseCommandChannel(clientId, 'client-stale-during-command');
+        }
+        recordFlightEvent('command_stale_abort', {
+          commandId: command.id,
+          clientId,
+          type,
+          staleForMs,
+          staleAbortMs,
+          delivery: pending.delivery || null,
+        });
+        reject(error);
+      }, staleCheckIntervalMs);
+    }
     if (dispatchTimeoutMs > 0) {
       pending.dispatchTimer = setTimeout(() => {
         if (pending.dispatchedAt) return;
         pendingCommands.delete(command.id);
         removeQueuedCommand(clientId, command.id);
-        clearTimeout(pending.timer);
+        clearPendingTimers();
         const error = new Error(
           `A aba do Gemini está conectada, mas não abriu o canal de comandos para ${type}. Recarregue a aba do Gemini e confirme que a extensão está ativa no navegador.`,
         );
@@ -2693,6 +2926,7 @@ const resolveCommand = (commandId, result) => {
   if (!pending) return false;
   clearTimeout(pending.timer);
   if (pending.dispatchTimer) clearTimeout(pending.dispatchTimer);
+  if (pending.staleTimer) clearInterval(pending.staleTimer);
   pendingCommands.delete(commandId);
   const client = clients.get(pending.clientId);
   if (client) {
@@ -2763,6 +2997,9 @@ const requireClient = (selector = {}) => {
     return selectableClients[0];
   }
 
+  const implicitClient = selectUnambiguousImplicitGeminiClient(selectableClients);
+  if (implicitClient) return implicitClient;
+
   throw ambiguousTabsError(selectableClients, normalized);
 };
 
@@ -2770,6 +3007,21 @@ const isNotebookClient = (client) =>
   client?.page?.kind === 'notebook' ||
   String(client?.page?.pathname || '').startsWith('/notebook/') ||
   (client?.conversations || []).some((conversation) => conversation.source === 'notebook');
+
+const clientHasUsefulGeminiContext = (client) =>
+  !!client?.page?.chatId || recentConversationCountForClient(client) > 0 || isNotebookClient(client);
+
+const selectUnambiguousImplicitGeminiClient = (selectableClients = []) => {
+  const usefulClients = selectableClients.filter(clientHasUsefulGeminiContext);
+  const candidates = usefulClients.length > 0 ? usefulClients : selectableClients;
+  const activeUsefulClients = candidates.filter((client) => client.isActiveTab === true);
+  if (activeUsefulClients.length === 1) return activeUsefulClients[0];
+
+  const concreteChatClients = candidates.filter((client) => !!client?.page?.chatId);
+  if (concreteChatClients.length === 1 && candidates.length === 1) return concreteChatClients[0];
+
+  return null;
+};
 
 const requireNotebookClient = (selector = {}) => {
   const normalized = normalizeClientSelector(selector);
@@ -2938,6 +3190,14 @@ const exportCommandTimeoutMs = (args = {}) => {
   );
 };
 
+const exportCommandStaleAbortMs = (args = {}) =>
+  normalizeExportWaitMs(
+    args.exportStaleAbortMs ?? args.browserStaleAbortMs,
+    EXPORT_COMMAND_STALE_ABORT_MS,
+    CLIENT_STALE_MS + 1000,
+    10 * 60_000,
+  );
+
 const normalizeReloadWaitMs = (value, fallback, max = 120_000) => {
   const parsed = Number(value ?? fallback);
   const safe = Number.isFinite(parsed) ? parsed : fallback;
@@ -3038,13 +3298,64 @@ const ensureBrowserExtensionReady = (args = {}, options = {}) =>
     },
   );
 
+const selectorHasExplicitTabTarget = (selector = {}) =>
+  !!selector.clientId || selector.tabId !== null || !!selector.claimId;
+
+const sameClientIdentity = (left, right) =>
+  !!left?.clientId && !!right?.clientId && left.clientId === right.clientId;
+
+const clientMatchesNormalizedSelector = (client, normalized) => {
+  if (!client) return false;
+  if (normalized.clientId) return client.clientId === normalized.clientId;
+  if (normalized.tabId !== null) return Number(client.tabId) === normalized.tabId;
+  return false;
+};
+
+const findClaimClientForSelector = (normalized) => {
+  if (normalized.claimId) return liveClientForClaim(tabClaims.get(normalized.claimId));
+  return null;
+};
+
+const findClientByClaimableSelector = (candidateClients, normalized) => {
+  const direct = candidateClients.find((client) => clientMatchesNormalizedSelector(client, normalized));
+  if (direct) return direct;
+  const claimClient = findClaimClientForSelector(normalized);
+  if (!claimClient) return null;
+  return candidateClients.find((client) => sameClientIdentity(client, claimClient)) || null;
+};
+
+const inactiveGeminiTabClaimNotAllowedError = (candidateClients = [], selector = {}) => {
+  const diagnostics = candidateClients.map((client) => ({
+    client: summarizeClient(client),
+    rejection: explainActiveClaimableGeminiClientRejection(
+      client,
+      activeClaimableGeminiClientOptions(),
+    ),
+  }));
+  const error = new Error(
+    'inactive_gemini_tab_claim_not_allowed: só uma aba Gemini ativa, com heartbeat fresco e build esperado, pode ser reivindicada para exportação.',
+  );
+  error.code = 'inactive_gemini_tab_claim_not_allowed';
+  error.data = {
+    selector: normalizeClientSelector(selector),
+    connectedTabs: candidateClients.map(summarizeClient),
+    diagnostics,
+  };
+  return error;
+};
+
 const selectClaimableClient = async (args = {}) => {
   cleanupStaleClients();
   cleanupExpiredTabClaims();
-  let liveClients = getSelectableGeminiClients();
+  const normalized = normalizeClientSelector(args);
+  let selectableClients = getSelectableGeminiClients();
+  let claimableClients = getActiveClaimableGeminiClients(
+    selectableClients,
+    activeClaimableGeminiClientOptions(),
+  );
   const openIfMissing = args.openIfMissing !== false && args.wakeBrowser !== false;
 
-  if (liveClients.length === 0 && openIfMissing) {
+  if (claimableClients.length === 0 && selectableClients.length === 0 && openIfMissing) {
     await launchChromeForGemini({
       profileDirectory: CHROME_GUARD_CONFIG.profileDirectory,
     });
@@ -3052,16 +3363,34 @@ const selectClaimableClient = async (args = {}) => {
       normalizeWaitMs(args.waitMs, BROWSER_STATUS_WAKE_WAIT_MS),
       CHROME_GUARD_CONFIG.pollIntervalMs || 500,
     );
-    liveClients = getSelectableGeminiClients();
+    selectableClients = getSelectableGeminiClients();
+    claimableClients = getActiveClaimableGeminiClients(
+      selectableClients,
+      activeClaimableGeminiClientOptions(),
+    );
+  }
+
+  const selectedClaimable = findClientByClaimableSelector(claimableClients, normalized);
+  if (selectedClaimable) return selectedClaimable;
+
+  const selectedNonClaimable = findClientByClaimableSelector(selectableClients, normalized);
+  if (
+    selectedNonClaimable &&
+    selectorHasExplicitTabTarget(normalized) &&
+    !toActiveClaimableGeminiClient(
+      selectedNonClaimable,
+      activeClaimableGeminiClientOptions(),
+    )
+  ) {
+    throw inactiveGeminiTabClaimNotAllowedError([selectedNonClaimable], normalized);
   }
 
   if (args.preferActive === true) {
-    const activeClients = liveClients.filter((client) => client.isActiveTab === true);
-    if (activeClients.length === 1) return activeClients[0];
+    if (claimableClients.length === 1) return claimableClients[0];
   }
 
   if (args.preferRecent === true) {
-    const candidates = [...liveClients].sort(
+    const candidates = [...claimableClients].sort(
       (a, b) =>
         recentConversationCountForClient(b) - recentConversationCountForClient(a) ||
         Number(b.isActiveTab === true) - Number(a.isActiveTab === true) ||
@@ -3072,15 +3401,15 @@ const selectClaimableClient = async (args = {}) => {
 
   if (Number.isInteger(Number(args.index))) {
     const index = Number(args.index);
-    if (index < 1 || index > liveClients.length) {
+    if (index < 1 || index > claimableClients.length) {
       throw new Error(`Índice de aba inválido: ${args.index}.`);
     }
-    return liveClients[index - 1];
+    return claimableClients[index - 1];
   }
 
   const chatId = String(args.chatId || '').trim().toLowerCase();
   if (chatId) {
-    const match = liveClients.find(
+    const match = claimableClients.find(
       (client) =>
         String(client.page?.chatId || '').toLowerCase() === chatId ||
         (client.conversations || []).some(
@@ -3091,20 +3420,46 @@ const selectClaimableClient = async (args = {}) => {
     throw new Error(`Nenhuma aba conectada corresponde ao chatId ${chatId}.`);
   }
 
-  return requireClient(args);
+  const sessionClaimClient = liveClientForClaim(claimForSession(normalized.sessionId));
+  if (sessionClaimClient) {
+    const sessionClaimable = claimableClients.find((client) =>
+      sameClientIdentity(client, sessionClaimClient),
+    );
+    if (sessionClaimable) return sessionClaimable;
+  }
+
+  if (claimableClients.length === 0) {
+    throw inactiveGeminiTabClaimNotAllowedError(selectableClients, normalized);
+  }
+
+  if (claimableClients.length === 1) return claimableClients[0];
+
+  const implicitClient = selectUnambiguousImplicitGeminiClient(claimableClients);
+  if (implicitClient) {
+    return assertActiveClaimableGeminiClient(
+      implicitClient,
+      activeClaimableGeminiClientOptions(),
+    );
+  }
+
+  throw ambiguousTabsError(claimableClients, normalized);
 };
 
-const claimTabForClient = async (client, args = {}) => {
+const claimTabForClient = async (client, args = {}, options = {}) => {
+  const requestedClient =
+    options.requireActiveGemini === true
+      ? assertActiveClaimableGeminiClient(client, activeClaimableGeminiClientOptions())
+      : client;
   cleanupExpiredTabClaims();
   const sessionId = normalizeSessionId(args.sessionId || args._proxySessionId);
   const ttlMs = normalizeClaimTtlMs(args.ttlMs);
   const now = Date.now();
   const existingSessionClaim = claimForSession(sessionId);
-  const existingClientClaim = claimForClient(client);
+  const existingClientClaim = claimForClient(requestedClient);
 
   if (
     existingSessionClaim &&
-    existingSessionClaim.clientId !== client.clientId &&
+    existingSessionClaim.clientId !== requestedClient.clientId &&
     args.force !== true
   ) {
     const error = new Error(
@@ -3113,14 +3468,14 @@ const claimTabForClient = async (client, args = {}) => {
     error.code = 'tab_claim_conflict';
     error.data = {
       currentClaim: summarizeTabClaim(existingSessionClaim),
-      requestedClient: summarizeClient(client),
+      requestedClient: summarizeClient(requestedClient),
     };
     throw error;
   }
 
   if (
     existingSessionClaim &&
-    existingSessionClaim.clientId !== client.clientId &&
+    existingSessionClaim.clientId !== requestedClient.clientId &&
     args.force === true
   ) {
     await releaseTabClaim({ claimId: existingSessionClaim.claimId, reason: 'claim-replaced' });
@@ -3151,7 +3506,7 @@ const claimTabForClient = async (client, args = {}) => {
   }
 
   const claimId =
-    existingSessionClaim?.clientId === client.clientId
+    existingSessionClaim?.clientId === requestedClient.clientId
       ? existingSessionClaim.claimId
       : normalizeClaimId(args.claimId);
   const label = labelForSession(sessionId, args.label);
@@ -3159,13 +3514,19 @@ const claimTabForClient = async (client, args = {}) => {
   const expiresAtMs = now + ttlMs;
 
   const ready = await ensureBrowserExtensionReady(
-    { clientId: client.clientId },
+    { clientId: requestedClient.clientId },
     {
       allowLaunchChrome: false,
       allowReload: args.allowReload !== false,
     },
   );
-  const readyClient = ready.client || client;
+  const readyClient =
+    options.requireActiveGemini === true
+      ? assertActiveClaimableGeminiClient(
+          ready.client || requestedClient,
+          activeClaimableGeminiClientOptions(),
+        )
+      : ready.client || requestedClient;
 
   const visual = await enqueueCommand(
     readyClient.clientId,
@@ -3216,6 +3577,9 @@ const claimTabForClient = async (client, args = {}) => {
     reloadAttempts: ready.reloadAttempts || 0,
   };
 };
+
+const claimGeminiTabForClient = async (client, args = {}) =>
+  claimTabForClient(client, args, { requireActiveGemini: true });
 
 const releaseTabClaim = async (args = {}) => {
   cleanupExpiredTabClaims();
@@ -3384,19 +3748,34 @@ const ensureTabClaimForJob = async (client, args = {}, label = TAB_CLAIM_LABELS.
   const sessionId = normalizeSessionId(args.sessionId || args._proxySessionId);
   const existingSessionClaim = claimForSession(sessionId);
   if (existingSessionClaim?.clientId === client.clientId && args.renewExistingClaim === false) {
+    client.lastTabClaimWarning = null;
     return summarizeTabClaim(existingSessionClaim);
   }
   if (args.autoClaim === false) {
+    client.lastTabClaimWarning = null;
     return existingSessionClaim?.clientId === client.clientId
       ? summarizeTabClaim(existingSessionClaim)
       : null;
   }
-  const result = await claimTabForClient(client, {
-    ...args,
-    sessionId,
-    label: args.label || label,
-  });
-  return result.claim;
+  try {
+    const result = await claimGeminiTabForClient(client, {
+      ...args,
+      sessionId,
+      label: args.label || label,
+    });
+    client.lastTabClaimWarning = null;
+    return result.claim;
+  } catch (err) {
+    const warning = {
+      ok: false,
+      code: err?.code || 'tab_claim_failed',
+      error: err?.message || String(err),
+      label: args.label || label,
+    };
+    client.lastTabClaimWarning = warning;
+    if (args.requireTabClaim === true) throw err;
+    return null;
+  }
 };
 
 const clientIsActivityClient = (client) => {
@@ -3500,6 +3879,7 @@ const summarizeClient = (client) => ({
     lastCommandTimeoutCode: client.lastCommandTimeoutCode || null,
   },
   page: client.page || null,
+  lifecycle: lifecycleSummaryForClient(client),
   tabClaim: client.tabClaim || null,
   serverClaim: summarizeTabClaim(claimForClient(client)),
   bridgeHealth: buildBridgeHealth(client),
@@ -3510,12 +3890,13 @@ const summarizeClient = (client) => ({
 });
 
 const clientHasOpenCommandChannel = (client) =>
-  (!!client?.eventStream?.res && !client.eventStream.res.destroyed) ||
+  clientEventStreamUsable(client) ||
   !!client?.pendingPoll ||
   client?.commandPoll?.polling === true;
 
 const commandChannelReadyForClient = (client) =>
-  clientHasOpenCommandChannel(client);
+  clientHasOpenCommandChannel(client) &&
+  !clientHasRecentCommandFailure(client);
 
 const browserReadyBlockingIssue = ({
   allLiveClients = [],
@@ -3672,8 +4053,11 @@ const normalizeOffset = (value, max = MAX_RECENT_CHATS_LOAD_TARGET - 1) => {
 const notebookConversationsForClient = (client) =>
   (client.conversations || []).filter((conversation) => conversation.source === 'notebook');
 
+const hasExportableRecentConversationIdentity = (conversation = {}) =>
+  conversation.source !== 'notebook' && !!normalizeConversationChatId(conversation);
+
 const recentConversationsForClient = (client) =>
-  (client.conversations || []).filter((conversation) => conversation.source !== 'notebook');
+  (client.conversations || []).filter(hasExportableRecentConversationIdentity);
 
 const recentConversationCountForClient = (client) => recentConversationsForClient(client).length;
 
@@ -3685,22 +4069,73 @@ const clientMatchesExpectedBrowserExtension = (client) =>
   (!EXPECTED_CHROME_EXTENSION_INFO.buildStamp ||
     String(clientBuildStamp(client) || '') === EXPECTED_CHROME_EXTENSION_INFO.buildStamp);
 
+const activeClaimableGeminiClientOptions = (overrides = {}) => ({
+  now: Date.now(),
+  staleAfterMs: CLIENT_STALE_MS,
+  expectedExtensionVersion: EXPECTED_CHROME_EXTENSION_INFO.extensionVersion,
+  expectedProtocolVersion: EXPECTED_CHROME_EXTENSION_INFO.protocolVersion,
+  expectedBuildStamp: EXPECTED_CHROME_EXTENSION_INFO.buildStamp,
+  requireCommandReady: true,
+  ...overrides,
+});
+
+const clientLifecycleOptions = (overrides = {}) => ({
+  ...activeClaimableGeminiClientOptions(),
+  hydrationGraceMs: 4000,
+  sessionId: PROCESS_SESSION_ID,
+  claims: summarizeRawTabClaims(),
+  ...overrides,
+});
+
+const lifecycleSummaryForClient = (client, overrides = {}) => {
+  const lifecycle = getGeminiClientLifecycle(client, clientLifecycleOptions(overrides));
+  return {
+    state: lifecycle.state,
+    code: lifecycle.code,
+    message: lifecycle.message,
+    nextAction: lifecycle.nextAction,
+    retryable: lifecycle.retryable,
+    manualReloadRecommended: lifecycle.manualReloadRecommended,
+  };
+};
+
 const clientHasConcreteTabIdentity = (client) =>
   client?.tabId !== undefined && client?.tabId !== null;
+
+const clientHasFreshPageHeartbeat = (client, now = Date.now()) =>
+  !!client?.page && !!client?.lastHeartbeatAt && now - client.lastHeartbeatAt <= CLIENT_STALE_MS;
 
 const clientIsSelectableGeminiTab = (client) =>
   isLiveClient(client) &&
   !clientIsActivityClient(client) &&
   clientHasConcreteTabIdentity(client) &&
+  clientHasFreshPageHeartbeat(client) &&
   clientMatchesExpectedBrowserExtension(client);
+
+const compareSelectableClientPreference = (a, b) =>
+  Number(commandChannelReadyForClient(b)) - Number(commandChannelReadyForClient(a)) ||
+  Number(!clientHasRecentCommandFailure(b)) - Number(!clientHasRecentCommandFailure(a)) ||
+  Number(!!b?.page?.chatId) - Number(!!a?.page?.chatId) ||
+  recentConversationCountForClient(b) - recentConversationCountForClient(a) ||
+  Number(b?.isActiveTab === true) - Number(a?.isActiveTab === true) ||
+  Number(b?.lastCommandResultAt || 0) - Number(a?.lastCommandResultAt || 0) ||
+  Number(b?.lastSeenAt || 0) - Number(a?.lastSeenAt || 0);
+
+const dedupeSelectableClientsByTabId = (selectableClients = []) => {
+  const byTabId = new Map();
+  for (const client of selectableClients) {
+    const tabKey = String(client.tabId);
+    const existing = byTabId.get(tabKey);
+    if (!existing || compareSelectableClientPreference(client, existing) < 0) {
+      byTabId.set(tabKey, client);
+    }
+  }
+  return [...byTabId.values()].sort(compareSelectableClientPreference);
+};
 
 const getSelectableGeminiClients = () => {
   const liveClients = getLiveClients();
-  const healthyTabs = liveClients.filter(clientIsSelectableGeminiTab);
-  if (healthyTabs.length > 0) return healthyTabs;
-  const geminiClients = liveClients.filter((client) => !clientIsActivityClient(client));
-  const matchingClients = geminiClients.filter(clientMatchesExpectedBrowserExtension);
-  return matchingClients.length > 0 ? matchingClients : geminiClients;
+  return dedupeSelectableClientsByTabId(liveClients.filter(clientIsSelectableGeminiTab));
 };
 
 const getActivityClients = () =>
@@ -3898,17 +4333,21 @@ const scanActivityWithClient = async (args = {}) => {
 
 const tabSelectionDiagnostics = (liveClients, selectableClients) => {
   const selectableIds = new Set(selectableClients.map((client) => client.clientId));
-  return liveClients
-    .filter((client) => !selectableIds.has(client.clientId))
-    .map((client) => ({
-      ...summarizeClient(client),
-      demotedFromTabSelection: true,
-      demotionReason: !clientHasConcreteTabIdentity(client)
-        ? 'missing-tab-id'
-        : !clientMatchesExpectedBrowserExtension(client)
-          ? 'version-or-build-mismatch'
-          : 'not-selected',
-    }));
+  const classified = classifyGeminiClientLifecycle(liveClients, clientLifecycleOptions());
+  return classified
+    .filter(({ client }) => !selectableIds.has(client.clientId))
+    .map(({ client, lifecycle }) => {
+      return {
+        ...summarizeClient(client),
+        lifecycle: lifecycleSummaryForClient(client),
+        demotedFromTabSelection: true,
+        demotionReason: !clientHasConcreteTabIdentity(client)
+          ? 'missing-tab-id'
+          : !clientMatchesExpectedBrowserExtension(client)
+            ? 'version-or-build-mismatch'
+            : lifecycle.code || lifecycle.state || 'not-selected',
+      };
+    });
 };
 
 const requireRecentChatsClient = (selector = {}) => {
@@ -5344,12 +5783,116 @@ const resolveNotebookConversationRequest = (client, args = {}) => {
   throw new Error('Informe index, chatId ou title para escolher a conversa do caderno.');
 };
 
+const tabActivationBrokerClients = (preferredClient = null) => {
+  cleanupStaleClients();
+  const preferred =
+    preferredClient?.clientId && isLiveClient(clients.get(preferredClient.clientId))
+      ? clients.get(preferredClient.clientId)
+      : null;
+  const candidates = getLiveClients()
+    .filter(clientMatchesExpectedBrowserExtension)
+    .filter(clientHasOpenCommandChannel)
+    .filter((client) => !clientHasRecentCommandFailure(client));
+  const ordered = [];
+  const add = (client) => {
+    if (!client?.clientId || ordered.some((item) => item.clientId === client.clientId)) return;
+    if (!candidates.some((item) => item.clientId === client.clientId)) return;
+    ordered.push(client);
+  };
+  add(preferred);
+  candidates.filter(clientIsActivityClient).forEach(add);
+  candidates.filter((client) => !clientIsActivityClient(client)).forEach(add);
+  return ordered;
+};
+
+const activateBrowserTabById = async (rawTabId, args = {}, preferredClient = null) => {
+  const tabId = normalizeTabId(rawTabId);
+  if (tabId === null) {
+    const error = new Error('Não há tabId confiável para ativar a aba do Gemini.');
+    error.code = 'tab_activation_failed';
+    throw error;
+  }
+
+  const brokers = tabActivationBrokerClients(preferredClient);
+  if (brokers.length === 0) {
+    const error = new Error(
+      'Nenhuma aba da extensão está com canal de comando saudável para ativar a aba do Gemini.',
+    );
+    error.code = 'tab_activation_broker_missing';
+    throw error;
+  }
+
+  let lastError = null;
+  for (const broker of brokers) {
+    try {
+      const command = await enqueueCommandWithClientRecovery(
+        broker,
+        'activate-browser-tab',
+        {
+          tabId,
+          reason: args.activateTabReason || 'export',
+          focusWindow: args.focusWindow !== false,
+        },
+        {
+          timeoutMs: EXPORT_TAB_ACTIVATION_TIMEOUT_MS,
+          dispatchTimeoutMs: 4000,
+          staleAbortMs: CLIENT_STALE_MS + 1000,
+        },
+        { clientId: broker.clientId },
+      );
+      const result = command.result || null;
+      if (result?.ok && result.isActiveTab !== false) {
+        return { broker: command.client || broker, result };
+      }
+      lastError = new Error(result?.error || result?.reason || 'Falha ao ativar aba do navegador.');
+      lastError.code = result?.code || 'tab_activation_failed';
+      lastError.data = result;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+
+  const error = new Error(
+    lastError?.message || 'Não consegui ativar a aba do Gemini antes da exportação.',
+  );
+  error.code = lastError?.code || 'tab_activation_failed';
+  error.cause = lastError || null;
+  throw error;
+};
+
+const ensureClientActiveForExport = async (client, args = {}) => {
+  const shouldActivateTab =
+    args.activateTabBeforeExport !== false && args.activateTab !== false;
+  if (!shouldActivateTab) {
+    return { client, activation: null };
+  }
+  if (client?.isActiveTab === true) return { client, activation: { ok: true, alreadyActive: true } };
+
+  const { result: activation } = await activateBrowserTabById(client?.tabId, args, client);
+  const activeClient = resolveContinuationClient(client, args);
+  if (activation?.isActiveTab !== undefined) activeClient.isActiveTab = activation.isActiveTab;
+
+  if (!activation?.ok || activation.isActiveTab === false) {
+    const error = new Error(
+      activation?.error ||
+        activation?.reason ||
+        'Não consegui ativar a aba do Gemini antes da exportação. Nenhum arquivo foi salvo.',
+    );
+    error.code = 'tab_activation_failed';
+    error.data = { activation, client: summarizeClient(activeClient) };
+    throw error;
+  }
+
+  return { client: activeClient, activation };
+};
+
 const downloadConversationItemForClient = async (client, conversation, args = {}) => {
   const commandStartedAt = Date.now();
   const hydrationArgs = exportHydrationArgs(args);
   const commandTimeoutMs = exportCommandTimeoutMs(args);
+  const prepared = await ensureClientActiveForExport(client, args);
   const command = await enqueueCommandWithClientRecovery(
-    client,
+    prepared.client,
     'get-chat-by-id',
     {
       item: conversation,
@@ -5357,7 +5900,7 @@ const downloadConversationItemForClient = async (client, conversation, args = {}
       notebookReturnMode: args.notebookReturnMode || null,
       ...hydrationArgs,
     },
-    { timeoutMs: commandTimeoutMs },
+    { timeoutMs: commandTimeoutMs, staleAbortMs: exportCommandStaleAbortMs(args) },
     args,
   );
   const activeClient = command.client;
@@ -5372,16 +5915,15 @@ const downloadConversationItemForClient = async (client, conversation, args = {}
   }
 
   const expectedChatId = normalizeConversationChatId(conversation);
-  const payloadChatId = stripGeminiPrefix(result.payload?.chatId || '');
-  if (expectedChatId && payloadChatId && expectedChatId !== payloadChatId) {
-    throw new Error(
-      `Exportacao abortada: o browser retornou o chat ${payloadChatId}, mas o MCP pediu ${expectedChatId}. Nenhum arquivo foi salvo.`,
-    );
-  }
-  if (expectedChatId && !payloadChatId) {
-    throw new Error(
-      `Exportacao abortada: a extensao nao retornou chatId para confirmar a conversa ${expectedChatId}. Nenhum arquivo foi salvo.`,
-    );
+  const integrity = await validateMcpExportPayload(result.payload, {
+    expectedChatId,
+    requestedChatId: conversation.chatId || conversation.id || conversation.url || null,
+  });
+  if (!integrity.ok) {
+    const error = new Error(integrity.message);
+    error.code = integrity.code;
+    error.data = integrity;
+    throw error;
   }
 
   const saveStartedAt = Date.now();
@@ -5412,12 +5954,18 @@ const downloadConversationItemForClient = async (client, conversation, args = {}
   return {
     client: summarizeClient(activeClient),
     conversation: result.conversation || conversation,
-    chatId: result.payload?.chatId || conversation.chatId || null,
-    title: result.payload?.title || conversation.title || null,
-    turns: Array.isArray(result.payload?.turns) ? result.payload.turns.length : null,
+    chatId: integrity.snapshot.chatId || result.payload?.chatId || conversation.chatId || null,
+    title: integrity.snapshot.title || result.payload?.title || conversation.title || null,
+    turns: integrity.assistantTurnCount,
     hydration: result.payload?.hydration || null,
     returnedToOriginal: result.returnedToOriginal ?? null,
     returnError: result.returnError || null,
+    integrity: {
+      markdownHash: integrity.markdownHash,
+      assistantTurnCount: integrity.assistantTurnCount,
+      evidence: integrity.evidence,
+      warnings: integrity.warnings,
+    },
     metrics,
     ...saved,
   };
@@ -5432,6 +5980,12 @@ const isTransientTabBusyError = (err) =>
 
 const retryableConversationExportReason = (err) => {
   if (isTransientTabBusyError(err)) return 'tab_operation_in_progress';
+  if (
+    err?.code === 'client_reconnected_during_command' ||
+    err?.code === 'client_stale_during_command'
+  ) {
+    return err.code;
+  }
   const message = String(err?.message || err?.data?.error || '');
   if (
     /conte[úu]do da conversa ainda parece ser o chat anterior|URL mudou/i.test(message)
@@ -5453,6 +6007,8 @@ const isRetryableConversationExportError = (err) =>
 
 const isRecoverableClientDisconnectError = (err) =>
   err?.code === 'client_not_found' ||
+  err?.code === 'client_reconnected_during_command' ||
+  err?.code === 'client_stale_during_command' ||
   (err?.code === 'command_timeout' && err.commandDispatched !== true) ||
   /Cliente [\w-]+ não encontrado|Cliente [\w-]+ não está ativo|Claim [\w-]+ não está ativa/i.test(
     String(err?.message || ''),
@@ -5482,27 +6038,118 @@ const continuationSelectorForClient = (client, args = {}) => {
   };
 };
 
-const resolveContinuationClient = (client, args = {}) => {
-  cleanupStaleClients();
-  cleanupExpiredTabClaims();
-  const current = client?.clientId ? clients.get(client.clientId) : null;
-  if (isLiveClient(current)) return current;
+const commandClientState = (client) => {
+  if (!client?.clientId) return null;
+  const claim = claimForClient(client) || clientTabClaim(client) || null;
+  return {
+    clientId: client.clientId,
+    tabId: client.tabId ?? null,
+    claimId: claim?.claimId || null,
+    sessionId: claim?.sessionId || client.tabClaim?.sessionId || client.summary?.tabClaim?.sessionId || null,
+    live: isLiveClient(client),
+    commandReady: commandChannelReadyForClient(client),
+    recentCommandFailure: clientHasRecentCommandFailure(client),
+    lastSeenAt: client.lastSeenAt || null,
+  };
+};
 
-  const selector = continuationSelectorForClient(client, args);
-  if (selector.claimId) {
-    const claimClient = liveClientForClaim(tabClaims.get(selector.claimId));
-    if (claimClient) return claimClient;
-  }
-  if (selector.tabId !== undefined && selector.tabId !== null) {
-    const tabId = normalizeTabId(selector.tabId);
-    const sameTab = getSelectableGeminiClients().find(
+const sameTabClientsForContinuation = (selector = {}) => {
+  if (selector.tabId === undefined || selector.tabId === null) return [];
+  const tabId = normalizeTabId(selector.tabId);
+  if (tabId === null) return [];
+  return getLiveClients()
+    .filter(clientIsSelectableGeminiTab)
+    .filter(
       (candidate) =>
         candidate.tabId !== null &&
         candidate.tabId !== undefined &&
         Number(candidate.tabId) === tabId,
-    );
-    if (sameTab) return sameTab;
+    )
+    .sort(compareSelectableClientPreference);
+};
+
+const commandClientPoolForContinuation = (
+  client,
+  args = {},
+  { replacementClientId = null } = {},
+) => {
+  cleanupStaleClients();
+  cleanupExpiredTabClaims();
+  const selector = continuationSelectorForClient(client, args);
+  const current = client?.clientId ? clients.get(client.clientId) || null : null;
+  const claimClient = selector.claimId ? liveClientForClaim(tabClaims.get(selector.claimId)) : null;
+  const sessionClaimClient = liveClientForClaim(claimForSession(selector.sessionId));
+  const replacementClient = replacementClientId ? clients.get(replacementClientId) || null : null;
+  const sameTabClients = sameTabClientsForContinuation(selector);
+  const fallback =
+    sameTabClients[0] ||
+    claimClient ||
+    sessionClaimClient ||
+    (current && isLiveClient(current) ? current : null);
+  return {
+    selector,
+    pool: {
+      current: commandClientState(current),
+      replacement: commandClientState(replacementClient),
+      claim: commandClientState(claimClient),
+      sameTab: sameTabClients.map(commandClientState).filter(Boolean),
+      sessionClaim: commandClientState(sessionClaimClient),
+      fallback: commandClientState(fallback),
+    },
+  };
+};
+
+const commandRecoveryErrorInfo = (err) => ({
+  code: err?.code || null,
+  message: err?.message || null,
+  commandDispatched: err?.commandDispatched ?? null,
+  replacementClientId: err?.replacementClientId || null,
+});
+
+const resolveContinuationClient = (client, args = {}) => {
+  cleanupStaleClients();
+  cleanupExpiredTabClaims();
+  const current = client?.clientId ? clients.get(client.clientId) : null;
+  const selector = continuationSelectorForClient(client, args);
+
+  if (!args.clientId && selector.claimId) {
+    const claimClient = liveClientForClaim(tabClaims.get(selector.claimId));
+    if (
+      claimClient?.clientId &&
+      claimClient.clientId !== current?.clientId &&
+      (!isLiveClient(current) ||
+        clientHasRecentCommandFailure(current) ||
+        !commandChannelReadyForClient(current))
+    ) {
+      return claimClient;
+    }
   }
+
+  if (selector.claimId) {
+    const claimClient = liveClientForClaim(tabClaims.get(selector.claimId));
+    if (!isLiveClient(current) && claimClient) return claimClient;
+  }
+  if (selector.tabId !== undefined && selector.tabId !== null) {
+    const tabId = normalizeTabId(selector.tabId);
+    const sameTab = getLiveClients()
+      .filter(clientIsSelectableGeminiTab)
+      .find(
+      (candidate) =>
+        candidate.clientId !== current?.clientId &&
+        candidate.tabId !== null &&
+        candidate.tabId !== undefined &&
+        Number(candidate.tabId) === tabId,
+      );
+    if (
+      sameTab &&
+      (!isLiveClient(current) ||
+        clientHasRecentCommandFailure(current) ||
+        !commandChannelReadyForClient(current))
+    ) {
+      return sameTab;
+    }
+  }
+  if (isLiveClient(current)) return current;
   const sessionClaimClient = liveClientForClaim(claimForSession(selector.sessionId));
   return sessionClaimClient || current || client;
 };
@@ -5526,19 +6173,29 @@ const enqueueCommandWithClientRecovery = async (
   options = {},
   selector = {},
 ) => {
-  let activeClient = resolveContinuationClient(client, selector);
-  try {
-    const result = await enqueueCommand(activeClient.clientId, type, commandArgs, options);
-    return { client: activeClient, result, recovered: activeClient.clientId !== client?.clientId };
-  } catch (err) {
-    if (!isRecoverableClientDisconnectError(err)) throw err;
-    const recoveredClient = await waitForContinuationClient(activeClient, selector);
-    if (!recoveredClient?.clientId || !isLiveClient(clients.get(recoveredClient.clientId))) {
-      throw err;
-    }
-    const result = await enqueueCommand(recoveredClient.clientId, type, commandArgs, options);
-    return { client: recoveredClient, result, recovered: true };
-  }
+  const { runBrowserCommandWithClientRecovery } = await loadMcpCommandLease();
+  const initialClient = resolveContinuationClient(client, selector);
+  const { result, lease, recovered } = await runBrowserCommandWithClientRecovery({
+    initialClient: commandClientState(initialClient),
+    selector: continuationSelectorForClient(initialClient, selector),
+    request: {
+      type,
+      args: commandArgs,
+      options,
+    },
+    waitMs: RECENT_CHATS_CLIENT_RECOVERY_WAIT_MS,
+    pollMs: 500,
+    getPool: ({ error }) =>
+      commandClientPoolForContinuation(initialClient, selector, {
+        replacementClientId: error?.replacementClientId || null,
+      }).pool,
+    dispatch: (commandLease, request) =>
+      enqueueCommand(commandLease.clientId, request.type, request.args || {}, request.options || {}),
+    isRecoverableError: isRecoverableClientDisconnectError,
+    describeError: commandRecoveryErrorInfo,
+  });
+  const activeClient = clients.get(lease.clientId) || initialClient;
+  return { client: activeClient, result, recovered };
 };
 
 const downloadConversationItemWithRetry = async (job, client, conversation, args = {}) => {
@@ -5563,6 +6220,14 @@ const downloadConversationItemWithRetry = async (job, client, conversation, args
       const retryReason = retryableConversationExportReason(err);
       if (!isRetryableConversationExportError(err) || !retryReason || attempt >= retryLimit) {
         throw err;
+      }
+      const recoveredClient = resolveContinuationClient(client, {
+        ...args,
+        clientId: undefined,
+      });
+      if (recoveredClient?.clientId && recoveredClient.clientId !== client?.clientId) {
+        client = recoveredClient;
+        rebindExportJobToClient(job, recoveredClient, retryReason);
       }
       const retryDelayMs = retryBaseMs * attempt;
       job.current = {
@@ -6184,7 +6849,8 @@ const listRecentChatsForClient = async (client, args = {}) => {
   if (refreshPlan.shouldRefresh) {
     try {
       const refreshPromise = refreshClientConversations(client, { ensureSidebar: true });
-      refresh = refreshPlan.preferFastRefresh
+      const shouldBoundRefresh = refreshPlan.preferFastRefresh || !untilEnd;
+      refresh = shouldBoundRefresh
         ? await withTimeout(refreshPromise, RECENT_CHATS_REFRESH_BUDGET_MS)
         : await refreshPromise;
       if (refresh?.client) client = refresh.client;
@@ -6616,6 +7282,7 @@ const summarizeExportJob = (job) => ({
   tabClaim: summarizeTabClaim(claimForClient(clients.get(job.clientId))),
   autoReleaseTabClaim: job.autoReleaseTabClaim ?? null,
   tabClaimId: job.tabClaimId || null,
+  tabClaimWarning: job.tabClaimWarning || null,
   tabClaimRelease: job.tabClaimRelease || null,
   tabSession: summarizeTabSession(job.tabSession),
   trace: summarizeJobTrace(job.trace),
@@ -6693,11 +7360,31 @@ const touchExportJob = (job) => {
 const isTerminalExportJobStatus = (status) =>
   ['completed', 'completed_with_errors', 'failed', 'cancelled'].includes(status);
 
-const findRunningBrowserExportJob = (clientId) =>
+const exportJobTabId = (job) => {
+  const claim = job?.tabClaimId ? tabClaims.get(job.tabClaimId) : null;
+  return normalizeTabId(job?.tabSession?.tabId ?? claim?.tabId);
+};
+
+const browserExportJobMatchesClient = (job, clientOrId) => {
+  if (!['recent-chats-export', 'direct-chats-export'].includes(job?.type)) return false;
+  const client =
+    typeof clientOrId === 'string'
+      ? clients.get(clientOrId) || { clientId: clientOrId }
+      : clientOrId || null;
+  if (!client) return false;
+  if (job.clientId && client.clientId && job.clientId === client.clientId) return true;
+  const claim = claimForClient(client);
+  if (job.tabClaimId && claim?.claimId && job.tabClaimId === claim.claimId) return true;
+  const jobTabId = exportJobTabId(job);
+  const clientTabId = normalizeTabId(client.tabId);
+  return jobTabId !== null && clientTabId !== null && jobTabId === clientTabId;
+};
+
+const findRunningBrowserExportJob = (clientOrId) =>
   Array.from(exportJobs.values()).find(
     (job) =>
       ['recent-chats-export', 'direct-chats-export'].includes(job.type) &&
-      job.clientId === clientId &&
+      browserExportJobMatchesClient(job, clientOrId) &&
       !isTerminalExportJobStatus(job.status),
   );
 
@@ -6727,10 +7414,25 @@ const shellQuoteJson = (value) => JSON.stringify(value);
 const exportJobResumeCommand = (job) => {
   if (!job?.reportFile) return null;
   const tool = 'gemini_export';
-  const args = {
-    action: job.syncMode ? 'sync' : job.exportMissingOnly ? 'missing' : 'recent',
-    resumeReportFile: job.reportFile,
-  };
+  const args =
+    job.type === 'direct-chats-export'
+      ? {
+          action: 'reexport',
+          resumeReportFile: job.reportFile,
+          ...(job.selectionFile ? { selectionFile: job.selectionFile } : {}),
+          ...(job.selectionFile
+            ? {}
+            : {
+                chatIds: (job.items || [])
+                  .map((item) => item.chatId)
+                  .filter(Boolean),
+              }),
+          ...(job.expectedCount ? { expectedCount: job.expectedCount } : {}),
+        }
+      : {
+          action: job.syncMode ? 'sync' : job.exportMissingOnly ? 'missing' : 'recent',
+          resumeReportFile: job.reportFile,
+        };
   if (job.exportMissingOnly && job.existingScanDir) {
     args.vaultDir = job.existingScanDir;
   }
@@ -6773,7 +7475,7 @@ const exportJobInProgressError = (job) => {
 };
 
 const assertNoRunningBrowserExportJob = (client) => {
-  const running = findRunningBrowserExportJob(client.clientId);
+  const running = findRunningBrowserExportJob(client);
   if (!running) return;
   if (maybeFinalizeStaleCancelRequestedJob(running, client, 'cancel-stale-before-new-job')) {
     return;
@@ -7011,6 +7713,7 @@ const buildRecentChatsExportReport = (job, client, successes, failures) => ({
   loadMoreTimedOut: job.loadMoreTimedOut === true,
   loadMoreTrace: Array.isArray(job.loadMoreTrace) ? job.loadMoreTrace : [],
   metrics: summarizeExportJobMetrics(job, client, { includeConversations: true }),
+  tabClaimWarning: job.tabClaimWarning || null,
   tabSession: summarizeTabSession(job.tabSession),
   trace: summarizeJobTrace(job.trace),
   progressMessage: exportJobProgressMessage(job),
@@ -7181,6 +7884,7 @@ const buildDirectChatsExportReport = (job, client, successes, failures) => ({
   failureCount: failures.length,
   delayMs: job.delayMs,
   metrics: summarizeExportJobMetrics(job, client, { includeConversations: true }),
+  tabClaimWarning: job.tabClaimWarning || null,
   tabSession: summarizeTabSession(job.tabSession),
   trace: summarizeJobTrace(job.trace),
   progressMessage: exportJobProgressMessage(job),
@@ -7315,6 +8019,39 @@ const broadcastDirectChatsJobProgress = (job, client, patch = {}) => {
     chatId: job.current?.chatId || null,
     currentChatId: job.current?.chatId || null,
   });
+};
+
+const rebindExportJobToClient = (job, client, reason = 'client-reconnected') => {
+  if (!job || !client?.clientId) return client || null;
+  if (job.clientId === client.clientId) return client;
+  const previousClientId = job.clientId || null;
+  job.clientId = client.clientId;
+  if (job.tabSession) {
+    job.tabSession.clientId = client.clientId;
+    job.tabSession.tabId = normalizeTabId(client.tabId) ?? job.tabSession.tabId ?? null;
+    job.tabSession.windowId = normalizeTabId(client.windowId) ?? job.tabSession.windowId ?? null;
+    job.tabSession.lastSeenAt = new Date().toISOString();
+  }
+  appendExportJobTrace(job, 'job_client_rebound', {
+    previousClientId,
+    nextClientId: client.clientId,
+    tabId: client.tabId ?? null,
+    reason,
+  });
+  touchExportJob(job);
+  return client;
+};
+
+const rebroadcastActiveBrowserExportJobForClient = (client, reason = 'client-upsert') => {
+  const job = findRunningBrowserExportJob(client);
+  if (!job) return null;
+  rebindExportJobToClient(job, client, reason);
+  if (job.type === 'direct-chats-export') {
+    broadcastDirectChatsJobProgress(job, client);
+  } else {
+    broadcastRecentChatsJobProgress(job, client);
+  }
+  return job;
 };
 
 const cancelRequestedAgeMs = (job) => {
@@ -7580,10 +8317,7 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
         index: job.startIndex + sliceIndex,
       }))
       .filter(({ conversation }) => {
-        const key =
-          normalizeConversationChatId(conversation) ||
-          stripGeminiPrefix(conversation.chatId || conversation.id) ||
-          conversation.url;
+        const key = normalizeConversationChatId(conversation);
         if (!key || seen.has(key)) return false;
         seen.add(key);
         return true;
@@ -7729,7 +8463,7 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
           returnToOriginal: false,
         });
         const resultClient = result.client?.clientId ? clients.get(result.client.clientId) : null;
-        if (resultClient) client = resultClient;
+        if (resultClient) client = rebindExportJobToClient(job, resultClient, 'conversation-download');
         const success = {
           index,
           chatId: result.chatId,
@@ -7741,6 +8475,7 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
           mediaFailureCount: result.mediaFailureCount || 0,
           turns: result.turns,
           overwritten: result.overwritten,
+          integrity: result.integrity || null,
           metrics: result.metrics || null,
         };
         successes.push(success);
@@ -7773,6 +8508,8 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
           chatId: conversation.chatId || conversation.id || null,
           title: conversation.title || null,
           error: err.message,
+          code: err.code || null,
+          evidence: Array.isArray(err.data?.evidence) ? err.data.evidence : [],
         };
         failures.push(failure);
         job.failures.push(failure);
@@ -7907,6 +8644,7 @@ const startRecentChatsExportJob = (client, args = {}) => {
     clientId: client.clientId,
     autoReleaseTabClaim: shouldAutoReleaseTabClaim(args),
     tabClaimId: activeClaim?.claimId || args.claimId || null,
+    tabClaimWarning: client.lastTabClaimWarning || null,
     tabClaimRelease: null,
     outputDir,
     createdAt: new Date().toISOString(),
@@ -8009,6 +8747,8 @@ const runDirectChatsExportJob = async (job, client, args = {}) => {
           outputDir: job.outputDir,
           returnToOriginal: false,
         });
+        const resultClient = result.client?.clientId ? clients.get(result.client.clientId) : null;
+        if (resultClient) client = rebindExportJobToClient(job, resultClient, 'conversation-download');
         const success = {
           index,
           chatId: result.chatId,
@@ -8021,6 +8761,7 @@ const runDirectChatsExportJob = async (job, client, args = {}) => {
           turns: result.turns,
           overwritten: result.overwritten,
           sourcePath: conversation.request?.sourcePath || null,
+          integrity: result.integrity || null,
           metrics: result.metrics || null,
         };
         successes.push(success);
@@ -8055,6 +8796,8 @@ const runDirectChatsExportJob = async (job, client, args = {}) => {
           title: conversation.title || null,
           sourcePath: conversation.request?.sourcePath || null,
           error: err.message,
+          code: err.code || null,
+          evidence: Array.isArray(err.data?.evidence) ? err.data.evidence : [],
         };
         failures.push(failure);
         job.failures.push(failure);
@@ -8193,6 +8936,7 @@ const startDirectChatsExportJob = (client, args = {}) => {
     clientId: client.clientId,
     autoReleaseTabClaim: shouldAutoReleaseTabClaim(args),
     tabClaimId: activeClaim?.claimId || args.claimId || null,
+    tabClaimWarning: client.lastTabClaimWarning || null,
     tabClaimRelease: null,
     outputDir,
     createdAt: new Date().toISOString(),
@@ -8631,8 +9375,12 @@ const legacyRawTools = [
       cleanupStaleClients();
       let launchResult = null;
       let allLiveClients = getLiveClients();
-      let liveClients = getSelectableGeminiClients();
-      if (liveClients.length === 0 && args.openIfMissing !== false) {
+      let selectableClients = getSelectableGeminiClients();
+      let claimableClients = getActiveClaimableGeminiClients(
+        selectableClients,
+        activeClaimableGeminiClientOptions(),
+      );
+      if (claimableClients.length === 0 && selectableClients.length === 0 && args.openIfMissing !== false) {
         launchResult = await launchChromeForGemini({
           profileDirectory: CHROME_GUARD_CONFIG.profileDirectory,
         });
@@ -8641,15 +9389,19 @@ const legacyRawTools = [
           CHROME_GUARD_CONFIG.pollIntervalMs || 500,
         );
         allLiveClients = getLiveClients();
-        liveClients = getSelectableGeminiClients();
+        selectableClients = getSelectableGeminiClients();
+        claimableClients = getActiveClaimableGeminiClients(
+          selectableClients,
+          activeClaimableGeminiClientOptions(),
+        );
       }
-      const diagnosticClients = tabSelectionDiagnostics(allLiveClients, liveClients);
+      const diagnosticClients = tabSelectionDiagnostics(allLiveClients, claimableClients);
       return toolTextResult({
         ok: true,
         sessionId: PROCESS_SESSION_ID,
-        connectedTabCount: liveClients.length,
+        connectedTabCount: claimableClients.length,
         connectedClientCount: allLiveClients.length,
-        tabs: liveClients.map((client, index) => ({
+        tabs: claimableClients.map((client, index) => ({
           index: index + 1,
           ...summarizeClient(client),
         })),
@@ -8658,25 +9410,25 @@ const legacyRawTools = [
         browserWake: launchResult
           ? {
               ...launchResult,
-              connectedAfterWake: liveClients.length,
+              connectedAfterWake: claimableClients.length,
             }
           : {
               attempted: false,
-              reason: liveClients.length > 0 ? 'already-connected' : 'open-disabled',
+              reason: claimableClients.length > 0 ? 'already-connected' : 'open-disabled',
             },
         nextAction:
-          liveClients.length === 0
+          claimableClients.length === 0
             ? {
                 code: 'no_gemini_tab_connected',
                 message:
                   'Abra uma aba do Gemini ou chame gemini_tabs { action: "list", intent: "tab_management", openIfMissing: true }.',
               }
-            : liveClients.length === 1
+            : claimableClients.length === 1
               ? {
                   code: 'claim_single_tab',
                   command: {
                     tool: 'gemini_tabs',
-                    arguments: { action: 'claim', clientId: liveClients[0].clientId },
+                    arguments: { action: 'claim', clientId: claimableClients[0].clientId },
                   },
                 }
               : {
@@ -8739,7 +9491,7 @@ const legacyRawTools = [
     },
     call: async (args = {}) => {
       const client = await selectClaimableClient(args);
-      return toolTextResult(await claimTabForClient(client, args));
+      return toolTextResult(await claimGeminiTabForClient(client, args));
     },
   },
   {
@@ -11093,7 +11845,7 @@ const bridgeServer = createServer(async (req, res) => {
       };
       if (action === 'claim') {
         const client = await selectClaimableClient(args);
-        sendAgentJson(res, 200, await claimTabForClient(client, args));
+        sendAgentJson(res, 200, await claimGeminiTabForClient(client, args));
         return;
       }
       if (action === 'release') {
@@ -11109,9 +11861,17 @@ const bridgeServer = createServer(async (req, res) => {
         return;
       }
       let allLiveClients = getLiveClients();
-      let liveClients = getSelectableGeminiClients();
+      let selectableClients = getSelectableGeminiClients();
+      let claimableClients = getActiveClaimableGeminiClients(
+        selectableClients,
+        activeClaimableGeminiClientOptions(),
+      );
       let launchResult = null;
-      if (liveClients.length === 0 && parseOptionalBoolean(url.searchParams.get('openIfMissing')) !== false) {
+      if (
+        claimableClients.length === 0 &&
+        selectableClients.length === 0 &&
+        parseOptionalBoolean(url.searchParams.get('openIfMissing')) !== false
+      ) {
         launchResult = await launchChromeForGemini({
           profileDirectory: CHROME_GUARD_CONFIG.profileDirectory,
         });
@@ -11120,20 +11880,24 @@ const bridgeServer = createServer(async (req, res) => {
           CHROME_GUARD_CONFIG.pollIntervalMs || 500,
         );
         allLiveClients = getLiveClients();
-        liveClients = getSelectableGeminiClients();
+        selectableClients = getSelectableGeminiClients();
+        claimableClients = getActiveClaimableGeminiClients(
+          selectableClients,
+          activeClaimableGeminiClientOptions(),
+        );
       }
       sendAgentJson(res, 200, {
         ok: true,
         action: 'list',
         sessionId: PROCESS_SESSION_ID,
-        connectedTabCount: liveClients.length,
+        connectedTabCount: claimableClients.length,
         connectedClientCount: allLiveClients.length,
-        tabs: liveClients.map((client, index) => ({
+        tabs: claimableClients.map((client, index) => ({
           index: index + 1,
           ...summarizeClient(client),
         })),
-        connectedClients: liveClients.map(summarizeClient),
-        diagnosticClients: tabSelectionDiagnostics(allLiveClients, liveClients),
+        connectedClients: claimableClients.map(summarizeClient),
+        diagnosticClients: tabSelectionDiagnostics(allLiveClients, claimableClients),
         claims: summarizeTabClaims(),
         tabClaims: summarizeTabClaims(),
         browserWake: launchResult || { attempted: false },
@@ -11155,7 +11919,7 @@ const bridgeServer = createServer(async (req, res) => {
         ...body,
       };
       const client = await selectClaimableClient(args);
-      sendAgentJson(res, 200, await claimTabForClient(client, args));
+      sendAgentJson(res, 200, await claimGeminiTabForClient(client, args));
     } catch (err) {
       sendAgentJson(res, 503, {
         ok: false,
@@ -11941,7 +12705,30 @@ const bridgeServer = createServer(async (req, res) => {
         return;
       }
 
-      const client = clients.get(clientId) || upsertClient({ clientId });
+      const tabClaim =
+        url.searchParams.get('claimId') || url.searchParams.get('claimSessionId')
+          ? {
+              claimId: url.searchParams.get('claimId') || null,
+              sessionId: url.searchParams.get('claimSessionId') || null,
+            }
+          : null;
+      const protocolVersion = url.searchParams.has('protocolVersion')
+        ? Number(url.searchParams.get('protocolVersion'))
+        : undefined;
+      const client = upsertClient({
+        clientId,
+        tabId: url.searchParams.has('tabId') ? Number(url.searchParams.get('tabId')) : undefined,
+        windowId: url.searchParams.has('windowId')
+          ? Number(url.searchParams.get('windowId'))
+          : undefined,
+        isActiveTab: url.searchParams.has('isActiveTab')
+          ? url.searchParams.get('isActiveTab') === '1'
+          : undefined,
+        extensionVersion: url.searchParams.get('extensionVersion') || undefined,
+        protocolVersion: Number.isFinite(protocolVersion) ? protocolVersion : undefined,
+        buildStamp: url.searchParams.get('buildStamp') || undefined,
+        tabClaim,
+      });
       closeEventStream(client);
       res.writeHead(200, sseHeaders(req));
       res.write(': connected\n\n');
@@ -12024,12 +12811,23 @@ const bridgeServer = createServer(async (req, res) => {
       });
       const commandDelivery = flushQueuedCommand(client);
       const heartbeatCommand = commandDelivery ? null : takeQueuedCommand(client);
-      const eventStreamConnected = !!client.eventStream?.res && !client.eventStream.res.destroyed;
+      if (heartbeatCommand) {
+        const pending = pendingCommands.get(heartbeatCommand.id);
+        if (pending) pending.delivery = 'heartbeat';
+      }
+      const eventStreamUsable = clientEventStreamUsable(client);
       const snapshotRequested =
         payload.snapshotDirty === true ||
         !client.lastSnapshotAt ||
         (!!payload.snapshotHash && payload.snapshotHash !== client.snapshotHash);
-      const jobProgress = eventStreamConnected ? null : buildJobProgressBroadcast(client);
+      const heartbeatJobProgress = buildJobProgressBroadcast(client);
+      const jobProgress = shouldIncludeHeartbeatJobProgress({
+        hasJobProgress: !!heartbeatJobProgress,
+        status: heartbeatJobProgress?.status || null,
+        eventStreamUsable,
+      })
+        ? heartbeatJobProgress
+        : null;
       sendBridgeJson(req, res, 200, {
         ok: true,
         clientId: client.clientId,
@@ -12041,10 +12839,10 @@ const bridgeServer = createServer(async (req, res) => {
             ? commandDelivery
             : null,
         transport: {
-          eventsConnected: eventStreamConnected,
+          eventsConnected: eventStreamUsable,
           longPollConnected: !!client.pendingPoll,
         },
-        commandPollRequired: !client.pendingPoll && !eventStreamConnected,
+        commandPollRequired: !client.pendingPoll && !eventStreamUsable,
         queuedCommands: client.queue?.length || 0,
         snapshotRequested,
         bridgeHealth: buildBridgeHealth(client),

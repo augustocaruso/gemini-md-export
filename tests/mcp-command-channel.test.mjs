@@ -16,6 +16,67 @@ test('MCP não espera timeout longo quando comando não é entregue à aba', () 
   assert.match(source, /clearTimeout\(pending\.dispatchTimer\)/);
 });
 
+test('MCP aborta export se a aba para de enviar heartbeat durante comando pesado', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const cleanupBlock = source.match(
+    /const cleanupStaleClients = \(\) => \{[\s\S]*?\n\};/,
+  )?.[0] || '';
+  const reconnectBlock = source.match(
+    /const preserveReconnectConversationCache = \(client, payload = \{\}\) => \{[\s\S]*?\n\};\n\nconst upsertClient/,
+  )?.[0] || '';
+  const enqueueBlock = source.match(
+    /const enqueueCommand = \(clientId, type, args = \{\}, options = \{\}\) => \{[\s\S]*?\n\};\n\nconst resolveCommand/,
+  )?.[0] || '';
+  const downloadBlock = source.match(
+    /const downloadConversationItemForClient = async[\s\S]*?\nconst isTransientTabBusyError/,
+  )?.[0] || '';
+
+  assert.match(source, /EXPORT_COMMAND_STALE_ABORT_MS/);
+  assert.match(enqueueBlock, /staleAbortMs/);
+  assert.match(enqueueBlock, /staleTimer/);
+  assert.match(enqueueBlock, /client_stale_during_command/);
+  assert.match(enqueueBlock, /markClientCommandTimeout\(clientId, type,[\s\S]*client_stale_during_command/);
+  assert.match(downloadBlock, /staleAbortMs:\s*exportCommandStaleAbortMs\(args\)/);
+  assert.match(cleanupBlock, /retainedByPendingCommandAt/);
+  assert.doesNotMatch(
+    cleanupBlock,
+    /client\.lastSeenAt\s*=\s*now/,
+    'cleanup nao pode renovar lastSeenAt de cliente morto, senao o stale abort nunca dispara',
+  );
+  assert.match(source, /const abortPendingCommandsForClient = \(/);
+  assert.match(source, /selectReconnectSourcesForTab/);
+  assert.match(reconnectBlock, /for \(const source of abortClients\)/);
+  assert.match(reconnectBlock, /abortPendingCommandsForClient\(source\.clientId/);
+  assert.match(reconnectBlock, /client_reconnected_during_command/);
+  assert.match(source, /err\?\.code === 'client_reconnected_during_command'/);
+  assert.match(source, /err\?\.code === 'client_stale_during_command'/);
+});
+
+test('MCP degrada SSE para long-poll quando comando enviado por SSE some', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const flushBlock = source.match(
+    /const flushQueuedCommand = \(client[\s\S]*?\n\};\n\nconst removeQueuedCommand/,
+  )?.[0] || '';
+  const enqueueBlock = source.match(
+    /const enqueueCommand = \(clientId, type, args = \{\}, options = \{\}\) => \{[\s\S]*?\n\};\n\nconst resolveCommand/,
+  )?.[0] || '';
+  const heartbeatBlock = source.match(
+    /url\.pathname === '\/bridge\/heartbeat'[\s\S]*?sendBridgeJson\(req, res, 200,[\s\S]*?\n      \}\);/,
+  )?.[0] || '';
+
+  assert.match(source, /SSE_COMMAND_FAILURE_BACKOFF_MS/);
+  assert.match(source, /const clientEventStreamUsable = \(client\) =>/);
+  assert.match(flushBlock, /clientEventStreamUsable\(client\)/);
+  assert.match(flushBlock, /pending\.delivery = 'sse'/);
+  assert.match(enqueueBlock, /disableClientSseCommandChannel\(clientId/);
+  assert.match(source, /closeEventStream\(client\)/);
+  assert.match(heartbeatBlock, /const eventStreamUsable = clientEventStreamUsable\(client\)/);
+  assert.match(heartbeatBlock, /transport:\s*\{[\s\S]*eventsConnected: eventStreamUsable/);
+  assert.match(heartbeatBlock, /commandPollRequired: !client\.pendingPoll && !eventStreamUsable/);
+  assert.match(heartbeatBlock, /shouldIncludeHeartbeatJobProgress/);
+  assert.doesNotMatch(heartbeatBlock, /eventStreamUsable \? null : buildJobProgressBroadcast/);
+});
+
 test('MCP dá timeout maior e knobs de hidratação para export de conversa gigante', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
 
@@ -31,12 +92,19 @@ test('MCP dá timeout maior e knobs de hidratação para export de conversa giga
 
 test('MCP protocolo v2 usa SSE para comandos e snapshot separado', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
-  const contentSource = readFileSync(resolve(ROOT, 'src', 'userscript-shell.js'), 'utf-8');
+  const contentSource = readFileSync(resolve(ROOT, 'src', 'userscript-shell.ts'), 'utf-8');
   const bridgeVersion = JSON.parse(readFileSync(resolve(ROOT, 'bridge-version.json'), 'utf-8'));
+  const eventsBlock = source.match(
+    /url\.pathname === '\/bridge\/events'[\s\S]*?sendClientEvent\(client, 'hello'/,
+  )?.[0] || '';
 
   assert.equal(bridgeVersion.protocolVersion, 2);
   assert.match(source, /url\.pathname === '\/bridge\/events'/);
   assert.match(source, /text\/event-stream/);
+  assert.match(eventsBlock, /tabId:\s*url\.searchParams\.has\('tabId'\)/);
+  assert.match(eventsBlock, /buildStamp:\s*url\.searchParams\.get\('buildStamp'\)/);
+  assert.match(eventsBlock, /claimId:\s*url\.searchParams\.get\('claimId'\)/);
+  assert.match(eventsBlock, /const client = upsertClient\(\{/);
   assert.match(source, /sendClientEvent\(client, 'command'/);
   assert.match(source, /url\.pathname === '\/bridge\/snapshot'/);
   assert.match(source, /upsertClientSnapshot/);
@@ -105,6 +173,36 @@ test('MCP nao escolhe cliente My Activity de build antigo apos reload da extensa
   assert.doesNotMatch(requireActivityClientBlock, /if \(activityClients\[0\]\) return activityClients\[0\]/);
 });
 
+test('MCP só reivindica abas Gemini ativas por contrato TS', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const selectClaimableBlock = source.match(
+    /const selectClaimableClient = async \(args = \{\}\) => \{[\s\S]*?\n\};\n\nconst claimTabForClient/,
+  )?.[0] || '';
+  const claimGeminiTabBlock = source.match(
+    /const claimGeminiTabForClient = async \(client, args = \{\}\) =>[\s\S]*?\n\nconst releaseTabClaim/,
+  )?.[0] || '';
+  const listTabsBlock = source.match(
+    /name: 'gemini_list_tabs'[\s\S]*?\n  \},\n  \{\n    name: 'gemini_claim_tab'/,
+  )?.[0] || '';
+
+  assert.match(source, /toActiveClaimableGeminiClient/);
+  assert.match(source, /getActiveClaimableGeminiClients/);
+  assert.match(source, /assertActiveClaimableGeminiClient/);
+  assert.match(selectClaimableBlock, /getActiveClaimableGeminiClients/);
+  assert.match(selectClaimableBlock, /inactiveGeminiTabClaimNotAllowedError/);
+  assert.match(claimGeminiTabBlock, /claimTabForClient\(client, args, \{ requireActiveGemini: true \}\)/);
+  assert.match(listTabsBlock, /claimableClients/);
+  assert.match(listTabsBlock, /const diagnosticClients = tabSelectionDiagnostics\(allLiveClients, claimableClients\)/);
+});
+
+test('MCP expõe lifecycle diagnostics para readiness de abas', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+
+  assert.match(source, /classifyGeminiClientLifecycle/);
+  assert.match(source, /getGeminiClientLifecycle/);
+  assert.match(source, /lifecycle:\s*lifecycleSummaryForClient/);
+});
+
 test('MCP acorda My Activity reaproveitando aba existente antes de abrir outra', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const ensureActivityBlock = source.match(
@@ -145,7 +243,7 @@ test('browser_status expõe saúde da bridge MCP/Chrome', () => {
   assert.match(source, /serviceWorker/);
   assert.match(source, /contentScript/);
   assert.match(source, /diagnostics/);
-  assert.match(source, /const commandChannelReadyForClient = \(client\) =>\s*clientHasOpenCommandChannel\(client\);/);
+  assert.match(source, /const commandChannelReadyForClient = \(client\) =>\s*clientHasOpenCommandChannel\(client\) &&\s*!clientHasRecentCommandFailure\(client\);/);
   assert.match(source, /blockingIssue = 'command_timeout_recent'/);
 });
 
@@ -201,7 +299,7 @@ test('MCP publico bloqueia contagem/exportacao por tools ruidosas sem depender d
 
 test('MCP implementa afinidade confiável por claim de aba', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
-  const contentSource = readFileSync(resolve(ROOT, 'src', 'userscript-shell.js'), 'utf-8');
+  const contentSource = readFileSync(resolve(ROOT, 'src', 'userscript-shell.ts'), 'utf-8');
   const backgroundSource = readFileSync(resolve(ROOT, 'src', 'extension-background.js'), 'utf-8');
   const buildSource = readFileSync(resolve(ROOT, 'scripts', 'build.mjs'), 'utf-8');
 
@@ -209,8 +307,19 @@ test('MCP implementa afinidade confiável por claim de aba', () => {
   assert.match(source, /name: 'gemini_claim_tab'/);
   assert.match(source, /name: 'gemini_release_tab'/);
   assert.match(source, /getSelectableGeminiClients/);
+  assert.match(source, /clientHasConcreteTabIdentity\(client\)/);
+  assert.match(source, /const clientHasFreshPageHeartbeat = \(client, now = Date\.now\(\)\) =>/);
+  assert.match(source, /!!client\?\.page && !!client\?\.lastHeartbeatAt/);
+  assert.match(source, /dedupeSelectableClientsByTabId/);
+  assert.match(source, /compareSelectableClientPreference/);
+  assert.match(source, /byTabId\.set\(tabKey, client\)/);
+  assert.match(source, /return dedupeSelectableClientsByTabId\(liveClients\.filter\(clientIsSelectableGeminiTab\)\)/);
+  assert.match(source, /clientHasFreshPageHeartbeat\(client\)/);
+  assert.match(source, /selectUnambiguousImplicitGeminiClient/);
+  assert.match(source, /activeUsefulClients\.length === 1/);
   assert.match(source, /diagnosticClients/);
   assert.match(source, /demotedFromTabSelection/);
+  assert.match(source, /missing-tab-id/);
   assert.match(source, /ambiguous_gemini_tabs/);
   assert.doesNotMatch(source, /em MCP, use gemini_tabs/);
   assert.match(source, /tabClaims = new Map/);
@@ -226,7 +335,7 @@ test('MCP implementa afinidade confiável por claim de aba', () => {
   assert.match(source, /tab_claim_rebound/);
   assert.match(source, /release-tab-claim-by-tab-id/);
   assert.match(source, /hasPendingCommandForClient/);
-  assert.match(source, /lastSeenAtExtendedByCommandAt/);
+  assert.match(source, /retainedByPendingCommandAt/);
   assert.match(source, /lastCommandResultAt/);
   assert.match(source, /COMMAND_CHANNEL_FAILURE_COOLDOWN_MS/);
   assert.match(source, /markClientCommandTimeout/);
@@ -341,7 +450,7 @@ test('MCP expõe diagnóstico e cleanup controlado de processos sem guard de bro
 
 test('bridge busca mídia sem depender de CORS da extensão Chrome', () => {
   const serverSource = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
-  const contentSource = readFileSync(resolve(ROOT, 'src', 'userscript-shell.js'), 'utf-8');
+  const contentSource = readFileSync(resolve(ROOT, 'src', 'userscript-shell.ts'), 'utf-8');
   const backgroundSource = readFileSync(resolve(ROOT, 'src', 'extension-background.js'), 'utf-8');
 
   assert.match(serverSource, /const fetchAssetForBridge = async \(source\) =>/);
