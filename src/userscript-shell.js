@@ -44,11 +44,12 @@
   const BUTTON_ID = `${UI_ID_PREFIX}-btn`;
   const BUTTON_SLOT_ID = `${UI_ID_PREFIX}-btn-slot`;
   const BUTTON_LABEL = 'Baixar Markdown';
-  // Material Symbols "download" (filled), 24x24, no container. currentColor
-  // para herdar a cor do top-bar do Gemini (tema claro/escuro automático).
+  // Material Symbols "download" outline em 20px, alinhado ao peso visual dos
+  // mat-icon-button vizinhos (kebab "more_vert", etc.) no Gemini lr26.
+  // currentColor herda do top-bar (tema claro/escuro automático).
   const BUTTON_ICON_SVG =
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -960 960 960" width="22" height="22" fill="currentColor" aria-hidden="true" focusable="false">' +
-    '<path d="M480-320 280-520l56-58 104 104v-326h80v326l104-104 56 58-200 200ZM240-160q-33 0-56.5-23.5T160-240v-120h80v120h480v-120h80v120q0 33-23.5 56.5T720-160H240Z"/>' +
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -960 960 960" width="20" height="20" fill="currentColor" aria-hidden="true" focusable="false">' +
+    '<path d="M480-336 288-528l51-51 105 105v-342h72v342l105-105 51 51-192 192ZM263-192q-29.7 0-50.85-21.15Q191-234.3 191-264v-72h72v72h434v-72h72v72q0 29.7-21.15 50.85Q726.7-192 697-192H263Z"/>' +
     '</svg>';
   const FOLDER_ICON_SVG =
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -960 960 960" width="18" height="18" fill="currentColor" aria-hidden="true" focusable="false">' +
@@ -141,25 +142,45 @@
       const rightSection = topBar.querySelector('.top-bar-actions .right-section');
       if (!visibleRect(rightSection)) continue;
 
+      // Anchors históricos: Gemini "clássico" expunha share/menu/save chat
+      // como filhos do right-section. O redesign lr26 (2026) deixou só o
+      // kebab "Abrir o menu de conversa" dentro de um `.buttons-container`.
+      // Tentamos os anchors antigos primeiro (legado), depois caímos no
+      // primeiro `.buttons-container` visível para inserir à esquerda do
+      // kebab.
       const shareButton = rightSection.querySelector('[data-test-id="share-button"]');
       const menuButton = rightSection.querySelector(
         '[data-test-id="conversation-actions-menu-icon-button"]',
       );
       const saveChatButton = rightSection.querySelector('#gemini-exporter');
-      const anchor =
+      const legacyAnchor =
         shareButton?.closest('.buttons-container.share') ||
         menuButton?.closest('conversation-actions-icon') ||
         saveChatButton ||
         null;
 
-      if (!anchor || !visibleRect(anchor)) continue;
+      let anchor = legacyAnchor && visibleRect(legacyAnchor) ? legacyAnchor : null;
+      let matchedBy = anchor
+        ? `Gemini right-section before ${anchor.id || anchor.tagName.toLowerCase()}`
+        : null;
 
-      return {
-        target: rightSection,
-        before: anchor,
-        anchor,
-        matchedBy: `Gemini right-section before ${anchor.id || anchor.tagName.toLowerCase()}`,
-      };
+      if (!anchor) {
+        // Pega o primeiro `.buttons-container` visível (no DOM lr26 normalmente
+        // é o que envolve o kebab); evita o `.adv-upsell` quando ele estiver
+        // colapsado (largura ~0) e cai automaticamente nele se for a única
+        // opção visível.
+        const containers = Array.from(
+          rightSection.querySelectorAll(':scope > .buttons-container'),
+        ).filter((el) => visibleRect(el));
+        if (containers.length) {
+          anchor = containers[0];
+          matchedBy = `Gemini right-section before .buttons-container (${containers.length} visible)`;
+        }
+      }
+
+      if (!anchor) continue;
+
+      return { target: rightSection, before: anchor, anchor, matchedBy };
     }
 
     return null;
@@ -258,6 +279,17 @@
       .filter(({ rect }) => rect.width > 0 && rect.height > 0);
 
     if (scored.length === 0) return null;
+
+    // Caminho feliz do Gemini lr26: só existe um `top-bar-actions` visível
+    // (o da conversa, ocupando a largura cheia do header). Retorna direto
+    // sem cair na heurística do OneGoogleBar, que agora encolheu para um
+    // sliver de 8x48 no canto direito.
+    if (scored.length === 1) {
+      return {
+        target: scored[0].el,
+        matchedBy: 'top-bar-actions single visible candidate',
+      };
+    }
 
     const ogb = findOgbRect();
     if (ogb) {
@@ -743,6 +775,128 @@
     return pageWindow.matchMedia?.('(prefers-color-scheme: dark)').matches || false;
   };
 
+  // Tokens vivos do Gemini (redesign lr26): a página agora expõe um sistema
+  // de design via custom properties `--gem-sys-color--*` no <html> e <body>.
+  // Lemos esses tokens em runtime quando o host os fornece, com fallback pros
+  // valores hardcoded por tema. Isso deixa a UI da extensão acompanhar
+  // automaticamente tema claro/escuro e qualquer tweak fino do Gemini sem
+  // precisar atualizar a paleta manualmente.
+  const readGeminiToken = (name, fallback = '') => {
+    try {
+      const html = getComputedStyle(document.documentElement).getPropertyValue(name);
+      if (html && html.trim()) return html.trim();
+      const body = getComputedStyle(document.body).getPropertyValue(name);
+      if (body && body.trim()) return body.trim();
+    } catch {
+      // getComputedStyle pode falhar em runtimes degradados; usa fallback.
+    }
+    return fallback;
+  };
+  // Paleta semântica derivada dos tokens do Gemini com fallbacks por tema.
+  // Mantém o mesmo contrato dos `--gm-*` antigos para não exigir mudança no
+  // CSS espalhado pelo shell.
+  const buildHostPalette = () => {
+    const dark = isDarkTheme();
+    const surfaceContainerHigh = readGeminiToken(
+      '--gem-sys-color--surface-container-high',
+      dark ? '#282a2c' : '#ffffff',
+    );
+    const surfaceContainerHighest = readGeminiToken(
+      '--gem-sys-color--surface-container-highest',
+      dark ? '#333537' : '#f8fafd',
+    );
+    const surfaceContainer = readGeminiToken(
+      '--gem-sys-color--surface-container',
+      dark ? '#1e1f20' : '#f0f4f9',
+    );
+    const onSurface = readGeminiToken(
+      '--gem-sys-color--on-surface',
+      dark ? '#e3e3e3' : '#1f1f1f',
+    );
+    const outline = readGeminiToken(
+      '--gem-sys-color--outline',
+      dark ? '#8e918f' : '#74777f',
+    );
+    const outlineVariant = readGeminiToken(
+      '--gem-sys-color--outline-variant',
+      dark ? '#444746' : '#c4c7c5',
+    );
+    const primary = readGeminiToken(
+      '--gem-sys-color--primary',
+      dark ? '#a8c7fa' : '#0b57d0',
+    );
+    const onPrimary = readGeminiToken(
+      '--gem-sys-color--on-primary',
+      dark ? '#062e6f' : '#ffffff',
+    );
+    const secondaryContainer = readGeminiToken(
+      '--gem-sys-color--secondary-container',
+      dark ? '#004a77' : '#c2e7ff',
+    );
+    const onSecondaryContainer = readGeminiToken(
+      '--gem-sys-color--on-secondary-container',
+      dark ? '#c2e7ff' : '#001d35',
+    );
+    // Bordas/text-muted derivados via `color-mix` quando disponível, fallback
+    // pros valores observados.
+    return {
+      '--gm-panel-bg': surfaceContainerHigh,
+      '--gm-surface-elevated': surfaceContainerHighest,
+      '--gm-surface-muted': surfaceContainer,
+      '--gm-border': outlineVariant,
+      '--gm-border-strong': outline,
+      '--gm-text': onSurface,
+      '--gm-text-muted': dark
+        ? `color-mix(in srgb, ${onSurface} 65%, transparent)`
+        : `color-mix(in srgb, ${onSurface} 60%, transparent)`,
+      '--gm-accent': primary,
+      '--gm-accent-strong': secondaryContainer,
+      '--gm-accent-text': onPrimary,
+      '--gm-accent-on-strong': onSecondaryContainer,
+      '--gm-success': dark ? '#a6d4a6' : '#137333',
+      '--gm-badge-bg': secondaryContainer,
+      '--gm-badge-text': onSecondaryContainer,
+      '--gm-font':
+        '"Google Sans Text","Google Sans",Roboto,"Segoe UI",system-ui,sans-serif',
+    };
+  };
+  const buildDockHostPalette = () => {
+    const dark = isDarkTheme();
+    const palette = buildHostPalette();
+    return {
+      '--gm-dock-bg': palette['--gm-panel-bg'],
+      '--gm-dock-text': palette['--gm-text'],
+      '--gm-dock-muted': palette['--gm-text-muted'],
+      '--gm-dock-border': palette['--gm-border'],
+      '--gm-dock-track': dark
+        ? 'rgba(255,255,255,0.08)'
+        : 'rgba(60,64,67,0.12)',
+      '--gm-dock-done-bg': palette['--gm-accent-strong'],
+      '--gm-font': palette['--gm-font'],
+      '--gm-accent': palette['--gm-accent'],
+    };
+  };
+  const buildMenuHostPalette = () => {
+    const dark = isDarkTheme();
+    const palette = buildHostPalette();
+    return {
+      '--gm-menu-bg': palette['--gm-panel-bg'],
+      '--gm-menu-text': palette['--gm-text'],
+      '--gm-menu-muted': palette['--gm-text-muted'],
+      '--gm-menu-border': palette['--gm-border'],
+      '--gm-menu-divider': palette['--gm-border'],
+      '--gm-menu-hover': dark
+        ? `color-mix(in srgb, ${palette['--gm-text']} 8%, transparent)`
+        : `color-mix(in srgb, ${palette['--gm-text']} 6%, transparent)`,
+      '--gm-menu-focus': `color-mix(in srgb, ${palette['--gm-accent']} 22%, transparent)`,
+      '--gm-menu-shadow': dark
+        ? '0 16px 36px rgba(0,0,0,0.45), 0 2px 8px rgba(0,0,0,0.30)'
+        : '0 16px 36px rgba(60,64,67,0.20), 0 2px 8px rgba(60,64,67,0.12)',
+      '--gm-menu-accent': palette['--gm-accent'],
+      '--gm-menu-font': palette['--gm-font'],
+    };
+  };
+
   // --- debug / feedback -------------------------------------------------
 
   const log = (...args) => console.log(LOG_PREFIX, ...args);
@@ -803,12 +957,31 @@
       document.body.appendChild(toast);
     }
 
+    // Cores tonalizadas via tokens do Gemini quando disponíveis. Os hex
+    // fixos abaixo são fallback quando o host não expõe `--gem-sys-color--*`
+    // (Gemini antigo) ou quando `color-mix` não está disponível.
+    const errorBase = readGeminiToken('--gem-sys-color--error', '');
+    const primaryBase = readGeminiToken('--gem-sys-color--primary', '');
     const palette =
       kind === 'error'
-        ? { bg: '#c5221f', border: '#8f1b13' }
+        ? {
+            bg: errorBase
+              ? `color-mix(in srgb, ${errorBase} 88%, black)`
+              : '#c5221f',
+            border: errorBase
+              ? `color-mix(in srgb, ${errorBase} 70%, black)`
+              : '#8f1b13',
+          }
         : kind === 'success'
           ? { bg: '#137333', border: '#0d5a27' }
-          : { bg: '#1a73e8', border: '#1557b0' };
+          : {
+              bg: primaryBase
+                ? `color-mix(in srgb, ${primaryBase} 80%, black)`
+                : '#1a73e8',
+              border: primaryBase
+                ? `color-mix(in srgb, ${primaryBase} 60%, black)`
+                : '#1557b0',
+            };
 
     // prefixo visual (emoji/ícone simples) ajuda a identificar severidade
     // mesmo quando o usuário só olha de canto de olho.
@@ -5911,14 +6084,16 @@
             font-family: var(--gm-font);
             display: flex;
             flex-direction: column;
-            gap: 8px;
-            padding: 12px 14px;
-            border-radius: 18px;
+            gap: 10px;
+            padding: 14px 16px;
+            border-radius: 22px;
             background: var(--gm-dock-bg);
             color: var(--gm-dock-text);
             border: 1px solid var(--gm-dock-border);
-            box-shadow: 0 10px 30px rgba(0,0,0,0.16);
-            backdrop-filter: blur(10px);
+            box-shadow:
+              0 16px 40px rgba(0,0,0,0.40),
+              0 2px 8px rgba(0,0,0,0.24);
+            backdrop-filter: blur(14px);
           }
           #${PROGRESS_DOCK_ID} .gm-dock-track {
             height: 6px;
@@ -5952,6 +6127,9 @@
             );
             transform: translateX(-100%);
             animation: gm-dock-shimmer 1500ms linear infinite;
+          }
+          #${PROGRESS_DOCK_ID}.gm-dock-done .gm-dock-bar {
+            background: var(--gm-dock-done-bg, var(--gm-accent));
           }
           #${PROGRESS_DOCK_ID}.gm-dock-done .gm-dock-bar::after {
             animation: none;
@@ -6125,27 +6303,7 @@
       return;
     }
 
-    const dark = isDarkTheme();
-    const vars = dark
-      ? {
-          '--gm-dock-bg': 'rgba(31,35,41,0.94)',
-          '--gm-dock-text': '#e8eaed',
-          '--gm-dock-muted': '#aab4be',
-          '--gm-dock-border': 'rgba(255,255,255,0.08)',
-          '--gm-dock-track': 'rgba(255,255,255,0.08)',
-          '--gm-font': '"Google Sans Text","Google Sans",Roboto,"Segoe UI",system-ui,sans-serif',
-          '--gm-accent': '#8ab4f8',
-        }
-      : {
-          '--gm-dock-bg': 'rgba(255,255,255,0.94)',
-          '--gm-dock-text': '#202124',
-          '--gm-dock-muted': '#5f6368',
-          '--gm-dock-border': 'rgba(60,64,67,0.12)',
-          '--gm-dock-track': 'rgba(60,64,67,0.12)',
-          '--gm-font': '"Google Sans Text","Google Sans",Roboto,"Segoe UI",system-ui,sans-serif',
-          '--gm-accent': '#1a73e8',
-        };
-
+    const vars = buildDockHostPalette();
     Object.entries(vars).forEach(([key, value]) => dock.style.setProperty(key, value));
 
     const titleEl = document.getElementById(`${PROGRESS_DOCK_ID}-title`);
@@ -6779,18 +6937,20 @@
           max-height: min(680px, calc(100vh - 24px));
           display: flex;
           flex-direction: column;
-          gap: 12px;
+          gap: 14px;
           box-sizing: border-box;
           overflow: hidden;
           background: var(--gm-panel-bg);
           color: var(--gm-text);
-          border-radius: 22px;
+          border-radius: 28px;
           border: 1px solid var(--gm-border);
-          box-shadow: 0 20px 70px rgba(0,0,0,0.22);
-          padding: 18px;
+          box-shadow:
+            0 28px 64px rgba(0,0,0,0.40),
+            0 2px 8px rgba(0,0,0,0.24);
+          padding: 22px;
           font-family: var(--gm-font);
           font-size: 14px;
-          line-height: 1.35;
+          line-height: 1.4;
         }
         #${MODAL_ID} *,
         #${MODAL_ID} *::before,
@@ -6811,40 +6971,47 @@
           flex-wrap: wrap;
         }
         #${MODAL_ID} .gm-modal-title strong {
-          font-size: 18px;
+          font-size: 20px;
           line-height: 1.2;
-          font-weight: 600;
+          font-weight: 500;
+          letter-spacing: 0;
         }
         #${MODAL_ID} .gm-count-chip {
           display: inline-flex;
           align-items: center;
           justify-content: center;
           min-height: 22px;
-          padding: 0 8px;
-          border-radius: 999px;
-          background: var(--gm-surface-muted);
-          border: 1px solid var(--gm-border);
-          font-size: 12px;
+          padding: 0;
+          background: transparent;
+          border: 0;
+          font-size: 13px;
           color: var(--gm-text-muted);
+        }
+        #${MODAL_ID} .gm-count-chip:not(:empty)::before {
+          content: "·";
+          display: inline-block;
+          margin-right: 8px;
+          opacity: 0.6;
         }
         #${MODAL_ID} .gm-btn-close {
           display: inline-flex;
           align-items: center;
           justify-content: center;
-          flex: 0 0 32px;
-          width: 32px;
-          height: 32px;
+          flex: 0 0 36px;
+          width: 36px;
+          height: 36px;
           padding: 0;
           border-radius: 999px;
           border: none;
           background: transparent;
           color: var(--gm-text-muted);
-          font-size: 18px;
+          font-size: 20px;
           line-height: 1;
           cursor: pointer;
+          transition: background-color 180ms cubic-bezier(0.22, 0.61, 0.36, 1), color 180ms ease;
         }
         #${MODAL_ID} .gm-btn-close:hover {
-          background: var(--gm-surface-muted);
+          background: color-mix(in srgb, var(--gm-text) 8%, transparent);
           color: var(--gm-text);
         }
         #${MODAL_ID} .gm-toolbar {
@@ -6868,15 +7035,20 @@
         #${MODAL_ID} .gm-input {
           width: 100%;
           min-width: 0;
-          height: 36px;
-          padding: 0 12px;
-          border-radius: 12px;
-          border: 1px solid var(--gm-border);
+          height: 40px;
+          padding: 0 16px;
+          border-radius: 999px;
+          border: 1px solid transparent;
           background: var(--gm-surface-muted);
           color: var(--gm-text);
           outline: none;
           font-size: 14px;
-          line-height: 36px;
+          line-height: 40px;
+          transition: border-color 160ms ease, background-color 160ms ease;
+        }
+        #${MODAL_ID} .gm-input:focus {
+          border-color: var(--gm-accent);
+          background: var(--gm-surface-elevated);
         }
         #${MODAL_ID} .gm-input::placeholder {
           color: var(--gm-text-muted);
@@ -6886,70 +7058,84 @@
           align-items: center;
           justify-content: center;
           box-sizing: border-box;
-          height: 36px;
+          height: 40px;
           min-width: 0;
           border-radius: 999px;
-          padding: 0 12px;
-          border: 1px solid var(--gm-border);
-          background: var(--gm-surface-elevated);
+          padding: 0 18px;
+          border: 1px solid transparent;
+          background: transparent;
           color: var(--gm-text);
           cursor: pointer;
           appearance: none;
           font-size: 13px;
           font-weight: 500;
           line-height: 1;
-          transition: background .16s ease, border-color .16s ease, transform .16s ease;
+          letter-spacing: 0.005em;
+          transition:
+            background-color 180ms cubic-bezier(0.22, 0.61, 0.36, 1),
+            border-color 180ms ease,
+            color 180ms ease,
+            transform 120ms ease;
           white-space: nowrap;
         }
         #${MODAL_ID} .gm-btn:hover:not(:disabled) {
-          background: var(--gm-surface-muted);
+          background: color-mix(in srgb, var(--gm-text) 8%, transparent);
+        }
+        #${MODAL_ID} .gm-btn:active:not(:disabled) {
+          transform: scale(0.97);
         }
         #${MODAL_ID} .gm-btn:disabled {
-          opacity: 0.55;
+          opacity: 0.5;
           cursor: default;
         }
         #${MODAL_ID} .gm-btn-primary {
           background: var(--gm-accent);
           border-color: transparent;
-          color: white;
+          color: var(--gm-accent-text);
         }
         #${MODAL_ID} .gm-btn-primary:hover:not(:disabled) {
-          background: var(--gm-accent-strong);
+          background: color-mix(in srgb, var(--gm-accent) 88%, white);
         }
+        /* "Success" no contexto deste modal é o CTA "Baixar selecionadas" --
+           a ação principal e única tonalmente saturada do footer. No
+           Gemini lr26 o equivalente semântico é o secondary-container azul
+           piscina; usamos --gm-accent-strong (#004a77 escuro / #c2e7ff
+           claro) com texto em --gm-accent-on-strong para casar com chips
+           e CTAs nativos sem destoar com um verde foreign ao sistema. */
         #${MODAL_ID} .gm-btn-success {
-          background: var(--gm-success);
+          background: var(--gm-accent-strong);
           border-color: transparent;
-          color: white;
-          padding: 0 18px;
+          color: var(--gm-accent-on-strong);
+          padding: 0 22px;
           font-weight: 500;
         }
         #${MODAL_ID} .gm-btn-success:hover:not(:disabled) {
-          filter: brightness(1.08);
+          background: color-mix(in srgb, var(--gm-accent-strong) 86%, white);
         }
         #${MODAL_ID} .gm-btn-ghost {
           background: transparent;
           border-color: transparent;
           color: var(--gm-text-muted);
-          padding: 0 12px;
+          padding: 0 16px;
         }
         #${MODAL_ID} .gm-btn-ghost:hover:not(:disabled) {
-          background: var(--gm-surface-muted);
+          background: color-mix(in srgb, var(--gm-text) 8%, transparent);
           color: var(--gm-text);
         }
         #${MODAL_ID} .gm-destination {
           display: grid;
-          grid-template-columns: 32px minmax(0, 1fr) auto;
+          grid-template-columns: 36px minmax(0, 1fr) auto;
           align-items: center;
-          gap: 12px;
-          padding: 10px 14px;
-          border-radius: 14px;
+          gap: 14px;
+          padding: 12px 16px;
+          border-radius: 18px;
           background: var(--gm-surface-muted);
-          border: 1px solid var(--gm-border);
+          border: 1px solid transparent;
         }
         #${MODAL_ID} .gm-destination-icon {
-          width: 32px;
-          height: 32px;
-          border-radius: 10px;
+          width: 36px;
+          height: 36px;
+          border-radius: 999px;
           background: var(--gm-badge-bg);
           color: var(--gm-badge-text);
           display: grid;
@@ -6996,7 +7182,7 @@
         #${MODAL_ID} .gm-list {
           display: flex;
           flex-direction: column;
-          gap: 8px;
+          gap: 2px;
           overflow-y: auto;
           overflow-x: hidden;
           /* flex:1 + min-height:0 deixa a lista crescer dentro do painel
@@ -7019,7 +7205,7 @@
           gap: 0;
         }
         #${MODAL_ID} .gm-list.is-virtual .gm-conversation-item {
-          margin-bottom: 8px;
+          margin-bottom: 2px;
         }
         #${MODAL_ID} .gm-virtual-spacer {
           flex: 0 0 auto;
@@ -7049,25 +7235,36 @@
           gap: 12px;
           align-items: center;
           box-sizing: border-box;
-          padding: 11px 12px;
-          min-height: 64px;
-          border: 1px solid var(--gm-border);
-          border-radius: 14px;
-          background: var(--gm-surface-elevated);
+          padding: 10px 14px;
+          min-height: 56px;
+          border: 1px solid transparent;
+          border-radius: 16px;
+          background: transparent;
           cursor: pointer;
-          transition: border-color .16s ease, background .16s ease;
+          transition: background-color 180ms cubic-bezier(0.22, 0.61, 0.36, 1), border-color 180ms ease;
         }
         #${MODAL_ID} .gm-conversation-item:hover {
-          border-color: var(--gm-border-strong);
-          background: var(--gm-surface-muted);
+          background: color-mix(in srgb, var(--gm-text) 6%, transparent);
+        }
+        /* :has() é Chrome 105+; o content script só roda em Chromium recente.
+           Linha selecionada usa o chip azul-petróleo do Gemini (secondary-container)
+           pra alinhar visualmente com o estado "pílula ativa" do app. */
+        #${MODAL_ID} .gm-conversation-item:has(.gm-checkbox:checked) {
+          background: var(--gm-badge-bg);
+          color: var(--gm-badge-text);
+        }
+        #${MODAL_ID} .gm-conversation-item:has(.gm-checkbox:checked) .gm-conversation-title,
+        #${MODAL_ID} .gm-conversation-item:has(.gm-checkbox:checked) .gm-conversation-id {
+          color: var(--gm-badge-text);
         }
         #${MODAL_ID} .gm-checkbox {
           flex: 0 0 auto;
           justify-self: center;
-          width: 16px;
-          height: 16px;
+          width: 18px;
+          height: 18px;
           margin: 0;
           accent-color: var(--gm-accent);
+          cursor: pointer;
         }
         #${MODAL_ID} .gm-conversation-copy {
           display: flex;
@@ -7160,8 +7357,8 @@
           #${MODAL_ID} .gm-modal-panel {
             width: calc(100vw - 20px);
             max-height: calc(100vh - 20px);
-            padding: 14px;
-            border-radius: 18px;
+            padding: 16px;
+            border-radius: 22px;
           }
           #${MODAL_ID} .gm-toolbar,
           #${MODAL_ID} .gm-footer {
@@ -7428,38 +7625,7 @@
     refreshConversationState();
     const modal = ensureModal();
     startSidebarConversationObserver();
-    const dark = isDarkTheme();
-    const vars = dark
-      ? {
-          '--gm-panel-bg': '#1f2329',
-          '--gm-surface-elevated': '#2a2f36',
-          '--gm-surface-muted': '#171b20',
-          '--gm-border': 'rgba(255,255,255,0.08)',
-          '--gm-border-strong': 'rgba(138,180,248,0.45)',
-          '--gm-text': '#e8eaed',
-          '--gm-text-muted': '#aab4be',
-          '--gm-accent': '#8ab4f8',
-          '--gm-accent-strong': '#6ea3f7',
-          '--gm-success': '#1e8e3e',
-          '--gm-badge-bg': 'rgba(138,180,248,0.16)',
-          '--gm-badge-text': '#8ab4f8',
-          '--gm-font': '"Google Sans Text","Google Sans",Roboto,"Segoe UI",system-ui,sans-serif',
-        }
-      : {
-          '--gm-panel-bg': '#ffffff',
-          '--gm-surface-elevated': '#ffffff',
-          '--gm-surface-muted': '#f6f8fb',
-          '--gm-border': 'rgba(60,64,67,0.14)',
-          '--gm-border-strong': 'rgba(26,115,232,0.28)',
-          '--gm-text': '#202124',
-          '--gm-text-muted': '#5f6368',
-          '--gm-accent': '#1a73e8',
-          '--gm-accent-strong': '#1557b0',
-          '--gm-success': '#137333',
-          '--gm-badge-bg': '#e8f0fe',
-          '--gm-badge-text': '#1557b0',
-          '--gm-font': '"Google Sans Text","Google Sans",Roboto,"Segoe UI",system-ui,sans-serif',
-        };
+    const vars = buildHostPalette();
     Object.entries(vars).forEach(([key, value]) => modal.style.setProperty(key, value));
     modal.removeAttribute('hidden');
     modal.hidden = false;
@@ -7898,7 +8064,11 @@
       lineHeight: '0',
       verticalAlign: 'middle',
       appearance: 'none',
-      transition: 'background-color 160ms ease',
+      // Material-style ease para combinar com o resto da UI do Gemini lr26;
+      // transform leve no :active dá o feedback tátil que o mat-icon-button
+      // tem via ripple (sem precisar reimplementar ripple).
+      transition:
+        'background-color 180ms cubic-bezier(0.22, 0.61, 0.36, 1), transform 120ms ease',
       // limpa resíduo de um eventual render FAB legado
       position: '',
       right: '',
@@ -7949,35 +8119,7 @@
   let menuRepositionHandler = null;
   let menuScrollHandler = null;
 
-  const buildMenuPalette = () =>
-    isDarkTheme()
-      ? {
-          '--gm-menu-bg': 'rgba(35,38,43,0.98)',
-          '--gm-menu-text': '#e8eaed',
-          '--gm-menu-muted': '#9aa0a6',
-          '--gm-menu-border': 'rgba(255,255,255,0.08)',
-          '--gm-menu-divider': 'rgba(255,255,255,0.08)',
-          '--gm-menu-hover': 'rgba(232,234,237,0.08)',
-          '--gm-menu-focus': 'rgba(138,180,248,0.20)',
-          '--gm-menu-shadow': '0 8px 24px rgba(0,0,0,0.45), 0 2px 6px rgba(0,0,0,0.30)',
-          '--gm-menu-accent': '#8ab4f8',
-          '--gm-menu-font':
-            '"Google Sans Text","Google Sans",Roboto,"Segoe UI",system-ui,sans-serif',
-        }
-      : {
-          '--gm-menu-bg': 'rgba(255,255,255,0.99)',
-          '--gm-menu-text': '#202124',
-          '--gm-menu-muted': '#5f6368',
-          '--gm-menu-border': 'rgba(60,64,67,0.12)',
-          '--gm-menu-divider': 'rgba(60,64,67,0.10)',
-          '--gm-menu-hover': 'rgba(60,64,67,0.06)',
-          '--gm-menu-focus': 'rgba(26,115,232,0.12)',
-          '--gm-menu-shadow':
-            '0 8px 24px rgba(60,64,67,0.18), 0 2px 6px rgba(60,64,67,0.10)',
-          '--gm-menu-accent': '#1a73e8',
-          '--gm-menu-font':
-            '"Google Sans Text","Google Sans",Roboto,"Segoe UI",system-ui,sans-serif',
-        };
+  const buildMenuPalette = () => buildMenuHostPalette();
 
   const closeTopBarMenu = () => {
     const existing = document.getElementById(MENU_ID);
@@ -8028,16 +8170,16 @@
       display: 'block',
       width: '100%',
       textAlign: 'left',
-      padding: '8px 10px',
+      padding: '10px 12px',
       background: 'transparent',
       color: 'var(--gm-menu-text)',
       border: '0',
-      borderRadius: '6px',
+      borderRadius: '12px',
       cursor: 'pointer',
       fontSize: '13px',
       fontFamily: 'var(--gm-menu-font)',
       lineHeight: '1.35',
-      transition: 'background-color 120ms ease',
+      transition: 'background-color 180ms cubic-bezier(0.22, 0.61, 0.36, 1)',
     });
     el.addEventListener('mouseenter', () => {
       el.style.background = 'var(--gm-menu-hover)';
@@ -8128,17 +8270,17 @@
       // Travar em 280px elimina o jump sem precisar normalizar texto.
       width: '280px',
       boxSizing: 'border-box',
-      padding: '4px',
+      padding: '6px',
       background: 'var(--gm-menu-bg)',
       color: 'var(--gm-menu-text)',
       border: '1px solid var(--gm-menu-border)',
-      borderRadius: '10px',
+      borderRadius: '16px',
       boxShadow: 'var(--gm-menu-shadow)',
       fontFamily: 'var(--gm-menu-font)',
       fontSize: '13px',
       zIndex: String(MENU_ZINDEX),
-      backdropFilter: 'blur(10px)',
-      WebkitBackdropFilter: 'blur(10px)',
+      backdropFilter: 'blur(14px)',
+      WebkitBackdropFilter: 'blur(14px)',
       // Garante que itens internos tenham referência de var caso sejam
       // re-renderizados (ex.: toggle "Ignorar"), evitando perder a paleta.
     });
@@ -8246,19 +8388,29 @@
     setHtml(btn, BUTTON_ICON_SVG);
     styleAsTopBarIconButton(btn);
 
-    const hoverIn = 'rgba(138,180,248,0.12)';
-    const focusIn = 'rgba(138,180,248,0.18)';
+    // Hover/focus puxam do currentColor (que herda do top-bar do Gemini), o
+    // que faz o disco sutil acompanhar tema claro e escuro sem hardcode.
+    // `color-mix` é Chrome 111+; o content script só roda em Chromium recente.
+    const hoverBg = 'color-mix(in srgb, currentColor 10%, transparent)';
+    const focusBg = 'color-mix(in srgb, currentColor 16%, transparent)';
     btn.addEventListener('mouseenter', () => {
-      btn.style.backgroundColor = hoverIn;
+      btn.style.backgroundColor = hoverBg;
     });
     btn.addEventListener('mouseleave', () => {
       btn.style.backgroundColor = 'transparent';
+      btn.style.transform = '';
     });
     btn.addEventListener('focus', () => {
-      btn.style.backgroundColor = focusIn;
+      btn.style.backgroundColor = focusBg;
     });
     btn.addEventListener('blur', () => {
       btn.style.backgroundColor = 'transparent';
+    });
+    btn.addEventListener('mousedown', () => {
+      btn.style.transform = 'scale(0.94)';
+    });
+    btn.addEventListener('mouseup', () => {
+      btn.style.transform = '';
     });
     btn.addEventListener('click', toggleTopBarMenu);
 

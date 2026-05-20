@@ -142,21 +142,28 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   em que a API de debug estiver disponível, evitando poluir a UI com um
   botão flutuante destoante.
   (7) **Injeção dentro do `top-bar-actions` da conversa**: a âncora é o
-  custom element `top-bar-actions` do Gemini. **Cuidado crítico**: a
-  página tem múltiplas instâncias desse elemento — uma na nav global
-  (canto superior esquerdo, colada no sidebar) e outra na conversa
-  (canto superior direito, com kebab + avatar). `querySelector` pega o
-  primeiro em ordem de documento, que é o errado. A função `findTopBar`
-  coleta todos, filtra pelos visíveis (`width/height > 0`) e, quando o
-  OneGoogleBar (`#gb` / `.boqOnegoogleliteOgbOneGoogleBar`) está visível,
-  escolhe o `top-bar-actions` na mesma faixa vertical e imediatamente à
-  esquerda dele. Só se o OGB não estiver disponível ela cai no fallback
-  **rightmost** via `getBoundingClientRect().right`. Na estrutura atual do
-  Gemini, o botão fica dentro de um slot próprio
+  custom element `top-bar-actions` do Gemini. **Cuidado crítico legado**:
+  versões pré-lr26 expunham múltiplas instâncias visíveis (uma na nav
+  global, outra na conversa com kebab + share + avatar); ali `findTopBar`
+  precisava desambiguar pelo OneGoogleBar (`#gb` /
+  `.boqOnegoogleliteOgbOneGoogleBar`). **No Gemini lr26 (2026)** o
+  redesign deixou só um `top-bar-actions` visível (full-width do header),
+  o avatar foi pro rodapé do sidebar (classe
+  `sidenav-mavatar-migration-enabled`) e `#gb` virou um sliver
+  ~8×48 invisível no canto. `findTopBar` agora resolve direto pelo caminho
+  `matchedBy: 'top-bar-actions single visible candidate'` quando há um só;
+  a heurística OGB-row-left vira fallback diagnóstico só pra DOM antigo.
+  **Não usar `#gb` como âncora visível** — filtre por `width > 40` se for
+  reintroduzir. O botão fica dentro de um slot próprio
   (`#gm-md-export-modern-btn-slot`) inserido em
-  `.top-bar-actions .right-section`, antes do container de share/menu; não
-  deve ficar como filho direto do custom element `top-bar-actions`, pois isso
-  joga o botão para perto do logo "Gemini". Selectors tipo
+  `.top-bar-actions .right-section`. `findGeminiRightSectionPlacement`
+  agora insere antes do primeiro `.buttons-container` visível do
+  `.right-section` (no lr26 isso é o kebab "Abrir o menu de conversa"),
+  caindo nos anchors legados (`share-button`, `conversation-actions-menu-icon-button`,
+  `#gemini-exporter`) só se eles existirem — não largue esses anchors
+  porque versões antigas ainda dependem deles. O slot não deve ficar como
+  filho direto do custom element `top-bar-actions`, senão joga o botão
+  para perto do logo "Gemini". Selectors tipo
   `chat-app-top-bar [role="toolbar"]` **foram banidos** porque casavam
   com a nav global. Caçar o kebab por `aria-haspopup="menu"` /
   aria-label "More options" **também foi banido** porque casa com
@@ -172,6 +179,32 @@ Separador `---` entre turnos. Headings `## 🧑 Usuário` e `## 🤖 Gemini`.
   em `appendChild(host)` em vez de ruidar "NotFoundError: Failed to execute
   'insertBefore'" no console do usuário. Se o botão ficar fora de lugar,
   o próximo tick do `MutationObserver` reposiciona.
+  **Paleta lida dos tokens do Gemini (lr26)**: o `<body>` lr26 expõe um
+  sistema de design via custom properties `--gem-sys-color--*`
+  (`surface`, `surface-container`, `surface-container-high`,
+  `surface-container-highest`, `on-surface`, `outline`, `outline-variant`,
+  `primary`, `on-primary`, `secondary-container`, `on-secondary-container`,
+  etc.). `readGeminiToken(name, fallback)` lê esses tokens do
+  `documentElement`/`body` e cai em hex hardcoded por tema quando o host
+  não fornece. `buildHostPalette` / `buildDockHostPalette` /
+  `buildMenuHostPalette` montam os `--gm-*` derivados (modal, dock, menu).
+  Resultado: o modal usa `surface-container-high` como fundo
+  (`#282a2c` dark / `#ffffff` light), CTA primário do footer puxa do
+  `secondary-container` (azul piscina `#004a77` / `#c2e7ff` claro) e os
+  chips selecionados batem com o estado "pílula ativa" do app. **Não
+  hardcode mais cores** nos blocos de paleta do modal/dock/menu — passe
+  por `buildHostPalette` para o tema do host vencer automaticamente. Se um
+  token for renomeado no Gemini (`--mat-sys-*` ou variação), adicionar
+  no `readGeminiToken` em vez de duplicar a leitura.
+  **Geometria do botão alinhada ao kebab**: o `mat-mdc-icon-button` do
+  Gemini (kebab "Abrir o menu de conversa") é 36×36 circular com
+  `border-radius: 9999px`, bg transparente, ícone gem-icon 24px. Nosso
+  botão usa slot 40×40 (touch target Material), botão interno
+  `border-radius: 999px`, bg transparente em repouso, hover/focus via
+  `color-mix(in srgb, currentColor 10/16%, transparent)` — herda do tema
+  sem hardcode. Ícone SVG é o "download" outline do Material Symbols em
+  20×20 com `fill="currentColor"` (não usar o filled 24px de antes — fica
+  mais pesado que o kebab vizinho).
   **Carimbo de build**: `scripts/build.mjs` injeta um stamp `YYYYMMDD-HHMM`
   UTC no log de boot (`userscript carregado (v<version> build <stamp>)`; texto
   histórico mantido pelo bundle).
