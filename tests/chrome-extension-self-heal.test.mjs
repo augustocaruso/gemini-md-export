@@ -59,6 +59,10 @@ test('service worker recarrega abas Gemini antes de reinjetar apos update/reload
   const source = readFileSync(resolve(ROOT, 'src', 'extension-background.ts'), 'utf-8');
 
   assert.match(source, /GEMINI_TAB_RELOAD_SETTLE_MS/);
+  assert.match(source, /LAST_MANAGED_TABS_RELOAD_KEY/);
+  assert.match(source, /MANAGED_TABS_RELOAD_COOLDOWN_MS/);
+  assert.match(source, /markManagedTabsReload/);
+  assert.match(source, /status: 'cooldown'/);
   assert.match(source, /reloadThenSelfHealGeminiTabs/);
   assert.match(
     source,

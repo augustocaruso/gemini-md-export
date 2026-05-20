@@ -12,6 +12,7 @@ import { createNativeBrokerPort } from './browser/background/native-broker-clien
 const EXTENSION_PROTOCOL_VERSION = Number('__EXTENSION_PROTOCOL_VERSION__');
 const PENDING_GEMINI_TABS_RELOAD_KEY = 'gemini-md-export.pendingGeminiTabsReload';
 const LAST_RUNTIME_BUILD_KEY = 'gemini-md-export.lastRuntimeBuild.v1';
+const LAST_MANAGED_TABS_RELOAD_KEY = 'gemini-md-export.lastManagedTabsReload.v1';
 const TAB_CLAIMS_STORAGE_KEY = 'gemini-md-export.tabClaims.v1';
 const TAB_CLAIM_ALARM_PREFIX = 'gemini-md-export.tabClaimExpiry.';
 const TAB_GROUP_NONE = -1;
@@ -38,6 +39,7 @@ const CONTENT_SCRIPT_SELF_HEAL_COOLDOWN_MS = 10_000;
 const CONTENT_SCRIPT_POST_INJECT_PING_ATTEMPTS = 5;
 const CONTENT_SCRIPT_POST_INJECT_PING_DELAY_MS = 180;
 const GEMINI_TAB_RELOAD_SETTLE_MS = 900;
+const MANAGED_TABS_RELOAD_COOLDOWN_MS = 30_000;
 const MANAGED_TAB_SELF_HEAL_DELAY_MS = 350;
 const ARTIFACT_CAPTURE_CACHE_LIMIT = 60;
 const TAB_CLAIM_COLORS = new Set([
@@ -1324,6 +1326,31 @@ chrome.runtime.onStartup?.addListener?.(() => {
   }, 800);
 });
 
+const markManagedTabsReload = async (reason) => {
+  const previous = await storageGet(LAST_MANAGED_TABS_RELOAD_KEY);
+  const now = Date.now();
+  const previousReloadedAtMs = Number(previous?.reloadedAtMs || 0);
+  if (
+    previousReloadedAtMs > 0 &&
+    now - previousReloadedAtMs < MANAGED_TABS_RELOAD_COOLDOWN_MS
+  ) {
+    return {
+      ok: false,
+      status: 'cooldown',
+      reason,
+      previous,
+      cooldownMs: MANAGED_TABS_RELOAD_COOLDOWN_MS - (now - previousReloadedAtMs),
+    };
+  }
+  const current = {
+    reason,
+    reloadedAtMs: now,
+    reloadedAt: new Date(now).toISOString(),
+  };
+  await storageSetKey(LAST_MANAGED_TABS_RELOAD_KEY, current);
+  return { ok: true, status: 'marked', current, previous: previous || null };
+};
+
 const reloadGeminiTabs = (reason = 'manual') =>
   new Promise((resolve) => {
     if (!chrome.tabs?.query || !chrome.tabs?.reload) {
@@ -1331,7 +1358,21 @@ const reloadGeminiTabs = (reason = 'manual') =>
       return;
     }
 
-    chrome.tabs.query({ url: MANAGED_CONTENT_TAB_URL_PATTERNS }, (tabs = []) => {
+    markManagedTabsReload(reason).then((reloadLease) => {
+      if (reloadLease?.status === 'cooldown') {
+        resolve({
+          ok: true,
+          status: 'cooldown',
+          reason,
+          skipped: true,
+          reloaded: 0,
+          cooldownMs: reloadLease.cooldownMs,
+          previous: reloadLease.previous || null,
+        });
+        return;
+      }
+
+      chrome.tabs.query({ url: MANAGED_CONTENT_TAB_URL_PATTERNS }, (tabs = []) => {
       if (chrome.runtime.lastError) {
         resolve({
           ok: false,
@@ -1356,6 +1397,7 @@ const reloadGeminiTabs = (reason = 'manual') =>
         reloaded,
       });
       resolve({ ok: true, reason, reloaded });
+      });
     });
   });
 
