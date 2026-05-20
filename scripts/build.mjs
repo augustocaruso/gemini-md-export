@@ -8,7 +8,7 @@
 // Estratégia:
 // 1. Lê src/extract.mjs.
 // 2. Remove as declarações `export` (viram apenas `const`/`function`).
-// 3. Substitui o marcador em src/userscript-shell.js
+// 3. Substitui o marcador no shell gerado de src/userscript-shell.ts
 //    pelo conteúdo preparado.
 // 4. Substitui `__VERSION__` pelo version do package.json.
 // 5. Escreve o userscript.
@@ -38,15 +38,59 @@ const notebookReturnPlanSrc = readFileSync(
 );
 const batchSessionSrc = readFileSync(resolve(ROOT, 'src/batch-session.mjs'), 'utf-8');
 const domRunnerSrc = readFileSync(resolve(ROOT, 'src/dom-runner.mjs'), 'utf-8');
-const progressDockUiSrc = readFileSync(resolve(ROOT, 'src/progress-dock-ui.mjs'), 'utf-8');
-const shellSrc = readFileSync(resolve(ROOT, 'src/userscript-shell.js'), 'utf-8');
+const hostPaletteSrc = readFileSync(
+  resolve(ROOT, 'build', 'ts', 'browser', 'shared', 'host-palette.js'),
+  'utf-8',
+);
+const progressDockUiSrc = readFileSync(
+  resolve(ROOT, 'build', 'ts', 'browser', 'shared', 'progress-dock-ui.js'),
+  'utf-8',
+);
+const progressStateSrc = readFileSync(
+  resolve(ROOT, 'build', 'ts', 'browser', 'shared', 'progress-state.js'),
+  'utf-8',
+);
+const progressPortSrc = readFileSync(
+  resolve(ROOT, 'build', 'ts', 'browser', 'shared', 'progress-port.js'),
+  'utf-8',
+);
+const tabCommandsSrc = readFileSync(
+  resolve(ROOT, 'build', 'ts', 'browser', 'shared', 'tab-commands.js'),
+  'utf-8',
+);
+const bridgeClientSrc = readFileSync(
+  resolve(ROOT, 'build', 'ts', 'browser', 'shared', 'bridge-client.js'),
+  'utf-8',
+);
+const pageBlockerSrc = readFileSync(
+  resolve(ROOT, 'build', 'ts', 'browser', 'shared', 'page-blocker.js'),
+  'utf-8',
+);
+const coreChatIdSrc = readFileSync(resolve(ROOT, 'build', 'ts', 'core', 'chat-id.js'), 'utf-8');
+const geminiDomAdapterSrc = readFileSync(
+  resolve(ROOT, 'build', 'ts', 'browser', 'dom-adapter', 'gemini-web-current.js'),
+  'utf-8',
+);
+const navigationEngineSrc = readFileSync(
+  resolve(ROOT, 'build', 'ts', 'browser', 'navigation', 'navigation-engine.js'),
+  'utf-8',
+);
+const hydrationProgressSrc = readFileSync(
+  resolve(ROOT, 'build', 'ts', 'browser', 'navigation', 'hydration-progress.js'),
+  'utf-8',
+);
+const shellGeneratedSrc = readFileSync(resolve(ROOT, 'build', 'ts', 'userscript-shell.js'), 'utf-8');
 const artifactCaptureSrc = readFileSync(resolve(ROOT, 'src/artifact-capture.js'), 'utf-8');
-const activityContentScriptSrc = readFileSync(
-  resolve(ROOT, 'src/activity-content-script.js'),
+const activityContentScriptGeneratedSrc = readFileSync(
+  resolve(ROOT, 'build', 'ts', 'activity-content-script.js'),
+  'utf-8',
+);
+const googleBlockerContentScriptGeneratedSrc = readFileSync(
+  resolve(ROOT, 'build', 'ts', 'google-blocker-content-script.js'),
   'utf-8',
 );
 const extensionBackgroundSrc = readFileSync(
-  resolve(ROOT, 'src/extension-background.js'),
+  resolve(ROOT, 'build', 'ts', 'extension-background.js'),
   'utf-8',
 );
 const geminiCliExtensionContextSrc = readFileSync(
@@ -56,58 +100,119 @@ const geminiCliExtensionContextSrc = readFileSync(
 
 // Remove `export` keywords para transformar o módulo em código top-level
 // válido dentro do IIFE do userscript. Preserva o resto do código intacto.
-const inlineable = extractSrc
-  .replace(/^export\s+const\s+/gm, 'const ')
-  .replace(/^export\s+function\s+/gm, 'function ')
-  .replace(/^export\s+\{[^}]*\};?\s*$/gm, '');
+const stripModuleSyntax = (source) =>
+  source
+    .replace(/^import\s+[^;]+;\s*$/gm, '')
+    .replace(/^export\s+const\s+/gm, 'const ')
+    .replace(/^export\s+function\s+/gm, 'function ')
+    .replace(/^export\s+class\s+/gm, 'class ')
+    .replace(/^export\s+\{[^}]*\};?\s*$/gm, '');
 
-const inlineableNotebookReturnPlan = notebookReturnPlanSrc
-  .replace(/^export\s+const\s+/gm, 'const ')
-  .replace(/^export\s+function\s+/gm, 'function ')
-  .replace(/^export\s+\{[^}]*\};?\s*$/gm, '');
-const inlineableBatchSession = batchSessionSrc
-  .replace(/^export\s+const\s+/gm, 'const ')
-  .replace(/^export\s+function\s+/gm, 'function ')
-  .replace(/^export\s+\{[^}]*\};?\s*$/gm, '');
-const inlineableDomRunner = domRunnerSrc
-  .replace(/^export\s+const\s+/gm, 'const ')
-  .replace(/^export\s+function\s+/gm, 'function ')
-  .replace(/^export\s+\{[^}]*\};?\s*$/gm, '');
-const inlineableProgressDockUi = progressDockUiSrc
-  .replace(/^export\s+const\s+/gm, 'const ')
-  .replace(/^export\s+function\s+/gm, 'function ')
-  .replace(/^export\s+\{[^}]*\};?\s*$/gm, '');
+const shellSrc = stripModuleSyntax(shellGeneratedSrc);
+const activityContentScriptSrc = stripModuleSyntax(activityContentScriptGeneratedSrc);
+const inlineable = stripModuleSyntax(extractSrc);
+
+const inlineableNotebookReturnPlan = stripModuleSyntax(notebookReturnPlanSrc);
+const inlineableBatchSession = stripModuleSyntax(batchSessionSrc);
+const inlineableDomRunner = stripModuleSyntax(domRunnerSrc);
+const inlineableHostPalette = stripModuleSyntax(hostPaletteSrc);
+const inlineableProgressDockUi = stripModuleSyntax(progressDockUiSrc);
+const inlineableProgressState = stripModuleSyntax(progressStateSrc);
+const inlineableProgressPort = stripModuleSyntax(progressPortSrc);
+const inlineableTabCommands = stripModuleSyntax(tabCommandsSrc);
+const inlineableBridgeClient = stripModuleSyntax(bridgeClientSrc);
+const inlineableCoreChatId = stripModuleSyntax(coreChatIdSrc);
+const inlineableGeminiDomAdapter = stripModuleSyntax(geminiDomAdapterSrc);
+const inlineableNavigationEngine = stripModuleSyntax(navigationEngineSrc);
+const inlineableHydrationProgress = stripModuleSyntax(hydrationProgressSrc);
 
 const extractMarker = '/* __INLINE_EXTRACT_MODULE__ */';
 const notebookReturnPlanMarker = '/* __INLINE_NOTEBOOK_RETURN_PLAN__ */';
 const batchSessionMarker = '/* __INLINE_BATCH_SESSION_MODULE__ */';
 const domRunnerMarker = '/* __INLINE_DOM_RUNNER_MODULE__ */';
 const progressDockUiMarker = '/* __INLINE_PROGRESS_DOCK_UI__ */';
+const progressPortMarker = '/* __INLINE_PROGRESS_PORT__ */';
+const tabCommandsMarker = '/* __INLINE_TAB_COMMANDS__ */';
+const bridgeClientMarker = '/* __INLINE_BRIDGE_CLIENT__ */';
+const pageBlockerMarker = '/* __INLINE_PAGE_BLOCKER__ */';
+const browserNavigationStackMarker = '/* __INLINE_BROWSER_NAVIGATION_STACK__ */';
 if (!shellSrc.includes(extractMarker)) {
-  console.error(`[build] marker "${extractMarker}" não encontrado em userscript-shell.js`);
+  console.error(`[build] marker "${extractMarker}" não encontrado em userscript-shell.ts`);
   process.exit(1);
 }
 if (!shellSrc.includes(notebookReturnPlanMarker)) {
   console.error(
-    `[build] marker "${notebookReturnPlanMarker}" não encontrado em userscript-shell.js`,
+    `[build] marker "${notebookReturnPlanMarker}" não encontrado em userscript-shell.ts`,
   );
   process.exit(1);
 }
 if (!shellSrc.includes(batchSessionMarker)) {
-  console.error(`[build] marker "${batchSessionMarker}" não encontrado em userscript-shell.js`);
+  console.error(`[build] marker "${batchSessionMarker}" não encontrado em userscript-shell.ts`);
   process.exit(1);
 }
 if (!shellSrc.includes(domRunnerMarker)) {
-  console.error(`[build] marker "${domRunnerMarker}" não encontrado em userscript-shell.js`);
+  console.error(`[build] marker "${domRunnerMarker}" não encontrado em userscript-shell.ts`);
   process.exit(1);
 }
 if (!shellSrc.includes(progressDockUiMarker)) {
-  console.error(`[build] marker "${progressDockUiMarker}" não encontrado em userscript-shell.js`);
+  console.error(`[build] marker "${progressDockUiMarker}" não encontrado em userscript-shell.ts`);
+  process.exit(1);
+}
+if (!shellSrc.includes(progressPortMarker)) {
+  console.error(`[build] marker "${progressPortMarker}" não encontrado em userscript-shell.ts`);
+  process.exit(1);
+}
+if (!shellSrc.includes(tabCommandsMarker)) {
+  console.error(`[build] marker "${tabCommandsMarker}" não encontrado em userscript-shell.ts`);
+  process.exit(1);
+}
+if (!shellSrc.includes(bridgeClientMarker)) {
+  console.error(`[build] marker "${bridgeClientMarker}" não encontrado em userscript-shell.ts`);
+  process.exit(1);
+}
+if (!shellSrc.includes(pageBlockerMarker)) {
+  console.error(`[build] marker "${pageBlockerMarker}" não encontrado em userscript-shell.ts`);
+  process.exit(1);
+}
+if (!shellSrc.includes(browserNavigationStackMarker)) {
+  console.error(
+    `[build] marker "${browserNavigationStackMarker}" não encontrado em userscript-shell.ts`,
+  );
   process.exit(1);
 }
 if (!activityContentScriptSrc.includes(progressDockUiMarker)) {
   console.error(
-    `[build] marker "${progressDockUiMarker}" não encontrado em activity-content-script.js`,
+    `[build] marker "${progressDockUiMarker}" não encontrado em activity-content-script.ts`,
+  );
+  process.exit(1);
+}
+if (!activityContentScriptSrc.includes(progressPortMarker)) {
+  console.error(
+    `[build] marker "${progressPortMarker}" não encontrado em activity-content-script.ts`,
+  );
+  process.exit(1);
+}
+if (!activityContentScriptSrc.includes(tabCommandsMarker)) {
+  console.error(
+    `[build] marker "${tabCommandsMarker}" não encontrado em activity-content-script.ts`,
+  );
+  process.exit(1);
+}
+if (!activityContentScriptSrc.includes(bridgeClientMarker)) {
+  console.error(
+    `[build] marker "${bridgeClientMarker}" não encontrado em activity-content-script.ts`,
+  );
+  process.exit(1);
+}
+if (!googleBlockerContentScriptGeneratedSrc.includes(bridgeClientMarker)) {
+  console.error(
+    `[build] marker "${bridgeClientMarker}" não encontrado em google-blocker-content-script.ts`,
+  );
+  process.exit(1);
+}
+if (!googleBlockerContentScriptGeneratedSrc.includes(pageBlockerMarker)) {
+  console.error(
+    `[build] marker "${pageBlockerMarker}" não encontrado em google-blocker-content-script.ts`,
   );
   process.exit(1);
 }
@@ -130,7 +235,35 @@ const domRunnerBanner =
   '  // ============================================================\n';
 const progressDockUiBanner =
   '  // ============================================================\n' +
-  '  // Inlined from src/progress-dock-ui.mjs (auto-generated — do not edit)\n' +
+  '  // Inlined from src/browser/shared/progress-dock-ui.ts (auto-generated — do not edit)\n' +
+  '  // ============================================================\n';
+const progressStateBanner =
+  '  // ============================================================\n' +
+  '  // Inlined from src/browser/shared/progress-state.ts (auto-generated — do not edit)\n' +
+  '  // ============================================================\n';
+const hostPaletteBanner =
+  '  // ============================================================\n' +
+  '  // Inlined from src/browser/shared/host-palette.ts (auto-generated — do not edit)\n' +
+  '  // ============================================================\n';
+const progressPortBanner =
+  '  // ============================================================\n' +
+  '  // Inlined from src/browser/shared/progress-port.ts (auto-generated — do not edit)\n' +
+  '  // ============================================================\n';
+const tabCommandsBanner =
+  '  // ============================================================\n' +
+  '  // Inlined from src/browser/shared/tab-commands.ts (auto-generated — do not edit)\n' +
+  '  // ============================================================\n';
+const bridgeClientBanner =
+  '  // ============================================================\n' +
+  '  // Inlined from src/browser/shared/bridge-client.ts (auto-generated — do not edit)\n' +
+  '  // ============================================================\n';
+const pageBlockerBanner =
+  '  // ============================================================\n' +
+  '  // Inlined from src/browser/shared/page-blocker.ts (auto-generated — do not edit)\n' +
+  '  // ============================================================\n';
+const browserNavigationStackBanner =
+  '  // ============================================================\n' +
+  '  // Inlined from src/core/chat-id.ts + browser DOM/navigation modules (auto-generated — do not edit)\n' +
   '  // ============================================================\n';
 const inlinedExtract =
   extractBanner + inlineable.split('\n').map((l) => (l ? '  ' + l : l)).join('\n');
@@ -144,8 +277,39 @@ const inlinedDomRunner =
   domRunnerBanner +
   inlineableDomRunner.split('\n').map((l) => (l ? '  ' + l : l)).join('\n');
 const inlinedProgressDockUi =
+  hostPaletteBanner +
+  inlineableHostPalette.split('\n').map((l) => (l ? '  ' + l : l)).join('\n') +
+  '\n' +
+  progressStateBanner +
+  inlineableProgressState.split('\n').map((l) => (l ? '  ' + l : l)).join('\n') +
+  '\n' +
   progressDockUiBanner +
   inlineableProgressDockUi.split('\n').map((l) => (l ? '  ' + l : l)).join('\n');
+const inlinedProgressPort =
+  progressPortBanner +
+  inlineableProgressPort.split('\n').map((l) => (l ? '  ' + l : l)).join('\n');
+const inlinedTabCommands =
+  tabCommandsBanner +
+  inlineableTabCommands.split('\n').map((l) => (l ? '  ' + l : l)).join('\n');
+const inlinedBridgeClient =
+  bridgeClientBanner +
+  inlineableBridgeClient.split('\n').map((l) => (l ? '  ' + l : l)).join('\n');
+const inlineablePageBlocker = stripModuleSyntax(pageBlockerSrc);
+const inlinedPageBlocker =
+  pageBlockerBanner +
+  inlineablePageBlocker.split('\n').map((l) => (l ? '  ' + l : l)).join('\n');
+const inlinedBrowserNavigationStack =
+  browserNavigationStackBanner +
+  [
+    inlineableCoreChatId,
+    inlineableGeminiDomAdapter,
+    inlineableNavigationEngine,
+    inlineableHydrationProgress,
+  ]
+    .join('\n')
+    .split('\n')
+    .map((l) => (l ? '  ' + l : l))
+    .join('\n');
 
 // Carimbo de build curto (YYYYMMDD-HHMM) — ajuda a confirmar visualmente
 // se a extensão/userscript carregado é a versão recém-compilada (útil quando
@@ -160,6 +324,11 @@ const output = shellSrc
   .replace(batchSessionMarker, inlinedBatchSession)
   .replace(domRunnerMarker, inlinedDomRunner)
   .replace(progressDockUiMarker, inlinedProgressDockUi)
+  .replace(progressPortMarker, inlinedProgressPort)
+  .replace(tabCommandsMarker, inlinedTabCommands)
+  .replace(bridgeClientMarker, inlinedBridgeClient)
+  .replace(pageBlockerMarker, inlinedPageBlocker)
+  .replace(browserNavigationStackMarker, inlinedBrowserNavigationStack)
   .replace(/__VERSION__/g, pkg.version)
   .replace(/__EXTENSION_PROTOCOL_VERSION__/g, String(bridgeVersion.protocolVersion))
   .replace(/__BUILD_STAMP__/g, buildStamp);
@@ -200,6 +369,11 @@ const manifest = {
       run_at: 'document_idle',
     },
     {
+      matches: ['https://www.google.com/sorry/*', 'https://accounts.google.com/*'],
+      js: ['google-blocker-content-script.js'],
+      run_at: 'document_idle',
+    },
+    {
       matches: [
         'https://*.usercontent.goog/gemini-code-immersive/*',
         'https://*.googleusercontent.com/gemini-code-immersive/*',
@@ -209,10 +383,20 @@ const manifest = {
       all_frames: true,
     },
   ],
-  permissions: ['tabs', 'storage', 'tabGroups', 'scripting', 'nativeMessaging', 'offscreen'],
+  permissions: [
+    'tabs',
+    'storage',
+    'tabGroups',
+    'scripting',
+    'nativeMessaging',
+    'offscreen',
+    'debugger',
+  ],
   host_permissions: [
     'https://gemini.google.com/*',
     'https://myactivity.google.com/*',
+    'https://www.google.com/sorry/*',
+    'https://accounts.google.com/*',
     'https://lh3.google.com/*',
     'https://*.googleusercontent.com/*',
     'https://*.usercontent.goog/*',
@@ -230,6 +414,19 @@ writeFileSync(
   resolve(extensionDir, 'activity-content-script.js'),
   activityContentScriptSrc
     .replace(progressDockUiMarker, inlinedProgressDockUi)
+    .replace(progressPortMarker, inlinedProgressPort)
+    .replace(tabCommandsMarker, inlinedTabCommands)
+    .replace(bridgeClientMarker, inlinedBridgeClient)
+    .replace(/__VERSION__/g, pkg.version)
+    .replace(/__EXTENSION_PROTOCOL_VERSION__/g, String(bridgeVersion.protocolVersion))
+    .replace(/__BUILD_STAMP__/g, buildStamp),
+  'utf-8',
+);
+writeFileSync(
+  resolve(extensionDir, 'google-blocker-content-script.js'),
+  stripModuleSyntax(googleBlockerContentScriptGeneratedSrc)
+    .replace(bridgeClientMarker, inlinedBridgeClient)
+    .replace(pageBlockerMarker, inlinedPageBlocker)
     .replace(/__VERSION__/g, pkg.version)
     .replace(/__EXTENSION_PROTOCOL_VERSION__/g, String(bridgeVersion.protocolVersion))
     .replace(/__BUILD_STAMP__/g, buildStamp),
@@ -237,6 +434,11 @@ writeFileSync(
 );
 cpSync(resolve(ROOT, 'src', 'offscreen.html'), resolve(extensionDir, 'offscreen.html'));
 cpSync(resolve(ROOT, 'src', 'offscreen.js'), resolve(extensionDir, 'offscreen.js'));
+mkdirSync(resolve(extensionDir, 'browser', 'shared'), { recursive: true });
+cpSync(
+  resolve(ROOT, 'build', 'ts', 'browser', 'shared', 'chrome-debugger.js'),
+  resolve(extensionDir, 'browser', 'shared', 'chrome-debugger.js'),
+);
 writeFileSync(
   resolve(extensionDir, 'background.js'),
   extensionBackgroundSrc
@@ -254,6 +456,7 @@ writeFileSync(
 console.log(`[build] wrote ${resolve(extensionDir, 'content.js')}`);
 console.log(`[build] wrote ${resolve(extensionDir, 'artifact-capture.js')}`);
 console.log(`[build] wrote ${resolve(extensionDir, 'activity-content-script.js')}`);
+console.log(`[build] wrote ${resolve(extensionDir, 'google-blocker-content-script.js')}`);
 console.log(`[build] wrote ${resolve(extensionDir, 'background.js')}`);
 console.log(`[build] wrote ${resolve(extensionDir, 'manifest.json')}`);
 
@@ -291,9 +494,14 @@ writeFileSync(
 );
 writeFileSync(
   resolve(geminiCliExtensionDir, 'bridge-version.json'),
-  JSON.stringify(bridgeVersion, null, 2) + '\n',
+  JSON.stringify({ ...bridgeVersion, buildStamp }, null, 2) + '\n',
   'utf-8',
 );
+if (existsSync(resolve(ROOT, 'build', 'ts'))) {
+  cpSync(resolve(ROOT, 'build', 'ts'), resolve(geminiCliExtensionDir, 'build', 'ts'), {
+    recursive: true,
+  });
+}
 if (existsSync(resolve(ROOT, 'gemini-cli-extension', 'commands'))) {
   cpSync(
     resolve(ROOT, 'gemini-cli-extension', 'commands'),
@@ -315,8 +523,10 @@ if (existsSync(resolve(ROOT, 'gemini-cli-extension', 'skills'))) {
     { recursive: true },
   );
 }
-if (existsSync(resolve(ROOT, 'docs'))) {
-  cpSync(resolve(ROOT, 'docs'), resolve(geminiCliExtensionDir, 'docs'), {
+const bundledReferenceDocsDir = resolve(ROOT, 'docs', 'reference');
+if (existsSync(bundledReferenceDocsDir)) {
+  mkdirSync(resolve(geminiCliExtensionDir, 'docs'), { recursive: true });
+  cpSync(bundledReferenceDocsDir, resolve(geminiCliExtensionDir, 'docs', 'reference'), {
     recursive: true,
   });
 }
@@ -343,6 +553,10 @@ cpSync(
   resolve(geminiCliExtensionDir, 'scripts', 'bridge-smoke.mjs'),
 );
 cpSync(
+  resolve(ROOT, 'scripts', 'smoke-export-integrity.mjs'),
+  resolve(geminiCliExtensionDir, 'scripts', 'smoke-export-integrity.mjs'),
+);
+cpSync(
   resolve(ROOT, 'scripts', 'native-host-manifest.mjs'),
   resolve(geminiCliExtensionDir, 'scripts', 'native-host-manifest.mjs'),
 );
@@ -366,10 +580,6 @@ cpSync(
 cpSync(
   resolve(ROOT, 'src', 'recent-chats-policy.mjs'),
   resolve(geminiCliExtensionDir, 'src', 'recent-chats-policy.mjs'),
-);
-cpSync(
-  resolve(ROOT, 'src', 'recent-chats-load-more.mjs'),
-  resolve(geminiCliExtensionDir, 'src', 'recent-chats-load-more.mjs'),
 );
 cpSync(
   resolve(ROOT, 'src', 'mcp-server-errors.mjs'),
@@ -428,6 +638,9 @@ if (existsSync(resolve(geminiCliExtensionDir, 'skills'))) {
 }
 if (existsSync(resolve(geminiCliExtensionDir, 'docs'))) {
   console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'docs')}`);
+}
+if (existsSync(resolve(geminiCliExtensionDir, 'build', 'ts'))) {
+  console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'build', 'ts')}`);
 }
 if (existsSync(resolve(geminiCliExtensionDir, 'scripts'))) {
   console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'scripts')}`);

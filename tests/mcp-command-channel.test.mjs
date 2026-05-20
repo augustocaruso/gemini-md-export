@@ -52,6 +52,21 @@ test('MCP aborta export se a aba para de enviar heartbeat durante comando pesado
   assert.match(source, /err\?\.code === 'client_stale_during_command'/);
 });
 
+test('MCP propaga cancelamento de job para operação ativa no navegador', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const contentSource = readFileSync(resolve(ROOT, 'src', 'userscript-shell.ts'), 'utf-8');
+
+  assert.match(source, /requestActiveBrowserOperationCancelForJob/);
+  assert.match(source, /'cancel-active-operation'/);
+  assert.match(source, /browser_operation_cancel_requested/);
+  assert.match(source, /browser_operation_cancel_result/);
+  assert.match(source, /requestExportJobCancel\(job, 'tool-cancel'\)/);
+  assert.match(source, /requestExportJobCancel\(job, 'agent-cancel'\)/);
+  assert.match(contentSource, /command\.type === 'cancel-active-operation'/);
+  assert.match(contentSource, /activeTabOperationCancelRequested/);
+  assert.match(contentSource, /operation_cancelled/);
+});
+
 test('MCP degrada SSE para long-poll quando comando enviado por SSE some', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const flushBlock = source.match(
@@ -75,6 +90,32 @@ test('MCP degrada SSE para long-poll quando comando enviado por SSE some', () =>
   assert.match(heartbeatBlock, /commandPollRequired: !client\.pendingPoll && !eventStreamUsable/);
   assert.match(heartbeatBlock, /shouldIncludeHeartbeatJobProgress/);
   assert.doesNotMatch(heartbeatBlock, /eventStreamUsable \? null : buildJobProgressBroadcast/);
+});
+
+test('MCP pede self-reload pelo heartbeat quando build da extensão diverge', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const heartbeatBlock = source.match(
+    /url\.pathname === '\/bridge\/heartbeat'[\s\S]*?sendBridgeJson\(req, res, 200,[\s\S]*?\n      \}\);/,
+  )?.[0] || '';
+
+  assert.match(source, /const buildHeartbeatExtensionReload = \(client\) =>/);
+  assert.match(source, /extensionMismatchForClient\(client\)/);
+  assert.match(source, /expectedExtensionVersion:\s*EXPECTED_CHROME_EXTENSION_INFO\.extensionVersion/);
+  assert.match(source, /expectedProtocolVersion:\s*EXPECTED_CHROME_EXTENSION_INFO\.protocolVersion/);
+  assert.match(source, /expectedBuildStamp:\s*EXPECTED_CHROME_EXTENSION_INFO\.buildStamp/);
+  assert.match(heartbeatBlock, /extensionReload:\s*buildHeartbeatExtensionReload\(client\)/);
+});
+
+test('MCP nao transforma tabId nulo em aba zero ao renormalizar selector', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const normalizeTabIdBlock = source.match(
+    /const normalizeTabId = \(value\) => \{[\s\S]*?\n\};/,
+  )?.[0] || '';
+
+  assert.match(normalizeTabIdBlock, /value === null/);
+  assert.match(normalizeTabIdBlock, /value === undefined/);
+  assert.match(normalizeTabIdBlock, /value === ''/);
+  assert.match(normalizeTabIdBlock, /return null/);
 });
 
 test('MCP dá timeout maior e knobs de hidratação para export de conversa gigante', () => {
@@ -162,6 +203,7 @@ test('MCP nao escolhe cliente My Activity de build antigo apos reload da extensa
   )?.[0] || '';
 
   assert.match(buildHealthBlock, /const versionMatches = clientMatchesExpectedBrowserExtension\(client\)/);
+  assert.match(buildHealthBlock, /evaluateBridgeHealth\(client/);
   assert.doesNotMatch(buildHealthBlock, /activityClient\s*\|\|\s*clientMatchesExpectedBrowserExtension/);
   assert.match(getActivityClientsBlock, /Number\(clientMatchesExpectedBrowserExtension\(b\)\)/);
   assert.match(getActivityClientsBlock, /Number\(clientMatchesExpectedBrowserExtension\(a\)\)/);
@@ -188,7 +230,13 @@ test('MCP só reivindica abas Gemini ativas por contrato TS', () => {
   assert.match(source, /toActiveClaimableGeminiClient/);
   assert.match(source, /getActiveClaimableGeminiClients/);
   assert.match(source, /assertActiveClaimableGeminiClient/);
+  assert.match(source, /activateBrowserTabWithCdp/);
+  assert.match(source, /activateRuntimeExtensionClientWithCdp/);
+  assert.match(source, /buildRuntimeCdpControlSnapshot/);
+  assert.doesNotMatch(source, /const cdpUrlForArgs/);
   assert.match(selectClaimableBlock, /getActiveClaimableGeminiClients/);
+  assert.match(selectClaimableBlock, /selectClaimActivationCandidate/);
+  assert.match(selectClaimableBlock, /activateBrowserTabById/);
   assert.match(selectClaimableBlock, /inactiveGeminiTabClaimNotAllowedError/);
   assert.match(claimGeminiTabBlock, /claimTabForClient\(client, args, \{ requireActiveGemini: true \}\)/);
   assert.match(listTabsBlock, /claimableClients/);
@@ -200,6 +248,11 @@ test('MCP expõe lifecycle diagnostics para readiness de abas', () => {
 
   assert.match(source, /classifyGeminiClientLifecycle/);
   assert.match(source, /getGeminiClientLifecycle/);
+  assert.match(source, /hydrateClientLifecycleFields/);
+  assert.match(source, /clientHasPageBlocker/);
+  assert.match(source, /evaluateBridgeHealth/);
+  assert.match(source, /evaluateBrowserReadiness/);
+  assert.match(source, /claimableTabCount/);
   assert.match(source, /lifecycle:\s*lifecycleSummaryForClient/);
 });
 
@@ -213,7 +266,7 @@ test('MCP acorda My Activity reaproveitando aba existente antes de abrir outra',
   assert.match(source, /ACTIVITY_PRE_LAUNCH_WAIT_MS/);
   assert.match(source, /const waitForActivityClient = async/);
   assert.match(source, /targetUrl:\s*ACTIVITY_GEMINI_URL/);
-  assert.match(source, /openIfMissing !== false/);
+  assert.match(source, /openIfMissing !== true/);
   assert.match(source, /reason:\s*'activity-client-already-connected'/);
   assert.match(ensureActivityBlock, /const existingClient = await waitForActivityClient/);
   assert.match(ensureActivityBlock, /args\.preLaunchWaitMs \?\? ACTIVITY_PRE_LAUNCH_WAIT_MS/);
@@ -228,23 +281,24 @@ test('MCP acorda My Activity reaproveitando aba existente antes de abrir outra',
 
 test('browser_status expõe saúde da bridge MCP/Chrome', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const bridgeHealthSource = readFileSync(resolve(ROOT, 'src', 'mcp', 'bridge-health.ts'), 'utf-8');
 
   assert.match(source, /const buildBridgeHealth = \(client/);
   assert.match(source, /const buildExtensionReadiness = \(\{/);
-  assert.match(source, /command_channel_stuck/);
-  assert.match(source, /heartbeat_delayed/);
+  assert.match(bridgeHealthSource, /command_channel_stuck/);
+  assert.match(bridgeHealthSource, /heartbeat_delayed/);
   assert.match(source, /bridgeHealth/);
   assert.match(source, /extensionReadiness/);
   assert.match(source, /handshake/);
   assert.match(source, /gemini_browser_ready/);
   assert.match(source, /buildLightweightBrowserReady/);
-  assert.match(source, /browserReadyBlockingIssue/);
-  assert.match(source, /command_channel_not_ready/);
+  assert.match(source, /evaluateBrowserReadiness/);
+  assert.match(source, /evaluateBridgeHealth/);
   assert.match(source, /serviceWorker/);
   assert.match(source, /contentScript/);
   assert.match(source, /diagnostics/);
   assert.match(source, /const commandChannelReadyForClient = \(client\) =>\s*clientHasOpenCommandChannel\(client\) &&\s*!clientHasRecentCommandFailure\(client\);/);
-  assert.match(source, /blockingIssue = 'command_timeout_recent'/);
+  assert.match(source, /recentCommandFailure:\s*clientHasRecentCommandFailure\(client, now\)/);
 });
 
 test('MCP v0.5 lista somente as 7 tools públicas de domínio', () => {
@@ -300,7 +354,7 @@ test('MCP publico bloqueia contagem/exportacao por tools ruidosas sem depender d
 test('MCP implementa afinidade confiável por claim de aba', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const contentSource = readFileSync(resolve(ROOT, 'src', 'userscript-shell.ts'), 'utf-8');
-  const backgroundSource = readFileSync(resolve(ROOT, 'src', 'extension-background.js'), 'utf-8');
+  const backgroundSource = readFileSync(resolve(ROOT, 'src', 'extension-background.ts'), 'utf-8');
   const buildSource = readFileSync(resolve(ROOT, 'scripts', 'build.mjs'), 'utf-8');
 
   assert.match(source, /name: 'gemini_list_tabs'/);
@@ -340,10 +394,10 @@ test('MCP implementa afinidade confiável por claim de aba', () => {
   assert.match(source, /COMMAND_CHANNEL_FAILURE_COOLDOWN_MS/);
   assert.match(source, /markClientCommandTimeout/);
   assert.match(source, /clientHasRecentCommandFailure/);
-  assert.match(source, /command_timeout_recent/);
+  assert.match(source, /evaluateBridgeHealth/);
   assert.match(source, /releaseClaimOnOperationEnd/);
   assert.match(source, /releaseClaimOnSlowOperationMs/);
-  assert.match(source, /allowLaunchChrome:\s*args\.openIfMissing !== false/);
+  assert.match(source, /allowLaunchChrome:\s*args\.openIfMissing === true/);
   assert.match(source, /_proxySessionId/);
   assert.match(contentSource, /tab-claim-v1/);
   assert.match(contentSource, /command\.type === 'claim-tab'/);
@@ -402,9 +456,11 @@ test('browser_status diagnostica e tenta self-heal sem depender do guard wrapper
   )?.[0];
   assert.ok(statusBlock, 'gemini_browser_status deve existir');
   assert.ok(guardedBlock, 'lista de tools com guard deve existir');
-  assert.match(statusBlock, /ready:\s*matchingClients\.length > 0/);
+  assert.match(statusBlock, /const readiness = evaluateBrowserReadiness/);
+  assert.match(statusBlock, /ready:\s*readiness\.ready/);
+  assert.match(statusBlock, /claimableTabCount/);
   assert.match(statusBlock, /blockingIssue/);
-  assert.match(statusBlock, /no_connected_clients/);
+  assert.match(source, /evaluateBrowserReadiness/);
   assert.match(statusBlock, /selfHeal/);
   assert.match(statusBlock, /ensureBrowserExtensionReady/);
   assert.match(statusBlock, /allowReload:\s*args\.allowReload !== false/);
@@ -451,7 +507,7 @@ test('MCP expõe diagnóstico e cleanup controlado de processos sem guard de bro
 test('bridge busca mídia sem depender de CORS da extensão Chrome', () => {
   const serverSource = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const contentSource = readFileSync(resolve(ROOT, 'src', 'userscript-shell.ts'), 'utf-8');
-  const backgroundSource = readFileSync(resolve(ROOT, 'src', 'extension-background.js'), 'utf-8');
+  const backgroundSource = readFileSync(resolve(ROOT, 'src', 'extension-background.ts'), 'utf-8');
 
   assert.match(serverSource, /const fetchAssetForBridge = async \(source\) =>/);
   assert.match(serverSource, /url\.pathname === '\/bridge\/fetch-asset'/);

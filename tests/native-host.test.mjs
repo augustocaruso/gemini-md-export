@@ -39,7 +39,7 @@ test('native host responde ping no protocolo length-prefixed do Chrome', async (
 });
 
 test('service worker expõe probe de native messaging sem acoplar ao fluxo principal', () => {
-  const source = readFileSync(resolve(ROOT, 'src', 'extension-background.js'), 'utf-8');
+  const source = readFileSync(resolve(ROOT, 'src', 'extension-background.ts'), 'utf-8');
   assert.match(source, /NATIVE_HOST_NAME\s*=\s*'com\.augustocaruso\.gemini_md_export'/);
   assert.match(source, /chrome\.runtime\.connectNative/);
   assert.match(source, /gemini-md-export\/native-host-health/);
@@ -47,7 +47,7 @@ test('service worker expõe probe de native messaging sem acoplar ao fluxo princ
 });
 
 test('content script prefere native proxy para bridgeRequest com fallback HTTP', () => {
-  const source = readFileSync(resolve(ROOT, 'src', 'userscript-shell.js'), 'utf-8');
+  const source = readFileSync(resolve(ROOT, 'src', 'userscript-shell.ts'), 'utf-8');
   assert.match(source, /bridgeTransportState/);
   assert.match(source, /preferred:\s*'native'/);
   assert.match(source, /gemini-md-export\/native-proxy-http/);

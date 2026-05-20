@@ -1,7 +1,12 @@
+// @ts-nocheck
+// Transitional MV3 service worker source. New browser broker logic must live in
+// typed modules imported from this file; do not add new large JS-only blocks.
 // Service worker mínimo da extensão MV3.
 // Nesta primeira etapa ele existe principalmente para firmar a arquitetura
 // de extensão e servir de ponto de integração futura com helper local,
 // native messaging ou automações.
+
+import { activateTabWithDebugger } from './browser/shared/chrome-debugger.js';
 
 const EXTENSION_PROTOCOL_VERSION = Number('__EXTENSION_PROTOCOL_VERSION__');
 const PENDING_GEMINI_TABS_RELOAD_KEY = 'gemini-md-export.pendingGeminiTabsReload';
@@ -11,8 +16,17 @@ const TAB_CLAIM_ALARM_PREFIX = 'gemini-md-export.tabClaimExpiry.';
 const TAB_GROUP_NONE = -1;
 const GEMINI_TAB_URL_PATTERN = 'https://gemini.google.com/*';
 const ACTIVITY_TAB_URL_PATTERN = 'https://myactivity.google.com/product/gemini*';
-const MANAGED_CONTENT_TAB_URL_PATTERNS = [GEMINI_TAB_URL_PATTERN, ACTIVITY_TAB_URL_PATTERN];
+const GOOGLE_SORRY_TAB_URL_PATTERN = 'https://www.google.com/sorry/*';
+const GOOGLE_ACCOUNT_TAB_URL_PATTERN = 'https://accounts.google.com/*';
+const MANAGED_CONTENT_TAB_URL_PATTERNS = [
+  GEMINI_TAB_URL_PATTERN,
+  ACTIVITY_TAB_URL_PATTERN,
+  GOOGLE_SORRY_TAB_URL_PATTERN,
+  GOOGLE_ACCOUNT_TAB_URL_PATTERN,
+];
 const CONTENT_SCRIPT_FILE = 'content.js';
+const ACTIVITY_CONTENT_SCRIPT_FILE = 'activity-content-script.js';
+const GOOGLE_BLOCKER_CONTENT_SCRIPT_FILE = 'google-blocker-content-script.js';
 const CONTENT_SCRIPT_PING_TYPE = 'gemini-md-export/content-ping';
 const NATIVE_HOST_NAME = 'com.augustocaruso.gemini_md_export';
 const NATIVE_HOST_REQUEST_TIMEOUT_MS = 2500;
@@ -23,6 +37,7 @@ const CONTENT_SCRIPT_SELF_HEAL_COOLDOWN_MS = 10_000;
 const CONTENT_SCRIPT_POST_INJECT_PING_ATTEMPTS = 5;
 const CONTENT_SCRIPT_POST_INJECT_PING_DELAY_MS = 180;
 const GEMINI_TAB_RELOAD_SETTLE_MS = 900;
+const MANAGED_TAB_SELF_HEAL_DELAY_MS = 350;
 const ARTIFACT_CAPTURE_CACHE_LIMIT = 60;
 const TAB_CLAIM_COLORS = new Set([
   'grey',
@@ -41,6 +56,7 @@ const CLAIM_LABEL_MAX_GRAPHEMES = 16;
 const MANAGED_TAB_CLAIM_GROUP_TITLE_RE =
   /^(?:GME(?:\s|$)|✨ Em uso$|🔎 Conferindo$|📥 Exportando$|🔄 Sincroniza$)/iu;
 const contentScriptSelfHealCooldowns = new Map();
+const managedTabSelfHealTimers = new Map();
 let lastContentScriptSelfHeal = null;
 let lastNativeHostProbe = null;
 let lastOffscreenStatus = null;
@@ -382,6 +398,36 @@ const chromeGetTab = (tabId) =>
     });
   });
 
+const chromeUpdateTab = (tabId, updateProperties) =>
+  new Promise((resolve) => {
+    if (!chrome.tabs?.update || !Number.isInteger(tabId)) {
+      resolve({ ok: false, reason: 'tabs-update-api-unavailable', tabId });
+      return;
+    }
+    chrome.tabs.update(tabId, updateProperties, (tab) => {
+      if (chrome.runtime.lastError) {
+        resolve({ ok: false, reason: chrome.runtime.lastError.message, tabId });
+        return;
+      }
+      resolve({ ok: true, tab: tab || null, tabId });
+    });
+  });
+
+const chromeFocusWindow = (windowId) =>
+  new Promise((resolve) => {
+    if (!chrome.windows?.update || !Number.isInteger(windowId)) {
+      resolve({ ok: false, reason: 'windows-update-api-unavailable', windowId });
+      return;
+    }
+    chrome.windows.update(windowId, { focused: true }, (windowInfo) => {
+      if (chrome.runtime.lastError) {
+        resolve({ ok: false, reason: chrome.runtime.lastError.message, windowId });
+        return;
+      }
+      resolve({ ok: true, window: windowInfo || null, windowId });
+    });
+  });
+
 const chromeGetTabGroup = (groupId) =>
   new Promise((resolve) => {
     if (!chrome.tabGroups?.get || !Number.isInteger(groupId)) {
@@ -397,13 +443,33 @@ const chromeGetTabGroup = (groupId) =>
     });
   });
 
-const chromeQueryGeminiTabs = () =>
+const urlMatchesExtensionPattern = (url, pattern) => {
+  const value = String(url || '');
+  const expected = String(pattern || '');
+  if (!value || !expected) return false;
+  if (expected.endsWith('*')) return value.startsWith(expected.slice(0, -1));
+  return value === expected;
+};
+
+const managedContentScriptFileForUrl = (url) => {
+  if (urlMatchesExtensionPattern(url, GEMINI_TAB_URL_PATTERN)) return CONTENT_SCRIPT_FILE;
+  if (urlMatchesExtensionPattern(url, ACTIVITY_TAB_URL_PATTERN)) return ACTIVITY_CONTENT_SCRIPT_FILE;
+  if (
+    urlMatchesExtensionPattern(url, GOOGLE_SORRY_TAB_URL_PATTERN) ||
+    urlMatchesExtensionPattern(url, GOOGLE_ACCOUNT_TAB_URL_PATTERN)
+  ) {
+    return GOOGLE_BLOCKER_CONTENT_SCRIPT_FILE;
+  }
+  return null;
+};
+
+const chromeQueryManagedContentTabs = () =>
   new Promise((resolve) => {
     if (!chrome.tabs?.query) {
       resolve({ ok: false, reason: 'tabs-query-api-unavailable', tabs: [] });
       return;
     }
-    chrome.tabs.query({ url: GEMINI_TAB_URL_PATTERN }, (tabs = []) => {
+    chrome.tabs.query({ url: MANAGED_CONTENT_TAB_URL_PATTERNS }, (tabs = []) => {
       if (chrome.runtime.lastError) {
         resolve({
           ok: false,
@@ -415,6 +481,8 @@ const chromeQueryGeminiTabs = () =>
       resolve({ ok: true, tabs });
     });
   });
+
+const chromeQueryGeminiTabs = chromeQueryManagedContentTabs;
 
 const chromeSendTabMessage = (tabId, message, { timeoutMs = 1500 } = {}) =>
   new Promise((resolve) => {
@@ -454,6 +522,45 @@ const pingContentScript = (tabId, { timeoutMs = 1500 } = {}) =>
     { timeoutMs },
   );
 
+const activateSenderTab = async (message, sender = {}) => {
+  const requestedTabId = Number(message.tabId);
+  const tabId = Number.isInteger(requestedTabId) ? requestedTabId : sender.tab?.id;
+  if (!Number.isInteger(tabId)) {
+    return { ok: false, reason: 'sender-tab-unavailable', tabId: null };
+  }
+
+  const before = await chromeGetTab(tabId);
+  const debuggerActivation = await activateTabWithDebugger(tabId, {
+    chromeApi: chrome,
+    reason: message.reason || 'activate-tab',
+    disableDebugger: message.disableDebugger === true,
+  });
+  const activated =
+    debuggerActivation.ok === true
+      ? { ok: true, tab: { active: true }, reason: debuggerActivation.reason }
+      : await chromeUpdateTab(tabId, { active: true });
+  const focusedWindow =
+    message.focusWindow === true ? await chromeFocusWindow(before?.windowId ?? sender.tab?.windowId) : null;
+  const after = await chromeGetTab(tabId);
+  const isActiveTab = after?.active ?? activated.tab?.active ?? null;
+  return {
+    ok: (debuggerActivation.ok === true || activated.ok === true) && isActiveTab !== false,
+    reason:
+      debuggerActivation.ok === true
+        ? debuggerActivation.reason
+        : activated.ok === true
+          ? message.reason || 'activate-tab'
+          : activated.reason,
+    mode: debuggerActivation.ok === true ? debuggerActivation.mode : 'tabs-api',
+    debuggerActivation,
+    tabId,
+    windowId: sender.tab?.windowId ?? null,
+    wasActive: before?.active ?? null,
+    isActiveTab,
+    focusedWindow,
+  };
+};
+
 const contentScriptMatchesCurrentRuntime = (response) => {
   const expected = currentRuntimeInfo();
   return (
@@ -465,7 +572,7 @@ const contentScriptMatchesCurrentRuntime = (response) => {
   );
 };
 
-const chromeExecuteContentScript = (tabId) =>
+const chromeExecuteContentScript = (tabId, scriptFile = CONTENT_SCRIPT_FILE) =>
   new Promise((resolve) => {
     if (!chrome.scripting?.executeScript || !Number.isInteger(tabId)) {
       resolve({ ok: false, reason: 'scripting-api-unavailable' });
@@ -475,7 +582,7 @@ const chromeExecuteContentScript = (tabId) =>
     chrome.scripting.executeScript(
       {
         target: { tabId },
-        files: [CONTENT_SCRIPT_FILE],
+        files: [scriptFile],
       },
       (results) => {
         if (chrome.runtime.lastError) {
@@ -511,8 +618,20 @@ const ensureContentScriptForTab = async (tab, options = {}) => {
   const tabId = Number(tab?.id);
   const force = options.force === true;
   const reason = options.reason || 'self-heal';
+  const url = tab?.url || tab?.pendingUrl || '';
+  const scriptFile = options.scriptFile || managedContentScriptFileForUrl(url);
   if (!Number.isInteger(tabId)) {
     return { ok: false, reason: 'tab-id-unavailable', tabId: null };
+  }
+  if (!scriptFile) {
+    return {
+      ok: false,
+      status: 'unmanaged-url',
+      reason,
+      tabId,
+      url: url || null,
+      injected: false,
+    };
   }
 
   const before = await pingContentScript(tabId);
@@ -522,7 +641,8 @@ const ensureContentScriptForTab = async (tab, options = {}) => {
       status: 'already-current',
       reason,
       tabId,
-      url: tab.url || null,
+      url: url || null,
+      scriptFile,
       injected: false,
       before: before.response,
     };
@@ -536,7 +656,8 @@ const ensureContentScriptForTab = async (tab, options = {}) => {
       status: 'cooldown',
       reason,
       tabId,
-      url: tab.url || null,
+      url: url || null,
+      scriptFile,
       injected: false,
       before: before.response || null,
       pingError: before.reason || null,
@@ -548,16 +669,18 @@ const ensureContentScriptForTab = async (tab, options = {}) => {
     at: now,
     reason,
     buildStamp: currentRuntimeInfo().buildStamp,
+    scriptFile,
   });
 
-  const injected = await chromeExecuteContentScript(tabId);
+  const injected = await chromeExecuteContentScript(tabId, scriptFile);
   if (!injected.ok) {
     return {
       ok: false,
       status: 'inject-failed',
       reason,
       tabId,
-      url: tab.url || null,
+      url: url || null,
+      scriptFile,
       injected: false,
       before: before.response || null,
       pingError: before.reason || null,
@@ -571,7 +694,8 @@ const ensureContentScriptForTab = async (tab, options = {}) => {
     status: after.ok ? 'injected-current' : 'injected-unconfirmed',
     reason,
     tabId,
-    url: tab.url || null,
+    url: url || null,
+    scriptFile,
     injected: true,
     before: before.response || null,
     pingError: before.reason || null,
@@ -619,6 +743,51 @@ const selfHealGeminiTabs = async ({ reason = 'self-heal', force = false } = {}) 
   };
   console.log('[gemini-md-export/ext]', 'self-heal content script', lastContentScriptSelfHeal);
   return lastContentScriptSelfHeal;
+};
+
+const scheduleManagedTabSelfHeal = (
+  tab,
+  { reason = 'managed-tab-updated', force = false, delayMs = MANAGED_TAB_SELF_HEAL_DELAY_MS } = {},
+) => {
+  const tabId = Number(tab?.id);
+  const url = tab?.url || tab?.pendingUrl || '';
+  const scriptFile = managedContentScriptFileForUrl(url);
+  if (!Number.isInteger(tabId) || !scriptFile) return false;
+
+  clearTimeout(managedTabSelfHealTimers.get(tabId));
+  const timer = setTimeout(() => {
+    managedTabSelfHealTimers.delete(tabId);
+    ensureContentScriptForTab(tab, {
+      reason,
+      force,
+      scriptFile,
+    }).then((result) => {
+      lastContentScriptSelfHeal = {
+        ok: result.ok === true || result.status === 'cooldown',
+        reason,
+        status: result.status || (result.ok ? 'ok' : 'failed'),
+        at: new Date().toISOString(),
+        tabCount: 1,
+        current: result.ok ? 1 : 0,
+        injected: result.injected ? 1 : 0,
+        failed: result.ok || result.status === 'cooldown' ? 0 : 1,
+        results: [result],
+      };
+      console.log('[gemini-md-export/ext]', 'managed tab self-heal', lastContentScriptSelfHeal);
+    });
+  }, Math.max(0, Number(delayMs) || 0));
+  managedTabSelfHealTimers.set(tabId, timer);
+  return true;
+};
+
+const startManagedContentSelfHeal = ({
+  reason = 'service-worker-start',
+  force = false,
+  delayMs = MANAGED_TAB_SELF_HEAL_DELAY_MS,
+} = {}) => {
+  setTimeout(() => {
+    selfHealGeminiTabs({ reason, force });
+  }, Math.max(0, Number(delayMs) || 0));
 };
 
 const randomRequestId = () => {
@@ -1252,7 +1421,13 @@ const handleServiceWorkerStart = async () => {
   restoreTabClaimExpiryAlarms('service-worker-start');
   const consumedPendingReload = await consumePendingGeminiTabsReload();
   if (!consumedPendingReload) {
-    await refreshManagedTabsIfRuntimeChanged();
+    const refresh = await refreshManagedTabsIfRuntimeChanged();
+    if (refresh?.status === 'unchanged') {
+      startManagedContentSelfHeal({
+        reason: 'service-worker-start',
+        force: false,
+      });
+    }
   }
 };
 
@@ -1270,6 +1445,8 @@ chrome.alarms?.onAlarm?.addListener?.((alarm) => {
 
 chrome.tabs?.onRemoved?.addListener?.((tabId) => {
   tabBrokerRegistry.delete(tabId);
+  clearTimeout(managedTabSelfHealTimers.get(tabId));
+  managedTabSelfHealTimers.delete(tabId);
   clearTabClaimExpiryTimer(tabId);
   clearTabClaimExpiryAlarm(tabId);
   getTrackedTabClaims().then((claims) => {
@@ -1279,7 +1456,26 @@ chrome.tabs?.onRemoved?.addListener?.((tabId) => {
   });
 });
 
+chrome.tabs?.onCreated?.addListener?.((tab = {}) => {
+  scheduleManagedTabSelfHeal(tab, {
+    reason: 'managed-tab-created',
+  });
+});
+
 chrome.tabs?.onUpdated?.addListener?.((tabId, changeInfo = {}, tab = {}) => {
+  if (changeInfo.url || changeInfo.status === 'loading' || changeInfo.status === 'complete') {
+    scheduleManagedTabSelfHeal(
+      {
+        ...tab,
+        id: tabId,
+        url: changeInfo.url || tab.url || tab.pendingUrl,
+      },
+      {
+        reason: changeInfo.status === 'complete' ? 'managed-tab-complete' : 'managed-tab-updated',
+      },
+    );
+  }
+
   const existing = tabBrokerRegistry.get(tabId);
   if (!existing) return;
   const now = Date.now();
@@ -1292,6 +1488,16 @@ chrome.tabs?.onUpdated?.addListener?.((tabId, changeInfo = {}, tab = {}) => {
     updatedAt: new Date(now).toISOString(),
     updatedAtMs: now,
     reason: changeInfo.status === 'loading' ? 'tab-loading' : 'tab-updated',
+  });
+});
+
+chrome.tabs?.onActivated?.addListener?.((activeInfo = {}) => {
+  const tabId = Number(activeInfo.tabId);
+  if (!Number.isInteger(tabId)) return;
+  chromeGetTab(tabId).then((tab) => {
+    scheduleManagedTabSelfHeal(tab, {
+      reason: 'managed-tab-activated',
+    });
   });
 });
 
@@ -1653,6 +1859,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message?.type === 'gemini-md-export/reload-gemini-tabs') {
     reloadGeminiTabs(message.reason || 'content-script').then(sendResponse);
+    return true;
+  }
+
+  if (message?.type === 'gemini-md-export/activate-tab') {
+    activateSenderTab(message, sender).then(sendResponse);
     return true;
   }
 

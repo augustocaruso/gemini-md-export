@@ -165,6 +165,129 @@ const createGeminiSidebarDom = (ids) => {
   return { dom, runtimeErrors };
 };
 
+const createGeminiDelayedSidebarDom = (ids) => {
+  const virtualConsole = new VirtualConsole();
+  const runtimeErrors = [];
+  virtualConsole.on('jsdomError', (error) => runtimeErrors.push(error));
+
+  const dom = new JSDOM(
+    `<!doctype html>
+    <html>
+      <head><title>Histórico atrasado - Gemini</title></head>
+      <body>
+        <button id="side-menu" aria-label="Show menu" data-rect="16,8,40,40">menu</button>
+        <mat-sidenav aria-hidden="true" class="mat-drawer-closed" data-rect="0,0,320,900">
+          <conversations-list></conversations-list>
+        </mat-sidenav>
+        <main>
+          <user-query><div>pergunta</div></user-query>
+          <model-response><div>resposta</div></model-response>
+        </main>
+      </body>
+    </html>`,
+    {
+      url: `https://gemini.google.com/app/${ids[0]}`,
+      runScripts: 'outside-only',
+      pretendToBeVisual: true,
+      virtualConsole,
+    },
+  );
+
+  installLayoutMocks(dom.window);
+  dom.window.console.log = () => {};
+  dom.window.console.warn = () => {};
+  dom.window.console.error = (...args) => runtimeErrors.push(args);
+  dom.window.document
+    .querySelector('#side-menu')
+    .addEventListener('click', () => {
+      dom.window.setTimeout(() => {
+        const sideNav = dom.window.document.querySelector('mat-sidenav');
+        sideNav.removeAttribute('aria-hidden');
+        sideNav.classList.remove('mat-drawer-closed');
+        dom.window.document.querySelector('conversations-list').innerHTML = sidebarRows(ids);
+      }, 90);
+    });
+
+  return { dom, runtimeErrors };
+};
+
+const createGeminiSidebarDomWithoutChatIds = ({ url = 'https://gemini.google.com/app' } = {}) => {
+  const virtualConsole = new VirtualConsole();
+  const runtimeErrors = [];
+  virtualConsole.on('jsdomError', (error) => runtimeErrors.push(error));
+
+  const dom = new JSDOM(
+    `<!doctype html>
+    <html>
+      <head><title>Histórico novo - Gemini</title></head>
+      <body>
+        <mat-sidenav data-rect="0,0,320,900">
+          <conversations-list>
+            <div data-test-id="conversation"><span class="conversation-title">Conversa sem href 1</span></div>
+            <div data-test-id="conversation"><span class="conversation-title">Conversa sem href 2</span></div>
+          </conversations-list>
+        </mat-sidenav>
+      </body>
+    </html>`,
+    {
+      url,
+      runScripts: 'outside-only',
+      pretendToBeVisual: true,
+      virtualConsole,
+    },
+  );
+
+  installLayoutMocks(dom.window);
+  dom.window.console.log = () => {};
+  dom.window.console.warn = () => {};
+  dom.window.console.error = (...args) => runtimeErrors.push(args);
+
+  return { dom, runtimeErrors };
+};
+
+const createGeminiModernSidebarDom = (ids) => {
+  const virtualConsole = new VirtualConsole();
+  const runtimeErrors = [];
+  virtualConsole.on('jsdomError', (error) => runtimeErrors.push(error));
+
+  const dom = new JSDOM(
+    `<!doctype html>
+    <html>
+      <head><title>Histórico moderno - Gemini</title></head>
+      <body>
+        <div role="navigation" data-rect="0,0,320,900">
+          <mat-nav-list data-rect="0,120,320,720">
+            <infinite-scroller data-rect="0,120,320,720">
+              ${ids
+                .map(
+                  (id, index) => `
+                    <gem-nav-list-item role="listitem" data-conversation-id="c_${id}">
+                      <span class="conversation-title">Chat moderno ${index + 1}</span>
+                    </gem-nav-list-item>
+                  `,
+                )
+                .join('')}
+            </infinite-scroller>
+          </mat-nav-list>
+        </div>
+      </body>
+    </html>`,
+    {
+      url: `https://gemini.google.com/app/${ids[0]}`,
+      runScripts: 'outside-only',
+      pretendToBeVisual: true,
+      virtualConsole,
+    },
+  );
+
+  installLayoutMocks(dom.window);
+  dom.window.console.log = () => {};
+  dom.window.console.warn = () => {};
+  dom.window.console.error = (...args) => runtimeErrors.push(args);
+
+  return { dom, runtimeErrors };
+};
+
 const installReadyImageMock = (window, selector = 'img') => {
   window.document.querySelectorAll(selector).forEach((img) => {
     Object.defineProperty(img, 'complete', { configurable: true, value: true });
@@ -384,6 +507,145 @@ test('bridge acumula conversas vistas quando sidebar virtualiza lista', { timeou
   window.close();
 });
 
+test('content script aguarda sidebar atrasado antes de falhar listagem', { timeout: 2000 }, async () => {
+  const ids = ['b111111111111111', 'b222222222222222'];
+  const { dom, runtimeErrors } = createGeminiDelayedSidebarDom(ids);
+  const { window } = dom;
+  const debug = await evaluateContentScript(window);
+
+  assert.equal(debug.snapshot({}).sidebarOpen, false);
+
+  const opened = await debug.openSidebarForDebug({ timeoutMs: 1000, pollMs: 20 });
+
+  assert.equal(opened, true);
+  assert.equal(debug.snapshot({}).sidebarOpen, true);
+  assert.deepEqual(
+    Array.from(debug.listBridgeConversations().map((item) => item.chatId)),
+    ids,
+  );
+  assert.deepEqual(runtimeErrors, []);
+  window.close();
+});
+
+test('bridge nao fabrica chatIds quando sidebar novo omite URL real', async () => {
+  const { dom, runtimeErrors } = createGeminiSidebarDomWithoutChatIds();
+  const { window } = dom;
+  const debug = await evaluateContentScript(window);
+
+  assert.deepEqual(
+    Array.from(debug.listBridgeConversations().map((item) => item.chatId)),
+    [],
+    'linhas sem /app/<chatId> real nao podem virar chat-0/chat-1',
+  );
+  assert.deepEqual(runtimeErrors, []);
+  window.close();
+});
+
+test('bridge preserva chat atual, mas ignora linhas de sidebar sem chatId real', async () => {
+  const currentChatId = 'b8e7c075effe9457';
+  const { dom, runtimeErrors } = createGeminiSidebarDomWithoutChatIds({
+    url: `https://gemini.google.com/app/${currentChatId}`,
+  });
+  const { window } = dom;
+  const debug = await evaluateContentScript(window);
+
+  assert.deepEqual(
+    Array.from(debug.listBridgeConversations().map((item) => item.chatId)),
+    [currentChatId],
+  );
+  assert.doesNotMatch(
+    JSON.stringify(debug.listBridgeConversations()),
+    /chat-\d+/,
+    'fallback sintetico nao deve vazar para bridge/list/export',
+  );
+  assert.deepEqual(runtimeErrors, []);
+  window.close();
+});
+
+test('bridge reconhece sidebar moderno baseado em gem-nav-list-item', async () => {
+  const ids = [
+    'c111111111111111',
+    'c222222222222222',
+    'c333333333333333',
+  ];
+  const { dom, runtimeErrors } = createGeminiModernSidebarDom(ids);
+  const { window } = dom;
+  const debug = await evaluateContentScript(window);
+
+  assert.deepEqual(
+    Array.from(debug.listBridgeConversations().map((item) => item.chatId)),
+    ids,
+  );
+  assert.equal(debug.snapshot({}).sidebarOpen, true);
+  assert.deepEqual(runtimeErrors, []);
+  window.close();
+});
+
+test('snapshot de debug inclui amostras diagnosticas do sidebar moderno', async () => {
+  const ids = ['c111111111111111'];
+  const { dom, runtimeErrors } = createGeminiModernSidebarDom(ids);
+  const { window } = dom;
+  const debug = await evaluateContentScript(window);
+  const snapshot = debug.snapshot({ includeDomDiagnostics: true });
+
+  assert.equal(snapshot.sidebarDiagnostics.candidateConversationItemCount, 1);
+  assert.equal(snapshot.sidebarDiagnostics.extractableConversationItemCount, 1);
+  assert.equal(snapshot.sidebarDiagnostics.samples[0].tag, 'gem-nav-list-item');
+  assert.equal(snapshot.sidebarDiagnostics.samples[0].chatId, ids[0]);
+  assert.deepEqual(runtimeErrors, []);
+  window.close();
+});
+
+test('content script expõe DOM adapter e Navigation Engine compartilhados no runtime', async () => {
+  const currentChatId = 'b8e7c075effe9457';
+  const { dom, runtimeErrors } = createGeminiSidebarDom([currentChatId, 'aaaaaaaaaaaa']);
+  const { window } = dom;
+  const debug = await evaluateContentScript(window);
+
+  const state = debug.navigationState();
+  assert.equal(state.route.chatId, currentChatId);
+  assert.equal(state.rows[0].chatId, currentChatId);
+  assert.equal(state.rows[0].exportable, true);
+
+  const result = await debug.openChatWithNavigationForDebug({ chatId: currentChatId });
+  assert.equal(result.ok, true);
+  assert.equal(result.reason, 'already-current');
+  assert.equal(result.opened, false);
+  assert.deepEqual(runtimeErrors, []);
+  window.close();
+});
+
+test('Navigation Engine no content script aguarda turnos quando URL atual ainda esta vazia', { timeout: 5000 }, async () => {
+  const currentChatId = 'b8e7c075effe9457';
+  const { dom, runtimeErrors } = createGeminiMediaDom('');
+  const { window } = dom;
+  window.history.replaceState({}, '', `/app/${currentChatId}`);
+  const debug = await evaluateContentScript(window);
+
+  let resolved = false;
+  const navigationPromise = debug
+    .openChatWithNavigationForDebug({ chatId: currentChatId })
+    .then((result) => {
+      resolved = true;
+      return result;
+    });
+
+  await new Promise((resolve) => window.setTimeout(resolve, 350));
+  assert.equal(resolved, false, 'URL atual vazia nao deve liberar navegação para export');
+
+  window.document.querySelector('main').innerHTML = `
+    <user-query><div>pergunta hidratada</div></user-query>
+    <model-response><div>resposta hidratada</div></model-response>
+  `;
+
+  const result = await navigationPromise;
+  assert.equal(result.ok, true);
+  assert.equal(result.reason, 'already-current');
+  assert.equal(result.turnCount, 2);
+  assert.deepEqual(runtimeErrors, []);
+  window.close();
+});
+
 test('modal virtualiza lista grande sem renderizar todas as conversas', { timeout: 3000 }, async () => {
   const ids = Array.from({ length: 160 }, (_, index) =>
     `a${String(index + 1).padStart(15, '0')}`,
@@ -424,8 +686,8 @@ test('content script não contém fallback de captura visual', async () => {
 
 test('content script mantém caminhos frequentes leves', async () => {
   const [source, backgroundScript] = await Promise.all([
-    readFile(new URL('../src/userscript-shell.js', import.meta.url), 'utf8'),
-    readFile(new URL('../src/extension-background.js', import.meta.url), 'utf8'),
+    readFile(new URL('../src/userscript-shell.ts', import.meta.url), 'utf8'),
+    readFile(new URL('../src/extension-background.ts', import.meta.url), 'utf8'),
   ]);
   const heartbeatPayload = source.match(
     /const buildBridgeHeartbeatPayload = \(\) => \([\s\S]*?\n  \}\);\n\n  const buildBridgeSnapshotPayload/,
@@ -452,6 +714,12 @@ test('content script mantém caminhos frequentes leves', async () => {
   assert.match(source, /missing_on_conversation/);
   assert.match(source, /extensionSendMessageWithRetry/);
   assert.match(source, /lastExtensionPingAttempts/);
+  assert.match(source, /content-script-fallback/);
+  assert.match(source, /service-worker-info-unavailable/);
+  assert.match(source, /\{ timeoutMs: 1200, attempts: 1, retryDelayMs: 0 \}/);
+  assert.match(source, /CHAT_CLIENT_ID_STORAGE_KEY = 'gemini-md-export\.chatClientId\.v1'/);
+  assert.match(source, /const getOrCreateChatClientId = \(\) =>/);
+  assert.match(source, /bridgeState\.clientId = getOrCreateChatClientId\(\)/);
   assert.match(source, /const scheduleDomWork = \(reason = 'changed'/);
   assert.match(source, /tab-backpressure-v1/);
   assert.match(source, /TAB_OPERATION_COMMAND_TYPES/);
@@ -461,14 +729,38 @@ test('content script mantém caminhos frequentes leves', async () => {
   assert.match(source, /modalVirtual/);
   assert.match(backgroundScript, /source:\s*'service-worker'/);
   assert.match(snapshotPayload, /collectConversationLinkSnapshot\(\)/);
+  assert.match(source, /const buildBridgeEventsSearchParams = \(\) =>/);
+  assert.match(source, /params\.set\('tabId', String\(bridgeState\.tabId\)\)/);
+  assert.match(source, /params\.set\('buildStamp', String\(bridgeState\.buildStamp\)\)/);
+  assert.match(source, /\/bridge\/events\?\$\{buildBridgeEventsSearchParams\(\)\}/);
   assert.match(source, /new EventSource\(url\)/);
   assert.match(source, /\/bridge\/snapshot/);
+  assert.match(source, /const handleHeartbeatExtensionReload = async \(reload = null\) =>/);
+  assert.match(source, /type: 'RELOAD_SELF'/);
+  assert.match(source, /response\?\.extensionReload/);
+  assert.match(source, /response\?\.commandPollRequired === true/);
+  assert.match(source, /closeBridgeEvents\(\);[\s\S]*pollBridgeCommands\(true\)/);
   assert.match(source, /const MIN_FAST_POLL_BACKOFF_MS = 250/);
   assert.match(source, /const INJECT_THROTTLE_MS = 250/);
 });
 
+test('content script não deixa progresso local sobrescrever progress dock do MCP', async () => {
+  const source = await readFile(new URL('../src/userscript-shell.ts', import.meta.url), 'utf8');
+  const hydrationBlock = source.match(
+    /onProgress: \(\{ state: hydrationState, elapsedMs \}\) => \{[\s\S]*?options\.hydration\?\.onProgress/,
+  )?.[0] || '';
+  const mediaBlock = source.match(
+    /timings\.buildFallbackMarkdownMs = Date\.now\(\) - fallbackStartedAt;[\s\S]*?const mediaStartedAt = Date\.now\(\);/,
+  )?.[0] || '';
+
+  assert.match(hydrationBlock, /state\.exportSource === 'gui'/);
+  assert.match(hydrationBlock, /updateExportProgress\(\{[\s\S]*current: 0/);
+  assert.match(mediaBlock, /state\.exportSource === 'gui'/);
+  assert.match(mediaBlock, /Baixando mídias da conversa/);
+});
+
 test('content script reporta diagnóstico de scroll ao puxar histórico', async () => {
-  const source = await readFile(new URL('../src/userscript-shell.js', import.meta.url), 'utf8');
+  const source = await readFile(new URL('../src/userscript-shell.ts', import.meta.url), 'utf8');
   assert.match(source, /lastLoadMoreTrace:\s*\[\]/);
   assert.match(source, /const describeScrollContainer = \(el, matchedBy = null\) =>/);
   assert.match(source, /describeScrollContainer\(scrollContainer, scrollContainerMatchedBy\)/);
@@ -500,10 +792,27 @@ test('content script reporta diagnóstico de scroll ao puxar histórico', async 
   assert.match(source, /state\.listLoadStatus === 'inconclusive'/);
 });
 
+test('content script falha comandos de lista quando nao consegue expor o sidebar', async () => {
+  const source = await readFile(new URL('../src/userscript-shell.ts', import.meta.url), 'utf8');
+  assert.match(source, /const ensureSidebarOpenForCommand = async/);
+  assert.match(source, /code:\s*'sidebar_not_open'/);
+  assert.match(source, /Não consegui abrir o sidebar do Gemini/);
+  assert.match(source, /sidebarDiagnostics\(\)/);
+  assert.match(source, /const sidebarReady = await ensureSidebarOpenForCommand\(command, DEFAULT_LOAD_MORE_OPTIONS\.ensureSidebarDelayMs\)/);
+  assert.match(source, /const sidebarReady = await ensureSidebarOpenForCommand\(command, loadOptions\.ensureSidebarDelayMs\)/);
+  assert.match(source, /if \(!sidebarReady\.ok\) return sidebarReady/);
+  assert.doesNotMatch(source, /await ensureSidebarOpen\(\);\n\s*await sleep\(DEFAULT_LOAD_MORE_OPTIONS\.ensureSidebarDelayMs\);\n\s*\}\n\s*return \{\n\s*ok: true,\n\s*conversations:/);
+});
+
 test('content script mantém dock MCP durante navegação e sem prefixo de fase', async () => {
-  const source = await readFile(new URL('../src/userscript-shell.js', import.meta.url), 'utf8');
+  const source = await readFile(new URL('../src/userscript-shell.ts', import.meta.url), 'utf8');
   assert.match(source, /MCP_PROGRESS_SESSION_STORAGE_KEY/);
   assert.match(source, /MCP_PROGRESS_STALE_GRACE_MS/);
+  assert.match(source, /MCP_PROGRESS_CANCEL_STALE_MS/);
+  assert.match(source, /startMcpProgressWatchdog/);
+  assert.match(source, /clearStaleMcpProgressIfNeeded/);
+  assert.match(source, /status === 'cancel_requested'/);
+  assert.match(source, /state\.progress\.status = 'cancelled'/);
   assert.match(source, /saveMcpProgressSnapshot/);
   assert.match(source, /loadMcpProgressSnapshot/);
   assert.match(source, /restoreMcpProgressSnapshot\(\)/);
@@ -516,6 +825,18 @@ test('content script mantém dock MCP durante navegação e sem prefixo de fase'
   assert.doesNotMatch(source, /labelEl\.textContent = `\$\{.*phase.*:/);
   assert.doesNotMatch(source, /MCP exportando conversas/);
   assert.doesNotMatch(source, /MCP reexportando/);
+});
+
+test('content script acompanha redesign lr26 sem voltar para fonte JS', async () => {
+  const source = await readFile(new URL('../src/userscript-shell.ts', import.meta.url), 'utf8');
+  assert.match(source, /width="20" height="20"/);
+  assert.match(source, /top-bar-actions single visible candidate/);
+  assert.match(source, /:scope > \.buttons-container/);
+  assert.match(source, /buildHostPalette\(\{ documentRef: document, isDark: isDarkTheme\(\) \}\)/);
+  assert.match(source, /buildMenuHostPalette\(\{ documentRef: document, isDark: isDarkTheme\(\) \}\)/);
+  assert.match(source, /color-mix\(in srgb, currentColor 10%, transparent\)/);
+  assert.match(source, /gm-conversation-item:has\(\.gm-checkbox:checked\)/);
+  assert.doesNotMatch(source, /const hoverIn = 'rgba\(138,180,248,0\.12\)'/);
 });
 
 test('content script renderiza progresso selecionado sem jargão tecnico', { timeout: 2000 }, async () => {
@@ -648,7 +969,7 @@ test('content script renderiza progresso selecionado sem jargão tecnico', { tim
 });
 
 test('content script hidrata conversa gigante com orçamento adaptativo', async () => {
-  const source = await readFile(new URL('../src/userscript-shell.js', import.meta.url), 'utf8');
+  const source = await readFile(new URL('../src/userscript-shell.ts', import.meta.url), 'utf8');
 
   assert.match(source, /HYDRATION_MAX_TOTAL_MS = 10 \* 60 \* 1000/);
   assert.match(source, /HYDRATION_STALL_TIMEOUT_MS = 45000/);
@@ -657,10 +978,15 @@ test('content script hidrata conversa gigante com orçamento adaptativo', async 
   assert.match(source, /lastProgressAt/);
   assert.match(source, /hydrationMaxTotalMs/);
   assert.match(source, /hydrationStallTimeoutMs/);
+  assert.doesNotMatch(
+    source,
+    /after\.domSignature !== before\.domSignature/,
+    'assinatura total do DOM muda em páginas dinâmicas e não pode renovar hidratação para sempre',
+  );
 });
 
 test('content script explica fallback para Downloads e warnings de mídia', async () => {
-  const source = await readFile(new URL('../src/userscript-shell.js', import.meta.url), 'utf8');
+  const source = await readFile(new URL('../src/userscript-shell.ts', import.meta.url), 'utf8');
   assert.match(source, /Vou cair em Downloads/);
   assert.match(source, /mídias que não baixarem ficam avisadas no Markdown/);
   assert.match(source, /Para salvar direto no vault, reabra o Gemini CLI e clique em Alterar/);
@@ -979,6 +1305,27 @@ test('waitForChatToLoad aguarda DOM novo antes de liberar export', { timeout: 50
   assert.deepEqual(runtimeErrors, []);
 
   window.close();
+});
+
+test('hidratação não trata crescimento de layout como progresso real', async () => {
+  const source = await readFile(
+    new URL('../src/browser/navigation/hydration-progress.ts', import.meta.url),
+    'utf8',
+  );
+  const contentSource = await readFile(new URL('../src/userscript-shell.ts', import.meta.url), 'utf8');
+
+  assert.match(source, /hydrationDomProgressChanged/);
+  assert.match(source, /containerCount/);
+  assert.match(source, /turnDomCount/);
+  assert.match(source, /firstSignature/);
+  assert.match(source, /hydrationLayoutOnlyChanged/);
+  assert.doesNotMatch(
+    source.match(/export const hydrationDomProgressChanged[\s\S]*?;\n\nexport const hydrationLayoutOnlyChanged/)?.[0] || '',
+    /scrollHeight/,
+    'scrollHeight sozinho e layout, nao progresso real de DOM da conversa',
+  );
+  assert.match(contentSource, /conversationHydrationChanged = \(before, after\) =>\s*\n\s*hydrationDomProgressChanged\(before, after\)/);
+  assert.match(contentSource, /isCancelled:\s*activeTabOperationCancelRequested/);
 });
 
 test('exportPayload ignora chat antigo escondido no DOM da rota anterior', async () => {
