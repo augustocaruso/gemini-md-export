@@ -3778,6 +3778,26 @@ const ensureTabClaimForJob = async (client, args = {}, label = TAB_CLAIM_LABELS.
   }
 };
 
+const assertClientClaimedReadyForSession = (client, args = {}) => {
+  const sessionId = normalizeSessionId(args.sessionId || args._proxySessionId);
+  const sessionClaim = claimForSession(sessionId);
+  const clientClaim = claimForClient(client);
+  const browserClaim = clientTabClaim(client);
+  return assertClaimedReadyGeminiTab(
+    client,
+    clientLifecycleOptions({
+      sessionId,
+      claimId:
+        args.claimId ||
+        sessionClaim?.claimId ||
+        clientClaim?.claimId ||
+        browserClaim?.claimId ||
+        null,
+      requireClaimed: true,
+    }),
+  );
+};
+
 const clientIsActivityClient = (client) => {
   if (!client) return false;
   if (client.kind === 'activity' || client.page?.kind === 'activity') return true;
@@ -8619,6 +8639,7 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
 
 const startRecentChatsExportJob = (client, args = {}) => {
   assertNoRunningBrowserExportJob(client);
+  assertClientClaimedReadyForSession(client, args);
 
   const resumeReportFile = args.resumeReportFile || args.reportFile || null;
   const resume = resumeReportFile ? loadRecentChatsResumeCheckpoint(resumeReportFile) : null;
@@ -8908,6 +8929,7 @@ const runDirectChatsExportJob = async (job, client, args = {}) => {
 
 const startDirectChatsExportJob = (client, args = {}) => {
   assertNoRunningBrowserExportJob(client);
+  assertClientClaimedReadyForSession(client, args);
 
   const selection = normalizeDirectReexportSelection(args);
   const items = selection.items;

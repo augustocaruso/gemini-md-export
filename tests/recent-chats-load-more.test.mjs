@@ -102,6 +102,16 @@ test('contagem usa timeout total sem vazar para rodada interna do browser', () =
   assert.match(source, /RECENT_CHATS_CLIENT_RECOVERY_WAIT_MS/);
 });
 
+test('listagem curta nao espera timeout longo do browser quando refresh trava', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const block = source.match(
+    /const listRecentChatsForClient = async[\s\S]*?\nconst emptyTimingBucket/,
+  )?.[0];
+  assert.ok(block, 'listRecentChatsForClient deve existir');
+  assert.match(block, /const shouldBoundRefresh = refreshPlan\.preferFastRefresh \|\| !untilEnd/);
+  assert.match(block, /shouldBoundRefresh\s*\?\s*await withTimeout\(refreshPromise, RECENT_CHATS_REFRESH_BUDGET_MS\)\s*:\s*await refreshPromise/s);
+});
+
 test('contagem longa aplica claim visual temporaria na aba', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const block = source.match(
@@ -131,7 +141,36 @@ test('jobs renovam claim existente para recriar indicador visual ausente', () =>
   const block = source.match(/const ensureTabClaimForJob = async[\s\S]*?\n};/)?.[0];
   assert.ok(block, 'ensureTabClaimForJob deve existir');
   assert.match(block, /args\.renewExistingClaim === false/);
-  assert.match(block, /claimTabForClient\(client/);
+  assert.match(block, /claimGeminiTabForClient\(client/);
+  assert.match(block, /client\.lastTabClaimWarning = warning/);
+  assert.match(block, /args\.requireTabClaim === true/);
+  assert.match(block, /return null/);
+  assert.match(source, /tabClaimWarning: client\.lastTabClaimWarning \|\| null/);
+  assert.match(source, /tabClaimWarning: job\.tabClaimWarning \|\| null/);
+});
+
+test('export pesado ativa a aba real antes de hidratar conversa', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const prepareBlock = source.match(
+    /const ensureClientActiveForExport = async[\s\S]*?\n\};\n\nconst downloadConversationItemForClient/,
+  )?.[0] || '';
+  const downloadBlock = source.match(
+    /const downloadConversationItemForClient = async[\s\S]*?\nconst isTransientTabBusyError/,
+  )?.[0] || '';
+
+  assert.match(source, /EXPORT_TAB_ACTIVATION_TIMEOUT_MS/);
+  assert.match(source, /const activateBrowserTabById = async/);
+  assert.match(source, /const tabActivationBrokerClients = \(/);
+  assert.match(prepareBlock, /activateBrowserTabById\(client\?\.tabId/);
+  assert.match(source, /'activate-browser-tab'/);
+  assert.match(prepareBlock, /activateTabBeforeExport !== false/);
+  assert.match(prepareBlock, /tab_activation_failed/);
+  assert.match(downloadBlock, /const prepared = await ensureClientActiveForExport\(client, args\)/);
+  assert.ok(
+    downloadBlock.indexOf('ensureClientActiveForExport') <
+      downloadBlock.indexOf("'get-chat-by-id'"),
+    'ativacao precisa acontecer antes do comando pesado get-chat-by-id',
+  );
 });
 
 test('export all incompleto vira aviso em vez de sucesso silencioso', () => {
@@ -188,12 +227,14 @@ test('listagem de chats expõe contagem parcial sem fingir total', () => {
   assert.match(source, /activeClients\.length === 1/);
   assert.match(source, /usefulRecentClients/);
   assert.match(source, /recentConversationCountForClient\(client\) > 0 \|\| !!client\.page\?\.chatId/);
+  assert.match(source, /const hasExportableRecentConversationIdentity = \(conversation = \{\}\) =>/);
+  assert.match(source, /filter\(hasExportableRecentConversationIdentity\)/);
   assert.match(source, /action:\s*\{\s*type:\s*'string',\s*enum:\s*\['list', 'count'/);
 });
 
 test('export total registra métricas de performance no status e relatório', () => {
   const serverSource = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
-  const contentSource = readFileSync(resolve(ROOT, 'src', 'userscript-shell.js'), 'utf-8');
+  const contentSource = readFileSync(resolve(ROOT, 'src', 'userscript-shell.ts'), 'utf-8');
   const jobBlock = serverSource.match(
     /const runRecentChatsExportJob = async[\s\S]*?\nconst startRecentChatsExportJob/,
   )?.[0];
@@ -251,8 +292,11 @@ test('export jobs bloqueiam novo export ativo antes de tentar claim-tab', () => 
     const escaped = route.replaceAll('/', '\\/');
     const block = source.match(new RegExp(`url\\.pathname === '${escaped}'[\\s\\S]*?catch \\(err\\)`))?.[0];
     assert.ok(block, `${route} deve existir`);
-    assert.match(block, /const client = requireClient\(selector\);[\s\S]*?assertNoRunningBrowserExportJob\(client\);[\s\S]*?ensureTabClaimForJob/);
+    assert.match(block, /const client = requireClient\(selector\);[\s\S]*?assertNoRunningBrowserExportJob\(client\);[\s\S]*?ensureTabClaimForJob[\s\S]*?start(?:Recent|Direct)ChatsExportJob/);
   }
+  assert.match(source, /const assertClientClaimedReadyForSession = \(client, args = \{\}\) =>/);
+  assert.match(source, /const startRecentChatsExportJob = \(client, args = \{\}\) => \{[\s\S]*?assertClientClaimedReadyForSession\(client, args\)/);
+  assert.match(source, /const startDirectChatsExportJob = \(client, args = \{\}\) => \{[\s\S]*?assertClientClaimedReadyForSession\(client, args\)/);
   assert.match(source, /sendAgentError\(res, 503, err\)/);
 });
 
@@ -440,6 +484,12 @@ test('export recente faz retry para aba ocupada antes de registrar falha', () =>
   assert.match(source, /const downloadConversationItemWithRetry = async/);
   assert.match(source, /RECENT_CHATS_TRANSIENT_BUSY_RETRY_LIMIT/);
   assert.match(jobBlock, /downloadConversationItemWithRetry\(job, client, conversation/);
+  assert.match(jobBlock, /const key = normalizeConversationChatId\(conversation\);/);
+  assert.doesNotMatch(
+    jobBlock,
+    /stripGeminiPrefix\(conversation\.chatId \|\| conversation\.id\)\s*\|\|\s*conversation\.url/,
+    'export recente nao pode deduplicar/exportar conversa sem chatId real',
+  );
 });
 
 test('reexport de chatIds conhecidos roda como job em background', () => {
@@ -453,7 +503,7 @@ test('reexport de chatIds conhecidos roda como job em background', () => {
   assert.match(source, /const runDirectChatsExportJob = async/);
   assert.match(source, /extractChatIdFromUrl\(idLike\)/);
   assert.match(source, /writeExportReport\(\s*'direct-chats'/);
-  assert.match(source, /findRunningBrowserExportJob\(client\.clientId\)/);
+  assert.match(source, /findRunningBrowserExportJob\(client\)/);
   assert.match(source, /DIRECT_REEXPORT_RETRY_LIMIT/);
   assert.match(jobBlock, /downloadConversationItemWithRetry\(job, client, conversation/);
   assert.match(source, /'gemini_reexport_chats'/);
@@ -485,8 +535,42 @@ test('reexport direto retoma pelo relatório sem baixar tudo de novo', () => {
   assert.match(jobBlock, /const successes = Array\.isArray\(job\.resumedSuccesses\)/);
   assert.match(jobBlock, /const pendingItems = Array\.isArray\(job\.pendingItems\)/);
   assert.match(jobBlock, /for \(let i = 0; i < pendingItems\.length; i \+= 1\)/);
+  assert.match(jobBlock, /rebindExportJobToClient\(job, resultClient, 'conversation-download'\)/);
   assert.match(jobBlock, /job\.completed = Math\.min\(job\.requested, resumedCompletedCount \+ i \+ 1\)/);
   assert.match(endpointBlock, /\.\.\.bodySelector/);
+  assert.match(source, /action: 'reexport'/);
+  assert.match(source, /selectionFile: job\.selectionFile/);
+  assert.match(source, /expectedCount: job\.expectedCount/);
+});
+
+test('job em lote reata progresso ao client novo quando a mesma aba reconecta', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const matchBlock = source.match(
+    /const browserExportJobMatchesClient = \(job, clientOrId\) => \{[\s\S]*?\n\};/,
+  )?.[0];
+  const rebindBlock = source.match(
+    /const rebindExportJobToClient = \(job, client, reason = 'client-reconnected'\) => \{[\s\S]*?\n\};/,
+  )?.[0];
+  const rebroadcastBlock = source.match(
+    /const rebroadcastActiveBrowserExportJobForClient = \(client, reason = 'client-upsert'\) => \{[\s\S]*?\n\};/,
+  )?.[0];
+  const upsertBlock = source.match(
+    /const upsertClient = \(payload, meta = \{\}\) => \{[\s\S]*?\n\};\n\nconst upsertClientSnapshot/,
+  )?.[0];
+
+  assert.ok(matchBlock, 'matcher de job por client deve existir');
+  assert.ok(rebindBlock, 'rebind de job por client deve existir');
+  assert.ok(rebroadcastBlock, 'rebroadcast de progresso deve existir');
+  assert.ok(upsertBlock, 'upsertClient deve existir');
+  assert.match(matchBlock, /job\.tabClaimId/);
+  assert.match(matchBlock, /exportJobTabId\(job\)/);
+  assert.match(rebindBlock, /job_client_rebound/);
+  assert.match(rebindBlock, /job\.clientId = client\.clientId/);
+  assert.match(rebindBlock, /job\.tabSession\.clientId = client\.clientId/);
+  assert.match(rebroadcastBlock, /findRunningBrowserExportJob\(client\)/);
+  assert.match(rebroadcastBlock, /broadcastDirectChatsJobProgress\(job, client\)/);
+  assert.match(rebroadcastBlock, /broadcastRecentChatsJobProgress\(job, client\)/);
+  assert.match(upsertBlock, /rebroadcastActiveBrowserExportJobForClient\(next, 'client-upsert'\)/);
 });
 
 test('cancelamento preso vira terminal depois da janela de seguranca', () => {
