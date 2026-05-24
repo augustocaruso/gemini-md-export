@@ -55,30 +55,30 @@ test('my activity content script responde ping do service worker', () => {
   assert.match(source, /kind: 'activity'/);
 });
 
-test('service worker recarrega abas Gemini antes de reinjetar apos update/reload', () => {
+test('service worker nao recarrega abas automaticamente em install/update/self-reload', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'extension-background.ts'), 'utf-8');
   const policySource = readFileSync(
     resolve(ROOT, 'src', 'browser', 'background', 'managed-tabs-reload-policy.ts'),
     'utf-8',
   );
 
-  assert.match(source, /GEMINI_TAB_RELOAD_SETTLE_MS/);
   assert.match(source, /LAST_MANAGED_TABS_RELOAD_KEY/);
   assert.match(source, /MANAGED_TABS_RELOAD_COOLDOWN_MS/);
   assert.match(source, /markManagedTabsReload/);
   assert.match(source, /managedTabsReloadRuntimeKey/);
   assert.match(source, /decideManagedTabsReload/);
   assert.match(policySource, /already-reloaded-current-runtime/);
-  assert.match(source, /status: 'cooldown'/);
+  assert.match(source, /explicit-reload-required/);
   assert.match(source, /reloadThenSelfHealGeminiTabs/);
-  assert.match(
-    source,
-    /chrome\.runtime\.onInstalled\.addListener[\s\S]*reloadThenSelfHealGeminiTabs/,
-  );
-  assert.match(
-    source,
-    /const consumePendingGeminiTabsReload[\s\S]*reloadThenSelfHealGeminiTabs/,
-  );
+  const onInstalledBlock =
+    source.match(/chrome\.runtime\.onInstalled\.addListener\([\s\S]*?\n\}\);/)?.[0] || '';
+  const refreshRuntimeBlock =
+    source.match(/const refreshManagedTabsIfRuntimeChanged = async \(\) => \{[\s\S]*?\n\};/)?.[0] || '';
+  const consumePendingBlock =
+    source.match(/const consumePendingGeminiTabsReload = async \(\) => \{[\s\S]*?\n\};/)?.[0] || '';
+  assert.doesNotMatch(onInstalledBlock, /reloadThenSelfHealGeminiTabs/);
+  assert.doesNotMatch(refreshRuntimeBlock, /reloadThenSelfHealGeminiTabs/);
+  assert.doesNotMatch(consumePendingBlock, /reloadThenSelfHealGeminiTabs/);
 
   const helperStart = source.indexOf('const reloadThenSelfHealGeminiTabs');
   const helperEnd = source.indexOf('const consumePendingGeminiTabsReload', helperStart);
@@ -101,14 +101,17 @@ test('service worker recarrega abas My Activity quando o runtime da extensao mud
   assert.match(source, /chrome\.tabs\.query\(\{ url: MANAGED_CONTENT_TAB_URL_PATTERNS \}/);
 });
 
-test('service worker detecta build novo no start e recarrega content scripts gerenciados', () => {
+test('service worker detecta build novo no start e reinjeta content scripts sem reload de aba', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'extension-background.ts'), 'utf-8');
 
   assert.match(source, /LAST_RUNTIME_BUILD_KEY = 'gemini-md-export\.lastRuntimeBuild\.v1'/);
   assert.match(source, /refreshManagedTabsIfRuntimeChanged/);
+  const refreshRuntimeBlock =
+    source.match(/const refreshManagedTabsIfRuntimeChanged = async \(\) => \{[\s\S]*?\n\};/)?.[0] || '';
+  assert.doesNotMatch(refreshRuntimeBlock, /reloadThenSelfHealGeminiTabs/);
   assert.match(
-    source,
-    /refreshManagedTabsIfRuntimeChanged[\s\S]*reloadThenSelfHealGeminiTabs\(\{\s*reason: 'extension-runtime-changed'/,
+    refreshRuntimeBlock,
+    /startManagedContentSelfHeal\(\{[\s\S]*reason: 'extension-runtime-changed'/,
   );
   assert.match(source, /const consumedPendingReload = await consumePendingGeminiTabsReload\(\);/);
   assert.match(source, /if \(!consumedPendingReload\) \{[\s\S]*await refreshManagedTabsIfRuntimeChanged\(\);/);
@@ -133,6 +136,10 @@ test('content script responde ping do service worker e evita dupla injecao do me
 
   assert.match(source, /RUNTIME_GUARD_KEY/);
   assert.match(source, /__geminiMdExportModernRuntime/);
+  assert.match(source, /const quiesceExistingRuntime = \(runtime\) =>/);
+  assert.match(source, /runtime\.stop\('runtime-superseded'\)/);
+  assert.match(source, /TAB_IGNORE_CHANGED_EVENT_BOOTSTRAP/);
+  assert.match(source, /runtime\.stop = \(\) => \{[\s\S]*stopExtensionBridge\(\)/);
   assert.match(source, /gemini-md-export\/content-ping/);
   assert.match(source, /contentScriptRuntimeStatus/);
   assert.match(source, /installContentScriptMessageListener/);
@@ -148,7 +155,7 @@ test('service worker ativa a aba do proprio content script para export pesado', 
   assert.match(backgroundSource, /message\.tabId/);
   assert.match(backgroundSource, /debuggerActivation\.ok === true/);
   assert.match(backgroundSource, /chromeUpdateTab\(tabId, \{ active: true \}\)/);
-  assert.match(backgroundSource, /message\.focusWindow === true \? await chromeFocusWindow/);
+  assert.match(backgroundSource, /message\.focusWindow === true[\s\S]*chromeFocusWindow/);
   assert.match(backgroundSource, /gemini-md-export\/activate-tab/);
   assert.match(contentSource, /command\.type === 'activate-tab'/);
   assert.match(contentSource, /command\.type === 'activate-browser-tab'/);

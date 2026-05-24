@@ -8,7 +8,10 @@ import type { NativeBrokerRequest, NativeBrokerResponse } from './protocol.js';
 export const defaultBrokerIpcPath = ({
   platform = process.platform,
   runtimeDir = process.env.XDG_RUNTIME_DIR || tmpdir(),
-}: { platform?: NodeJS.Platform | string; runtimeDir?: string } = {}): string => {
+}: {
+  platform?: NodeJS.Platform | string;
+  runtimeDir?: string;
+} = {}): string => {
   if (platform === 'win32') return '\\\\.\\pipe\\gemini-md-export-native-broker';
   return join(runtimeDir, 'gemini-md-export-native-broker.sock');
 };

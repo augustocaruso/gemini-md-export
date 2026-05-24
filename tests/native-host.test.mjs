@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { tmpdir } from 'node:os';
 import test from 'node:test';
 
 const ROOT = resolve(import.meta.dirname, '..');
@@ -21,6 +22,15 @@ const decodeFirstNativeMessage = (buffer) => {
   return JSON.parse(buffer.subarray(4, 4 + length).toString('utf-8'));
 };
 
+const waitFor = async (predicate, { timeoutMs = 1000, intervalMs = 25 } = {}) => {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    if (predicate()) return true;
+    await new Promise((resolveWait) => setTimeout(resolveWait, intervalMs));
+  }
+  return false;
+};
+
 test('native host responde ping no protocolo length-prefixed do Chrome', async () => {
   const child = spawn(process.execPath, [resolve(ROOT, 'src', 'native-host.mjs')], {
     cwd: ROOT,
@@ -36,6 +46,63 @@ test('native host responde ping no protocolo length-prefixed do Chrome', async (
   assert.equal(response.nativeProtocolVersion, 1);
 
   child.stdin.end();
+});
+
+test('native host one-shot command does not bind the browser broker IPC socket', async () => {
+  const tmp = mkdtempSync(resolve(tmpdir(), 'gme-native-oneshot-'));
+  const brokerIpcPath = resolve(tmp, 'broker.sock');
+  const child = spawn(process.execPath, [resolve(ROOT, 'src', 'native-host.mjs')], {
+    cwd: ROOT,
+    env: {
+      ...process.env,
+      GEMINI_MD_EXPORT_NATIVE_BROKER_IPC: brokerIpcPath,
+    },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  try {
+    child.stdin.write(encodeNativeMessage({ id: 't1', command: 'ping' }));
+    const [chunk] = await once(child.stdout, 'data');
+    const response = decodeFirstNativeMessage(chunk);
+
+    assert.equal(response.ok, true);
+    assert.equal(await waitFor(() => existsSync(brokerIpcPath), { timeoutMs: 150 }), false);
+  } finally {
+    child.stdin.end();
+    child.kill();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test('native host binds the browser broker IPC socket only after extension hello', async () => {
+  const tmp = mkdtempSync(resolve(tmpdir(), 'gme-native-broker-'));
+  const brokerIpcPath = resolve(tmp, 'broker.sock');
+  const child = spawn(process.execPath, [resolve(ROOT, 'src', 'native-host.mjs')], {
+    cwd: ROOT,
+    env: {
+      ...process.env,
+      GEMINI_MD_EXPORT_NATIVE_BROKER_IPC: brokerIpcPath,
+    },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  try {
+    child.stdin.write(
+      encodeNativeMessage({
+        id: 'hello',
+        protocolVersion: 1,
+        command: 'extension.hello',
+        payload: { source: 'test' },
+      }),
+    );
+    const [chunk] = await once(child.stdout, 'data');
+    const response = decodeFirstNativeMessage(chunk);
+
+    assert.equal(response.ok, true);
+    assert.equal(await waitFor(() => existsSync(brokerIpcPath)), true);
+  } finally {
+    child.stdin.end();
+    child.kill();
+    rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test('native host runtime is implemented in TypeScript', () => {
@@ -64,6 +131,26 @@ test('service worker opens persistent native broker port and exposes tab command
   assert.match(brokerSource, /tabs\.claim/);
   assert.match(brokerSource, /claimDebuggableGeminiTab/);
   assert.match(brokerSource, /classifyBrowserTabs/);
+});
+
+test('service worker abre native broker no startup antes do self-heal de abas', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'extension-background.ts'), 'utf-8');
+  const startBlock =
+    source.match(/const handleServiceWorkerStart = async \(\) => \{[\s\S]*?\n\};/)?.[0] || '';
+
+  assert.match(startBlock, /ensureNativeBrokerPort\(\{ reason: 'service-worker-start' \}\)/);
+  assert.ok(
+    startBlock.indexOf("ensureNativeBrokerPort({ reason: 'service-worker-start' })") <
+      startBlock.indexOf('consumePendingGeminiTabsReload()'),
+    'native broker deve abrir antes do self-heal depender dele',
+  );
+});
+
+test('service worker bootstrap does not rely on delayed timer before native broker', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'extension-background.ts'), 'utf-8');
+
+  assert.match(source, /void handleServiceWorkerStart\(\);/);
+  assert.doesNotMatch(source, /setTimeout\(\(\)\s*=>\s*\{\s*handleServiceWorkerStart\(\);\s*\},\s*250\)/);
 });
 
 test('native host forwards local ipc requests to the extension port', () => {

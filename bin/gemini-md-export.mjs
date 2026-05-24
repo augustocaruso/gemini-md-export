@@ -28,6 +28,9 @@ import {
   sendTelemetry,
   telemetryStatus,
 } from '../src/telemetry.mjs';
+import { browserControlParamsFromFlags } from '../build/ts/cdp/runtime-options.js';
+import { runFixVaultCommand } from '../build/ts/cli/fix-vault-runner.js';
+import { buildBridgeOnlyChildEnv } from '../build/ts/mcp/browser-runtime-env.js';
 
 const DEFAULT_BRIDGE_URL = 'http://127.0.0.1:47283';
 const DEFAULT_POLL_MS = 1200;
@@ -46,6 +49,7 @@ const DEFAULT_COUNT_LOAD_MORE_BROWSER_TIMEOUT_MS = 30_000;
 const DEFAULT_COUNT_LOAD_MORE_BROWSER_ROUNDS = 12;
 const DEFAULT_COUNT_MAX_NO_GROWTH_ROUNDS = 8;
 const DEFAULT_BROWSER_LAUNCH_LOCK_GRACE_MS = 2_000;
+const EXPORT_JOB_START_TIMEOUT_MS = 120_000;
 const TAB_CLAIM_COUNT_LABEL = '🔎 Conferindo';
 const TERMINAL_STATUSES = new Set(['completed', 'completed_with_errors', 'failed', 'cancelled']);
 
@@ -59,9 +63,23 @@ const EXIT = {
   USAGE: 64,
 };
 
+const BIN_DIR = dirname(fileURLToPath(import.meta.url));
+const PACKAGE_ROOT = resolve(BIN_DIR, '..');
+
+const readBridgeVersionInfo = () => {
+  try {
+    const bridgeVersionPath = resolve(PACKAGE_ROOT, 'bridge-version.json');
+    return JSON.parse(readFileSync(bridgeVersionPath, 'utf-8')) || {};
+  } catch {
+    return {};
+  }
+};
+
+const BRIDGE_VERSION_INFO = readBridgeVersionInfo();
+
 const readPackageVersion = () => {
   try {
-    const packagePath = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'package.json');
+    const packagePath = resolve(PACKAGE_ROOT, 'package.json');
     return JSON.parse(readFileSync(packagePath, 'utf-8')).version || '0.0.0';
   } catch {
     return '0.0.0';
@@ -70,17 +88,38 @@ const readPackageVersion = () => {
 
 const VERSION = readPackageVersion();
 
-const readExpectedBridgeProtocolVersion = () => {
-  try {
-    const bridgeVersionPath = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'bridge-version.json');
-    const bridgeVersion = JSON.parse(readFileSync(bridgeVersionPath, 'utf-8'));
-    return bridgeVersion.protocolVersion ?? null;
-  } catch {
-    return null;
+const detectExpectedChromeBuildStamp = () => {
+  if (BRIDGE_VERSION_INFO.buildStamp) return BRIDGE_VERSION_INFO.buildStamp;
+  const candidates = [
+    resolve(PACKAGE_ROOT, 'browser-extension', 'background.js'),
+    resolve(PACKAGE_ROOT, 'browser-extension', 'content.js'),
+    resolve(PACKAGE_ROOT, 'dist', 'extension', 'background.js'),
+    resolve(PACKAGE_ROOT, 'dist', 'extension', 'content.js'),
+    resolve(PACKAGE_ROOT, 'dist', 'gemini-cli-extension', 'browser-extension', 'background.js'),
+    resolve(PACKAGE_ROOT, 'dist', 'gemini-cli-extension', 'browser-extension', 'content.js'),
+  ];
+  for (const candidate of candidates) {
+    try {
+      if (!existsSync(candidate)) continue;
+      const source = readFileSync(candidate, 'utf-8');
+      const match =
+        source.match(/\bbuildStamp:\s*['"](\d{8}-\d{4})['"]/) ||
+        source.match(/\bBUILD_STAMP\s*=\s*['"](\d{8}-\d{4})['"]/) ||
+        source.match(/\bbuild\s+(\d{8}-\d{4})\b/);
+      if (match?.[1]) return match[1];
+    } catch {
+      // Build stamp ausente não deve impedir a CLI de rodar.
+    }
   }
+  return null;
 };
 
-const EXPECTED_BRIDGE_PROTOCOL_VERSION = readExpectedBridgeProtocolVersion();
+const EXPECTED_BRIDGE_PROTOCOL_VERSION = BRIDGE_VERSION_INFO.protocolVersion ?? null;
+const EXPECTED_CHROME_EXTENSION_INFO = {
+  extensionVersion: BRIDGE_VERSION_INFO.extensionVersion || VERSION,
+  protocolVersion: EXPECTED_BRIDGE_PROTOCOL_VERSION,
+  buildStamp: detectExpectedChromeBuildStamp(),
+};
 
 const ANSI = {
   reset: '\x1b[0m',
@@ -118,6 +157,7 @@ const exitCodeHelp = () => [
 const commonOptionHelp = () => [
   'Opcoes comuns:',
   '  --bridge-url <url>       Bridge local. Default: http://127.0.0.1:47283.',
+  '  --cdp-url <url>          DevTools Protocol para controle de abas. Ex: http://127.0.0.1:9222.',
   '  --no-start-bridge       Nao iniciar bridge local automaticamente.',
   '  --bridge-start-wait-ms <ms> Quanto esperar a bridge iniciar. Default: 6000.',
   '  --bridge-keep-alive-ms <ms> Quanto a bridge iniciada pela CLI fica viva sem uso.',
@@ -131,9 +171,15 @@ const commonOptionHelp = () => [
   '  --claim-id <id>          Usa uma claim criada por gemini-md-export tabs claim.',
   '  --session <nome>         Sessao nomeada reutilizavel para claim/export.',
   '  --keep-claim             Nao libera --claim-id automaticamente apos chats/sync/export.',
-  '  --no-wake                Nao tentar acordar o navegador.',
+  '  --wake                   Pode abrir/acordar o navegador se nenhuma aba estiver conectada.',
+  '  --no-wake                Nao abrir/acordar o navegador. Default.',
+  '  --activate-tab           Pode tornar a aba Gemini alvo ativa dentro do navegador.',
+  '  --no-activate-tab        Nao ativar aba automaticamente. Default.',
+  '  --focus-window           Pode trazer a janela do navegador para frente.',
+  '  --no-focus-window        Nao focar janela do navegador. Default.',
   '  --no-self-heal           Nao tentar auto-recuperacao da extensao.',
-  '  --no-reload              Nao pedir reload automatico da extensao.',
+  '  --allow-reload           Permite reload explicito da extensao quando diagnosticado.',
+  '  --no-reload              Nao pedir reload da extensao. Default.',
   '  --no-color               Desliga ANSI.',
   '  --help, -h               Mostra ajuda.',
   '  --version, -v            Mostra versao.',
@@ -151,6 +197,8 @@ const jobOptionHelp = () => [
   '  --selection-file <path>      Manifesto criado por chats list --save-selection.',
   '  --expected-count <n>         Falha antes de iniciar se a selecao tiver outra quantidade.',
   '  --delay-ms <ms>              Pausa entre chats selecionados.',
+  '  --takeout <file.zip|html|json> Usa Takeout como fonte offline; My Activity cobre o restante.',
+  '  --no-my-activity           Nao tenta My Activity para datas (diagnostico avancado).',
   '  --max-load-more-rounds <n>   Rodadas maximas para puxar historico.',
   '  --load-more-attempts <n>     Tentativas de scroll por rodada.',
   '  --max-no-growth-rounds <n>   Rodadas sem crescimento antes de desistir.',
@@ -181,6 +229,7 @@ const usage = () =>
     '  doctor                Verifica bridge, extensao Chrome e aba Gemini.',
     '  diagnose page <url>   Diagnostica artefatos/iframes de uma conversa Gemini.',
     '  browser status        Mostra prontidao da bridge/extensao/abas.',
+    '  browser side-effects  Consulta/liga/desliga o freio local do navegador.',
     '  tabs list|claim       Lista/reivindica abas Gemini pela CLI.',
     '  chats count           Conta chats carregaveis sem despejar lista no chat.',
     '  chats list            Lista uma pagina e pode salvar selecao de chatIds.',
@@ -247,6 +296,8 @@ const syncHelp = () =>
     '  --output-dir <path>          Destino dos Markdown/assets. Default: vaultDir.',
     '  --resume-report-file <path>  Retoma um relatorio incremental anterior.',
     '  --sync-state-file <path>     Estado incremental customizado.',
+    '  --takeout <file.zip|html|json> Usa Takeout como fonte offline; My Activity cobre o restante.',
+    '  --no-my-activity            Nao tenta My Activity para datas (diagnostico avancado).',
     '  --known-boundary-count <n>   Quantidade de itens conhecidos para fronteira incremental.',
     '  --poll-ms <ms>               Intervalo de polling. Default: 1200.',
     '  --timeout-ms <ms>            Timeout total do job.',
@@ -321,12 +372,14 @@ const diagnoseHelp = () =>
 
 const browserHelp = () =>
   [
-    'gemini-md-export browser status',
+    'gemini-md-export browser',
     '',
     'Uso:',
     '  gemini-md-export browser status [opcoes]',
+    '  gemini-md-export browser side-effects status|disable|enable [opcoes]',
     '',
     'Mostra readiness e clientes Gemini conectados sem iniciar job de export.',
+    'O freio side-effects bloqueia launch, reload, foco e navegacao pelo MCP/CLI.',
     '',
     ...outputModeHelp(),
     '',
@@ -436,6 +489,7 @@ const exportRecentHelp = () =>
     '  gemini-md-export export recent [opcoes]',
     '',
     'Inicia job de export do historico recente carregavel.',
+    'Salva cada Markdown ja com datas usando My Activity; --takeout so adiciona fonte offline.',
     '',
     ...outputModeHelp(),
     '',
@@ -452,6 +506,7 @@ const exportMissingHelp = () =>
     '  gemini-md-export export missing <vaultDir> [opcoes]',
     '',
     'Baixa apenas conversas ausentes no vault informado.',
+    'Salva cada Markdown ja com datas usando My Activity; --takeout so adiciona fonte offline.',
     '',
     ...outputModeHelp(),
     '',
@@ -506,6 +561,7 @@ const exportSelectedHelp = () =>
     '',
     'Baixa conversas selecionadas em job de background. Para follow-up de "baixe essas",',
     'prefira o manifesto criado por chats list --save-selection para evitar ambiguidade.',
+    'Salva cada Markdown ja com datas usando My Activity; --takeout so adiciona fonte offline.',
     '',
     ...outputModeHelp(),
     '',
@@ -682,14 +738,14 @@ const fixVaultHelp = () =>
     'gemini-md-export fix-vault',
     '',
     'Uso:',
-    '  gemini-md-export fix-vault <vaultDir> [--takeout <Minhaatividade.html|MyActivity.json>] [--report <report.json>]',
+    '  gemini-md-export fix-vault <vaultDir> [--takeout <takeout.zip|Minhaatividade.html|MyActivity.json>] [--report <report.json>]',
     '',
     'Corrige o back catalog em um unico fluxo: audita integridade, normaliza o',
     'YAML canonico dos chats e preenche datas com Takeout primeiro e My Activity',
     'para o que sobrar.',
     '',
     'Opcoes:',
-    '  --takeout <file>       Usa arquivo offline do Google Takeout/My Activity.',
+    '  --takeout <file>       Usa arquivo offline do Google Takeout/My Activity (.zip, .html ou .json).',
     '  --use-my-activity      Usa My Activity pela extensao para datas remanescentes. Default.',
     '  --no-my-activity       Nao tenta My Activity; usa apenas Takeout e normalizacao local.',
     '  --report <file.json>   Grava relatorio combinado do fix-vault.',
@@ -705,14 +761,14 @@ const metadataHelp = () =>
     '',
     'Uso:',
     '  gemini-md-export metadata backfill <vaultDir> --use-my-activity --report <report.json>',
-    '  gemini-md-export metadata backfill <vaultDir> --takeout <Minhaatividade.html|MyActivity.json> --report <report.json>',
+    '  gemini-md-export metadata backfill <vaultDir> --takeout <takeout.zip|Minhaatividade.html|MyActivity.json> --report <report.json>',
     '',
     'Normaliza o YAML dos chats Gemini e tenta preencher date_created/date_last_message.',
     'O relatorio guarda checkpoint e evidencias sanitizadas: hashes, tamanhos, scores e status.',
     '',
     'Opcoes:',
     '  --use-my-activity       Usa a aba My Activity conectada pela extensao.',
-    '  --takeout <file>        Usa arquivo offline do Google Takeout/My Activity.',
+    '  --takeout <file>        Usa arquivo offline do Google Takeout/My Activity (.zip, .html ou .json).',
     '  --report <file.json>    Grava relatorio/checkpoint.',
     '  --limit <n>             Limita quantidade de chats processados.',
     '  --no-open-if-missing    Nao abre/recarrega My Activity automaticamente.',
@@ -779,6 +835,11 @@ const parseArgs = (argv) => {
         process.env.GEMINI_MD_EXPORT_BRIDGE_URL ||
         process.env.GEMINI_MCP_BRIDGE_URL ||
         DEFAULT_BRIDGE_URL,
+      cdpUrl:
+        process.env.GEMINI_MD_EXPORT_CDP_URL ||
+        process.env.GEMINI_MCP_CDP_URL ||
+        process.env.GME_CDP_URL ||
+        undefined,
       pollMs: DEFAULT_POLL_MS,
       readyWaitMs: DEFAULT_READY_WAIT_MS,
       timeoutMs: DEFAULT_TIMEOUT_MS,
@@ -800,9 +861,11 @@ const parseArgs = (argv) => {
         process.env.GME_BROWSER_PROFILE_DIRECTORY ||
         undefined,
       color: process.env.NO_COLOR ? false : true,
-      wakeBrowser: true,
+      wakeBrowser: false,
+      activateTab: false,
+      focusWindow: false,
       selfHeal: true,
-      allowReload: true,
+      allowReload: false,
       format: 'auto',
       help: firstArgIsHelp,
       version: firstArgIsVersion,
@@ -821,6 +884,7 @@ const parseArgs = (argv) => {
     if (arg === '--help' || arg === '-h') out.flags.help = true;
     else if (arg === '--version' || arg === '-v') out.flags.version = true;
     else if (arg === '--bridge-url') out.flags.bridgeUrl = value();
+    else if (arg === '--cdp-url') out.flags.cdpUrl = value();
     else if (arg === '--endpoint') out.flags.endpoint = value();
     else if (arg === '--token') out.flags.token = value();
     else if (arg === '--payload-level') out.flags.payloadLevel = value();
@@ -875,6 +939,8 @@ const parseArgs = (argv) => {
     else if (arg === '--browser') out.flags.browser = normalizeBrowserKey(value());
     else if (arg === '--profile-directory') out.flags.profileDirectory = value();
     else if (arg === '--extension-id') out.flags.extensionId = value();
+    else if (arg === '--reason') out.flags.reason = value();
+    else if (arg === '--expires-at') out.flags.expiresAt = value();
     else if (arg === '--client-id') out.flags.clientId = value();
     else if (arg === '--tab-id') out.flags.tabId = value();
     else if (arg === '--claim-id') out.flags.claimId = value();
@@ -886,7 +952,10 @@ const parseArgs = (argv) => {
     else if (arg === '--label') out.flags.label = value();
     else if (arg === '--color') out.flags.colorName = value();
     else if (arg === '--ttl-ms') out.flags.ttlMs = Number(value());
-    else if (arg === '--open-if-missing') out.flags.openIfMissing = true;
+    else if (arg === '--open-if-missing') {
+      out.flags.openIfMissing = true;
+      out.flags.wakeBrowser = true;
+    }
     else if (arg === '--no-open-if-missing') out.flags.openIfMissing = false;
     else if (arg === '--start-index') out.flags.startIndex = Number(value());
     else if (arg === '--chat-id') out.flags.chatIds.push(value());
@@ -934,8 +1003,14 @@ const parseArgs = (argv) => {
     else if (arg === '--no-start-bridge') out.flags.startBridge = false;
     else if (arg === '--exit-when-idle') out.flags.bridgeExitWhenIdle = true;
     else if (arg === '--no-exit-when-idle') out.flags.bridgeExitWhenIdle = false;
+    else if (arg === '--wake' || arg === '--wake-browser') out.flags.wakeBrowser = true;
     else if (arg === '--no-wake') out.flags.wakeBrowser = false;
+    else if (arg === '--activate-tab') out.flags.activateTab = true;
+    else if (arg === '--no-activate-tab') out.flags.activateTab = false;
+    else if (arg === '--focus-window') out.flags.focusWindow = true;
+    else if (arg === '--no-focus-window') out.flags.focusWindow = false;
     else if (arg === '--no-self-heal') out.flags.selfHeal = false;
+    else if (arg === '--allow-reload') out.flags.allowReload = true;
     else if (arg === '--no-reload') out.flags.allowReload = false;
     else if (arg.startsWith('-')) throw new Error(`Opcao desconhecida: ${arg}`);
     else out.positionals.push(arg);
@@ -1265,6 +1340,7 @@ const requestReadyStatus = async (bridgeUrl, flags, { waitMs = 0 } = {}) =>
       selfHeal: flags.selfHeal,
       allowReload: flags.allowReload,
       clientId: flags.clientId,
+      ...browserControlParamsFromFlags(flags),
     }),
     {
       timeoutMs: Math.max(
@@ -1278,7 +1354,7 @@ const requestReadyStatus = async (bridgeUrl, flags, { waitMs = 0 } = {}) =>
     },
   );
 
-const packageRoot = () => resolve(dirname(fileURLToPath(import.meta.url)), '..');
+const packageRoot = () => PACKAGE_ROOT;
 
 const firstExistingPath = (candidates) => candidates.find((candidate) => existsSync(candidate)) || null;
 
@@ -1290,15 +1366,17 @@ const bridgeServerPath = () =>
 
 const repairScriptPath = () =>
   firstExistingPath([
+    process.env.GEMINI_MD_EXPORT_REPAIR_SCRIPT,
     resolve(packageRoot(), 'scripts', 'vault-repair.mjs'),
     resolve(packageRoot(), 'gemini-cli-extension', 'scripts', 'vault-repair.mjs'),
-  ]);
+  ].filter(Boolean));
 
 const metadataScriptPath = () =>
   firstExistingPath([
+    process.env.GEMINI_MD_EXPORT_METADATA_SCRIPT,
     resolve(packageRoot(), 'scripts', 'chat-metadata-backfill.mjs'),
     resolve(packageRoot(), 'gemini-cli-extension', 'scripts', 'chat-metadata-backfill.mjs'),
-  ]);
+  ].filter(Boolean));
 
 const localBridgeAddress = (bridgeUrl) => {
   try {
@@ -1334,10 +1412,7 @@ const startBridgeOnlyProcess = (flags) => {
       cwd: homedir(),
       detached: true,
       stdio: 'ignore',
-      env: {
-        ...process.env,
-        GEMINI_MCP_CHROME_LAUNCH_IF_CLOSED: 'false',
-      },
+      env: buildBridgeOnlyChildEnv(process.env),
     },
   );
   child.unref();
@@ -1406,7 +1481,39 @@ const bridgeHealthMismatch = (health = {}) => {
       process: processInfo,
     };
   }
+  const expectedChromeExtension = health.expectedChromeExtension || null;
+  if (
+    EXPECTED_CHROME_EXTENSION_INFO.buildStamp &&
+    expectedChromeExtension?.buildStamp &&
+    String(expectedChromeExtension.buildStamp) !== String(EXPECTED_CHROME_EXTENSION_INFO.buildStamp)
+  ) {
+    return {
+      kind: 'browser-build',
+      actualVersion: health.version || null,
+      expectedVersion: VERSION,
+      actualProtocolVersion: health.protocolVersion ?? null,
+      expectedProtocolVersion: EXPECTED_BRIDGE_PROTOCOL_VERSION,
+      actualBuildStamp: expectedChromeExtension.buildStamp,
+      expectedBuildStamp: EXPECTED_CHROME_EXTENSION_INFO.buildStamp,
+      process: processInfo,
+    };
+  }
   return null;
+};
+
+const bridgeRuntimeMismatch = async (flags, health = {}) => {
+  const mismatch = bridgeHealthMismatch(health);
+  if (mismatch) return mismatch;
+  if (!EXPECTED_CHROME_EXTENSION_INFO.buildStamp || health.expectedChromeExtension) return null;
+  try {
+    const diagnostics = await requestJson(flags.bridgeUrl, '/agent/clients', { timeoutMs: 1500 });
+    return bridgeHealthMismatch({
+      ...health,
+      expectedChromeExtension: diagnostics?.expectedChromeExtension || null,
+    });
+  } catch {
+    return null;
+  }
 };
 
 const bridgeProcessLooksLikeExporter = (processInfo = {}) =>
@@ -1447,6 +1554,13 @@ const staleBridgeMessage = (mismatch, { safe = false } = {}) => {
       (safe ? '' : '\nNão encontrei um alvo seguro para reiniciar automaticamente.')
     );
   }
+  if (mismatch?.kind === 'browser-build') {
+    return (
+      `Bridge local desatualizada${pid}: build da extensão ${mismatch.actualBuildStamp ?? '?'}; ` +
+      `esta CLI espera ${mismatch.expectedBuildStamp ?? '?'}.${location}` +
+      (safe ? '' : '\nNão encontrei um alvo seguro para reiniciar automaticamente.')
+    );
+  }
   return (
     `Bridge local desatualizada${pid}: ${mismatch?.actualVersion || '?'} -> ${mismatch?.expectedVersion || VERSION}.` +
     location +
@@ -1467,6 +1581,45 @@ const createStaleBridgeError = (health, mismatch, details = {}) => {
   err.data = {
     bridge: health,
     mismatch,
+    ...details,
+  };
+  return err;
+};
+
+const bridgeBrowserControlProblem = (health = {}) => {
+  if (health?.browserControl?.authorized === true) return null;
+  return {
+    kind: health?.browserControl ? 'browser-control-disabled' : 'browser-control-unknown',
+    browserControl: health?.browserControl || null,
+    browserSideEffects: health?.browserSideEffects || null,
+    process: bridgeProcessInfo(health),
+  };
+};
+
+const browserControlBridgeMessage = (problem = {}) => {
+  const processInfo = problem.process || {};
+  const pid = processInfo.pid ? ` PID ${processInfo.pid}` : '';
+  const path = processInfo.root || processInfo.path || processInfo.commandLine || null;
+  const location = path ? `\nProcesso: ${path}` : '';
+  return (
+    `Bridge local${pid} esta em modo diagnostico e nao esta autorizada a controlar o navegador.` +
+    `${location}\nA CLI vai iniciar uma bridge propria para exportacao quando puder substituir esse processo com seguranca.`
+  );
+};
+
+const createBrowserControlBridgeError = (health, problem, details = {}) => {
+  const err = new Error(
+    [
+      browserControlBridgeMessage(problem),
+      'Feche a sessao antiga que carregou o MCP ou rode cleanup stale-processes depois de conferir o PID.',
+    ]
+      .filter(Boolean)
+      .join('\n'),
+  );
+  err.code = 'browser_control_bridge_not_authorized';
+  err.data = {
+    bridge: health,
+    problem,
     ...details,
   };
   return err;
@@ -1519,7 +1672,7 @@ const waitForFreshBridgeHealth = async (flags, { timeoutMs, lastError = null } =
     await sleep(120);
     try {
       const health = await requestJson(flags.bridgeUrl, '/healthz', { timeoutMs: 1000 });
-      const mismatch = bridgeHealthMismatch(health);
+      const mismatch = await bridgeRuntimeMismatch(flags, health);
       if (!mismatch) return health;
       latestHealth = health;
       latestError = createStaleBridgeError(health, mismatch, {
@@ -1564,7 +1717,10 @@ const recoverStaleBridge = async (flags, ui, health, mismatch) => {
     ui.stdout.write('Reiniciando bridge local...\n');
   } else {
     setWaitNote(ui, 'Atualizando bridge local', {
-      detail: `Bridge antiga detectada: ${mismatch.actualVersion || '?'} -> ${mismatch.expectedVersion || VERSION}`,
+      detail:
+        mismatch.kind === 'browser-build'
+          ? `Bridge antiga detectada: build ${mismatch.actualBuildStamp || '?'} -> ${mismatch.expectedBuildStamp || '?'}`
+          : `Bridge antiga detectada: ${mismatch.actualVersion || '?'} -> ${mismatch.expectedVersion || VERSION}`,
     });
   }
   const terminated = await terminateStaleBridgeProcess(health, {
@@ -1579,7 +1735,33 @@ const recoverStaleBridge = async (flags, ui, health, mismatch) => {
   return startFreshBridgeOnly(flags, ui);
 };
 
-const ensureBridgeAvailable = async (flags, ui) => {
+const recoverBrowserControlBridge = async (flags, ui, health, problem) => {
+  const safe =
+    flags.startBridge &&
+    localBridgeAddress(flags.bridgeUrl) &&
+    bridgeProcessLooksLikeExporter(problem.process || bridgeProcessInfo(health)) &&
+    problem.process?.pid &&
+    problem.process.pid !== process.pid &&
+    problem.process.pid !== process.ppid;
+  if (!safe) throw createBrowserControlBridgeError(health, problem, { safe });
+  if (shouldWriteInlineStatus(ui)) {
+    ui.stdout.write(`${browserControlBridgeMessage(problem)}\n`);
+    ui.stdout.write('Substituindo bridge local para exportacao...\n');
+  } else {
+    setWaitNote(ui, 'Preparando bridge de exportacao', {
+      detail: 'Bridge anterior estava em modo diagnostico.',
+    });
+  }
+  const terminated = await terminateStaleBridgeProcess(health, {
+    waitMs: Math.min(8000, Math.max(1000, Number(flags.bridgeStartWaitMs || 6000))),
+  });
+  if (!terminated.exited) {
+    throw createBrowserControlBridgeError(health, problem, { safe, terminated });
+  }
+  return startFreshBridgeOnly(flags, ui);
+};
+
+const ensureBridgeAvailable = async (flags, ui, options = {}) => {
   let health = null;
   try {
     health = await requestJson(flags.bridgeUrl, '/healthz', { timeoutMs: 1000 });
@@ -1589,7 +1771,7 @@ const ensureBridgeAvailable = async (flags, ui) => {
     }
     return startFreshBridgeOnly(flags, ui, firstError);
   }
-  const mismatch = bridgeHealthMismatch(health);
+  const mismatch = await bridgeRuntimeMismatch(flags, health);
   if (mismatch) {
     return await withWaitStatus(
       ui,
@@ -1599,10 +1781,29 @@ const ensureBridgeAvailable = async (flags, ui) => {
         renderIntervalMs: DEFAULT_TUI_RENDER_INTERVAL_MS,
         tuiKind: 'ready',
         intervalMessage: (elapsedMs) =>
-          `Bridge antiga detectada: ${mismatch.actualVersion || '?'} -> ${mismatch.expectedVersion || VERSION}; ${formatDuration(elapsedMs)} decorridos.`,
+          mismatch.kind === 'browser-build'
+            ? `Bridge antiga detectada: build ${mismatch.actualBuildStamp || '?'} -> ${mismatch.expectedBuildStamp || '?'}; ${formatDuration(elapsedMs)} decorridos.`
+            : `Bridge antiga detectada: ${mismatch.actualVersion || '?'} -> ${mismatch.expectedVersion || VERSION}; ${formatDuration(elapsedMs)} decorridos.`,
       },
       () => recoverStaleBridge(flags, ui, health, mismatch),
     );
+  }
+  if (options.requireBrowserControl === true) {
+    const problem = bridgeBrowserControlProblem(health);
+    if (problem) {
+      return await withWaitStatus(
+        ui,
+        {
+          message: 'Preparando bridge de exportacao.',
+          intervalMs: 1000,
+          renderIntervalMs: DEFAULT_TUI_RENDER_INTERVAL_MS,
+          tuiKind: 'ready',
+          intervalMessage: (elapsedMs) =>
+            `Bridge anterior em modo diagnostico; ${formatDuration(elapsedMs)} decorridos.`,
+        },
+        () => recoverBrowserControlBridge(flags, ui, health, problem),
+      );
+    }
   }
   return health;
 };
@@ -1814,6 +2015,8 @@ const humanStatusLabel = (job = {}) => {
   if (job.status === 'cancelled') return 'Cancelado';
   if (job.phase === 'loading-history') return 'Carregando historico';
   if (job.phase === 'scanning-vault') return 'Comparando vault';
+  if (job.phase === 'loading-metadata') return 'Indexando datas';
+  if (job.phase === 'resolving-metadata') return 'Conferindo datas';
   if (job.phase === 'exporting') return 'Exportando';
   if (job.phase === 'writing-report') return 'Finalizando';
   return 'Preparando';
@@ -1956,7 +2159,7 @@ const renderLinesForJob = (ui, job = {}, tick = 0) => {
   const total = Number(job.requested || job.missingCount || job.webConversationCount || 0);
   const current = displayProgressPosition(job, total);
   const barCurrent = barProgressPosition(job, total);
-  const indeterminate = !total || ['queued', 'loading-history', 'scanning-vault'].includes(job.phase);
+  const indeterminate = !total || ['queued', 'loading-history', 'scanning-vault', 'loading-metadata', 'resolving-metadata'].includes(job.phase);
   const status = colorize(ui, terminalColorForStatus(job.status), humanStatusLabel(job));
   const headline = fitTerminalLine(ui, job.progressMessage || job.decisionSummary?.headline || 'Sincronizando...');
   const currentLabel = job.current?.title || job.current?.chatId || null;
@@ -2114,7 +2317,7 @@ const renderTuiStreamProgress = (ui, job, previous = {}, tick = 0) => {
   const total = Number(job.requested || job.missingCount || job.webConversationCount || 0);
   const current = displayProgressPosition(job, total);
   const barCurrent = barProgressPosition(job, total);
-  const indeterminate = !total || ['queued', 'loading-history', 'scanning-vault'].includes(job.phase);
+  const indeterminate = !total || ['queued', 'loading-history', 'scanning-vault', 'loading-metadata', 'resolving-metadata'].includes(job.phase);
   const count = total > 0 ? `${Math.min(current, total)}/${total}` : indeterminateCountText(job);
   const progress = bar(ui, barCurrent, total, {
     width: Math.max(18, Math.min(30, Math.floor((Number(ui.stdout.columns) || 88) / 3))),
@@ -2389,7 +2592,7 @@ const waitForReadyAfterBrowserWake = async (bridgeUrl, flags, ui, launch = null)
     process.env.GME_ACTIVE_TAB_URL ||
     process.env.GEMINI_MD_EXPORT_BROWSER_TAB_URLS ||
     process.env.GME_BROWSER_TAB_URLS;
-  if (launch?.dryRun === true && !hasBrowserDiagnosticOverride) {
+  if (!hasBrowserDiagnosticOverride && (!launch || launch.dryRun)) {
     if (flags.readyWaitMs <= 0) return requestFastReadyStatus(bridgeUrl, flags);
     return requestReadyStatus(bridgeUrl, flags, { waitMs: flags.readyWaitMs });
   }
@@ -2635,6 +2838,65 @@ const ensureReady = async (bridgeUrl, flags, ui) => {
   throw err;
 };
 
+const canPrepareExportFromReady = (ready = {}) =>
+  ready.ready !== true &&
+  connectedClientCountFromReady(ready) > 0 &&
+  Number(ready.commandReadyClientCount || 0) > 0 &&
+  ['extension_not_connected', 'no_active_claimable_gemini_tab', 'no_selectable_gemini_tab'].includes(
+    String(ready.blockingIssue || ''),
+  );
+
+const ensureReadyForExport = async (bridgeUrl, flags, ui) => {
+  const ready = await withWaitStatus(
+    ui,
+    {
+      message: 'Verificando Gemini Web e extensao do navegador.',
+      intervalMs: nonNegativeIntEnv(
+        process.env.GEMINI_MD_EXPORT_READY_STATUS_INTERVAL_MS,
+        DEFAULT_READY_STATUS_INTERVAL_MS,
+        60_000,
+      ),
+      renderIntervalMs: DEFAULT_TUI_RENDER_INTERVAL_MS,
+      tuiKind: 'ready',
+      intervalMessage: (elapsedMs) =>
+        `Ainda verificando Gemini Web... ${formatDuration(elapsedMs)} decorridos; sem fallback MCP.`,
+    },
+    () => readyWithCliWake(bridgeUrl, flags, ui),
+  );
+  if (ready.ready === true) return ready;
+
+  if (canPrepareExportFromReady(ready)) {
+    setWaitNote(ui, 'Preparando aba Gemini para exportacao', {
+      issue: ready.blockingIssue || null,
+    });
+    if (shouldWriteInlineStatus(ui)) {
+      ui.stdout.write('Preparando automaticamente uma aba Gemini exportavel...\n');
+    }
+    return ready;
+  }
+
+  if (ui.format !== 'json' && ui.format !== 'jsonl') {
+    ui.stderr.write(
+      [
+        'Gemini Web ainda nao esta pronto.',
+        `Motivo: ${ready.blockingIssue || 'desconhecido'}.`,
+        ready.browserDiagnostic?.message ||
+        ready.extensionReadiness?.nextAction?.message ||
+          ready.cliBrowserWake?.reason ||
+          ready.cliBrowserWake?.error ||
+          '',
+      ]
+        .filter(Boolean)
+        .join('\n') + '\n',
+    );
+  }
+  const err = new Error(ready.blockingIssue || 'Gemini Web nao esta pronto.');
+  err.code = 'extension_unready';
+  err.reported = true;
+  err.data = ready;
+  throw err;
+};
+
 const startSyncJob = async (bridgeUrl, flags) =>
   requestJson(
     bridgeUrl,
@@ -2643,20 +2905,27 @@ const startSyncJob = async (bridgeUrl, flags) =>
       outputDir: flags.outputDir || flags.vaultDir,
       resumeReportFile: flags.resumeReportFile,
       syncStateFile: flags.syncStateFile,
+      takeout: flags.takeout,
+      useMyActivity: flags.noMyActivity ? false : flags.useMyActivity,
+      noMyActivity: flags.noMyActivity,
       knownBoundaryCount: flags.knownBoundaryCount,
       ...loadMoreParamsFromFlags(flags),
       clientId: flags.clientId,
       tabId: flags.tabId,
       claimId: flags.claimId,
       autoReleaseClaim: flags.autoReleaseClaim,
+      ...browserControlParamsFromFlags(flags),
     }),
-    { timeoutMs: 20000 },
+    { timeoutMs: EXPORT_JOB_START_TIMEOUT_MS },
   );
 
 const startExportJob = async (bridgeUrl, kind, flags) => {
   const params = {
     outputDir: flags.outputDir,
     resumeReportFile: flags.resumeReportFile,
+    takeout: flags.takeout,
+    useMyActivity: flags.noMyActivity ? false : flags.useMyActivity,
+    noMyActivity: flags.noMyActivity,
     maxChats: flags.maxChats,
     limit: flags.maxChats,
     batchSize: flags.batchSize,
@@ -2670,9 +2939,12 @@ const startExportJob = async (bridgeUrl, kind, flags) => {
     claimId: flags.claimId,
     sessionId: flags.sessionId,
     autoReleaseClaim: flags.autoReleaseClaim,
+    ...browserControlParamsFromFlags(flags),
   };
   if (kind === 'recent') {
-    return requestJson(bridgeUrl, appendParams('/agent/export-recent-chats', params), { timeoutMs: 20000 });
+    return requestJson(bridgeUrl, appendParams('/agent/export-recent-chats', params), {
+      timeoutMs: EXPORT_JOB_START_TIMEOUT_MS,
+    });
   }
   if (kind === 'missing') {
     return requestJson(
@@ -2683,7 +2955,7 @@ const startExportJob = async (bridgeUrl, kind, flags) => {
         existingScanDir: flags.vaultDir,
         outputDir: flags.outputDir || flags.vaultDir,
       }),
-      { timeoutMs: 20000 },
+      { timeoutMs: EXPORT_JOB_START_TIMEOUT_MS },
     );
   }
   if (kind === 'resume') {
@@ -2693,7 +2965,7 @@ const startExportJob = async (bridgeUrl, kind, flags) => {
         ...params,
         resumeReportFile: flags.resumeReportFile,
       }),
-      { timeoutMs: 20000 },
+      { timeoutMs: EXPORT_JOB_START_TIMEOUT_MS },
     );
   }
   if (kind === 'selected' || kind === 'reexport') {
@@ -2702,7 +2974,7 @@ const startExportJob = async (bridgeUrl, kind, flags) => {
       '/agent/reexport-chats',
       {
         method: 'POST',
-        timeoutMs: 20000,
+        timeoutMs: EXPORT_JOB_START_TIMEOUT_MS,
         operation: 'reexport-chats',
         body: {
           ...params,
@@ -2716,7 +2988,9 @@ const startExportJob = async (bridgeUrl, kind, flags) => {
     );
   }
   if (kind === 'notebook') {
-    return requestJson(bridgeUrl, appendParams('/agent/export-notebook', params), { timeoutMs: 20000 });
+    return requestJson(bridgeUrl, appendParams('/agent/export-notebook', params), {
+      timeoutMs: EXPORT_JOB_START_TIMEOUT_MS,
+    });
   }
   throw usageError(`Subcomando export desconhecido: ${kind}.`);
 };
@@ -2938,6 +3212,7 @@ const claimCliTabForCount = async (flags = {}, countTimeoutMs) => {
       ttlMs,
       openIfMissing: false,
       allowReload: flags.allowReload,
+      ...browserControlParamsFromFlags(flags),
     }),
     { timeoutMs: 20_000 },
   );
@@ -3054,7 +3329,7 @@ const runSync = async (parsed, streams = {}) => {
       ui.stdout.write(`Conectando na bridge ${normalizeBridgeUrl(flags.bridgeUrl)}...\n`);
     }
     await ensureBridgeAvailable(flags, ui);
-    await ensureReady(flags.bridgeUrl, flags, ui);
+    await ensureReadyForExport(flags.bridgeUrl, flags, ui);
     initialJob = await startSyncJob(flags.bridgeUrl, flags);
     uninstallSignalCleanup = installJobSignalCleanup({
       flags,
@@ -3189,10 +3464,40 @@ const runDoctor = async (parsed, streams = {}) => {
 
 const runBrowser = async (parsed, streams = {}) => {
   const subcommand = parsed.positionals[0];
-  if (subcommand !== 'status') throw usageError('Uso: gemini-md-export browser status.');
+  if (!['status', 'side-effects'].includes(subcommand)) {
+    throw usageError('Uso: gemini-md-export browser status | browser side-effects status|disable|enable.');
+  }
   const ui = makeUi(parsed.flags, streams);
   warnTuiFallback(ui);
   await ensureBridgeAvailable(parsed.flags, ui);
+
+  if (subcommand === 'side-effects') {
+    const action = parsed.positionals[1] || 'status';
+    if (!['status', 'disable', 'enable'].includes(action)) {
+      throw usageError('Uso: gemini-md-export browser side-effects status|disable|enable.');
+    }
+    const result = await requestJson(
+      parsed.flags.bridgeUrl,
+      appendParams('/agent/browser-side-effects', {
+        action,
+        reason: parsed.flags.reason,
+        expiresAt: parsed.flags.expiresAt,
+      }),
+      { timeoutMs: 5000 },
+    );
+    const sideEffects = result.sideEffects || {};
+    const state = sideEffects.disabled ? 'desativado' : 'ativo';
+    writeStructuredResult(ui, result, {
+      label:
+        action === 'disable'
+          ? 'Controle do navegador bloqueado localmente.'
+          : action === 'enable'
+            ? 'Controle do navegador reativado.'
+            : `Controle do navegador: ${state}.`,
+    });
+    return { exitCode: result.ok ? EXIT.OK : EXIT.MANUAL_ACTION, result };
+  }
+
   const ready = await readyWithCliWake(parsed.flags.bridgeUrl, parsed.flags, ui);
   let clients = null;
   try {
@@ -3353,6 +3658,7 @@ const runDiagnose = async (parsed, streams = {}) => {
         releaseClaimOnOperationEnd: parsed.flags.autoReleaseClaim !== false,
         autoReleaseClaim: parsed.flags.autoReleaseClaim,
         waitMs: diagnoseWaitMs,
+        ...browserControlParamsFromFlags(parsed.flags),
       }),
       { timeoutMs: Math.max(45_000, Number(diagnoseWaitMs || 0) + 20_000) },
     );
@@ -3466,6 +3772,7 @@ const runTabs = async (parsed, streams = {}) => {
       waitMs: parsed.flags.waitMs,
       allowReload: parsed.flags.allowReload,
       delayMs: parsed.flags.delayMs,
+      ...browserControlParamsFromFlags(parsed.flags),
     }),
     { timeoutMs: action === 'reload' ? 30000 : 20000 },
   );
@@ -3655,6 +3962,7 @@ const runChats = async (parsed, streams = {}) => {
         claimId: parsed.flags.claimId,
         sessionId: parsed.flags.sessionId,
         autoReleaseClaim: parsed.flags.autoReleaseClaim,
+        ...browserControlParamsFromFlags(parsed.flags),
       }),
       { timeoutMs: 30_000 },
     );
@@ -3734,6 +4042,7 @@ const runChats = async (parsed, streams = {}) => {
             tabId: requestTabId,
             claimId: requestClaimId,
             sessionId: parsed.flags.sessionId,
+            ...browserControlParamsFromFlags(parsed.flags),
           }),
           { timeoutMs: remainingMs + 15_000 },
         );
@@ -3855,7 +4164,7 @@ const runExport = async (parsed, streams = {}) => {
       }
     }
     await ensureBridgeAvailable(flags, ui);
-    await ensureReady(flags.bridgeUrl, flags, ui);
+    await ensureReadyForExport(flags.bridgeUrl, flags, ui);
     initialJob = await startExportJob(flags.bridgeUrl, isSelectedExport ? 'selected' : subcommand, flags);
     uninstallSignalCleanup = installJobSignalCleanup({
       flags,
@@ -4019,151 +4328,18 @@ const reportTimestamp = () =>
     .replace(/\..+$/, '')
     .replace('T', '-');
 
-const runNodeScript = async ({ scriptPath, args, streams, streamStdout = true }) => {
-  const stdout = streams.stdout || process.stdout;
-  const stderr = streams.stderr || process.stderr;
-  let stdoutText = '';
-  let stderrText = '';
-  const child = spawn(process.execPath, [scriptPath, ...args], {
-    cwd: packageRoot(),
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  child.stdout.on('data', (chunk) => {
-    stdoutText += String(chunk);
-    if (streamStdout) stdout.write(chunk);
-  });
-  child.stderr.on('data', (chunk) => {
-    stderrText += String(chunk);
-    stderr.write(chunk);
-  });
-  const exitCode = await new Promise((resolveExit) => {
-    child.on('exit', (code) => resolveExit(code ?? EXIT.JOB_FAILED));
-  });
-  return { exitCode, stdoutText, stderrText };
-};
-
-const readJsonIfExists = (filePath) => {
-  if (!filePath || !existsSync(filePath)) return null;
-  try {
-    return JSON.parse(readFileSync(filePath, 'utf-8'));
-  } catch {
-    return null;
-  }
-};
-
-const parseJsonText = (text) => {
-  try {
-    return text ? JSON.parse(text) : null;
-  } catch {
-    return null;
-  }
-};
-
 const runFixVault = async (parsed, streams = {}) => {
-  const vaultDir = parsed.flags.vaultDir || parsed.positionals[0];
-  if (!vaultDir) throw usageError('Informe vaultDir para fix-vault.');
-  const resolvedVaultDir = resolve(vaultDir);
-  if (!existsSync(resolvedVaultDir)) throw new Error(`Vault nao encontrado: ${resolvedVaultDir}`);
   const repairPath = repairScriptPath();
   const metadataPath = metadataScriptPath();
   if (!repairPath) throw new Error('scripts/vault-repair.mjs nao encontrado no pacote.');
   if (!metadataPath) throw new Error('scripts/chat-metadata-backfill.mjs nao encontrado no pacote.');
-
-  const reportPath = resolve(
-    parsed.flags.report ||
-      `${resolvedVaultDir}/.gemini-md-export-fix/fix-vault-${reportTimestamp()}.json`,
-  );
-  const reportDir = dirname(reportPath);
-  const repairReportDir = resolve(reportDir, 'repair');
-  const metadataReportPath = resolve(reportDir, 'metadata-backfill.json');
-  mkdirSync(reportDir, { recursive: true });
-
-  const repairArgs = ['--dry-run', '--skip-browser-check', '--report-dir', repairReportDir];
-  if (parsed.flags.takeout) repairArgs.push('--takeout', parsed.flags.takeout);
-  repairArgs.push(resolvedVaultDir);
-
-  const metadataArgs = [resolvedVaultDir, '--report', metadataReportPath, '--bridge-url', parsed.flags.bridgeUrl];
-  if (parsed.flags.takeout) metadataArgs.push('--takeout', parsed.flags.takeout);
-  if (!parsed.flags.noMyActivity) metadataArgs.push('--use-my-activity');
-  if (parsed.flags.openIfMissing === false) metadataArgs.push('--no-open-if-missing');
-  else if (parsed.flags.openIfMissing === true) metadataArgs.push('--open-if-missing');
-  if (Number.isFinite(parsed.flags.limit) && parsed.flags.limit > 0) {
-    metadataArgs.push('--limit', String(parsed.flags.limit));
-  }
-
-  const stdout = streams.stdout || process.stdout;
-  stdout.write('Fix vault: auditando integridade do catalogo...\n');
-  const repair = await runNodeScript({
-    scriptPath: repairPath,
-    args: repairArgs,
+  return runFixVaultCommand({
+    parsed,
     streams,
-    streamStdout: false,
+    packageRoot: packageRoot(),
+    repairPath,
+    metadataPath,
   });
-  stdout.write('Fix vault: normalizando YAML e preenchendo datas...\n');
-  const metadata = repair.exitCode === 0
-    ? await runNodeScript({
-        scriptPath: metadataPath,
-        args: metadataArgs,
-        streams,
-      })
-    : { exitCode: EXIT.JOB_FAILED, stdoutText: '', stderrText: 'repair_failed' };
-
-  const repairOutput = parseJsonText(repair.stdoutText) || {};
-  const repairSummary = readJsonIfExists(repairOutput.preliminaryReportPath);
-  const metadataReport = readJsonIfExists(metadataReportPath);
-  const activityError = metadataReport?.activityError || null;
-  const warnings = [];
-  if (activityError) {
-    warnings.push({
-      code: activityError.code || 'my_activity_unavailable',
-      message: activityError.message || 'My Activity nao ficou disponivel.',
-      nextAction:
-        'Abra https://myactivity.google.com/product/gemini, confirme que a extensao foi recarregada e rode fix-vault de novo para datas remanescentes.',
-    });
-    stdout.write(
-      'Aviso: My Activity nao ficou disponivel. Abra https://myactivity.google.com/product/gemini, recarregue a extensao se necessario e rode fix-vault de novo para datas remanescentes.\n',
-    );
-  }
-
-  const combined = {
-    schema: 'gemini-md-export.fix-vault-report.v1',
-    generatedAt: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
-    vaultDir: resolvedVaultDir,
-    takeout: parsed.flags.takeout ? basename(parsed.flags.takeout) : null,
-    ok: repair.exitCode === 0 && metadata.exitCode === 0,
-    steps: [
-      {
-        name: 'repair-audit',
-        status: repair.exitCode === 0 ? 'completed' : 'failed',
-        exitCode: repair.exitCode,
-        reportDir: repairReportDir,
-      },
-      {
-        name: 'metadata-backfill',
-        status: metadata.exitCode === 0 ? 'completed' : 'failed',
-        exitCode: metadata.exitCode,
-        reportPath: metadataReportPath,
-      },
-    ],
-    reports: {
-      repairPreliminaryReport: repairOutput.preliminaryReportPath || null,
-      metadataReport: metadataReportPath,
-    },
-    summary: {
-      repair: {
-        verificationQueueSize: repairSummary?.verificationQueueSize || 0,
-        wikiReviewQueueSize: repairSummary?.wikiReviewQueueSize || 0,
-        takeoutEvidence: repairSummary?.takeoutEvidence?.summary || { enabled: false },
-      },
-      metadata: metadataReport?.summary || null,
-    },
-    warnings,
-  };
-  writeFileSync(reportPath, `${JSON.stringify(combined, null, 2)}\n`, 'utf-8');
-  stdout.write(`Fix vault: relatorio combinado em ${reportPath}\n`);
-
-  const exitCode = repair.exitCode || metadata.exitCode || EXIT.OK;
-  return { exitCode, result: combined };
 };
 
 const runMetadata = async (parsed, streams = {}) => {

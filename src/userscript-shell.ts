@@ -10,6 +10,8 @@
 // @run-at       document-idle
 // ==/UserScript==
 
+// @ts-nocheck
+
 // Camada de browser do userscript.
 // Este arquivo é a parte "suja": depende de window, location, document,
 // Blob, URL.createObjectURL, etc. Toda a lógica de conversão DOM→Markdown
@@ -26,6 +28,11 @@
   /* __INLINE_BATCH_SESSION_MODULE__ */
   /* __INLINE_DOM_RUNNER_MODULE__ */
   /* __INLINE_PROGRESS_DOCK_UI__ */
+  /* __INLINE_PROGRESS_PORT__ */
+  /* __INLINE_TAB_COMMANDS__ */
+  /* __INLINE_BRIDGE_CLIENT__ */
+  /* __INLINE_PAGE_BLOCKER__ */
+  /* __INLINE_BROWSER_NAVIGATION_STACK__ */
 
   // --- config -----------------------------------------------------------
 
@@ -45,11 +52,16 @@
   const BUTTON_ID = `${UI_ID_PREFIX}-btn`;
   const BUTTON_SLOT_ID = `${UI_ID_PREFIX}-btn-slot`;
   const BUTTON_LABEL = 'Baixar Markdown';
-  // Material Symbols "download" (filled), 24x24, no container. currentColor
-  // para herdar a cor do top-bar do Gemini (tema claro/escuro automático).
+  // Ícone SVG dentro do slot nativo do botão. Não usar ligature textual:
+  // se a fonte Material Symbols não estiver disponível, o texto "download"
+  // aparece literal no topo da página.
   const BUTTON_ICON_SVG =
-    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -960 960 960" width="22" height="22" fill="currentColor" aria-hidden="true" focusable="false">' +
-    '<path d="M480-320 280-520l56-58 104 104v-326h80v326l104-104 56 58-200 200ZM240-160q-33 0-56.5-23.5T160-240v-120h80v120h480v-120h80v120q0 33-23.5 56.5T720-160H240Z"/>' +
+    '<svg xmlns="http://www.w3.org/2000/svg" data-role="gm-md-export-download-icon" viewBox="0 -960 960 960" width="20" height="20" fill="currentColor" aria-hidden="true" focusable="false">' +
+    '<path d="M480-336 288-528l51-51 105 105v-342h72v342l105-105 51 51-192 192ZM263-192q-29.7 0-50.85-21.15Q191-234.3 191-264v-72h72v72h434v-72h72v72q0 29.7-21.15 50.85Q726.7-192 697-192H263Z"/>' +
+    '</svg>';
+  const MENU_CHECK_ICON_SVG =
+    '<svg xmlns="http://www.w3.org/2000/svg" data-role="gm-menu-check-icon" viewBox="0 -960 960 960" width="20" height="20" fill="currentColor" aria-hidden="true" focusable="false">' +
+    '<path d="M382-240 154-468l57-57 171 171 367-367 57 57-424 424Z"/>' +
     '</svg>';
   const FOLDER_ICON_SVG =
     '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 -960 960 960" width="18" height="18" fill="currentColor" aria-hidden="true" focusable="false">' +
@@ -67,14 +79,16 @@
   const MODAL_SEARCH_ID = `${UI_ID_PREFIX}-search`;
   const PROGRESS_DOCK_ID = `${UI_ID_PREFIX}-progress-dock`;
   const MENU_ID = `${UI_ID_PREFIX}-menu`;
+  const TOPBAR_TOOLTIP_ID = `${UI_ID_PREFIX}-tooltip`;
   const DEBUG_GLOBAL = '__geminiMdExportDebug';
   const LOG_PREFIX = '[gemini-md-export]';
   const SCRIPT_VERSION = '__VERSION__';
   const BUILD_STAMP = '__BUILD_STAMP__';
   const FRAME_TIMEOUT_MS = 45000;
   const CONVERSATION_CONTAINER_SELECTOR = 'div.conversation-container';
-  const HYDRATION_LOAD_WAIT_MS = 2500;
+  const HYDRATION_LOAD_WAIT_MS = 900;
   const HYDRATION_TOP_SETTLE_MS = 8000;
+  const HYDRATION_SMALL_TOP_SETTLE_MS = 900;
   const HYDRATION_STALL_TIMEOUT_MS = 45000;
   const HYDRATION_MAX_TOTAL_MS = 10 * 60 * 1000;
   const HYDRATION_MAX_ATTEMPTS = 900;
@@ -142,24 +156,43 @@
       const rightSection = topBar.querySelector('.top-bar-actions .right-section');
       if (!visibleRect(rightSection)) continue;
 
+      // Anchors históricos: Gemini "clássico" expunha share/menu/save chat
+      // como filhos do right-section. O redesign lr26 deixou só o kebab
+      // dentro de um `.buttons-container`. Tentamos anchors antigos primeiro
+      // e depois caímos no primeiro container visível.
       const shareButton = rightSection.querySelector('[data-test-id="share-button"]');
       const menuButton = rightSection.querySelector(
         '[data-test-id="conversation-actions-menu-icon-button"]',
       );
       const saveChatButton = rightSection.querySelector('#gemini-exporter');
-      const anchor =
+      const legacyAnchor =
         shareButton?.closest('.buttons-container.share') ||
         menuButton?.closest('conversation-actions-icon') ||
         saveChatButton ||
         null;
 
-      if (!anchor || !visibleRect(anchor)) continue;
+      let anchor = legacyAnchor && visibleRect(legacyAnchor) ? legacyAnchor : null;
+      let matchedBy = anchor
+        ? `Gemini right-section before ${anchor.id || anchor.tagName.toLowerCase()}`
+        : null;
+
+      if (!anchor) {
+        const containers = Array.from(
+          rightSection.querySelectorAll(':scope > .buttons-container'),
+        ).filter((el) => visibleRect(el));
+        if (containers.length) {
+          anchor = containers[0];
+          matchedBy = `Gemini right-section before .buttons-container (${containers.length} visible)`;
+        }
+      }
+
+      if (!anchor) continue;
 
       return {
         target: rightSection,
         before: anchor,
         anchor,
-        matchedBy: `Gemini right-section before ${anchor.id || anchor.tagName.toLowerCase()}`,
+        matchedBy,
       };
     }
 
@@ -259,6 +292,16 @@
       .filter(({ rect }) => rect.width > 0 && rect.height > 0);
 
     if (scored.length === 0) return null;
+
+    // Caminho feliz do Gemini lr26: só existe um `top-bar-actions` visível
+    // (o da conversa, ocupando a largura cheia do header). Retorna direto
+    // sem depender do OneGoogleBar, que virou um sliver pouco confiável.
+    if (scored.length === 1) {
+      return {
+        target: scored[0].el,
+        matchedBy: 'top-bar-actions single visible candidate',
+      };
+    }
 
     const ogb = findOgbRect();
     if (ogb) {
@@ -364,7 +407,21 @@
       ...candidates,
     };
   };
-  const SIDEBAR_ITEM_SELECTOR = 'conversations-list [data-test-id="conversation"]';
+  const SIDEBAR_ITEM_SELECTOR = [
+    'conversations-list [data-test-id="conversation"]',
+    'gem-nav-list-item',
+    'mat-nav-list [role="listitem"]',
+    '[role="navigation"] [data-conversation-id]',
+    '[role="navigation"] [data-chat-id]',
+    '[role="navigation"] [data-test-id^="conversation_"]',
+  ].join(',');
+  const SIDEBAR_SCROLL_ROOT_SELECTOR = [
+    'conversations-list',
+    'infinite-scroller',
+    'mat-nav-list',
+    'mat-sidenav',
+    '[role="navigation"]',
+  ].join(',');
   const NOTEBOOK_CHAT_ROW_SELECTOR = 'project-chat-history project-chat-row';
   const NOTEBOOK_CHAT_HISTORY_SELECTOR =
     'project-chat-history, infinite-scroller.project-chat-history-scroller, .project-chat-history-container';
@@ -387,6 +444,8 @@
   const BRIDGE_BASE_URL =
     pageWindow.__GEMINI_MCP_BRIDGE_URL || 'http://127.0.0.1:47283';
   const RUNTIME_GUARD_KEY = '__geminiMdExportModernRuntime';
+  const TAB_IGNORE_SESSION_STORAGE_KEY_BOOTSTRAP = 'gemini-md-export.ignoreThisTab.v1';
+  const TAB_IGNORE_CHANGED_EVENT_BOOTSTRAP = 'gm-md-export:tab-ignored-changed';
   const existingRuntime = pageWindow[RUNTIME_GUARD_KEY];
   if (
     existingRuntime?.buildStamp === BUILD_STAMP &&
@@ -394,8 +453,33 @@
   ) {
     return;
   }
+  const quiesceExistingRuntime = (runtime) => {
+    if (!runtime) return;
+    try {
+      if (typeof runtime.stop === 'function') {
+        runtime.stop('runtime-superseded');
+        return;
+      }
+    } catch {
+      // Se a runtime anterior falhar ao desligar, usamos o fallback legado.
+    }
+    try {
+      pageWindow.sessionStorage?.setItem(TAB_IGNORE_SESSION_STORAGE_KEY_BOOTSTRAP, '1');
+      const event =
+        typeof CustomEvent === 'function'
+          ? new CustomEvent(TAB_IGNORE_CHANGED_EVENT_BOOTSTRAP, {
+              detail: { ignored: true, reason: 'runtime-superseded' },
+            })
+          : null;
+      if (event) pageWindow.dispatchEvent(event);
+      pageWindow.sessionStorage?.removeItem(TAB_IGNORE_SESSION_STORAGE_KEY_BOOTSTRAP);
+    } catch {
+      // Fallback melhor-esforço para builds antigas que só escutam o toggle.
+    }
+  };
   try {
     if (existingRuntime && existingRuntime.buildStamp !== BUILD_STAMP) {
+      quiesceExistingRuntime(existingRuntime);
       existingRuntime.supersededAt = Date.now();
       existingRuntime.supersededBy = BUILD_STAMP;
     }
@@ -437,7 +521,10 @@
   const NOTEBOOK_CHAT_URL_CACHE_STORAGE_KEY = 'gemini-md-export.notebookChatUrls.v1';
   const BATCH_EXPORT_SESSION_STORAGE_KEY = 'gemini-md-export.batchExportSession.v1';
   const MCP_PROGRESS_SESSION_STORAGE_KEY = 'gemini-md-export.mcpProgress.v1';
+  const CHAT_CLIENT_ID_STORAGE_KEY = 'gemini-md-export.chatClientId.v1';
   const MCP_PROGRESS_STALE_GRACE_MS = 45_000;
+  const MCP_PROGRESS_CANCEL_STALE_MS = 15_000;
+  const MCP_PROGRESS_WATCHDOG_MS = 1000;
   // Por aba (sessionStorage): quando '1', a aba não envia heartbeat nem
   // long-poll de comandos para a bridge MCP. Usuário liga/desliga pelo menu
   // do botão. Sobrevive reload da própria aba; some quando a aba é fechada.
@@ -510,10 +597,13 @@
     isExporting: false,
     exportSource: null, // 'gui' | 'mcp' | null
     progress: null,
+    previousProgressForDisplay: null,
     progressCreepTimer: null,
     mcpProgressActive: false,
     mcpProgressJobId: null,
     mcpProgressLastSeenAt: 0,
+    mcpProgressCancelSinceAt: 0,
+    mcpProgressWatchdogTimer: 0,
     isLoadingMore: false,
     loadMoreFailures: 0,
     lastLoadMoreTrace: [],
@@ -570,9 +660,14 @@
     confirmEndGrowthTimeoutMs: 900,
     confirmEndPostLoadSettleMs: 70,
   });
+  const SIDEBAR_OPEN_WAIT_MS = 6000;
+  const SIDEBAR_OPEN_POLL_MS = 120;
+  const SIDEBAR_OPEN_CLICK_ATTEMPTS = 3;
   const notebookChatIdCache = new WeakMap();
   let notebookChatUrlCache = null;
   let lastTabBrokerReportAt = 0;
+  let extensionContextRefreshInFlight = null;
+  let tabBrokerReportInFlight = null;
   const bridgeState = {
     started: false,
     clientId: '',
@@ -746,6 +841,18 @@
     return pageWindow.matchMedia?.('(prefers-color-scheme: dark)').matches || false;
   };
 
+  const buildNativeStyleProfile = () =>
+    buildGeminiNativeStyleProfile({ documentRef: document, isDark: isDarkTheme() });
+
+  const applyNativeStyleProfile = (element) => {
+    const profile = buildNativeStyleProfile();
+    element.dataset.gmNativeStyleProfile = profile.name;
+    applyGeminiNativeStyleVars(element, profile);
+    return profile;
+  };
+
+  const nativeStyleVar = (name, fallback) => `var(${name}, ${fallback})`;
+
   // --- debug / feedback -------------------------------------------------
 
   const log = (...args) => console.log(LOG_PREFIX, ...args);
@@ -806,12 +913,22 @@
       document.body.appendChild(toast);
     }
 
+    const errorBase = readHostCssToken('--gem-sys-color--error', '', { documentRef: document });
+    const primaryBase = readHostCssToken('--gem-sys-color--primary', '', { documentRef: document });
     const palette =
       kind === 'error'
-        ? { bg: '#c5221f', border: '#8f1b13' }
+        ? {
+            bg: errorBase ? `color-mix(in srgb, ${errorBase} 88%, black)` : '#c5221f',
+            border: errorBase ? `color-mix(in srgb, ${errorBase} 70%, black)` : '#8f1b13',
+          }
         : kind === 'success'
           ? { bg: '#137333', border: '#0d5a27' }
-          : { bg: '#1a73e8', border: '#1557b0' };
+          : {
+              bg: primaryBase ? `color-mix(in srgb, ${primaryBase} 80%, black)` : '#1a73e8',
+              border: primaryBase
+                ? `color-mix(in srgb, ${primaryBase} 60%, black)`
+                : '#1557b0',
+            };
 
     // prefixo visual (emoji/ícone simples) ajuda a identificar severidade
     // mesmo quando o usuário só olha de canto de olho.
@@ -917,31 +1034,116 @@
     return { wrapper, scroller };
   };
 
-  const getSidebarNav = () =>
-    document.querySelector('mat-sidenav') || document.querySelector('[role="navigation"]');
+  const getSidebarNav = () => {
+    const explicitSideNav = document.querySelector('mat-sidenav');
+    if (explicitSideNav) return explicitSideNav;
+    return Array.from(document.querySelectorAll('[role="navigation"], mat-nav-list')).find((el) =>
+      !!el.querySelector?.(SIDEBAR_ITEM_SELECTOR),
+    ) || null;
+  };
 
   const isSidebarOpen = () => {
     const sideNav = getSidebarNav();
     if (!sideNav) return false;
     if (sideNav.getAttribute('aria-hidden') === 'true') return false;
     if (sideNav.classList.contains('mat-drawer-closed')) return false;
-    if (sideNav.offsetWidth <= 100) return false;
-    return true;
+    const rect = visibleRect(sideNav);
+    const width = rect?.width || sideNav.offsetWidth || 0;
+    if (width > 0 && width <= 100) return false;
+    return getSidebarConversationElements().some((element) => !!getChatIdFromSidebarElement(element));
   };
 
-  const ensureSidebarOpen = async () => {
+  const findSidebarMenuButton = () => {
+    const selectors = [
+      '[data-test-id="side-nav-menu-button"]',
+      'button[aria-label*="main menu" i]',
+      'button[aria-label*="show menu" i]',
+      'button[aria-label*="open menu" i]',
+      'button[aria-label*="expand menu" i]',
+      'button[aria-label*="open navigation" i]',
+      'button[aria-label*="show navigation" i]',
+      'button[aria-label*="side navigation" i]',
+      'button[aria-label*="sidebar" i]',
+      'button[aria-label*="abrir navegação" i]',
+      'button[aria-label*="abrir menu" i]',
+      'button[aria-label*="expandir" i]',
+      'button[aria-label*="barra lateral" i]',
+      'button[aria-label*="menu principal" i]',
+      'button[aria-label*="navigation" i]',
+      'button[aria-label*="menu" i]',
+    ];
+    const candidates = selectors.flatMap((selector) =>
+      Array.from(document.querySelectorAll(selector)),
+    );
+    const seen = new Set();
+    return candidates
+      .filter((button) => {
+        if (seen.has(button)) return false;
+        seen.add(button);
+        const rect = visibleRect(button);
+        if (!rect) return false;
+        if (button.disabled || button.getAttribute('aria-disabled') === 'true') return false;
+        const label = controlLabel(button);
+        const explicit = button.matches?.('[data-test-id="side-nav-menu-button"]');
+        const labelLooksRight =
+          /(^menu$|main menu|show menu|open menu|expand menu|open navigation|show navigation|side navigation|sidebar|side nav|abrir navegação|abrir navegacao|abrir menu|expandir|barra lateral|menu principal|navigation)/i.test(label);
+        const leftSide = rect.left <= Math.max(420, (window.innerWidth || 0) * 0.35);
+        const topSide = rect.top <= Math.max(96, (window.innerHeight || 0) * 0.18);
+        return explicit || (labelLooksRight && leftSide && topSide);
+      })
+      .sort((a, b) => {
+        const aExplicit = a.matches?.('[data-test-id="side-nav-menu-button"]') ? 0 : 1;
+        const bExplicit = b.matches?.('[data-test-id="side-nav-menu-button"]') ? 0 : 1;
+        if (aExplicit !== bExplicit) return aExplicit - bExplicit;
+        return a.getBoundingClientRect().left - b.getBoundingClientRect().left;
+      })[0] || null;
+  };
+
+  const waitForSidebarOpen = async (timeoutMs = SIDEBAR_OPEN_WAIT_MS, pollMs = SIDEBAR_OPEN_POLL_MS) => {
+    const startedAt = Date.now();
+    const budgetMs = Math.max(0, Number(timeoutMs) || 0);
+    const intervalMs = Math.max(25, Number(pollMs) || SIDEBAR_OPEN_POLL_MS);
+    do {
+      if (isSidebarOpen()) return true;
+      await sleep(intervalMs);
+    } while (Date.now() - startedAt < budgetMs);
+    return isSidebarOpen();
+  };
+
+  const ensureSidebarOpen = async (options = {}) => {
     if (isSidebarOpen()) return true;
+    const timeoutMs = Math.max(700, Number(options.timeoutMs || SIDEBAR_OPEN_WAIT_MS));
+    const pollMs = Math.max(25, Number(options.pollMs || SIDEBAR_OPEN_POLL_MS));
+    const startedAt = Date.now();
+    let attempts = 0;
 
-    const menuButton =
-      document.querySelector('[data-test-id="side-nav-menu-button"]') ||
-      document.querySelector('button[aria-label*="menu" i]') ||
-      document.querySelector('button[aria-label*="navigation" i]');
+    while (Date.now() - startedAt < timeoutMs) {
+      const menuButton = findSidebarMenuButton();
+      if (menuButton && attempts < SIDEBAR_OPEN_CLICK_ATTEMPTS) {
+        attempts += 1;
+        menuButton.click();
+      }
 
-    if (!menuButton) return false;
+      const remainingMs = Math.max(0, timeoutMs - (Date.now() - startedAt));
+      if (await waitForSidebarOpen(Math.min(1200, remainingMs), pollMs)) return true;
+    }
+    return isSidebarOpen();
+  };
 
-    menuButton.click();
-    await sleep(700);
-    return isSidebarOpen() || !!document.querySelector('conversations-list');
+  const ensureSidebarOpenForCommand = async (command, settleMs) => {
+    if (command.args?.ensureSidebar === false || isNotebookPage()) return { ok: true };
+    const opened = await ensureSidebarOpen({
+      timeoutMs: command.args?.ensureSidebarTimeoutMs,
+      pollMs: command.args?.ensureSidebarPollMs,
+    });
+    await sleep(settleMs);
+    if (opened && isSidebarOpen()) return { ok: true };
+    return {
+      ok: false,
+      code: 'sidebar_not_open',
+      error: 'Não consegui abrir o sidebar do Gemini. Abra a lista de conversas e tente novamente.',
+      sidebarDiagnostics: sidebarDiagnostics(),
+    };
   };
 
   const getSidebarConversationElements = () => {
@@ -1118,6 +1320,41 @@
     }
   };
 
+  const normalizeConcreteChatId = (value) => {
+    const chatId = String(value || '').trim().replace(/^c_/, '');
+    return /^[a-f0-9]{12,}$/i.test(chatId) ? chatId : null;
+  };
+
+  const findChatIdInAttributeValue = (value) => {
+    const text = String(value || '').trim();
+    if (!text) return null;
+    const appPathMatch = text.match(/\/app\/(?:c_)?([a-f0-9]{12,})/i);
+    const appPathChatId = normalizeConcreteChatId(appPathMatch?.[1]);
+    if (appPathChatId) return appPathChatId;
+
+    const prefixedMatch = text.match(/\bc_([a-f0-9]{12,})\b/i);
+    const prefixedChatId = normalizeConcreteChatId(prefixedMatch?.[1]);
+    if (prefixedChatId) return prefixedChatId;
+
+    const exactChatId = normalizeConcreteChatId(text);
+    if (exactChatId) return exactChatId;
+    return null;
+  };
+
+  const getChatIdFromElementAttributes = (element) => {
+    const candidates = [
+      element,
+      ...Array.from(element.querySelectorAll?.('*') || []).slice(0, 80),
+    ];
+    for (const candidate of candidates) {
+      for (const attr of Array.from(candidate.attributes || [])) {
+        const chatId = findChatIdInAttributeValue(attr.value);
+        if (chatId) return chatId;
+      }
+    }
+    return null;
+  };
+
   const getChatIdFromSidebarElement = (element) => {
     const url = getConversationUrlFromElement(element);
     if (url) {
@@ -1127,21 +1364,27 @@
 
     const testId = element.getAttribute('data-test-id');
     if (testId?.startsWith('conversation_')) {
-      return testId.slice('conversation_'.length);
+      const chatId = normalizeConcreteChatId(testId.slice('conversation_'.length));
+      if (chatId) return chatId;
     }
 
     const jslog = element.getAttribute('jslog');
     if (jslog) {
       const match = jslog.match(/BardVeMetadataKey:\[[^\]]*\["([^"]+)"/);
-      if (match?.[1]) return match[1];
+      const chatId = normalizeConcreteChatId(match?.[1]);
+      if (chatId) return chatId;
     }
 
-    return null;
+    return getChatIdFromElementAttributes(element);
   };
 
   const getConversationTitleFromElement = (element, fallbackId) => {
     const title =
-      cleanText(element.querySelector('.conversation-title, .title')?.textContent) ||
+      cleanText(
+        element.querySelector(
+          '.conversation-title, .title, [data-test-id="conversation-title"], [data-test-id="chat-title"]',
+        )?.textContent,
+      ) ||
       cleanText(element.getAttribute('aria-label')) ||
       cleanText(element.textContent).split('\n')[0];
     return title && !/new chat/i.test(title) ? title : fallbackId;
@@ -1343,23 +1586,27 @@
   const stripConversationPrefix = (value) => String(value || '').replace(/^c_/, '');
 
   const collectSidebarConversationLinks = () => {
+    if (!isSidebarOpen()) return [];
+
     const seen = new Set();
     const items = [];
     const currentId = currentChatId();
 
     getSidebarConversationElements().forEach((element, index) => {
-      const id = getChatIdFromSidebarElement(element) || `chat-${index}`;
+      const chatId = getChatIdFromSidebarElement(element);
+      if (!chatId) return;
+      const id = chatId;
       if (seen.has(id)) return;
       seen.add(id);
 
       const url =
         getConversationUrlFromElement(element) ||
-        (id ? `https://gemini.google.com/app/${id.startsWith('c_') ? id.slice(2) : id}` : null);
+        `https://gemini.google.com/app/${chatId}`;
       if (!url) return;
 
       const title = getConversationTitleFromElement(element, id);
       const pathname = new URL(url).pathname;
-      const itemChatId = extractChatId(pathname) || id;
+      const itemChatId = extractChatId(pathname) || chatId;
       const current =
         !!currentId &&
         (pathname === location.pathname ||
@@ -1390,12 +1637,30 @@
     return items.sort((a, b) => Number(b.current) - Number(a.current));
   };
 
+  const collectCurrentConversationLink = () => {
+    const currentId = currentChatId();
+    if (!currentId) return [];
+    return [
+      {
+        id: currentId,
+        chatId: currentId,
+        title: scrapeTitle() || currentId,
+        url: location.href,
+        current: true,
+        source: 'current',
+      },
+    ];
+  };
+
   const mergeConversationLists = (...lists) => {
     const seen = new Set();
     const merged = [];
     lists.flat().forEach((item) => {
       if (!item) return;
-      const key = `${item.source || 'sidebar'}:${item.chatId || item.id || item.url}`;
+      const chatId = stripConversationPrefix(item.chatId || item.id || '');
+      const key = /^[a-f0-9]{12,}$/i.test(chatId)
+        ? `chat:${chatId.toLowerCase()}`
+        : `${item.source || 'sidebar'}:${item.url || item.id || item.title || ''}`;
       if (seen.has(key)) return;
       seen.add(key);
       merged.push(item);
@@ -1440,20 +1705,25 @@
 
   const collectBridgeConversationLinks = () =>
     isNotebookPage()
-      ? mergeConversationLists(collectCachedSidebarConversationLinks(), collectNotebookConversationLinks())
-      : collectCachedSidebarConversationLinks();
+      ? mergeConversationLists(
+          collectCachedSidebarConversationLinks(),
+          collectNotebookConversationLinks(),
+          collectCurrentConversationLink(),
+        )
+      : mergeConversationLists(collectCachedSidebarConversationLinks(), collectCurrentConversationLink());
 
   const collectConversationLinkSnapshot = () => {
     const notebookPage = isNotebookPage();
     const sidebarConversations = collectCachedSidebarConversationLinks();
+    const currentConversation = collectCurrentConversationLink();
     const notebookConversations = notebookPage ? collectNotebookConversationLinks() : [];
     const modalConversations =
       notebookPage && notebookConversations.length > 0
         ? notebookConversations
         : sidebarConversations;
     const bridgeConversations = notebookPage
-      ? mergeConversationLists(sidebarConversations, notebookConversations)
-      : sidebarConversations;
+      ? mergeConversationLists(sidebarConversations, notebookConversations, currentConversation)
+      : mergeConversationLists(sidebarConversations, currentConversation);
 
     return {
       modalConversations,
@@ -1544,9 +1814,56 @@
     return (
       node.matches?.('[data-test-id="conversation"]') ||
       !!node.querySelector?.('[data-test-id="conversation"]') ||
+      node.matches?.('gem-nav-list-item, [data-conversation-id], [data-chat-id]') ||
+      !!node.querySelector?.('gem-nav-list-item, [data-conversation-id], [data-chat-id]') ||
       node.matches?.('project-chat-row') ||
       !!node.querySelector?.('project-chat-row')
     );
+  };
+
+  const uniqueElements = (items) => {
+    const seen = new Set();
+    return items.filter((item) => {
+      if (!(item instanceof Element) || seen.has(item)) return false;
+      seen.add(item);
+      return true;
+    });
+  };
+
+  const sidebarConversationItemsWithin = (root) => {
+    if (!(root instanceof Element)) return [];
+    return uniqueElements([
+      ...(root.matches?.(SIDEBAR_ITEM_SELECTOR) ? [root] : []),
+      ...Array.from(root.querySelectorAll?.(SIDEBAR_ITEM_SELECTOR) || []),
+    ]);
+  };
+
+  const sidebarRootHasExtractableConversation = (root) =>
+    sidebarConversationItemsWithin(root).some((element) => !!getChatIdFromSidebarElement(element));
+
+  const findSidebarHistoryScroller = () => {
+    const roots = uniqueElements(
+      Array.from(document.querySelectorAll(SIDEBAR_SCROLL_ROOT_SELECTOR)),
+    );
+    const relevantRoots = roots.filter(sidebarRootHasExtractableConversation);
+    if (relevantRoots.length === 0) return { wrapper: null, scroller: null, matchedBy: null };
+
+    const preferredWrapper =
+      relevantRoots.find((el) => el.tagName?.toLowerCase() === 'conversations-list') ||
+      relevantRoots.find((el) => el.tagName?.toLowerCase() === 'mat-nav-list') ||
+      relevantRoots.find((el) => el.tagName?.toLowerCase() === 'infinite-scroller') ||
+      relevantRoots[0];
+
+    const scroller =
+      relevantRoots.find((el) => hasOverflow(el)) ||
+      findScrollableParent(preferredWrapper) ||
+      preferredWrapper;
+
+    return {
+      wrapper: preferredWrapper,
+      scroller,
+      matchedBy: scroller?.tagName?.toLowerCase() || null,
+    };
   };
 
   const scheduleSidebarRefresh = () => {
@@ -1570,7 +1887,7 @@
     stopSidebarConversationObserver();
     const conversationsList = isNotebookPage()
       ? findNotebookHistoryScroller().wrapper
-      : document.querySelector('conversations-list');
+      : findSidebarHistoryScroller().wrapper;
     if (!conversationsList) return;
 
     sidebarConversationObserver = new MutationObserver((mutations) => {
@@ -1681,7 +1998,7 @@
     new Promise((resolve) => {
       const conversationsList = isNotebookPage()
         ? findNotebookHistoryScroller().wrapper
-        : document.querySelector('conversations-list');
+        : findSidebarHistoryScroller().wrapper;
       if (!conversationsList) {
         resolve(false);
         return;
@@ -1749,6 +2066,10 @@
 
     if (isNotebookPage()) {
       pickScrollContainer(findNotebookHistoryScroller().scroller, 'notebook-history-scroller');
+    }
+    if (!isNotebookPage()) {
+      const sidebarScroller = findSidebarHistoryScroller();
+      pickScrollContainer(sidebarScroller.scroller, sidebarScroller.matchedBy || 'sidebar-history-scroller');
     }
     const sidebarList = document.querySelector('conversations-list');
     pickScrollContainer(
@@ -1993,6 +2314,88 @@
       })),
     );
 
+  const summarizeSidebarCandidateElement = (el, index) => {
+    const rect = visibleRect(el);
+    const attrs = {};
+    for (const name of [
+      'data-test-id',
+      'data-conversation-id',
+      'data-chat-id',
+      'aria-label',
+      'href',
+      'jslog',
+      'class',
+      'role',
+    ]) {
+      const value = el.getAttribute?.(name);
+      if (value) attrs[name] = String(value).slice(0, 240);
+    }
+    const anchor = el.matches?.('a[href]') ? el : el.querySelector?.('a[href]');
+    if (anchor?.getAttribute?.('href')) {
+      attrs.anchorHref = String(anchor.getAttribute('href')).slice(0, 240);
+    }
+    return {
+      index,
+      tag: el.tagName?.toLowerCase() || null,
+      visible: !!rect,
+      rect: rect
+        ? {
+            left: Math.round(rect.left),
+            top: Math.round(rect.top),
+            width: Math.round(rect.width),
+            height: Math.round(rect.height),
+          }
+        : null,
+      chatId: getChatIdFromSidebarElement(el),
+      text: normalizeWhitespace(el.textContent || '').slice(0, 160),
+      attrs,
+    };
+  };
+
+  const sidebarDiagnostics = () => {
+    const candidates = getSidebarConversationElements();
+    const extractable = candidates.filter((el) => !!getChatIdFromSidebarElement(el));
+    const roots = Array.from(document.querySelectorAll(SIDEBAR_SCROLL_ROOT_SELECTOR));
+    const scroller = findSidebarHistoryScroller();
+    const menuButtons = Array.from(
+      document.querySelectorAll(
+        [
+          '[data-test-id="side-nav-menu-button"]',
+          'button[aria-label*="menu" i]',
+          'button[aria-label*="navigation" i]',
+          'button[aria-label*="navegação" i]',
+        ].join(','),
+      ),
+    )
+      .slice(0, 12)
+      .map((button, index) => summarizeDiagnosticElement(button, `sidebar-menu-button-${index + 1}`));
+    return {
+      sidebarOpen: isSidebarOpen(),
+      candidateConversationItemCount: candidates.length,
+      extractableConversationItemCount: extractable.length,
+      scrollRootCount: roots.length,
+      scrollRoots: roots.slice(0, 12).map((root, index) => ({
+        index,
+        tag: root.tagName?.toLowerCase() || null,
+        visible: !!visibleRect(root),
+        childConversationItemCount: sidebarConversationItemsWithin(root).length,
+        childExtractableConversationItemCount: sidebarConversationItemsWithin(root).filter(
+          (el) => !!getChatIdFromSidebarElement(el),
+        ).length,
+        hasOverflow: hasOverflow(root),
+      })),
+      scroller: scroller.scroller
+        ? {
+            matchedBy: scroller.matchedBy,
+            ...describeScrollContainer(scroller.scroller, scroller.matchedBy),
+          }
+        : { found: false },
+      samples: candidates.slice(0, 16).map(summarizeSidebarCandidateElement),
+      extractableSamples: extractable.slice(0, 8).map(summarizeSidebarCandidateElement),
+      menuButtons,
+    };
+  };
+
   const debugSnapshot = ({ includeDomDiagnostics = true } = {}) => {
     const {
       modalConversations,
@@ -2017,6 +2420,7 @@
         'project-chat-row': countNodes('project-chat-row'),
       },
       customTags: includeDomDiagnostics ? listCustomTags() : [],
+      sidebarDiagnostics: includeDomDiagnostics ? sidebarDiagnostics() : null,
       buttonPresent: !!document.getElementById(BUTTON_ID),
       modalPresent: !!document.getElementById(MODAL_ID),
       menuPresent: !!document.getElementById(MENU_ID),
@@ -2789,6 +3193,14 @@
     }
   };
 
+  const getOrCreateChatClientId = () =>
+    getOrCreateBridgeClientId({
+      storage: pageWindow.sessionStorage,
+      storageKey: CHAT_CLIENT_ID_STORAGE_KEY,
+      prefix: 'chat',
+      randomId,
+    });
+
   const withTimeout = (promise, timeoutMs, message) =>
     new Promise((resolve, reject) => {
       const timeoutId = setTimeout(
@@ -3242,10 +3654,16 @@
     kind: isNotebookPage() ? 'notebook' : 'chat',
     model: scrapeModel(),
     turnCount: conversationDomTurnCount(document),
+    sidebarOpen: isSidebarOpen(),
     reachedSidebarEnd: state.reachedSidebarEnd,
     isActiveTab: bridgeState.isActiveTab,
     protocolVersion: bridgeState.protocolVersion,
     buildStamp: bridgeState.buildStamp,
+    blocker: detectGooglePageBlocker({
+      url: location.href,
+      title: document.title,
+      bodyText: '',
+    }),
     topBar: buildTopBarDiagnostics(),
   });
 
@@ -4046,7 +4464,7 @@
     const fallbackStartedAt = Date.now();
     const fallbackContent = buildDocument({ meta, turns });
     timings.buildFallbackMarkdownMs = Date.now() - fallbackStartedAt;
-    if (state.progress) {
+    if (state.progress && state.exportSource === 'gui') {
       updateExportProgress({ label: 'Baixando mídias da conversa...' });
     }
     const mediaStartedAt = Date.now();
@@ -4126,8 +4544,15 @@
       commandId: active.commandId || null,
       startedAt: new Date(active.startedAt).toISOString(),
       elapsedMs: Date.now() - active.startedAt,
+      cancelRequestedAt: active.cancelRequestedAt
+        ? new Date(active.cancelRequestedAt).toISOString()
+        : null,
+      cancelReason: active.cancelReason || null,
     };
   };
+
+  const activeTabOperationCancelRequested = () =>
+    Boolean(state.activeTabOperation?.cancelRequestedAt);
 
   const maybeReleaseClaimAfterTabOperation = async (command, result, startedAt) => {
     const args = command?.args || {};
@@ -4191,6 +4616,33 @@
       bridgeState.lastExtensionPingError = err?.message || String(err);
       return null;
     }
+  };
+
+  const refreshExtensionContextSoon = ({ force = false, reason = 'background' } = {}) => {
+    if (!isExtensionContext || extensionContextRefreshInFlight) return;
+    extensionContextRefreshInFlight = Promise.resolve()
+      .then(() => refreshExtensionContext({ force }))
+      .catch((err) => {
+        bridgeState.lastExtensionPingAt = Date.now();
+        bridgeState.lastExtensionPingError = err?.message || String(err);
+        bridgeState.lastError = bridgeState.lastExtensionPingError;
+        warn(`Falha ao atualizar contexto da extensão (${reason}).`, err);
+      })
+      .finally(() => {
+        extensionContextRefreshInFlight = null;
+      });
+  };
+
+  const reportTabBrokerStateSoon = (reason = 'heartbeat', { force = false } = {}) => {
+    if (!isExtensionContext || tabBrokerReportInFlight) return;
+    tabBrokerReportInFlight = Promise.resolve()
+      .then(() => reportTabBrokerState(reason, { force }))
+      .catch((err) => {
+        bridgeState.lastExtensionPingError = err?.message || String(err);
+      })
+      .finally(() => {
+        tabBrokerReportInFlight = null;
+      });
   };
 
   const runWithTabOperationBackpressure = async (command, fn) => {
@@ -4293,6 +4745,7 @@
         title: requestedChatId,
         url: `https://gemini.google.com/app/${requestedChatId}`,
         current: false,
+        source: item.source === 'sidebar' ? 'sidebar' : 'unknown',
       };
     }
 
@@ -4305,6 +4758,7 @@
           item.url ||
           (requestedChatId ? `https://gemini.google.com/app/${requestedChatId}` : null),
         current: item.current || false,
+        source: item.source === 'sidebar' ? 'sidebar' : 'unknown',
       };
     }
 
@@ -4312,6 +4766,323 @@
     if (current) return current;
 
     throw new Error('Informe index ou chatId para escolher a conversa.');
+  };
+
+  const sharedTabCommands = createSharedTabCommandHandlers({
+    defaultReason: 'bridge-command',
+    defaultClaimLabel: TAB_CLAIM_DEFAULT_LABEL,
+    defaultClaimColor: 'green',
+    extensionSendMessage,
+    getTabId: () => bridgeState.tabId,
+    getWindowId: () => bridgeState.windowId,
+    getTabClaim: () => state.tabClaim,
+    setTabClaim: (claim) => {
+      state.tabClaim = claim;
+    },
+    clearTabClaim: clearLocalTabClaim,
+    setIsActiveTab: (value) => {
+      bridgeState.isActiveTab = value;
+    },
+    getExtensionInfo: async () => {
+      const localInfo = () => ({
+        ok: true,
+        version: bridgeState.extensionVersion || SCRIPT_VERSION,
+        extensionVersion: bridgeState.extensionVersion || SCRIPT_VERSION,
+        protocolVersion: bridgeState.protocolVersion ?? EXTENSION_PROTOCOL_VERSION,
+        extensionId: null,
+        manifestVersion: 3,
+        tabId: bridgeState.tabId ?? null,
+        windowId: bridgeState.windowId ?? null,
+        isActiveTab: bridgeState.isActiveTab ?? null,
+        buildStamp: bridgeState.buildStamp || BUILD_STAMP,
+        source: 'content-script-fallback',
+        contentScript: true,
+        serviceWorker: false,
+      });
+      try {
+        const ping = await extensionSendMessageWithRetry(
+          { type: 'GET_EXTENSION_INFO' },
+          { timeoutMs: 1200, attempts: 1, retryDelayMs: 0 },
+        );
+        const response = ping.response;
+        if (response?.ok && response.protocolVersion !== undefined) {
+          bridgeState.protocolVersion = response.protocolVersion;
+        }
+        if (response?.version || response?.extensionVersion) {
+          bridgeState.extensionVersion = response.extensionVersion || response.version;
+        }
+        if (response?.buildStamp) bridgeState.buildStamp = response.buildStamp;
+        return {
+          ...localInfo(),
+          ...(response || {}),
+          contentScript: true,
+          serviceWorker: response?.ok === true,
+          attempts: ping.attempts,
+          source: response?.source || 'service-worker',
+        };
+      } catch (err) {
+        return {
+          ...localInfo(),
+          fallback: true,
+          reason: 'service-worker-info-unavailable',
+          error: err?.message || String(err),
+          attempts: err?.attempts || 1,
+        };
+      }
+    },
+    rememberTabClaim,
+    releaseCurrentTabClaim,
+    afterReleaseByTabId: async ({ command, response, requestedTabId }) => {
+      const currentTabId = Number(bridgeState.tabId);
+      const targetsThisTab =
+        Number.isInteger(requestedTabId) &&
+        Number.isInteger(currentTabId) &&
+        requestedTabId === currentTabId;
+      const claimMatches =
+        !command.args?.claimId ||
+        !state.tabClaim?.claimId ||
+        state.tabClaim.claimId === command.args.claimId;
+      if (targetsThisTab && claimMatches && response?.ok) {
+        clearLocalTabClaim();
+        reportTabBrokerState('claim-released-by-tab-id', { force: true });
+      }
+    },
+  });
+
+  const browserSideEffectCommands = new Set([
+    'get-chat-by-id',
+    'load-more-conversations',
+    'open-chat',
+    'reload-gemini-tabs',
+    'reload-page',
+  ]);
+
+  const hasExplicitBrowserCommandIntent = (command) =>
+    command.args?.explicit === true ||
+    command.args?.explicitBrowserSideEffect === true ||
+    command.args?.browserSideEffectExplicit === true ||
+    command.args?.force === true;
+
+  const explicitBrowserCommandIntentRequired = (command) => ({
+    ok: false,
+    code: 'explicit_browser_intent_required',
+    status: 'explicit-browser-intent-required',
+    reason: command.args?.reason || 'bridge-command',
+    skipped: true,
+  });
+
+  const captureHostStylesProbe = () => {
+    const pageDoc = pageWindow.document;
+    const visible = (el) => {
+      if (!el) return false;
+      try {
+        const r = el.getBoundingClientRect();
+        if (r.width < 4 || r.height < 4) return false;
+        const cs = pageWindow.getComputedStyle(el);
+        return cs.visibility !== 'hidden' && cs.display !== 'none' && parseFloat(cs.opacity) > 0;
+      } catch {
+        return false;
+      }
+    };
+    const visAll = (sel) => {
+      try {
+        return Array.from(pageDoc.querySelectorAll(sel)).filter(visible);
+      } catch {
+        return [];
+      }
+    };
+    const first = (sel) => visAll(sel)[0] || null;
+    const readToken = (name) => {
+      try {
+        const html = pageWindow.getComputedStyle(pageDoc.documentElement).getPropertyValue(name).trim();
+        if (html) return html;
+        if (pageDoc.body) {
+          const body = pageWindow.getComputedStyle(pageDoc.body).getPropertyValue(name).trim();
+          if (body) return body;
+        }
+      } catch {}
+      return '';
+    };
+    const pick = (el, props) => {
+      if (!el) return null;
+      let cs;
+      try {
+        cs = pageWindow.getComputedStyle(el);
+      } catch {
+        return null;
+      }
+      const out = {};
+      for (const p of props) {
+        try {
+          out[p] = cs.getPropertyValue(p).trim();
+        } catch {
+          out[p] = '';
+        }
+      }
+      const r = el.getBoundingClientRect();
+      out.__rect = { w: Math.round(r.width), h: Math.round(r.height) };
+      out.__tag = el.tagName.toLowerCase();
+      out.__cls = typeof el.className === 'string' ? el.className.slice(0, 160) : '';
+      out.__aria = el.getAttribute('aria-label') || '';
+      return out;
+    };
+
+    const surfaceProps = [
+      'background-color',
+      'color',
+      'border',
+      'border-color',
+      'border-radius',
+      'box-shadow',
+      'padding',
+      'font-family',
+      'font-size',
+      'font-weight',
+      'line-height',
+      'letter-spacing',
+      'backdrop-filter',
+    ];
+    const buttonProps = [
+      'background-color',
+      'color',
+      'border',
+      'border-color',
+      'border-radius',
+      'width',
+      'height',
+      'padding',
+      'min-width',
+      'min-height',
+      'box-shadow',
+      'transition',
+      'font-family',
+      'font-size',
+      'font-weight',
+    ];
+    const inputProps = [
+      'background-color',
+      'color',
+      'border',
+      'border-color',
+      'border-radius',
+      'padding',
+      'font-size',
+      'box-shadow',
+    ];
+
+    const tokenNames = [
+      '--gem-sys-color--surface',
+      '--gem-sys-color--surface-container',
+      '--gem-sys-color--surface-container-low',
+      '--gem-sys-color--surface-container-high',
+      '--gem-sys-color--surface-container-highest',
+      '--gem-sys-color--on-surface',
+      '--gem-sys-color--on-surface-variant',
+      '--gem-sys-color--outline',
+      '--gem-sys-color--outline-variant',
+      '--gem-sys-color--primary',
+      '--gem-sys-color--on-primary',
+      '--gem-sys-color--primary-container',
+      '--gem-sys-color--on-primary-container',
+      '--gem-sys-color--secondary',
+      '--gem-sys-color--secondary-container',
+      '--gem-sys-color--on-secondary-container',
+      '--gem-sys-color--tertiary-container',
+      '--gem-sys-color--error',
+      '--gem-sys-color--inverse-surface',
+      '--gem-sys-color--inverse-on-surface',
+      '--gem-sys-elevation--level1',
+      '--gem-sys-elevation--level2',
+      '--gem-sys-elevation--level3',
+      '--gem-sys-shape--corner-small',
+      '--gem-sys-shape--corner-medium',
+      '--gem-sys-shape--corner-large',
+      '--gem-sys-shape--corner-extra-large',
+      '--gem-sys-typescale--body-large-font',
+      '--gem-sys-typescale--label-large-font',
+      '--mat-sys-surface',
+      '--mat-sys-on-surface',
+      '--mat-sys-primary',
+      '--mat-sys-secondary-container',
+      '--mat-sys-outline',
+    ];
+    const tokens = {};
+    for (const name of tokenNames) tokens[name] = readToken(name);
+
+    const topBars = Array.from(pageDoc.querySelectorAll('top-bar-actions'));
+    const topBar = topBars.find(visible) || topBars[0] || null;
+    const rightSection = topBar?.querySelector('.right-section') || null;
+    const buttonsContainers = rightSection
+      ? Array.from(rightSection.querySelectorAll('.buttons-container')).filter(visible)
+      : [];
+
+    const kebab =
+      (topBar &&
+        (topBar.querySelector('button[aria-haspopup="menu"]') ||
+          topBar.querySelector('button.mat-mdc-icon-button') ||
+          topBar.querySelector('mat-icon-button'))) ||
+      first('top-bar-actions button[mat-icon-button]') ||
+      first('button.mat-mdc-icon-button');
+
+    let kebabIcon = null;
+    if (kebab) {
+      const ic = kebab.querySelector(
+        'mat-icon, gem-icon, .material-symbols-outlined, .gds-icon, svg, i',
+      );
+      if (ic) {
+        try {
+          const cs = pageWindow.getComputedStyle(ic);
+          const r = ic.getBoundingClientRect();
+          kebabIcon = {
+            tag: ic.tagName.toLowerCase(),
+            cls: typeof ic.className === 'string' ? ic.className.slice(0, 160) : '',
+            text: (ic.textContent || '').trim().slice(0, 40),
+            fontFamily: cs.getPropertyValue('font-family').trim(),
+            fontSize: cs.getPropertyValue('font-size').trim(),
+            color: cs.getPropertyValue('color').trim(),
+            size: { w: Math.round(r.width), h: Math.round(r.height) },
+          };
+        } catch {
+          kebabIcon = null;
+        }
+      }
+    }
+
+    const sidebarItem =
+      first(
+        'side-nav-action-button.is-selected, .conversations-list .selected, mat-list-item.mdc-list-item--selected, [data-test-id="conversation"].is-selected, gem-nav-list-item.is-selected',
+      ) || first('gem-nav-list-item');
+    const inputArea = first('input-area-v2 .input-container, input-area-v2 .text-input-field, input-area-v2');
+    const dialog = first('mat-dialog-container, .cdk-overlay-pane mat-dialog-container, .cdk-overlay-pane[role="dialog"]');
+    const menu = first('.mat-mdc-menu-panel, .cdk-overlay-pane .menu-content, gem-popover, [role="menu"]');
+    const menuItem = menu?.querySelector('[role="menuitem"], .mat-mdc-menu-item, .menu-item') || null;
+    const chip = first('mat-chip, .mdc-evolution-chip, [class*="chip"]:not([class*="chips"])');
+    const toast = first('.mat-mdc-snack-bar-container, .gmat-snack-bar, simple-snack-bar');
+
+    return {
+      capturedAt: new Date().toISOString(),
+      href: pageWindow.location.href,
+      bodyClass: (pageDoc.body && pageDoc.body.className ? pageDoc.body.className : '').slice(0, 240),
+      htmlClass: pageDoc.documentElement.className.slice(0, 240),
+      tokens,
+      geometry: {
+        topBarCount: topBars.length,
+        topBarVisibleCount: topBars.filter(visible).length,
+        topBarRect: topBar ? topBar.getBoundingClientRect().toJSON?.() || null : null,
+        rightSectionRect: rightSection ? rightSection.getBoundingClientRect().toJSON?.() || null : null,
+        buttonsContainerCount: rightSection ? rightSection.querySelectorAll('.buttons-container').length : 0,
+        buttonsContainerVisibleCount: buttonsContainers.length,
+      },
+      kebab: pick(kebab, buttonProps),
+      kebabIcon,
+      sidebarItem: pick(sidebarItem, surfaceProps),
+      inputArea: pick(inputArea, inputProps),
+      dialog: pick(dialog, surfaceProps),
+      menu: pick(menu, surfaceProps),
+      menuItem: pick(menuItem, surfaceProps),
+      chip: pick(chip, surfaceProps),
+      toast: pick(toast, surfaceProps),
+    };
   };
 
   const executeBridgeCommand = async (command) => {
@@ -4322,10 +5093,45 @@
       };
     }
 
+    const sharedResult = await sharedTabCommands.execute(command);
+    if (sharedResult !== undefined) return sharedResult;
+
+    if (
+      browserSideEffectCommands.has(String(command.type || '')) &&
+      !hasExplicitBrowserCommandIntent(command)
+    ) {
+      return explicitBrowserCommandIntentRequired(command);
+    }
+
     if (command.type === 'ping' || command.type === 'snapshot') {
+      let hostStyles = null;
+      try {
+        hostStyles = captureHostStylesProbe();
+      } catch {
+        hostStyles = null;
+      }
       return {
         ok: true,
         snapshot: debugSnapshot(),
+        hostStyles,
+      };
+    }
+
+    if (command.type === 'cancel-active-operation') {
+      if (!state.activeTabOperation) {
+        return {
+          ok: true,
+          cancelled: false,
+          reason: 'no-active-operation',
+        };
+      }
+      state.activeTabOperation.cancelRequestedAt = Date.now();
+      state.activeTabOperation.cancelReason = command.args?.reason || 'bridge-command';
+      reportTabBrokerState('operation-cancel-requested', { force: true });
+      return {
+        ok: true,
+        cancelled: true,
+        activeOperation: activeTabOperationSummary(),
       };
     }
 
@@ -4334,6 +5140,13 @@
         ok: true,
         media: inspectMediaDom(),
         snapshot: debugSnapshot(),
+      };
+    }
+
+    if (command.type === 'capture-host-styles') {
+      return {
+        ok: true,
+        hostStyles: captureHostStylesProbe(),
       };
     }
 
@@ -4394,6 +5207,15 @@
     }
 
     if (command.type === 'reload-gemini-tabs') {
+      if (command.args?.explicit !== true && command.args?.force !== true) {
+        return {
+          ok: false,
+          status: 'explicit-reload-required',
+          reason: command.args?.reason || 'bridge-command',
+          skipped: true,
+          reloaded: 0,
+        };
+      }
       const response = await new Promise((resolve) => {
         if (typeof chrome === 'undefined' || !chrome?.runtime?.sendMessage) {
           resolve({ ok: false, reason: 'runtime-message-unavailable', reloaded: 0 });
@@ -4403,6 +5225,8 @@
           {
             type: 'gemini-md-export/reload-gemini-tabs',
             reason: command.args?.reason || 'bridge-command',
+            explicit: command.args?.explicit === true,
+            force: command.args?.force === true,
           },
           (result) => {
             if (chrome.runtime.lastError) {
@@ -4446,6 +5270,26 @@
         expectedBuildStamp: command.args?.expectedBuildStamp || null,
       });
       return response || { ok: false, reason: 'empty-reload-response' };
+    }
+
+    if (command.type === 'activate-tab' || command.type === 'activate-browser-tab') {
+      const requestedTabId = Number(command.args?.tabId ?? command.args?.targetTabId);
+      const response = await extensionSendMessage(
+        {
+          type: 'gemini-md-export/activate-tab',
+          tabId: Number.isInteger(requestedTabId) ? requestedTabId : undefined,
+          reason: command.args?.reason || 'bridge-command',
+          focusWindow: command.args?.focusWindow === true,
+        },
+        { timeoutMs: 5000 },
+      );
+      if (
+        response?.isActiveTab !== undefined &&
+        (!Number.isInteger(requestedTabId) || requestedTabId === bridgeState.tabId)
+      ) {
+        bridgeState.isActiveTab = response.isActiveTab;
+      }
+      return response || { ok: false, reason: 'empty-activate-tab-response' };
     }
 
     if (command.type === 'claim-tab') {
@@ -4510,10 +5354,8 @@
     }
 
     if (command.type === 'list-conversations') {
-      if (command.args?.ensureSidebar !== false) {
-        await ensureSidebarOpen();
-        await sleep(DEFAULT_LOAD_MORE_OPTIONS.ensureSidebarDelayMs);
-      }
+      const sidebarReady = await ensureSidebarOpenForCommand(command, DEFAULT_LOAD_MORE_OPTIONS.ensureSidebarDelayMs);
+      if (!sidebarReady.ok) return sidebarReady;
       return {
         ok: true,
         conversations: collectBridgeConversationLinks(),
@@ -4530,10 +5372,8 @@
         ignoreFailureCap: command.args?.ignoreFailureCap === true,
         endFailureThreshold: command.args?.endFailureThreshold,
       });
-      if (command.args?.ensureSidebar !== false) {
-        await ensureSidebarOpen();
-        await sleep(loadOptions.ensureSidebarDelayMs);
-      }
+      const sidebarReady = await ensureSidebarOpenForCommand(command, loadOptions.ensureSidebarDelayMs);
+      if (!sidebarReady.ok) return sidebarReady;
       if (command.args?.resetReachedEnd === true) {
         state.reachedSidebarEnd = false;
         state.loadMoreFailures = 0;
@@ -4662,10 +5502,13 @@
     if (command.type === 'open-chat') {
       try {
         const targetItem = findConversationForBridgeCommand(command.args || {});
-        await navigateToConversation(targetItem);
+        const navigation = await openChatWithNavigationEngine(targetItem, {
+          ignoreBusy: true,
+        });
         return {
           ok: true,
           conversation: targetItem,
+          navigation: navigation?.navigationEngine || navigation || null,
           snapshot: debugSnapshot(),
         };
       } catch (err) {
@@ -4717,7 +5560,9 @@
         originalItem.chatId !== targetItem.chatId
       ) {
         try {
-          await navigateToConversation(originalItem);
+          await openChatWithNavigationEngine(originalItem, {
+            ignoreBusy: true,
+          });
           returnedToOriginal = true;
         } catch (err) {
           returnError = err?.message || String(err);
@@ -4914,23 +5759,14 @@
   };
 
   const conversationHydrationChanged = (before, after) =>
-    !!before &&
-    !!after &&
-    (after.containerCount > before.containerCount ||
-      after.turnDomCount > before.turnDomCount ||
-      after.firstSignature !== before.firstSignature ||
-      after.domSignature !== before.domSignature ||
-      after.scrollHeight > before.scrollHeight + 4);
-
-  const conversationHydrationLooksLarge = (state) =>
-    Number(state?.turnDomCount || 0) >= 80 ||
-    Number(state?.containerCount || 0) >= 80 ||
-    Number(state?.scrollHeight || 0) >= 30000;
+    hydrationDomProgressChanged(before, after);
 
   const topHydrationConfirmationMs = (state, { loadWaitMs, topSettleMs }) =>
-    conversationHydrationLooksLarge(state)
-      ? topSettleMs
-      : Math.min(topSettleMs, Math.max(1200, loadWaitMs));
+    hydrationConfirmationWaitMs(state, {
+      loadWaitMs,
+      topSettleMs,
+      smallSettleMs: HYDRATION_SMALL_TOP_SETTLE_MS,
+    });
 
   const nudgeConversationTop = async (scrollTarget, scrollElement, doc, win) => {
     try {
@@ -5008,6 +5844,11 @@
       const waitStartedAt = Date.now();
       let state = beforeState;
       while (Date.now() - waitStartedAt < waitMs) {
+        if (options.isCancelled?.()) {
+          const error = new Error('Exportação cancelada antes de terminar a hidratação da conversa.');
+          error.code = 'operation_cancelled';
+          throw error;
+        }
         await sleep(100);
         state = conversationHydrationState(scroller, doc, scrollTarget, win);
         if (conversationHydrationChanged(beforeState, state)) {
@@ -5021,6 +5862,11 @@
     };
 
     while (attempts < maxAttempts) {
+      if (options.isCancelled?.()) {
+        const error = new Error('Exportação cancelada antes de terminar a hidratação da conversa.');
+        error.code = 'operation_cancelled';
+        throw error;
+      }
       if (Date.now() - startedAt > maxTotalMs) {
         timedOut = true;
         finalReason = 'max-total-time';
@@ -5483,7 +6329,24 @@
       };
     }
 
-    const element = getSidebarConversationById(item.id);
+    const preferSidebarNavigation =
+      item.source === 'sidebar' || options.preferSidebarNavigation === true;
+    if (preferSidebarNavigation && !isSidebarOpen()) {
+      try {
+        await ensureSidebarOpen({
+          timeoutMs: Math.min(FRAME_TIMEOUT_MS, Number(options.sidebarOpenTimeoutMs || 5000)),
+          pollMs: 100,
+        });
+      } catch {
+        // Se o sidebar não abrir, o fallback por URL direta ainda preserva o export.
+      }
+    }
+
+    if (!isSidebarOpen() && String(item.url || '').includes('/app/')) {
+      return navigateToKnownChatUrl(item);
+    }
+
+    const element = getSidebarConversationById(item.id || targetChatId);
     if (!element) {
       if ((item.chatId || item.url) && String(item.url || '').includes('/app/')) {
         return navigateToKnownChatUrl(item);
@@ -5499,12 +6362,124 @@
     });
   };
 
+  const getGeminiDomAdapter = () =>
+    createGeminiWebDomAdapter({
+      documentRef: document,
+      locationHref: location.href,
+    });
+
+  const navigationRowFromConversationItem = (item = {}) => {
+    const chatId = normalizeExpectedChatId(item);
+    const url =
+      item.url ||
+      (chatId ? `https://gemini.google.com/app/${chatId}` : null);
+    const warnings = chatId && url ? [] : ['missing_chat_id'];
+    return {
+      source: item.source === 'notebook' || item.source === 'sidebar' ? item.source : 'unknown',
+      index: Number.isInteger(item.index) ? item.index : 0,
+      title: item.title || item.id || chatId || '',
+      url,
+      chatId: chatId || null,
+      exportable: Boolean(chatId && url),
+      current: Boolean(chatId && chatId === currentChatId()),
+      warnings,
+      evidence: [
+        {
+          source: 'chat-dom',
+          kind: chatId ? 'conversation-item-chat-id' : 'conversation-item-missing-chat-id',
+          confidence: chatId ? 'strong' : 'missing',
+          warnings,
+        },
+      ],
+    };
+  };
+
+  const openChatWithNavigationEngine = async (target = {}, options = {}) => {
+    const item = target.item || target.row || target;
+    const row = navigationRowFromConversationItem(item);
+    let legacyNavigation = null;
+    const previousChatId = currentChatId();
+    const previousSignature = conversationDomSignature(document);
+    const engine = createNavigationEngine({
+      adapter: getGeminiDomAdapter(),
+      isBusy: () => Boolean(state.activeTabOperation && options.ignoreBusy !== true),
+      openUrl: async () => {
+        legacyNavigation = await navigateToConversation(item, options);
+      },
+      waitForHydration: async ({ chatId }) => {
+        try {
+          const loaded = await waitForChatToLoad(chatId, {
+            previousChatId,
+            previousSignature: previousChatId && previousChatId !== chatId ? previousSignature : '',
+          });
+          return {
+            ok: true,
+            turnCount: loaded.turnCount,
+            warnings: [],
+            evidence: [
+              {
+                source: 'chat-dom',
+                kind: 'conversation-hydrated-before-export',
+                confidence: 'strong',
+                warnings: [],
+              },
+            ],
+          };
+        } catch (err) {
+          return {
+            ok: false,
+            code: 'timeout',
+            message: err?.message || String(err),
+            requestedChatId: chatId,
+            observedChatId: currentChatId() || undefined,
+            warnings: ['conversation_hydration_timeout'],
+            evidence: [
+              {
+                source: 'chat-dom',
+                kind: 'conversation-hydration-timeout',
+                confidence: 'missing',
+                warnings: ['conversation_hydration_timeout'],
+              },
+            ],
+          };
+        }
+      },
+    });
+    const result = await engine.openChat({
+      chatId: row.chatId,
+      url: row.url,
+      row,
+    });
+    if (!result.ok) {
+      const error = new Error(result.message);
+      error.code = result.code;
+      error.navigation = result;
+      throw error;
+    }
+    if (legacyNavigation) {
+      return {
+        ...legacyNavigation,
+        navigationEngine: result,
+      };
+    }
+    return {
+      chatId: result.chatId,
+      previousChatId: currentChatId(),
+      previousSignature: '',
+      signature: conversationDomSignature(document),
+      turnCount: result.turnCount ?? conversationDomTurnCount(document),
+      skipped: result.reason === 'already-current',
+      navigationEngine: result,
+    };
+  };
+
   const collectExportForCurrentConversation = async (options = {}) => {
     const hydrationStartedAt = Date.now();
     const hydrated = await hydrateConversationToTop(document, window, {
       ...(options.hydration || {}),
+      isCancelled: activeTabOperationCancelRequested,
       onProgress: ({ state: hydrationState, elapsedMs }) => {
-        if (state.progress) {
+        if (state.progress && state.exportSource === 'gui') {
           updateExportProgress({
             current: 0,
             label: `Hidratando conversa... ${
@@ -5567,7 +6542,10 @@
 
   const collectExportForConversation = async (item, options = {}) => {
     const navigationStartedAt = Date.now();
-    const navigation = await navigateToConversation(item, options);
+    const navigation = await openChatWithNavigationEngine(item, {
+      ...options,
+      ignoreBusy: true,
+    });
     const openConversationMs = Date.now() - navigationStartedAt;
     return collectExportForCurrentConversation({
       expectedChatId: normalizeExpectedChatId(item),
@@ -5798,17 +6776,69 @@
       filtered[0]?.id || ''
     }|${filtered.at(-1)?.id || ''}`;
 
-  const scheduleVirtualListRender = () => {
-    if (!state.modalVirtual.active || state.modalVirtual.scheduled) return;
-    state.modalVirtual.scheduled = true;
-    const schedule =
+	  const scheduleVirtualListRender = () => {
+	    if (!state.modalVirtual.active || state.modalVirtual.scheduled) return;
+	    state.modalVirtual.scheduled = true;
+	    const schedule =
       typeof pageWindow.requestAnimationFrame === 'function'
         ? pageWindow.requestAnimationFrame.bind(pageWindow)
         : (callback) => setTimeout(callback, 16);
     schedule(() => {
       state.modalVirtual.scheduled = false;
-      renderConversationList({ fromVirtualScroll: true });
+	      renderConversationList({ fromVirtualScroll: true });
+	    });
+	  };
+
+  const modalListWheelMetrics = (target) => ({
+    scrollTop: Number(target.scrollTop || 0),
+    clientHeight: Number(target.clientHeight || 0),
+    scrollHeight: Number(target.scrollHeight || 0),
+    itemHeight: MODAL_VIRTUAL_ITEM_HEIGHT,
+    virtualItemCount: state.modalVirtual.active ? state.modalVirtual.lastTotal : 0,
+  });
+
+  const modalListMaxScrollTop = (target) =>
+    computeModalVirtualScrollRange(modalListWheelMetrics(target));
+
+  const handleModalListScrollPosition = (target) => {
+    scheduleVirtualListRender();
+    if (modalListMaxScrollTop(target) - target.scrollTop < 120) {
+      loadMoreConversations(
+        isNotebookPage() ? NOTEBOOK_LOAD_MORE_ATTEMPTS : SIDEBAR_LOAD_MORE_ATTEMPTS,
+      );
+    }
+  };
+
+  const scrollModalListByWheel = (target, event) => {
+    const result = computeModalWheelScroll({
+      ...modalListWheelMetrics(target),
+      deltaY: Number(event.deltaY || 0),
+      ctrlKey: event.ctrlKey === true,
+      metaKey: event.metaKey === true,
     });
+    if (!result.shouldScroll) return false;
+    event.preventDefault();
+    event.stopPropagation();
+    target.scrollTop = result.nextScrollTop;
+    handleModalListScrollPosition(target);
+    return true;
+  };
+
+  const handleModalListWheel = (event) => {
+    const target = event.currentTarget;
+    if (!(target instanceof HTMLElement)) return;
+    scrollModalListByWheel(target, event);
+  };
+
+  const handleModalPanelWheel = (event) => {
+    const list = document.getElementById(MODAL_LIST_ID);
+    if (!(list instanceof HTMLElement)) return;
+    const target = event.target;
+    if (target instanceof Element) {
+      if (target.closest(`#${MODAL_LIST_ID}`)) return;
+      if (target.closest('input, textarea, select, [contenteditable="true"]')) return;
+    }
+    scrollModalListByWheel(list, event);
   };
 
   const renderConversationList = ({ fromVirtualScroll = false } = {}) => {
@@ -5821,9 +6851,9 @@
     // do reflow, a menos que usuario estivesse colado no fim (auto-scroll
     // de continuacao) ou tenhamos acabado de bater no fim da lista.
     const prevScrollTop = container.scrollTop;
+    const maxScrollTopBeforeRender = modalListMaxScrollTop(container);
     const wasNearBottom =
-      container.scrollHeight > container.clientHeight &&
-      container.scrollHeight - container.scrollTop - container.clientHeight < 48;
+      maxScrollTopBeforeRender > 0 && maxScrollTopBeforeRender - container.scrollTop < 48;
     const finishRender = () => {
       renderListEndState();
       requestAnimationFrame(() => {
@@ -5831,10 +6861,7 @@
           container.scrollTop = container.scrollHeight;
         } else if (prevScrollTop > 0) {
           // Clamp contra encolhimento (filtro reduziu lista).
-          const maxTop = Math.max(
-            0,
-            container.scrollHeight - container.clientHeight,
-          );
+          const maxTop = modalListMaxScrollTop(container);
           container.scrollTop = Math.min(prevScrollTop, maxTop);
         }
       });
@@ -5940,19 +6967,6 @@
   // pulamos pra esse alvo (animação CSS suaviza). Mecânica clássica
   // de YouTube/GitHub progress bar.
   const PROGRESS_CREEP_INTERVAL_MS = 240;
-  const PROGRESS_CREEP_MAX_FRACTION = 0.85; // não passa de 85% até o próximo milestone
-
-  const computeProgressMilestone = (progress) => {
-    const total = Math.max(progress?.total || 1, 1);
-    const status = progress?.status || '';
-    const raw = (status === 'completed' || status === 'completed_with_errors')
-      ? total
-      : Number(progress?.current ?? progress?.completed ?? 0);
-    const current = Math.max(0, Math.min(Number.isFinite(raw) ? raw : 0, total));
-    const base = (current / total) * 100;
-    const next = (Math.min(current + 1, total) / total) * 100;
-    return { base, next };
-  };
 
   const UI_TECHNICAL_COPY_RE =
     /\b(MCP|bridge|claim|job|payload|phase|reexport(?:ando|acao|ação)?)\b/i;
@@ -5978,11 +6992,7 @@
   };
 
   const progressBarCurrent = (progress) => {
-    const total = Math.max(progress?.total || 1, 1);
-    const status = progress?.status || '';
-    if (status === 'completed' || status === 'completed_with_errors') return total;
-    const raw = Number(progress?.current ?? progress?.completed ?? 0);
-    return Math.max(0, Math.min(Number.isFinite(raw) ? raw : 0, total));
+    return sharedProgressBarCurrent(progress);
   };
 
   const progressTitleFor = (progress) => {
@@ -6055,8 +7065,12 @@
         stopProgressCreep();
         return;
       }
-      const { base, next } = computeProgressMilestone(state.progress);
-      const ceiling = base + (next - base) * PROGRESS_CREEP_MAX_FRACTION;
+      if (!sharedShouldRunProgressCreep(state.progress)) {
+        stopProgressCreep();
+        return;
+      }
+      const { base } = sharedComputeProgressMilestone(state.progress);
+      const ceiling = sharedProgressCreepCeiling(state.progress);
       const display = state.progress.displayPercent ?? base;
       if (display >= ceiling - 0.05) return;
       // Fração aproxima exponencialmente: andamos 18% do caminho restante
@@ -6077,7 +7091,7 @@
       return;
     }
 
-    applySharedProgressDockTheme(dock, { dark: isDarkTheme() });
+    applySharedProgressDockTheme(dock, { dark: isDarkTheme(), documentRef: document });
 
     const { titleEl, countEl, labelEl, barEl } = getSharedProgressDockElements({
       dockId: PROGRESS_DOCK_ID,
@@ -6093,12 +7107,17 @@
       labelEl.textContent = humanProgressLabelFor(state.progress);
     }
     if (barEl) {
-      const { base, next } = computeProgressMilestone(state.progress);
+      const { base, next } = sharedComputeProgressMilestone(state.progress);
       // Se o `current` real avançou, pulamos a barra pra base nova; caso
       // contrário, mantemos o valor que o creep está alimentando (sem
       // regredir nem ultrapassar a base nova).
       const prevDisplay = state.progress.displayPercent ?? 0;
-      const display = Math.max(prevDisplay, base);
+      const display = sharedNormalizeProgressDisplayPercent({
+        previousProgress: state.previousProgressForDisplay || state.progress,
+        nextProgress: state.progress,
+        previousDisplayPercent: prevDisplay,
+      });
+      state.previousProgressForDisplay = { ...state.progress };
       state.progress.displayPercent = display;
       barEl.style.width = `${display}%`;
       // Quando bate o total, marca como pronto pra parar o shimmer.
@@ -6108,8 +7127,10 @@
         dock.classList.remove('gm-dock-done');
       }
       // Garante que o creep está rodando (idempotente).
-      if (!state.progressCreepTimer && next > base + 0.5) {
+      if (sharedShouldRunProgressCreep(state.progress) && !state.progressCreepTimer && next > base + 0.5) {
         startProgressCreep();
+      } else if (!sharedShouldRunProgressCreep(state.progress)) {
+        stopProgressCreep();
       }
     }
 
@@ -6145,6 +7166,7 @@
       startedAt: Date.now(),
       displayPercent: 0,
     };
+    state.previousProgressForDisplay = null;
     hideExportModal();
     updateProgressDock();
     startProgressCreep();
@@ -6153,7 +7175,14 @@
 
   const updateExportProgress = (patch = {}) => {
     if (!state.progress) return;
+    const previousProgress = { ...state.progress };
     Object.assign(state.progress, patch);
+    state.progress.displayPercent = sharedNormalizeProgressDisplayPercent({
+      previousProgress,
+      nextProgress: state.progress,
+      previousDisplayPercent: previousProgress.displayPercent ?? state.progress.displayPercent ?? 0,
+    });
+    state.previousProgressForDisplay = previousProgress;
     updateProgressDock();
   };
 
@@ -6176,6 +7205,7 @@
     state.isExporting = false;
     state.exportSource = null;
     state.progress = null;
+    state.previousProgressForDisplay = null;
     if (state.activeTabOperation?.type === 'gui-export') {
       state.completedTabOperations += 1;
       state.activeTabOperation = null;
@@ -6195,6 +7225,62 @@
     'failed',
     'cancelled',
   ]);
+
+  const stopMcpProgressWatchdog = () => {
+    if (state.mcpProgressWatchdogTimer) {
+      clearInterval(state.mcpProgressWatchdogTimer);
+      state.mcpProgressWatchdogTimer = 0;
+    }
+  };
+
+  const noteMcpProgressStatus = (status) => {
+    if (status === 'cancel_requested') {
+      state.mcpProgressCancelSinceAt = state.mcpProgressCancelSinceAt || Date.now();
+      return;
+    }
+    state.mcpProgressCancelSinceAt = 0;
+  };
+
+  const clearStaleMcpProgressIfNeeded = () => {
+    if (!state.mcpProgressActive || state.exportSource !== 'mcp') {
+      stopMcpProgressWatchdog();
+      return false;
+    }
+    const status = state.progress?.status || '';
+    const now = Date.now();
+    const staleMs =
+      status === 'cancel_requested'
+        ? now - (state.mcpProgressCancelSinceAt || state.mcpProgressLastSeenAt || now)
+        : now - (state.mcpProgressLastSeenAt || now);
+    const limitMs =
+      status === 'cancel_requested' ? MCP_PROGRESS_CANCEL_STALE_MS : MCP_PROGRESS_STALE_GRACE_MS;
+    if (staleMs < limitMs) return false;
+
+    if (status === 'cancel_requested' && state.progress) {
+      state.progress.status = 'cancelled';
+      state.progress.phase = 'cancelled';
+      state.progress.label = 'Cancelado';
+      stopMcpProgressWatchdog();
+      state.mcpProgressActive = false;
+      state.mcpProgressJobId = null;
+      state.mcpProgressLastSeenAt = 0;
+      state.mcpProgressCancelSinceAt = 0;
+      clearMcpProgressSnapshot();
+      updateProgressDock();
+      void finishExportProgress();
+    } else {
+      clearMcpProgressState();
+    }
+    return true;
+  };
+
+  const startMcpProgressWatchdog = () => {
+    if (state.mcpProgressWatchdogTimer) return;
+    state.mcpProgressWatchdogTimer = setInterval(
+      clearStaleMcpProgressIfNeeded,
+      MCP_PROGRESS_WATCHDOG_MS,
+    );
+  };
 
   const serializeMcpProgress = (jobProgress) => {
     if (!jobProgress || typeof jobProgress !== 'object') return null;
@@ -6304,7 +7390,12 @@
       if (!raw) return null;
       const snapshot = JSON.parse(raw);
       if (!snapshot || snapshot.source !== 'mcp') return null;
-      if (Date.now() - Number(snapshot.updatedAt || 0) > MCP_PROGRESS_STALE_GRACE_MS) {
+      const ageMs = Date.now() - Number(snapshot.updatedAt || 0);
+      if (ageMs > MCP_PROGRESS_STALE_GRACE_MS) {
+        clearMcpProgressSnapshot();
+        return null;
+      }
+      if (snapshot.status === 'cancel_requested' && ageMs > MCP_PROGRESS_CANCEL_STALE_MS) {
         clearMcpProgressSnapshot();
         return null;
       }
@@ -6325,6 +7416,7 @@
     state.mcpProgressActive = true;
     state.mcpProgressJobId = snapshot.jobId || null;
     state.mcpProgressLastSeenAt = Date.now();
+    noteMcpProgressStatus(snapshot.status);
     state.isExporting = true;
     state.exportSource = 'mcp';
     state.progress = {
@@ -6344,21 +7436,26 @@
       startedAt: Date.now(),
       displayPercent: 0,
     };
+    state.previousProgressForDisplay = null;
     saveMcpProgressSnapshot(snapshot);
     updateProgressDock();
     startProgressCreep();
+    startMcpProgressWatchdog();
   };
 
   const clearMcpProgressState = () => {
+    stopMcpProgressWatchdog();
     state.mcpProgressActive = false;
     state.mcpProgressJobId = null;
     state.mcpProgressLastSeenAt = 0;
+    state.mcpProgressCancelSinceAt = 0;
     clearMcpProgressSnapshot();
     if (state.exportSource === 'mcp') {
       stopProgressCreep();
       state.isExporting = false;
       state.exportSource = null;
       state.progress = null;
+      state.previousProgressForDisplay = null;
       updateProgressDock();
     }
   };
@@ -6374,8 +7471,12 @@
       // reconexão do content script. Mantemos o dock por uma janela curta para
       // evitar sumiço no meio do job; se o MCP realmente parou, aí limpamos.
       if (state.mcpProgressActive) {
+        if (clearStaleMcpProgressIfNeeded()) return;
         const ageMs = Date.now() - (state.mcpProgressLastSeenAt || 0);
-        if (ageMs < MCP_PROGRESS_STALE_GRACE_MS) {
+        const status = state.progress?.status || '';
+        const limitMs =
+          status === 'cancel_requested' ? MCP_PROGRESS_CANCEL_STALE_MS : MCP_PROGRESS_STALE_GRACE_MS;
+        if (ageMs < limitMs) {
           updateProgressDock();
           return;
         }
@@ -6386,6 +7487,8 @@
 
     if (jobProgress.source && jobProgress.source !== 'mcp') return;
     state.mcpProgressLastSeenAt = Date.now();
+    noteMcpProgressStatus(jobProgress.status);
+    startMcpProgressWatchdog();
 
     if (!state.mcpProgressActive) {
       beginMcpProgress(jobProgress);
@@ -6395,6 +7498,7 @@
         if (!snapshot) return;
         // Novo job começou — reinicia o dock para refletir totais novos.
         state.mcpProgressJobId = snapshot.jobId;
+        noteMcpProgressStatus(snapshot.status);
         state.progress = {
           total: snapshot.total,
           current: snapshot.current || 0,
@@ -6412,6 +7516,7 @@
           startedAt: Date.now(),
           displayPercent: 0,
         };
+        state.previousProgressForDisplay = null;
         saveMcpProgressSnapshot({
           source: 'mcp',
           jobId: state.mcpProgressJobId,
@@ -6433,9 +7538,11 @@
     if (jobProgress.status && TERMINAL_MCP_STATUSES.has(jobProgress.status)) {
       // Terminal: anima 100% + shimmer off + fade-out, mantendo a sensação
       // de "concluído" antes de esconder.
+      stopMcpProgressWatchdog();
       state.mcpProgressActive = false;
       state.mcpProgressJobId = null;
       state.mcpProgressLastSeenAt = 0;
+      state.mcpProgressCancelSinceAt = 0;
       clearMcpProgressSnapshot();
       void finishExportProgress();
     }
@@ -6563,7 +7670,9 @@
           phase: 'retorno',
           errorCount: failures.size,
         });
-        await navigateToConversation(resumeOriginalItem);
+        await openChatWithNavigationEngine(resumeOriginalItem, {
+          ignoreBusy: true,
+        });
       } catch (err) {
         warn('Falha ao voltar para a conversa original.', err);
       }
@@ -6685,10 +7794,15 @@
 
   const ensureModal = () => {
     let modal = document.getElementById(MODAL_ID);
+    if (modal?.dataset?.gmMdExportBuildStamp && modal.dataset.gmMdExportBuildStamp !== BUILD_STAMP) {
+      modal.remove();
+      modal = null;
+    }
     if (modal) return modal;
 
     modal = document.createElement('div');
     modal.id = MODAL_ID;
+    modal.dataset.gmMdExportBuildStamp = BUILD_STAMP;
     modal.hidden = true;
     Object.assign(modal.style, {
       position: 'fixed',
@@ -6703,23 +7817,27 @@
 
     setHtml(modal, `
       <style>
-        #${MODAL_ID} .gm-modal-panel {
-          width: min(760px, calc(100vw - 24px));
-          max-height: min(680px, calc(100vh - 24px));
-          display: flex;
-          flex-direction: column;
-          gap: 12px;
-          box-sizing: border-box;
+	        #${MODAL_ID} .gm-modal-panel {
+	          width: var(--gmn-modal-panel-width, min(760px, calc(100vw - 24px)));
+	          height: var(--gmn-modal-panel-height, min(680px, calc(100vh - 24px)));
+	          max-height: var(--gmn-modal-panel-max-height, min(680px, calc(100vh - 24px)));
+	          display: flex;
+	          flex-direction: column;
+	          gap: var(--gmn-modal-panel-gap, 14px);
+	          min-height: 0;
+	          box-sizing: border-box;
           overflow: hidden;
           background: var(--gm-panel-bg);
           color: var(--gm-text);
-          border-radius: 22px;
+          border-radius: var(--gmn-modal-panel-radius, 28px);
           border: 1px solid var(--gm-border);
-          box-shadow: 0 20px 70px rgba(0,0,0,0.22);
-          padding: 18px;
+          box-shadow:
+            0 28px 64px rgba(0,0,0,0.40),
+            0 2px 8px rgba(0,0,0,0.24);
+          padding: var(--gmn-modal-panel-padding, 22px);
           font-family: var(--gm-font);
-          font-size: 14px;
-          line-height: 1.35;
+          font-size: var(--gmn-modal-font-size, 14px);
+          line-height: var(--gmn-modal-line-height, 1.4);
         }
         #${MODAL_ID} *,
         #${MODAL_ID} *::before,
@@ -6740,40 +7858,47 @@
           flex-wrap: wrap;
         }
         #${MODAL_ID} .gm-modal-title strong {
-          font-size: 18px;
-          line-height: 1.2;
-          font-weight: 600;
+          font-size: var(--gmn-modal-title-font-size, 20px);
+          line-height: var(--gmn-modal-title-line-height, 1.2);
+          font-weight: 500;
+          letter-spacing: 0;
         }
         #${MODAL_ID} .gm-count-chip {
           display: inline-flex;
           align-items: center;
           justify-content: center;
           min-height: 22px;
-          padding: 0 8px;
-          border-radius: 999px;
-          background: var(--gm-surface-muted);
-          border: 1px solid var(--gm-border);
-          font-size: 12px;
+          padding: 0;
+          background: transparent;
+          border: 0;
+          font-size: 13px;
           color: var(--gm-text-muted);
+        }
+        #${MODAL_ID} .gm-count-chip:not(:empty)::before {
+          content: "·";
+          display: inline-block;
+          margin-right: 8px;
+          opacity: 0.6;
         }
         #${MODAL_ID} .gm-btn-close {
           display: inline-flex;
           align-items: center;
           justify-content: center;
-          flex: 0 0 32px;
-          width: 32px;
-          height: 32px;
+          flex: 0 0 36px;
+          width: 36px;
+          height: 36px;
           padding: 0;
           border-radius: 999px;
           border: none;
           background: transparent;
           color: var(--gm-text-muted);
-          font-size: 18px;
+          font-size: 20px;
           line-height: 1;
           cursor: pointer;
+          transition: background-color 180ms cubic-bezier(0.22, 0.61, 0.36, 1), color 180ms ease;
         }
         #${MODAL_ID} .gm-btn-close:hover {
-          background: var(--gm-surface-muted);
+          background: color-mix(in srgb, var(--gm-text) 8%, transparent);
           color: var(--gm-text);
         }
         #${MODAL_ID} .gm-toolbar {
@@ -6797,15 +7922,20 @@
         #${MODAL_ID} .gm-input {
           width: 100%;
           min-width: 0;
-          height: 36px;
-          padding: 0 12px;
-          border-radius: 12px;
-          border: 1px solid var(--gm-border);
+          height: var(--gmn-modal-input-height, 40px);
+          padding: 0 16px;
+          border-radius: var(--gmn-modal-input-radius, 999px);
+          border: 1px solid transparent;
           background: var(--gm-surface-muted);
           color: var(--gm-text);
           outline: none;
           font-size: 14px;
-          line-height: 36px;
+          line-height: var(--gmn-modal-input-height, 40px);
+          transition: border-color 160ms ease, background-color 160ms ease;
+        }
+        #${MODAL_ID} .gm-input:focus {
+          border-color: var(--gm-accent);
+          background: var(--gm-surface-elevated);
         }
         #${MODAL_ID} .gm-input::placeholder {
           color: var(--gm-text-muted);
@@ -6815,70 +7945,78 @@
           align-items: center;
           justify-content: center;
           box-sizing: border-box;
-          height: 36px;
+          height: var(--gmn-modal-button-height, 40px);
           min-width: 0;
-          border-radius: 999px;
-          padding: 0 12px;
-          border: 1px solid var(--gm-border);
-          background: var(--gm-surface-elevated);
+          border-radius: var(--gmn-modal-button-radius, 999px);
+          padding: 0 18px;
+          border: 1px solid transparent;
+          background: transparent;
           color: var(--gm-text);
           cursor: pointer;
           appearance: none;
-          font-size: 13px;
-          font-weight: 500;
+          font-size: var(--gmn-modal-button-font-size, 13px);
+          font-weight: var(--gmn-modal-button-font-weight, 500);
           line-height: 1;
-          transition: background .16s ease, border-color .16s ease, transform .16s ease;
+          letter-spacing: 0.005em;
+          transition:
+            background-color 180ms cubic-bezier(0.22, 0.61, 0.36, 1),
+            border-color 180ms ease,
+            color 180ms ease,
+            transform 120ms ease;
           white-space: nowrap;
         }
         #${MODAL_ID} .gm-btn:hover:not(:disabled) {
-          background: var(--gm-surface-muted);
+          background: color-mix(in srgb, var(--gm-text) 8%, transparent);
+        }
+        #${MODAL_ID} .gm-btn:active:not(:disabled) {
+          transform: scale(0.97);
         }
         #${MODAL_ID} .gm-btn:disabled {
-          opacity: 0.55;
+          opacity: 0.5;
           cursor: default;
         }
         #${MODAL_ID} .gm-btn-primary {
           background: var(--gm-accent);
           border-color: transparent;
-          color: white;
+          color: var(--gm-accent-text);
         }
         #${MODAL_ID} .gm-btn-primary:hover:not(:disabled) {
-          background: var(--gm-accent-strong);
+          background: color-mix(in srgb, var(--gm-accent) 88%, white);
         }
         #${MODAL_ID} .gm-btn-success {
-          background: var(--gm-success);
+          background: var(--gm-accent-strong);
           border-color: transparent;
-          color: white;
-          padding: 0 18px;
+          color: var(--gm-accent-on-strong);
+          padding: 0 22px;
           font-weight: 500;
         }
         #${MODAL_ID} .gm-btn-success:hover:not(:disabled) {
-          filter: brightness(1.08);
+          background: color-mix(in srgb, var(--gm-accent-strong) 86%, white);
         }
         #${MODAL_ID} .gm-btn-ghost {
           background: transparent;
           border-color: transparent;
           color: var(--gm-text-muted);
-          padding: 0 12px;
+          padding: 0 16px;
         }
         #${MODAL_ID} .gm-btn-ghost:hover:not(:disabled) {
-          background: var(--gm-surface-muted);
+          background: color-mix(in srgb, var(--gm-text) 8%, transparent);
           color: var(--gm-text);
         }
         #${MODAL_ID} .gm-destination {
           display: grid;
-          grid-template-columns: 32px minmax(0, 1fr) auto;
+          grid-template-columns: 36px minmax(0, 1fr) auto;
           align-items: center;
-          gap: 12px;
-          padding: 10px 14px;
-          border-radius: 14px;
+          gap: 14px;
+          padding: 12px 16px;
+          border-radius: var(--gmn-modal-destination-radius, 18px);
           background: var(--gm-surface-muted);
-          border: 1px solid var(--gm-border);
+          border: 1px solid transparent;
         }
         #${MODAL_ID} .gm-destination-icon {
-          width: 32px;
-          height: 32px;
-          border-radius: 10px;
+          width: var(--gmn-modal-destination-icon-size, 36px);
+          height: var(--gmn-modal-destination-icon-size, 36px);
+          border-radius: 999px;
           background: var(--gm-badge-bg);
           color: var(--gm-badge-text);
           display: grid;
@@ -6887,8 +8025,8 @@
         }
         #${MODAL_ID} .gm-destination-icon svg {
           display: block;
-          width: 18px;
-          height: 18px;
+          width: var(--gmn-modal-destination-icon-glyph-size, 18px);
+          height: var(--gmn-modal-destination-icon-glyph-size, 18px);
         }
         #${MODAL_ID} .gm-destination-text {
           display: flex;
@@ -6922,20 +8060,17 @@
           line-height: 1.45;
           color: var(--gm-text-muted);
         }
-        #${MODAL_ID} .gm-list {
-          display: flex;
-          flex-direction: column;
-          gap: 8px;
-          overflow-y: auto;
-          overflow-x: hidden;
-          /* flex:1 + min-height:0 deixa a lista crescer dentro do painel
-             (que ja tem max-height propria) sem quebrar o footer. Antes o
-             max-height fixo em 360px deixava muita area vazia no modal
-             e uma barra de scroll apertada mesmo em telas grandes. */
-          flex: 1 1 auto;
-          min-height: 160px;
-          padding-right: 4px;
-          scrollbar-gutter: stable;
+	        #${MODAL_ID} .gm-list {
+	          display: flex;
+	          flex-direction: column;
+	          gap: var(--gmn-modal-list-gap, 2px);
+	          overflow-y: auto;
+	          overflow-x: hidden;
+	          flex: var(--gmn-modal-list-flex, 1 1 0);
+	          min-height: var(--gmn-modal-list-min-height, 0);
+	          max-height: none;
+	          padding-right: 4px;
+	          scrollbar-gutter: stable;
           /* Evita que o scroll da lista empurre o scroll do Gemini atras
              quando o usuario chega no topo/fundo. */
           overscroll-behavior: contain;
@@ -6948,7 +8083,7 @@
           gap: 0;
         }
         #${MODAL_ID} .gm-list.is-virtual .gm-conversation-item {
-          margin-bottom: 8px;
+          margin-bottom: 2px;
         }
         #${MODAL_ID} .gm-virtual-spacer {
           flex: 0 0 auto;
@@ -6956,7 +8091,7 @@
         }
         /* Scrollbar mais discreto e coerente com o tema do modal. */
         #${MODAL_ID} .gm-list::-webkit-scrollbar {
-          width: 10px;
+          width: var(--gmn-modal-list-scrollbar-width, 10px);
         }
         #${MODAL_ID} .gm-list::-webkit-scrollbar-track {
           background: transparent;
@@ -6975,28 +8110,36 @@
         #${MODAL_ID} .gm-conversation-item {
           display: grid;
           grid-template-columns: 24px minmax(0, 1fr);
-          gap: 12px;
+          gap: var(--gmn-modal-list-row-gap, 12px);
           align-items: center;
           box-sizing: border-box;
-          padding: 11px 12px;
-          min-height: 64px;
-          border: 1px solid var(--gm-border);
-          border-radius: 14px;
-          background: var(--gm-surface-elevated);
+          padding: var(--gmn-modal-list-row-padding, 10px 14px);
+          min-height: var(--gmn-modal-list-row-min-height, 56px);
+          border: 1px solid transparent;
+          border-radius: var(--gmn-modal-list-row-radius, 16px);
+          background: transparent;
           cursor: pointer;
-          transition: border-color .16s ease, background .16s ease;
+          transition: background-color 180ms cubic-bezier(0.22, 0.61, 0.36, 1), border-color 180ms ease;
         }
         #${MODAL_ID} .gm-conversation-item:hover {
-          border-color: var(--gm-border-strong);
-          background: var(--gm-surface-muted);
+          background: color-mix(in srgb, var(--gm-text) 6%, transparent);
+        }
+        #${MODAL_ID} .gm-conversation-item:has(.gm-checkbox:checked) {
+          background: var(--gm-badge-bg);
+          color: var(--gm-badge-text);
+        }
+        #${MODAL_ID} .gm-conversation-item:has(.gm-checkbox:checked) .gm-conversation-title,
+        #${MODAL_ID} .gm-conversation-item:has(.gm-checkbox:checked) .gm-conversation-id {
+          color: var(--gm-badge-text);
         }
         #${MODAL_ID} .gm-checkbox {
           flex: 0 0 auto;
           justify-self: center;
-          width: 16px;
-          height: 16px;
+          width: var(--gmn-modal-checkbox-size, 18px);
+          height: var(--gmn-modal-checkbox-size, 18px);
           margin: 0;
           accent-color: var(--gm-accent);
+          cursor: pointer;
         }
         #${MODAL_ID} .gm-conversation-copy {
           display: flex;
@@ -7183,20 +8326,18 @@
       updateModalState();
     });
 
-    modal.addEventListener(
-      'scroll',
-      (event) => {
-        const target = event.target;
-        if (!(target instanceof HTMLElement) || target.id !== MODAL_LIST_ID) return;
-        scheduleVirtualListRender();
-        if (target.scrollHeight - target.scrollTop - target.clientHeight < 120) {
-          loadMoreConversations(
-            isNotebookPage() ? NOTEBOOK_LOAD_MORE_ATTEMPTS : SIDEBAR_LOAD_MORE_ATTEMPTS,
-          );
-        }
-      },
-      true,
-    );
+    const modalList = modal.querySelector(`#${MODAL_LIST_ID}`);
+    if (modalList) {
+      modalList.addEventListener('scroll', (event) => {
+        const target = event.currentTarget;
+        if (target instanceof HTMLElement) handleModalListScrollPosition(target);
+      });
+      modalList.addEventListener('wheel', handleModalListWheel, { passive: false });
+    }
+    const modalPanel = modal.querySelector('[data-role="panel"]');
+    if (modalPanel) {
+      modalPanel.addEventListener('wheel', handleModalPanelWheel, { passive: false });
+    }
 
     modal.addEventListener('click', async (event) => {
       const trigger = event.target.closest('[data-action]');
@@ -7357,39 +8498,8 @@
     refreshConversationState();
     const modal = ensureModal();
     startSidebarConversationObserver();
-    const dark = isDarkTheme();
-    const vars = dark
-      ? {
-          '--gm-panel-bg': '#1f2329',
-          '--gm-surface-elevated': '#2a2f36',
-          '--gm-surface-muted': '#171b20',
-          '--gm-border': 'rgba(255,255,255,0.08)',
-          '--gm-border-strong': 'rgba(138,180,248,0.45)',
-          '--gm-text': '#e8eaed',
-          '--gm-text-muted': '#aab4be',
-          '--gm-accent': '#8ab4f8',
-          '--gm-accent-strong': '#6ea3f7',
-          '--gm-success': '#1e8e3e',
-          '--gm-badge-bg': 'rgba(138,180,248,0.16)',
-          '--gm-badge-text': '#8ab4f8',
-          '--gm-font': '"Google Sans Text","Google Sans",Roboto,"Segoe UI",system-ui,sans-serif',
-        }
-      : {
-          '--gm-panel-bg': '#ffffff',
-          '--gm-surface-elevated': '#ffffff',
-          '--gm-surface-muted': '#f6f8fb',
-          '--gm-border': 'rgba(60,64,67,0.14)',
-          '--gm-border-strong': 'rgba(26,115,232,0.28)',
-          '--gm-text': '#202124',
-          '--gm-text-muted': '#5f6368',
-          '--gm-accent': '#1a73e8',
-          '--gm-accent-strong': '#1557b0',
-          '--gm-success': '#137333',
-          '--gm-badge-bg': '#e8f0fe',
-          '--gm-badge-text': '#1557b0',
-          '--gm-font': '"Google Sans Text","Google Sans",Roboto,"Segoe UI",system-ui,sans-serif',
-        };
-    Object.entries(vars).forEach(([key, value]) => modal.style.setProperty(key, value));
+    applyCssVars(modal, buildHostPalette({ documentRef: document, isDark: isDarkTheme() }));
+    applyNativeStyleProfile(modal);
     modal.removeAttribute('hidden');
     modal.hidden = false;
     modal.style.display = 'grid';
@@ -7495,46 +8605,40 @@
 
   const sendBridgeHeartbeat = async () => {
     if (!bridgeState.started || bridgeState.heartbeatInFlight) return;
+    const client = getChatBridgeClient();
     bridgeState.heartbeatInFlight = true;
     bridgeState.lastHeartbeatStartedAt = Date.now();
 
     try {
-      await refreshExtensionContext();
-      await reportTabBrokerState('heartbeat');
-      const response = await bridgeRequest('/bridge/heartbeat', {
-        method: 'POST',
-        payload: buildBridgeHeartbeatPayload(),
-        timeoutMs: 4000,
-      });
+      const response = await client.sendHeartbeat();
+      syncChatBridgeClientState();
+      if (client.state.lastError) {
+        bridgeState.lastError = client.state.lastError;
+        return;
+      }
 
       bridgeState.lastHeartbeatAt = Date.now();
       bridgeState.lastHeartbeatDurationMs =
         bridgeState.lastHeartbeatAt - bridgeState.lastHeartbeatStartedAt;
       bridgeState.lastError = null;
-      if (response?.clientId && !bridgeState.clientId) {
-        bridgeState.clientId = response.clientId;
-      }
-      try {
-        handleMcpJobProgressBroadcast(response?.jobProgress || null);
-      } catch (err) {
-        warn('Falha ao processar jobProgress do bridge.', err);
-      }
       if (response?.snapshotRequested) {
         await sendBridgeSnapshot({ force: true });
       }
-      if (response?.command) {
-        await handleBridgeCommand(response.command);
+      const commandPollRequired = response?.commandPollRequired === true;
+      if (!response?.transport?.eventsConnected) {
+        closeBridgeEvents();
       }
-      if (response?.transport?.eventsConnected) {
-        pollBridgeCommands(false);
+      if (commandPollRequired || !response?.transport?.eventsConnected) {
+        pollBridgeCommands(true, { force: commandPollRequired });
       } else {
-        pollBridgeCommands(true);
+        pollBridgeCommands(false);
       }
     } catch (err) {
       bridgeState.lastError = err?.message || String(err);
       throw err;
     } finally {
       bridgeState.heartbeatInFlight = false;
+      syncChatBridgeClientState({ preserveHeartbeatInFlight: true });
     }
   };
 
@@ -7542,7 +8646,7 @@
     let lastError = null;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
-        return await bridgeRequest('/bridge/command-result', {
+        const response = await bridgeRequest('/bridge/command-result', {
           method: 'POST',
           payload: {
             clientId: bridgeState.clientId,
@@ -7551,6 +8655,8 @@
           },
           timeoutMs: 10000,
         });
+        clearPendingBridgeCommand(pageWindow.sessionStorage, command.id);
+        return response;
       } catch (err) {
         lastError = err;
         await sleep(150 * (attempt + 1));
@@ -7559,39 +8665,89 @@
     throw lastError;
   };
 
-  const rememberBridgeCommandResult = (commandId, result) => {
-    bridgeState.commandResultCache.set(commandId, {
-      result,
-      at: Date.now(),
-    });
-    for (const [key, cached] of bridgeState.commandResultCache.entries()) {
-      if (Date.now() - cached.at > 5 * 60_000) {
-        bridgeState.commandResultCache.delete(key);
-      }
+  let chatBridgeClient = null;
+
+  const syncChatBridgeClientState = ({ preserveHeartbeatInFlight = false } = {}) => {
+    if (!chatBridgeClient) return;
+    bridgeState.clientId = chatBridgeClient.state.clientId;
+    bridgeState.commandResultCache = chatBridgeClient.state.commandResultCache;
+    if (!preserveHeartbeatInFlight) {
+      bridgeState.heartbeatInFlight = chatBridgeClient.state.heartbeatInFlight;
     }
+  };
+
+  const getChatBridgeClient = () => {
+    if (chatBridgeClient) {
+      if (bridgeState.clientId && chatBridgeClient.state.clientId !== bridgeState.clientId) {
+        chatBridgeClient.state.clientId = bridgeState.clientId;
+      }
+      syncChatBridgeClientState();
+      return chatBridgeClient;
+    }
+    if (!bridgeState.clientId) bridgeState.clientId = randomId();
+    chatBridgeClient = createBrowserBridgeClient({
+      kind: 'chat',
+      bridgeBaseUrl: BRIDGE_BASE_URL,
+      capabilities: BRIDGE_PROTOCOL_CAPABILITIES,
+      clientId: bridgeState.clientId,
+      heartbeatIntervalMs: BRIDGE_HEARTBEAT_MS,
+      heartbeatTimeoutMs: 4000,
+      pollTimeoutMs: BRIDGE_POLL_TIMEOUT_MS,
+      getPageSnapshot: buildBridgePageSummary,
+      buildHeartbeatPayload: buildBridgeHeartbeatPayload,
+      beforeHeartbeat: () => {
+        refreshExtensionContextSoon({ reason: 'heartbeat' });
+        reportTabBrokerStateSoon('heartbeat');
+      },
+      executeCommand: (command) =>
+        runWithTabOperationBackpressure(command, () => executeBridgeCommand(command)),
+      postCommandResult: postBridgeCommandResult,
+      bridgeRequest,
+      onCommandReceived: () => {
+        bridgeState.lastCommandReceivedAt = Date.now();
+      },
+      onJobProgress: (jobProgress) => {
+        try {
+          handleMcpJobProgressBroadcast(jobProgress || null);
+        } catch (err) {
+          warn('Falha ao processar jobProgress do bridge.', err);
+        }
+      },
+      onError: (err) => {
+        bridgeState.lastError = err?.message || String(err);
+      },
+    });
+    syncChatBridgeClientState();
+    return chatBridgeClient;
   };
 
   const handleBridgeCommand = async (command) => {
     if (!command?.id) return;
-    bridgeState.lastCommandReceivedAt = Date.now();
-    const cached = bridgeState.commandResultCache.get(command.id);
-    if (cached) {
-      await postBridgeCommandResult(command, cached.result);
-      return;
-    }
-    let result;
+    savePendingBridgeCommand(pageWindow.sessionStorage, command);
+    const client = getChatBridgeClient();
+    await client.handleCommand(command);
+    syncChatBridgeClientState();
+  };
+
+  let pendingBridgeCommandResumeInFlight = false;
+  const resumePendingBridgeCommand = async () => {
+    if (pendingBridgeCommandResumeInFlight || !bridgeState.started) return;
+    const command = readPendingBridgeCommand(pageWindow.sessionStorage);
+    if (!command) return;
+    pendingBridgeCommandResumeInFlight = true;
     try {
-      result = await runWithTabOperationBackpressure(command, () =>
-        executeBridgeCommand(command),
-      );
-    } catch (err) {
-      result = {
-        ok: false,
-        error: err?.message || String(err),
-      };
+      await handleBridgeCommand(command);
+    } finally {
+      pendingBridgeCommandResumeInFlight = false;
     }
-    rememberBridgeCommandResult(command.id, result);
-    await postBridgeCommandResult(command, result);
+  };
+
+  const resumePendingBridgeCommandSoon = () => {
+    setTimeout(() => {
+      resumePendingBridgeCommand().catch((err) => {
+        bridgeState.lastError = err?.message || String(err);
+      });
+    }, 0);
   };
 
   const handleBridgeEventMessage = async (event) => {
@@ -7636,6 +8792,33 @@
     }, delayMs);
   };
 
+  const buildBridgeEventsSearchParams = () => {
+    const params = new URLSearchParams();
+    params.set('clientId', String(bridgeState.clientId || ''));
+    if (bridgeState.tabId !== null && bridgeState.tabId !== undefined) {
+      params.set('tabId', String(bridgeState.tabId));
+    }
+    if (bridgeState.windowId !== null && bridgeState.windowId !== undefined) {
+      params.set('windowId', String(bridgeState.windowId));
+    }
+    if (bridgeState.isActiveTab !== null && bridgeState.isActiveTab !== undefined) {
+      params.set('isActiveTab', bridgeState.isActiveTab ? '1' : '0');
+    }
+    if (bridgeState.extensionVersion) {
+      params.set('extensionVersion', String(bridgeState.extensionVersion));
+    }
+    if (bridgeState.protocolVersion !== null && bridgeState.protocolVersion !== undefined) {
+      params.set('protocolVersion', String(bridgeState.protocolVersion));
+    }
+    if (bridgeState.buildStamp) {
+      params.set('buildStamp', String(bridgeState.buildStamp));
+    }
+    const claim = tabClaimSummary();
+    if (claim?.claimId) params.set('claimId', String(claim.claimId));
+    if (claim?.sessionId) params.set('claimSessionId', String(claim.sessionId));
+    return params.toString();
+  };
+
   function connectBridgeEvents() {
     if (
       !bridgeState.started ||
@@ -7646,7 +8829,7 @@
       return;
     }
     bridgeState.eventsConnecting = true;
-    const url = `${BRIDGE_BASE_URL}/bridge/events?clientId=${encodeURIComponent(bridgeState.clientId)}`;
+    const url = `${BRIDGE_BASE_URL}/bridge/events?${buildBridgeEventsSearchParams()}`;
     const events = new EventSource(url);
     bridgeState.eventSource = events;
     events.addEventListener('open', () => {
@@ -7675,13 +8858,13 @@
     });
   }
 
-  const pollBridgeCommands = async (enabled = true) => {
+  const pollBridgeCommands = async (enabled = true, { force = false } = {}) => {
     if (!enabled) return;
-    if (!bridgeState.started || bridgeState.polling || bridgeState.eventsConnected) return;
+    if (!bridgeState.started || bridgeState.polling || (bridgeState.eventsConnected && !force)) return;
     bridgeState.polling = true;
     let errorBackoffMs = BRIDGE_POLL_ERROR_BACKOFF_MS;
 
-    while (bridgeState.started && !bridgeState.eventsConnected) {
+    while (bridgeState.started && (!bridgeState.eventsConnected || force)) {
       try {
         bridgeState.lastCommandPollStartedAt = Date.now();
         const response = await bridgeRequest(
@@ -7724,32 +8907,12 @@
       return;
     }
 
-    bridgeState.clientId = randomId();
+    bridgeState.clientId = getOrCreateChatClientId();
+    refreshExtensionContextSoon({ force: true, reason: 'install' });
 
-    try {
-      const ping = await extensionSendMessageWithRetry(
-        { type: 'gemini-md-export/ping' },
-        { timeoutMs: 3500, attempts: 2, retryDelayMs: 200 },
-      );
-      const response = ping.response;
-      bridgeState.lastExtensionPingAt = Date.now();
-      bridgeState.lastExtensionPingOkAt = bridgeState.lastExtensionPingAt;
-      bridgeState.lastExtensionPingAttempts = ping.attempts;
-      bridgeState.lastExtensionPingError = null;
-      if (response?.tabId !== undefined) bridgeState.tabId = response.tabId;
-      if (response?.windowId !== undefined) bridgeState.windowId = response.windowId;
-      if (response?.isActiveTab !== undefined) bridgeState.isActiveTab = response.isActiveTab;
-      if (response?.version) bridgeState.extensionVersion = response.version;
-      if (response?.protocolVersion !== undefined) bridgeState.protocolVersion = response.protocolVersion;
-      if (response?.buildStamp) bridgeState.buildStamp = response.buildStamp;
-    } catch (err) {
-      bridgeState.lastExtensionPingAt = Date.now();
-      bridgeState.lastExtensionPingAttempts = err?.attempts || 1;
-      bridgeState.lastExtensionPingError = err?.message || String(err);
-      warn('Falha ao obter contexto da extensão.', err);
-    }
-
-    bridgeState.started = true;
+    const client = getChatBridgeClient();
+    await client.start({ connectEvents: false, startHeartbeatTimer: false });
+    bridgeState.started = client.state.started;
     connectBridgeEvents();
 
     const heartbeatTick = async () => {
@@ -7763,6 +8926,7 @@
     await heartbeatTick();
     bridgeState.heartbeatTimer = setInterval(heartbeatTick, BRIDGE_HEARTBEAT_MS);
     pollBridgeCommands(!bridgeState.eventsConnected);
+    resumePendingBridgeCommandSoon();
     log('bridge da extensão iniciado', {
       bridgeBaseUrl: BRIDGE_BASE_URL,
       clientId: bridgeState.clientId,
@@ -7774,6 +8938,9 @@
   // sai sozinho na próxima iteração do `while (bridgeState.started)`; o MCP
   // limpa o cliente sozinho via timeout de stale.
   const stopExtensionBridge = () => {
+    if (chatBridgeClient) {
+      chatBridgeClient.stop();
+    }
     if (bridgeState.heartbeatTimer) {
       clearInterval(bridgeState.heartbeatTimer);
       bridgeState.heartbeatTimer = 0;
@@ -7786,6 +8953,17 @@
     closeBridgeEvents();
     bridgeState.started = false;
   };
+
+  try {
+    const runtime = pageWindow[RUNTIME_GUARD_KEY];
+    if (runtime?.buildStamp === BUILD_STAMP) {
+      runtime.stop = () => {
+        stopExtensionBridge();
+      };
+    }
+  } catch {
+    // Guard de runtime é diagnóstico; não deve bloquear a extensão.
+  }
 
   const applyTabIgnoredState = () => {
     if (isTabIgnored()) {
@@ -7808,16 +8986,28 @@
   // Aplica o visual idiomático do top-bar do Gemini no botão. Idempotente
   // (pode ser chamado em re-parenting sem duplicar listeners, porque quem
   // monta o botão só o faz uma vez — re-parenting só reseta estilos).
-  const styleAsTopBarIconButton = (btn) => {
+	  const styleAsTopBarIconButton = (btn) => {
+	    applyNativeStyleProfile(btn);
+	    // Adiciona classes nativas do Material 3 do Gemini para herdar
+	    // hover/focus/ripple do CSS global do host. O fallback fica no tamanho
+	    // do botão icon-only da top-bar; o slot externo guarda o respiro.
+    for (const cls of [
+      'mdc-icon-button',
+      'mat-mdc-icon-button',
+      'mat-mdc-button-base',
+      'mat-unthemed',
+    ]) {
+      if (!btn.classList.contains(cls)) btn.classList.add(cls);
+    }
     Object.assign(btn.style, {
-      display: 'inline-flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      flex: '0 0 40px',
-      padding: '0',
-      width: '40px',
-      height: '40px',
-      borderRadius: '999px',
+	      display: 'inline-flex',
+	      alignItems: 'center',
+	      justifyContent: 'center',
+	      flex: `0 0 ${nativeStyleVar('--gmn-topbar-button-size', '40px')}`,
+	      padding: nativeStyleVar('--gmn-topbar-button-padding', '10px'),
+	      width: nativeStyleVar('--gmn-topbar-button-size', '40px'),
+	      height: nativeStyleVar('--gmn-topbar-button-size', '40px'),
+      borderRadius: nativeStyleVar('--gmn-topbar-radius', '9999px'),
       border: 'none',
       background: 'transparent',
       color: 'inherit',
@@ -7827,31 +9017,69 @@
       lineHeight: '0',
       verticalAlign: 'middle',
       appearance: 'none',
-      transition: 'background-color 160ms ease',
+      transition: 'all 180ms cubic-bezier(0.22, 0.61, 0.36, 1)',
       // limpa resíduo de um eventual render FAB legado
-      position: '',
-      right: '',
-      bottom: '',
-      zIndex: '',
-    });
-  };
+	      position: '',
+	      right: '',
+	      bottom: '',
+	      zIndex: '',
+	    });
+	  };
+
+	  const installTopBarButtonFallbackStateHandlers = (btn) => {
+	    if (btn.dataset.gmTopBarStateHandlers === '1') return;
+	    btn.dataset.gmTopBarStateHandlers = '1';
+	    const setButtonState = (state = 'normal') => {
+	      btn.dataset.gmTopBarState = state;
+	      const backgrounds = {
+	        normal: 'transparent',
+	        hover: nativeStyleVar(
+	          '--gmn-topbar-state-hover',
+	          'var(--gem-sys-color--surface-container-highest, rgba(232, 234, 237, 0.08))',
+	        ),
+	        focus: nativeStyleVar(
+	          '--gmn-topbar-state-focus',
+	          'var(--gem-sys-color--surface-container-highest, rgba(232, 234, 237, 0.10))',
+	        ),
+	        pressed: nativeStyleVar(
+	          '--gmn-topbar-state-pressed',
+	          'var(--gem-sys-color--surface-container-highest, rgba(232, 234, 237, 0.14))',
+	        ),
+	      };
+	      btn.style.background = backgrounds[state] || backgrounds.normal;
+	    };
+	    let pointerInside = false;
+	    btn.addEventListener('mouseenter', () => {
+	      pointerInside = true;
+	      setButtonState('hover');
+	    });
+	    btn.addEventListener('mouseleave', () => {
+	      pointerInside = false;
+	      setButtonState('normal');
+	    });
+	    btn.addEventListener('focus', () => setButtonState('focus'));
+	    btn.addEventListener('blur', () => setButtonState('normal'));
+	    btn.addEventListener('mousedown', () => setButtonState('pressed'));
+	    btn.addEventListener('mouseup', () => setButtonState(pointerInside ? 'hover' : 'normal'));
+	  };
 
   const styleAsTopBarSlot = (slot) => {
+    applyNativeStyleProfile(slot);
     Object.assign(slot.dataset, {
       role: 'gemini-md-export-slot',
       gmMdExportVersion: SCRIPT_VERSION,
       gmMdExportBuildStamp: BUILD_STAMP,
       gmMdExportKind: 'topbar-slot',
     });
-    Object.assign(slot.style, {
-      display: 'inline-flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      flex: '0 0 40px',
-      width: '40px',
-      height: '40px',
-      margin: '0 2px',
-      padding: '0',
+	    Object.assign(slot.style, {
+	      display: 'inline-flex',
+	      alignItems: 'center',
+	      justifyContent: 'center',
+	      flex: `0 0 ${nativeStyleVar('--gmn-topbar-slot-size', '40px')}`,
+	      width: nativeStyleVar('--gmn-topbar-slot-size', '40px'),
+	      height: nativeStyleVar('--gmn-topbar-slot-size', '40px'),
+	      margin: '0',
+	      padding: '0',
       boxSizing: 'border-box',
       alignSelf: 'center',
       lineHeight: '0',
@@ -7861,12 +9089,85 @@
   };
 
   const markButtonAsCurrentBuild = (btn) => {
-    Object.assign(btn.dataset, {
-      role: 'gemini-md-export',
-      gmMdExportVersion: SCRIPT_VERSION,
-      gmMdExportBuildStamp: BUILD_STAMP,
-      gmMdExportKind: 'topbar-icon',
+	    Object.assign(btn.dataset, {
+	      role: 'gemini-md-export',
+	      gmMdExportVersion: SCRIPT_VERSION,
+	      gmMdExportBuildStamp: BUILD_STAMP,
+	      gmMdExportKind: 'topbar-icon',
+	    });
+    btn.removeAttribute('title');
+  };
+
+  const closeTopBarTooltip = () => {
+    document.getElementById(TOPBAR_TOOLTIP_ID)?.remove();
+  };
+
+  const positionTopBarTooltip = (tooltip, btn) => {
+    const rect = btn.getBoundingClientRect();
+    const viewportWidth =
+      pageWindow.innerWidth || document.documentElement?.clientWidth || 0;
+    const viewportHeight =
+      pageWindow.innerHeight || document.documentElement?.clientHeight || 0;
+    const tipRect = tooltip.getBoundingClientRect();
+    const top = Math.max(8, Math.min(viewportHeight - tipRect.height - 8, rect.top - 2));
+    const right = Math.max(8, viewportWidth - rect.left + 10);
+    tooltip.style.top = `${Math.round(top)}px`;
+    tooltip.style.right = `${Math.round(right)}px`;
+  };
+
+  const showTopBarTooltip = (btn) => {
+    if (document.getElementById(MENU_ID)) return;
+    closeTopBarTooltip();
+    const tooltip = document.createElement('div');
+    tooltip.id = TOPBAR_TOOLTIP_ID;
+    tooltip.textContent = 'Baixar como Markdown';
+    tooltip.setAttribute('role', 'tooltip');
+    applyNativeStyleProfile(tooltip);
+    Object.assign(tooltip.style, {
+      position: 'fixed',
+      zIndex: String(MENU_ZINDEX + 1),
+      background: nativeStyleVar('--gmn-tooltip-bg', 'rgb(241, 243, 244)'),
+      color: nativeStyleVar('--gmn-tooltip-text', 'rgb(32, 33, 36)'),
+      borderRadius: nativeStyleVar('--gmn-tooltip-radius', '18px'),
+      padding: nativeStyleVar('--gmn-tooltip-padding', '12px 28px'),
+      minHeight: nativeStyleVar('--gmn-tooltip-min-height', '40px'),
+      boxSizing: 'border-box',
+      display: 'flex',
+      alignItems: 'center',
+      fontFamily: 'var(--gm-menu-font, "Google Sans Text","Google Sans",Roboto,Arial,sans-serif)',
+      fontSize: nativeStyleVar('--gmn-tooltip-font-size', '14px'),
+      lineHeight: nativeStyleVar('--gmn-tooltip-line-height', '20px'),
+      fontWeight: nativeStyleVar('--gmn-tooltip-font-weight', '400'),
+      letterSpacing: '0',
+      whiteSpace: 'nowrap',
+      pointerEvents: 'none',
+      boxShadow: 'none',
     });
+    const arrow = document.createElement('span');
+    Object.assign(arrow.style, {
+      position: 'absolute',
+      right: '-7px',
+      top: '50%',
+      width: nativeStyleVar('--gmn-tooltip-arrow-size', '14px'),
+      height: nativeStyleVar('--gmn-tooltip-arrow-size', '14px'),
+      transform: 'translateY(-50%) rotate(45deg)',
+      background: nativeStyleVar('--gmn-tooltip-bg', 'rgb(241, 243, 244)'),
+      borderRadius: nativeStyleVar('--gmn-tooltip-arrow-radius', '2px'),
+    });
+    tooltip.appendChild(arrow);
+    document.body.appendChild(tooltip);
+    positionTopBarTooltip(tooltip, btn);
+  };
+
+  const installTopBarTooltipHandlers = (btn) => {
+    if (btn.dataset.gmTopBarTooltipHandlers === '1') return;
+    btn.dataset.gmTopBarTooltipHandlers = '1';
+    btn.addEventListener('mouseenter', () => showTopBarTooltip(btn));
+    btn.addEventListener('mouseleave', closeTopBarTooltip);
+    btn.addEventListener('focus', () => showTopBarTooltip(btn));
+    btn.addEventListener('blur', closeTopBarTooltip);
+    btn.addEventListener('mousedown', closeTopBarTooltip);
+    btn.addEventListener('click', closeTopBarTooltip);
   };
 
   // Menu popover ancorado ao botão. Sem `chrome.action` popup; o menu é DOM
@@ -7879,34 +9180,7 @@
   let menuScrollHandler = null;
 
   const buildMenuPalette = () =>
-    isDarkTheme()
-      ? {
-          '--gm-menu-bg': 'rgba(35,38,43,0.98)',
-          '--gm-menu-text': '#e8eaed',
-          '--gm-menu-muted': '#9aa0a6',
-          '--gm-menu-border': 'rgba(255,255,255,0.08)',
-          '--gm-menu-divider': 'rgba(255,255,255,0.08)',
-          '--gm-menu-hover': 'rgba(232,234,237,0.08)',
-          '--gm-menu-focus': 'rgba(138,180,248,0.20)',
-          '--gm-menu-shadow': '0 8px 24px rgba(0,0,0,0.45), 0 2px 6px rgba(0,0,0,0.30)',
-          '--gm-menu-accent': '#8ab4f8',
-          '--gm-menu-font':
-            '"Google Sans Text","Google Sans",Roboto,"Segoe UI",system-ui,sans-serif',
-        }
-      : {
-          '--gm-menu-bg': 'rgba(255,255,255,0.99)',
-          '--gm-menu-text': '#202124',
-          '--gm-menu-muted': '#5f6368',
-          '--gm-menu-border': 'rgba(60,64,67,0.12)',
-          '--gm-menu-divider': 'rgba(60,64,67,0.10)',
-          '--gm-menu-hover': 'rgba(60,64,67,0.06)',
-          '--gm-menu-focus': 'rgba(26,115,232,0.12)',
-          '--gm-menu-shadow':
-            '0 8px 24px rgba(60,64,67,0.18), 0 2px 6px rgba(60,64,67,0.10)',
-          '--gm-menu-accent': '#1a73e8',
-          '--gm-menu-font':
-            '"Google Sans Text","Google Sans",Roboto,"Segoe UI",system-ui,sans-serif',
-        };
+    buildMenuHostPalette({ documentRef: document, isDark: isDarkTheme() });
 
   const closeTopBarMenu = () => {
     const existing = document.getElementById(MENU_ID);
@@ -7939,9 +9213,9 @@
       pageWindow.innerHeight || document.documentElement?.clientHeight || 0;
     menu.style.position = 'fixed';
     // Alinha o canto superior direito do menu com o canto inferior direito do
-    // botão, com 6px de gap. Clamp para garantir que não vaze do viewport.
+    // botão, com o mesmo respiro vertical observado nos popovers nativos.
     const top = Math.min(
-      Math.max(8, Math.round(rect.bottom + 6)),
+      Math.max(8, Math.round(rect.bottom + 8)),
       Math.max(8, viewportHeight - 8),
     );
     const right = Math.max(8, Math.round(viewportWidth - rect.right));
@@ -7952,73 +9226,153 @@
     menu.style.overflowY = 'auto';
   };
 
-  const styleMenuItem = (el) => {
+  const setMenuItemVisualState = (el, state = 'normal') => {
+    el.dataset.gmMenuState = state;
+    const backgrounds = {
+      normal: 'transparent',
+      hover: 'var(--gm-menu-hover)',
+      focus: 'var(--gm-menu-focus)',
+      pressed: 'var(--gm-menu-pressed)',
+    };
+    el.style.background = backgrounds[state] || backgrounds.normal;
+  };
+
+  const installMenuItemStateHandlers = (el) => {
+    if (el.dataset.gmMenuStateHandlers === '1') return;
+    el.dataset.gmMenuStateHandlers = '1';
+    let pointerInside = false;
+    el.addEventListener('mouseenter', () => {
+      pointerInside = true;
+      setMenuItemVisualState(el, 'hover');
+    });
+    el.addEventListener('mouseleave', () => {
+      pointerInside = false;
+      setMenuItemVisualState(el, 'normal');
+    });
+    el.addEventListener('focus', () => setMenuItemVisualState(el, 'focus'));
+    el.addEventListener('blur', () => setMenuItemVisualState(el, 'normal'));
+    el.addEventListener('mousedown', () => setMenuItemVisualState(el, 'pressed'));
+    el.addEventListener('mouseup', () =>
+      setMenuItemVisualState(el, pointerInside ? 'hover' : 'normal'),
+    );
+    el.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Enter' || ev.key === ' ') {
+        setMenuItemVisualState(el, 'pressed');
+      }
+    });
+    el.addEventListener('keyup', () => setMenuItemVisualState(el, 'focus'));
+  };
+
+  // Itens usam classes nativas (`mat-mdc-menu-item`) e também carregam um
+  // fallback explícito para estados. Como o popover vive fora do overlay CDK,
+  // não dá para depender só do CSS global do host para hover/focus/pressed.
+  const styleMenuItem = (el, options = {}) => {
+    const minHeight =
+      options.minHeight || nativeStyleVar('--gmn-menu-item-min-height', '56px');
     Object.assign(el.style, {
       display: 'block',
       width: '100%',
       textAlign: 'left',
-      padding: '8px 10px',
-      background: 'transparent',
-      color: 'var(--gm-menu-text)',
+      minHeight,
+      padding: nativeStyleVar('--gmn-menu-item-padding', '8px 16px'),
       border: '0',
-      borderRadius: '6px',
-      cursor: 'pointer',
-      fontSize: '13px',
-      fontFamily: 'var(--gm-menu-font)',
-      lineHeight: '1.35',
-      transition: 'background-color 120ms ease',
+	      background: 'transparent',
+	      color: 'inherit',
+	      cursor: 'pointer',
+	      font: 'inherit',
+	      fontFamily: 'inherit',
+	      fontSize: nativeStyleVar('--gmn-menu-font-size', '14px'),
+	      lineHeight: nativeStyleVar('--gmn-menu-line-height', '20px'),
+	      fontWeight: nativeStyleVar('--gmn-menu-font-weight', '400'),
+	      boxSizing: 'border-box',
+	      borderRadius: nativeStyleVar('--gmn-menu-item-radius', '0'),
+	      outline: 'none',
+      transition: 'background-color 120ms cubic-bezier(0.2, 0, 0, 1)',
+      WebkitTapHighlightColor: 'transparent',
     });
-    el.addEventListener('mouseenter', () => {
-      el.style.background = 'var(--gm-menu-hover)';
-    });
-    el.addEventListener('mouseleave', () => {
-      el.style.background = 'transparent';
-    });
-    el.addEventListener('focus', () => {
-      el.style.background = 'var(--gm-menu-focus)';
-      el.style.outline = 'none';
-    });
-    el.addEventListener('blur', () => {
-      el.style.background = 'transparent';
-    });
+    installMenuItemStateHandlers(el);
   };
 
-  const renderIgnoreMenuItem = (item) => {
-    const ignored = isTabIgnored();
-    item.setAttribute('aria-checked', ignored ? 'true' : 'false');
-    item.dataset.checked = ignored ? '1' : '0';
-    while (item.firstChild) item.removeChild(item.firstChild);
+  const createMenuLeadingSlot = ({ checked = false, iconHtml = '' } = {}) => {
+    const slot = document.createElement('span');
+    Object.assign(slot.style, {
+      display: 'inline-flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      flex: `0 0 ${nativeStyleVar('--gmn-menu-leading-slot-size', '20px')}`,
+      width: nativeStyleVar('--gmn-menu-leading-slot-size', '20px'),
+      height: nativeStyleVar('--gmn-menu-leading-slot-size', '20px'),
+      color: 'var(--gm-menu-text)',
+      visibility: checked || iconHtml ? 'visible' : 'hidden',
+      lineHeight: '0',
+      pointerEvents: 'none',
+    });
+    const visualHtml = iconHtml || (checked ? MENU_CHECK_ICON_SVG : '');
+    if (visualHtml) {
+      const tpl = document.createElement('template');
+      tpl.innerHTML = visualHtml;
+      const icon = tpl.content.firstElementChild;
+      if (icon instanceof SVGElement) {
+        icon.setAttribute('width', '20');
+        icon.setAttribute('height', '20');
+        slot.appendChild(icon);
+      }
+    }
+    return slot;
+  };
+
+  const createMenuTextColumn = () => {
+    const textColumn = document.createElement('span');
+    Object.assign(textColumn.style, {
+      display: 'flex',
+      flexDirection: 'column',
+      flex: '1 1 auto',
+      minWidth: '0',
+    });
+    return textColumn;
+  };
+
+  const createMenuPrimaryText = (text) => {
+    const label = document.createElement('span');
+    label.textContent = text;
+    Object.assign(label.style, {
+	      display: 'block',
+	      color: 'var(--gm-menu-text)',
+	      fontSize: nativeStyleVar('--gmn-menu-font-size', '14px'),
+	      lineHeight: nativeStyleVar('--gmn-menu-line-height', '20px'),
+	      fontWeight: nativeStyleVar('--gmn-menu-font-weight', '400'),
+	      letterSpacing: '0',
+	      whiteSpace: 'normal',
+	    });
+    return label;
+  };
+
+	  const renderIgnoreMenuItem = (item) => {
+	    const ignored = isTabIgnored();
+	    item.setAttribute('aria-checked', ignored ? 'true' : 'false');
+	    item.setAttribute(
+	      'aria-label',
+	      ignored
+	        ? 'Ignorar esta aba. A conexão local está desligada nesta aba.'
+	        : 'Ignorar esta aba. Desliga a conexão local só nesta aba.',
+	    );
+	    item.dataset.checked = ignored ? '1' : '0';
+	    item.dataset.gmMenuChecked = ignored ? 'true' : 'false';
+	    item.classList.toggle('gm-menu-item-checked', ignored);
+	    while (item.firstChild) item.removeChild(item.firstChild);
 
     const row = document.createElement('span');
     Object.assign(row.style, {
       display: 'flex',
       alignItems: 'center',
-      gap: '10px',
+      gap: nativeStyleVar('--gmn-menu-leading-gap', '12px'),
     });
 
-    const check = document.createElement('span');
-    check.textContent = ignored ? '✓' : '';
-    Object.assign(check.style, {
-      display: 'inline-flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      flex: '0 0 18px',
-      width: '18px',
-      height: '18px',
-      fontWeight: '700',
-      fontSize: '13px',
-      color: 'var(--gm-menu-accent)',
-      visibility: ignored ? 'visible' : 'hidden',
-    });
-    const label = document.createElement('span');
-    label.textContent = 'Ignorar esta aba';
-    Object.assign(label.style, {
-      flex: '1 1 auto',
-      fontWeight: '500',
-      color: 'var(--gm-menu-text)',
-    });
+    const check = createMenuLeadingSlot({ checked: ignored });
+    const textColumn = createMenuTextColumn();
+    const label = createMenuPrimaryText('Ignorar esta aba');
     row.appendChild(check);
-    row.appendChild(label);
+    row.appendChild(textColumn);
 
     const sub = document.createElement('span');
     sub.textContent = ignored
@@ -8026,76 +9380,163 @@
       : 'Desliga a conexão local só nesta aba.';
     Object.assign(sub.style, {
       display: 'block',
-      marginTop: '3px',
-      paddingLeft: '28px',
-      fontSize: '11px',
-      lineHeight: '1.35',
-      color: 'var(--gm-menu-muted)',
-      // Trava altura: as duas variantes do texto têm comprimentos parecidos
-      // mas podem quebrar para nº diferente de linhas; min-height absorve a
-      // diferença para o item não pular ao alternar o toggle.
-      minHeight: '30px',
-    });
+      marginTop: '0',
+      fontSize: nativeStyleVar('--gmn-menu-font-size', '14px'),
+	      lineHeight: nativeStyleVar('--gmn-menu-line-height', '20px'),
+	      fontWeight: nativeStyleVar('--gmn-menu-font-weight', '400'),
+	      color: 'var(--gm-menu-muted)',
+	      letterSpacing: '0',
+	      whiteSpace: 'normal',
+	    });
 
+    textColumn.appendChild(label);
+    textColumn.appendChild(sub);
     item.appendChild(row);
-    item.appendChild(sub);
+  };
+
+  // Clona um menu/popover nativo do Gemini, se houver algum aberto em outro
+  // lugar do DOM (ex.: o usuário acabou de fechar o kebab e o overlay-pane
+  // ainda está no DOM). Devolve a casca pra usarmos como menu. Esse caminho
+  // garante paridade total com a paleta/elevação/cantos do Gemini lr26 sem
+  // depender de hardcode local.
+  const findNativeMenuPanelReference = () => {
+    const candidates = [
+      '.cdk-overlay-container .mat-mdc-menu-panel',
+      '.mat-mdc-menu-panel',
+      '.cdk-overlay-container gem-popover',
+      'gem-popover',
+    ];
+    for (const selector of candidates) {
+      const el = document.querySelector(selector);
+      if (el instanceof HTMLElement) return el;
+    }
+    return null;
+  };
+
+  const cloneNativeMenuPanelShell = (reference) => {
+    if (!reference) return null;
+    const clone = reference.cloneNode(false); // só a casca; sem children
+    // Limpa atributos potencialmente bagunçados do Angular
+    clone.removeAttribute('id');
+    clone.removeAttribute('aria-labelledby');
+    clone.removeAttribute('aria-describedby');
+    return clone;
+  };
+
+  const buildMenuItemNative = (referenceItem) => {
+    // Se temos um menu item nativo de exemplo, clone sem children e tira
+    // attributes específicos. Senão, cai num <button class="mat-mdc-menu-item">.
+    if (referenceItem) {
+      const clone = referenceItem.cloneNode(false);
+      clone.removeAttribute('id');
+      clone.removeAttribute('aria-labelledby');
+      clone.removeAttribute('disabled');
+      clone.removeAttribute('aria-disabled');
+      return clone;
+    }
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className =
+      'mat-mdc-menu-item mat-mdc-focus-indicator mat-focus-indicator mdc-list-item mat-mdc-menu-item-text';
+    btn.style.width = '100%';
+    btn.style.textAlign = 'left';
+    return btn;
   };
 
   const openTopBarMenu = (btn) => {
     closeTopBarMenu();
 
-    const menu = document.createElement('div');
+    const referenceMenu = findNativeMenuPanelReference();
+    const referenceItem =
+      referenceMenu?.querySelector('button.mat-mdc-menu-item, [role="menuitem"]') || null;
+
+    const menu = cloneNativeMenuPanelShell(referenceMenu) || document.createElement('div');
     menu.id = MENU_ID;
     menu.setAttribute('role', 'menu');
     menu.dataset.role = 'gm-md-export-menu';
+    // Garante classes nativas para puxar CSS de elevação/cantos/cor do host
+    // mesmo quando não há nenhum menu nativo aberto no momento.
+    const ensureClass = (cls) => {
+      if (!menu.classList.contains(cls)) menu.classList.add(cls);
+    };
+    ensureClass('mat-mdc-menu-panel');
+    ensureClass('mdc-menu');
+    ensureClass('mdc-menu-surface');
+    ensureClass('mat-mdc-elevation-z8');
+    ensureClass('mat-elevation-z8');
+    ensureClass('mat-mdc-menu-panel-animations-enabled');
+
     const palette = buildMenuPalette();
     Object.entries(palette).forEach(([k, v]) => menu.style.setProperty(k, v));
+    applyNativeStyleProfile(menu);
     Object.assign(menu.style, {
       position: 'fixed',
-      // Largura fixa: re-render do toggle "Ignorar esta aba" troca a
-      // submessage e fazia o popover ricochetear entre minWidth e maxWidth.
-      // Travar em 280px elimina o jump sem precisar normalizar texto.
-      width: '280px',
+      width: nativeStyleVar('--gmn-menu-width', '242px'),
       boxSizing: 'border-box',
-      padding: '4px',
-      background: 'var(--gm-menu-bg)',
-      color: 'var(--gm-menu-text)',
-      border: '1px solid var(--gm-menu-border)',
-      borderRadius: '10px',
-      boxShadow: 'var(--gm-menu-shadow)',
-      fontFamily: 'var(--gm-menu-font)',
-      fontSize: '13px',
-      zIndex: String(MENU_ZINDEX),
-      backdropFilter: 'blur(10px)',
-      WebkitBackdropFilter: 'blur(10px)',
-      // Garante que itens internos tenham referência de var caso sejam
-      // re-renderizados (ex.: toggle "Ignorar"), evitando perder a paleta.
+      padding: '0',
+      overflow: 'hidden',
+	      background:
+	        'var(--gem-sys-color--surface-container, var(--mat-sys-surface-container, var(--gm-menu-bg)))',
+	      color: 'var(--mat-sys-on-surface, var(--gm-menu-text))',
+	      borderRadius: 'var(--gem-sys-shape--corner-xl, var(--gmn-menu-radius, 20px))',
+	      boxShadow: nativeStyleVar(
+	        '--gmn-menu-shadow',
+	        'rgba(0, 0, 0, 0.28) 0px 0px 20px 0px',
+	      ),
+	      fontFamily: 'var(--gm-menu-font)',
+	      fontSize: nativeStyleVar('--gmn-menu-font-size', '14px'),
+	      lineHeight: nativeStyleVar('--gmn-menu-line-height', '20px'),
+	      zIndex: String(MENU_ZINDEX),
     });
 
-    const exportItem = document.createElement('button');
-    exportItem.type = 'button';
+    const contentWrap = document.createElement('div');
+    contentWrap.className = 'mat-mdc-menu-content';
+    contentWrap.setAttribute('role', 'none');
+    contentWrap.style.padding = '0';
+    menu.appendChild(contentWrap);
+
+    const exportItem = buildMenuItemNative(referenceItem);
     exportItem.setAttribute('role', 'menuitem');
     exportItem.dataset.role = 'gm-menu-export';
-    exportItem.textContent = 'Baixar como Markdown';
-    styleMenuItem(exportItem);
-    exportItem.style.fontWeight = '500';
+    // Limpa filhos do clone e adiciona um wrapper de texto nativo.
+    exportItem.replaceChildren();
+    const exportRow = document.createElement('span');
+    exportRow.className = 'mat-mdc-menu-item-text';
+    Object.assign(exportRow.style, {
+      display: 'flex',
+      alignItems: 'center',
+      gap: nativeStyleVar('--gmn-menu-leading-gap', '12px'),
+      width: '100%',
+    });
+    exportRow.appendChild(createMenuLeadingSlot());
+    const exportTextColumn = createMenuTextColumn();
+    exportTextColumn.appendChild(createMenuPrimaryText('Baixar como Markdown'));
+    exportRow.appendChild(exportTextColumn);
+    exportItem.appendChild(exportRow);
+	    styleMenuItem(exportItem);
     exportItem.addEventListener('click', () => {
       closeTopBarMenu();
       safeOpenExportModal();
     });
 
     const divider = document.createElement('div');
+    divider.className = 'mat-mdc-menu-divider mat-divider';
+    divider.setAttribute('role', 'separator');
     Object.assign(divider.style, {
       height: '1px',
-      margin: '4px 6px',
-      background: 'var(--gm-menu-divider)',
+      margin: nativeStyleVar('--gmn-menu-divider-margin', '0 16px'),
+      background:
+        'var(--gem-sys-color--outline-variant, var(--mat-sys-outline-variant, var(--gm-menu-divider)))',
+      border: 'none',
     });
 
-    const ignoreItem = document.createElement('button');
-    ignoreItem.type = 'button';
+    const ignoreItem = buildMenuItemNative(referenceItem);
     ignoreItem.setAttribute('role', 'menuitemcheckbox');
     ignoreItem.dataset.role = 'gm-menu-ignore-tab';
-    styleMenuItem(ignoreItem);
+    ignoreItem.replaceChildren();
+	    styleMenuItem(ignoreItem, {
+	      minHeight: nativeStyleVar('--gmn-menu-checkbox-item-min-height', '76px'),
+	    });
     renderIgnoreMenuItem(ignoreItem);
     ignoreItem.addEventListener('click', () => {
       const next = !isTabIgnored();
@@ -8113,9 +9554,9 @@
       }
     });
 
-    menu.appendChild(exportItem);
-    menu.appendChild(divider);
-    menu.appendChild(ignoreItem);
+    contentWrap.appendChild(exportItem);
+    contentWrap.appendChild(divider);
+    contentWrap.appendChild(ignoreItem);
     document.body.appendChild(menu);
     positionTopBarMenu(menu, btn);
     btn.setAttribute('aria-expanded', 'true');
@@ -8162,34 +9603,168 @@
     if (btn) openTopBarMenu(btn);
   };
 
-  const createExportButton = () => {
-    const btn = document.createElement('button');
-    btn.id = BUTTON_ID;
-    btn.type = 'button';
-    btn.title =
-      'Baixar como Markdown — clique para abrir o menu (Ctrl+Shift+E baixa a conversa atual)';
-    btn.setAttribute('aria-label', BUTTON_LABEL);
-    btn.setAttribute('aria-haspopup', 'menu');
-    btn.setAttribute('aria-expanded', 'false');
-    markButtonAsCurrentBuild(btn);
-    setHtml(btn, BUTTON_ICON_SVG);
-    styleAsTopBarIconButton(btn);
+  // Procura QUALQUER botão de ícone nativo do Gemini lr26 (mat-mdc-icon-button)
+  // visível na página para usar como template visual. Clonar o nativo é o jeito
+  // mais robusto de ficar visualmente idêntico aos botões vizinhos — herda
+  // todas as regras CSS do host sem reimplementar. Em /app (home) o top-bar
+  // pode não ter um exemplo, então procuramos page-wide e preferimos os mais
+  // próximos do top-bar.
+	  const findNativeIconButtonReference = (topBar = null) => {
+	    const selectors = [
+	      'top-bar-actions button.mat-mdc-icon-button',
+	      'top-bar-actions button[mat-icon-button]',
+	      'top-bar-actions conversation-actions-icon button',
+	      'top-bar-actions .right-section button[aria-haspopup="menu"]',
+	      'top-bar-actions .right-section button',
+	      '.top-bar-actions .right-section button[aria-haspopup="menu"]',
+	      '.top-bar-actions .right-section button',
+	      'temp-chat-button button.mat-mdc-icon-button',
+	      'gem-icon-button button.mat-mdc-icon-button',
+	      'button.mat-mdc-icon-button',
+      'button[mat-icon-button]',
+      'button[class*="mat-mdc-icon-button"]',
+	    ];
+	    const seen = new Set();
+	    const candidates = [];
+	    const collectCandidate = (el) => {
+	      if (!(el instanceof HTMLElement) || seen.has(el)) return;
+	      seen.add(el);
+	      if (el.id === BUTTON_ID || el.closest?.(`#${BUTTON_SLOT_ID}`)) return;
+	      const rect = el.getBoundingClientRect();
+	      if (rect.width <= 0 || rect.height <= 0) return;
+	      if (rect.width < 32 || rect.height < 32) return;
+	      candidates.push({ el, rect });
+	    };
+	    if (topBar instanceof Element) {
+	      const scopedRoot =
+	        topBar.querySelector('.right-section') ||
+	        topBar.querySelector('.top-bar-actions') ||
+	        topBar;
+	      for (const el of scopedRoot.querySelectorAll(
+	        'button.mat-mdc-icon-button, button[mat-icon-button], conversation-actions-icon button, temp-chat-button button, button[aria-haspopup="menu"], button',
+	      )) {
+	        collectCandidate(el);
+	      }
+	    }
+	    for (const selector of selectors) {
+	      for (const el of document.querySelectorAll(selector)) {
+	        collectCandidate(el);
+	      }
+	    }
+	    if (candidates.length === 0) return null;
+	    candidates.sort((a, b) => {
+	      const topDelta = a.rect.top - b.rect.top;
+	      if (Math.abs(topDelta) > 2) return topDelta;
+	      return b.rect.left - a.rect.left;
+	    });
+	    return candidates[0].el;
+	  };
 
-    const hoverIn = 'rgba(138,180,248,0.12)';
-    const focusIn = 'rgba(138,180,248,0.18)';
-    btn.addEventListener('mouseenter', () => {
-      btn.style.backgroundColor = hoverIn;
-    });
-    btn.addEventListener('mouseleave', () => {
-      btn.style.backgroundColor = 'transparent';
-    });
-    btn.addEventListener('focus', () => {
-      btn.style.backgroundColor = focusIn;
-    });
-    btn.addEventListener('blur', () => {
-      btn.style.backgroundColor = 'transparent';
-    });
-    btn.addEventListener('click', toggleTopBarMenu);
+  // Limpa state Angular do clone (atributos `_ngcontent`/`_nghost` ficam
+  // intactos porque o CSS view-encapsulated do Gemini só pinta filhos do
+  // template original. Removemos só listeners residuais via cloneNode profundo.)
+  const sanitizeClonedNativeButton = (clone) => {
+    clone.id = BUTTON_ID;
+    clone.type = 'button';
+    clone.removeAttribute('disabled');
+    clone.removeAttribute('aria-disabled');
+	    clone.removeAttribute('data-test-id');
+	    clone.removeAttribute('data-mat-icon-name');
+	    clone.removeAttribute('data-mat-icon-namespace');
+	    clone.removeAttribute('id-for-mat-menu-trigger');
+	    clone.removeAttribute('title');
+	    clone.setAttribute('aria-label', BUTTON_LABEL);
+	    clone.setAttribute('aria-haspopup', 'menu');
+	    clone.setAttribute('aria-expanded', 'false');
+	  };
+
+	  const createDownloadIconSvg = () => {
+	    const tpl = document.createElement('template');
+	    tpl.innerHTML = BUTTON_ICON_SVG.trim();
+	    return tpl.content.firstElementChild;
+	  };
+
+	  const styleDownloadIconHost = (host) => {
+	    host.setAttribute('aria-hidden', 'true');
+	    Object.assign(host.style, {
+	      display: 'inline-flex',
+	      alignItems: 'center',
+	      justifyContent: 'center',
+      width: nativeStyleVar('--gmn-topbar-icon-size', '20px'),
+      height: nativeStyleVar('--gmn-topbar-icon-size', '20px'),
+      minWidth: nativeStyleVar('--gmn-topbar-icon-size', '20px'),
+      fontSize: nativeStyleVar('--gmn-topbar-icon-size', '20px'),
+      lineHeight: nativeStyleVar('--gmn-topbar-icon-size', '20px'),
+      color: 'inherit',
+      textIndent: '0',
+      letterSpacing: 'normal',
+	      overflow: 'visible',
+	    });
+	    const svg = createDownloadIconSvg();
+	    if (svg) {
+	      svg.setAttribute('width', '20');
+	      svg.setAttribute('height', '20');
+	      host.replaceChildren(svg);
+	    }
+	  };
+
+	  const swapClonedButtonIcon = (clone) => {
+	    const iconHosts = clone.querySelectorAll(
+	      'mat-icon, gem-icon, .material-symbols-outlined, .gds-icon, svg',
+    );
+	    if (iconHosts.length) {
+	      const firstIconHost = iconHosts[0];
+	      if (firstIconHost instanceof SVGElement) {
+	        const svg = createDownloadIconSvg();
+	        if (svg) firstIconHost.replaceWith(svg);
+	        clone.dataset.gmMdExportIconMode = 'native-svg-replaced-svg';
+	      } else {
+	        styleDownloadIconHost(firstIconHost);
+	        clone.dataset.gmMdExportIconMode = 'native-svg';
+	      }
+	      // Remove ícones extras (alguns botões nativos têm badge interno).
+	      for (let i = 1; i < iconHosts.length; i += 1) {
+	        iconHosts[i].remove();
+	      }
+	      return true;
+	    }
+	    setHtml(clone, BUTTON_ICON_SVG);
+	    clone.dataset.gmMdExportIconMode = 'native-svg-fallback';
+	    return false;
+	  };
+
+	  const createExportButton = (topBar = null) => {
+	    const reference = findNativeIconButtonReference(topBar);
+
+    // Caminho preferido lr26: clonar o nativo. Herda mdc/mat- classes,
+    // spans de ripple, touch-target, estilos de hover/focus/ripple do CSS
+    // global do Gemini. Garantia de paridade visual sem hardcodar.
+    if (reference) {
+      const clone = reference.cloneNode(true);
+      sanitizeClonedNativeButton(clone);
+	      swapClonedButtonIcon(clone);
+	      markButtonAsCurrentBuild(clone);
+	      applyNativeStyleProfile(clone);
+	      installTopBarTooltipHandlers(clone);
+	      clone.addEventListener('click', toggleTopBarMenu);
+	      return clone;
+	    }
+
+    // Fallback (top-bar sem nativo identificável): cria botão neutro com
+    // estilos manuais. Esse caminho não deveria disparar no Gemini lr26.
+	    const btn = document.createElement('button');
+	    btn.id = BUTTON_ID;
+	    btn.type = 'button';
+	    btn.setAttribute('aria-label', BUTTON_LABEL);
+	    btn.setAttribute('aria-haspopup', 'menu');
+	    btn.setAttribute('aria-expanded', 'false');
+	    markButtonAsCurrentBuild(btn);
+	    btn.dataset.gmMdExportIconMode = 'native-svg-fallback';
+	    setHtml(btn, BUTTON_ICON_SVG);
+	    styleAsTopBarIconButton(btn);
+	    installTopBarTooltipHandlers(btn);
+	    installTopBarButtonFallbackStateHandlers(btn);
+	    btn.addEventListener('click', toggleTopBarMenu);
 
     return btn;
   };
@@ -8421,19 +9996,25 @@
       log('top-bar escolhido:', found.matchedBy, 'candidatos:', allRects);
     }
 
-    if (existing) {
-      markButtonAsCurrentBuild(existing);
-      if (!existing.querySelector('svg')) {
-        setHtml(existing, BUTTON_ICON_SVG);
-      }
-      placeInTopBar(existing, found);
-      // sempre reaplica os estilos — defende contra render legado (FAB azul)
-      // que tenha ficado de versões anteriores da extensão.
-      styleAsTopBarIconButton(existing);
-      return;
+	    if (existing) {
+	      markButtonAsCurrentBuild(existing);
+	      if (
+	        !existing.querySelector('svg[data-role="gm-md-export-download-icon"]') ||
+	        existing.textContent.includes('download')
+	      ) {
+	        swapClonedButtonIcon(existing);
+	      }
+	      installTopBarTooltipHandlers(existing);
+	      placeInTopBar(existing, found);
+	      // Reaplica o fallback só quando o botão não veio de clone nativo.
+	      // O clone precisa manter dimensões/classes computadas do host.
+	      if (existing.dataset.gmMdExportIconMode === 'native-svg-fallback') {
+	        styleAsTopBarIconButton(existing);
+	      }
+	      return;
     }
 
-    const btn = createExportButton();
+	    const btn = createExportButton(found.target);
     placeInTopBar(btn, found);
   };
 
@@ -8492,6 +10073,7 @@
         if (btn) openTopBarMenu(btn);
       },
       closeTopBarMenu: () => closeTopBarMenu(),
+      openSidebarForDebug: (options = {}) => ensureSidebarOpen(options),
       showProgressForDebug: (progress) => {
         handleMcpJobProgressBroadcast({
           source: 'mcp',
@@ -8509,8 +10091,35 @@
         browserDirectoryHandle: state.directoryHandle?.name || null,
         fallback: 'Downloads',
       }),
+      navigationState: () => {
+        const adapter = getGeminiDomAdapter();
+        return {
+          route: adapter.getRouteState(),
+          rows: adapter.listConversationRows(),
+          hydration: adapter.getHydrationState(),
+        };
+      },
+      openChatWithNavigationForDebug: async (target = {}) => {
+        const item =
+          target.item ||
+          findConversationForBridgeCommand({
+            chatId: target.chatId,
+            url: target.url,
+            index:
+              target.index !== undefined
+                ? Number(target.index) + 1
+                : target.rowIndex !== undefined
+                  ? Number(target.rowIndex) + 1
+                  : undefined,
+          });
+        const navigation = await openChatWithNavigationEngine(item);
+        return navigation.navigationEngine || navigation;
+      },
       notebookChatUrlCache: () => notebookChatUrlCacheSummary(),
       clearNotebookChatUrlCache: (notebookId) => clearNotebookChatUrlCache(notebookId),
+      pendingBatchExport: () => loadBatchExportSession(),
+      resumePendingBatchExport: () => resumePendingBatchExport(),
+      clearPendingBatchExport: () => clearBatchExportSession(),
       snapshot: debugSnapshot,
       artifacts: (options = {}) => inspectArtifactDom(options),
       hydrateCurrentConversation: (options = {}) => hydrateConversationToTop(document, window, options),
@@ -8614,11 +10223,9 @@
     );
     observer.observe(document.body, { childList: true, subtree: true });
     scheduleDomWork('bootstrap', { topBar: true });
-    setTimeout(() => {
-      resumePendingBatchExport().catch((err) => {
-        warn('Falha ao agendar retomada do batch export.', err);
-      });
-    }, 300);
+    if (loadBatchExportSession()) {
+      log('download em lote pendente encontrado; retomada exige ação explícita');
+    }
     log(`userscript carregado (v__VERSION__ build __BUILD_STAMP__)`);
     log(`debug API disponível em window.${DEBUG_GLOBAL}`);
   };

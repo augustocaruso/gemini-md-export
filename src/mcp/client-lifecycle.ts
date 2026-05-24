@@ -8,6 +8,7 @@ export type GeminiClientLifecycleState =
   | 'warming_up'
   | 'page_unready'
   | 'command_unready'
+  | 'blocked'
   | 'busy'
   | 'claimable'
   | 'claimed_ready'
@@ -24,6 +25,9 @@ export type GeminiClientLifecycleCode =
   | 'inactive_tab'
   | 'page_not_gemini'
   | 'page_not_hydrated'
+  | 'google_verification_required'
+  | 'google_login_required'
+  | 'google_page_blocked'
   | 'command_channel_unready'
   | 'tab_operation_in_progress'
   | 'claim_missing'
@@ -44,6 +48,13 @@ export type GeminiPageSnapshot = Readonly<{
   bridgeConversationCount?: number | null;
   sidebarConversationCount?: number | null;
   notebookCacheCount?: number | null;
+  blocker?: {
+    code?: string | null;
+    kind?: string | null;
+    message?: string | null;
+    nextAction?: string | null;
+    terminal?: boolean | null;
+  } | null;
 }>;
 
 export type GeminiClientSnapshot = Readonly<{
@@ -53,6 +64,7 @@ export type GeminiClientSnapshot = Readonly<{
   windowId?: number | string | null;
   isActiveTab?: boolean | null;
   lastHeartbeatAt?: number | null;
+  lastSnapshotAt?: number | null;
   lastSeenAt?: number | null;
   extensionVersion?: string | null;
   protocolVersion?: number | string | null;
@@ -102,13 +114,14 @@ export type ClaimableGeminiTab = GeminiClientSnapshot &
     readonly [CLAIMABLE_GEMINI_TAB]: true;
     readonly tabId: number;
     readonly isActiveTab: true;
-    readonly lastHeartbeatAt: number;
+    readonly lastRuntimeSignalAt: number;
     readonly page: GeminiPageSnapshot & Readonly<{ url: string }>;
   }>;
 
 export type ClaimedReadyGeminiTab = ClaimableGeminiTab &
   Readonly<{
     readonly [CLAIMED_READY_GEMINI_TAB]: true;
+    readonly commandReady: true;
     readonly claim: GeminiTabClaimSnapshot;
   }>;
 
@@ -146,6 +159,9 @@ const LIFECYCLE_MESSAGES: Record<GeminiClientLifecycleCode, string> = {
   inactive_tab: 'Aba Gemini inativa nao pode ser reivindicada para exportacao.',
   page_not_gemini: 'A aba ativa nao aponta para o Gemini Web.',
   page_not_hydrated: 'A pagina do Gemini ainda nao hidratou uma conversa exportavel.',
+  google_verification_required: 'O Google abriu uma tela de verificacao antes do Gemini.',
+  google_login_required: 'O navegador esta no login do Google.',
+  google_page_blocked: 'O Google bloqueou a pagina antes de liberar o Gemini.',
   command_channel_unready: 'A aba ativa ainda nao abriu o canal de comandos.',
   tab_operation_in_progress: 'A aba ja esta executando uma operacao pesada.',
   claim_missing: 'Esta sessao ainda nao reivindicou uma aba Gemini valida.',
@@ -164,6 +180,9 @@ const NEXT_ACTIONS: Record<GeminiClientLifecycleCode, string> = {
   inactive_tab: 'Ative a aba Gemini desejada antes de reivindicar ou exportar.',
   page_not_gemini: 'Abra https://gemini.google.com/app na aba ativa.',
   page_not_hydrated: 'Aguarde o Gemini renderizar a conversa ou a lista lateral.',
+  google_verification_required: 'Resolva a verificacao no navegador e tente novamente.',
+  google_login_required: 'Conclua o login no navegador e tente novamente.',
+  google_page_blocked: 'Resolva o bloqueio no navegador e tente novamente.',
   command_channel_unready: 'Aguarde o canal de comandos reconectar ou recarregue a aba.',
   tab_operation_in_progress: 'Aguarde a operacao atual da aba terminar.',
   claim_missing: 'Reivindique explicitamente uma aba Gemini para esta sessao.',
@@ -212,7 +231,7 @@ const pageOrigin = (client: GeminiClientSnapshot): string | null => {
 };
 
 const clientBuildStamp = (client: GeminiClientSnapshot): string | null =>
-  client.buildStamp || client.page?.buildStamp || null;
+  client.page?.buildStamp || client.buildStamp || null;
 
 const result = (
   state: GeminiClientLifecycleState,
@@ -311,10 +330,35 @@ const pageHasHydratedGeminiContext = (page: GeminiPageSnapshot) => {
   return false;
 };
 
+const pageBlockerCode = (
+  page: GeminiPageSnapshot | null | undefined,
+): GeminiClientLifecycleCode | null => {
+  const code = normalizeString(page?.blocker?.code);
+  if (code === 'google_verification_required') return 'google_verification_required';
+  if (code === 'google_login_required') return 'google_login_required';
+  if (code === 'google_page_blocked') return 'google_page_blocked';
+
+  const kind = normalizeString(page?.blocker?.kind);
+  if (kind === 'google_sorry' || kind === 'google_verification_text') {
+    return 'google_verification_required';
+  }
+  if (kind === 'google_login') return 'google_login_required';
+  if (page?.blocker?.terminal === true) return 'google_page_blocked';
+  return null;
+};
+
 const activeTabOperation = (client: GeminiClientSnapshot) =>
   client.tabOperationInProgress === true ||
   Boolean(client.metrics?.tabOperation?.active) ||
   Boolean(client.summary?.metrics?.tabOperation?.active);
+
+const runtimeSignalAt = (client: GeminiClientSnapshot): number | null => {
+  const lastHeartbeatAt = normalizeNumber(client.lastHeartbeatAt);
+  const lastSnapshotAt = normalizeNumber(client.lastSnapshotAt);
+  const lastSeenAt = normalizeNumber(client.lastSeenAt);
+  const signalAt = Math.max(lastHeartbeatAt || 0, lastSnapshotAt || 0, lastSeenAt || 0);
+  return signalAt > 0 ? signalAt : null;
+};
 
 export const getGeminiClientLifecycle = (
   client: GeminiClientSnapshot | null | undefined,
@@ -325,10 +369,17 @@ export const getGeminiClientLifecycle = (
   }
 
   const now = Number(options.now ?? Date.now());
-  const lastHeartbeatAt = normalizeNumber(client.lastHeartbeatAt);
-  const lastSeenAt = normalizeNumber(client.lastSeenAt);
-  const freshestSeenAt = Math.max(lastHeartbeatAt || 0, lastSeenAt || 0);
-  if (freshestSeenAt > 0 && now - freshestSeenAt > options.staleAfterMs) {
+  const lastRuntimeSignalAt = runtimeSignalAt(client);
+  if (lastRuntimeSignalAt !== null && now - lastRuntimeSignalAt > options.staleAfterMs) {
+    return result('dead', 'client_dead', client);
+  }
+
+  const blockerCode = pageBlockerCode(client.page);
+  if (blockerCode) {
+    return result('blocked', blockerCode, client);
+  }
+
+  if (lastRuntimeSignalAt === null && client.page) {
     return result('dead', 'client_dead', client);
   }
 
@@ -369,8 +420,8 @@ export const getGeminiClientLifecycle = (
   if (client.isActiveTab !== true) return result('page_unready', 'inactive_tab', client);
 
   const hydrationGraceMs = Number(options.hydrationGraceMs ?? 4000);
-  if (!client.page || !lastHeartbeatAt) {
-    if (freshestSeenAt > 0 && now - freshestSeenAt <= hydrationGraceMs) {
+  if (!client.page) {
+    if (lastRuntimeSignalAt !== null && now - lastRuntimeSignalAt <= hydrationGraceMs) {
       return result('warming_up', 'warming_up', client);
     }
     return result('transport_connected', 'page_not_hydrated', client);
@@ -416,7 +467,7 @@ export const toClaimableGeminiTab = (
     ...client,
     tabId: normalizeNumber(client.tabId) ?? 0,
     isActiveTab: true,
-    lastHeartbeatAt: normalizeNumber(client.lastHeartbeatAt) ?? 0,
+    lastRuntimeSignalAt: runtimeSignalAt(client) ?? 0,
     page: {
       ...client.page,
       url: client.page.url,
@@ -429,13 +480,18 @@ export const toClaimedReadyGeminiTab = (
   client: GeminiClientSnapshot | null | undefined,
   options: GeminiClientLifecycleOptions,
 ): ClaimedReadyGeminiTab | null => {
-  const lifecycle = getGeminiClientLifecycle(client, { ...options, requireClaimed: true });
+  const lifecycle = getGeminiClientLifecycle(client, {
+    ...options,
+    requireClaimed: true,
+    requireCommandReady: true,
+  });
   if (lifecycle.state !== 'claimed_ready' || !client?.page?.url || !lifecycle.claim) return null;
   return {
     ...client,
     tabId: normalizeNumber(client.tabId) ?? 0,
     isActiveTab: true,
-    lastHeartbeatAt: normalizeNumber(client.lastHeartbeatAt) ?? 0,
+    commandReady: true,
+    lastRuntimeSignalAt: runtimeSignalAt(client) ?? 0,
     page: {
       ...client.page,
       url: client.page.url,
@@ -462,9 +518,17 @@ export const assertClaimedReadyGeminiTab = (
   client: GeminiClientSnapshot | null | undefined,
   options: GeminiClientLifecycleOptions,
 ): ClaimedReadyGeminiTab => {
-  const claimed = toClaimedReadyGeminiTab(client, { ...options, requireClaimed: true });
+  const claimed = toClaimedReadyGeminiTab(client, {
+    ...options,
+    requireClaimed: true,
+    requireCommandReady: true,
+  });
   if (claimed) return claimed;
-  const lifecycle = getGeminiClientLifecycle(client, { ...options, requireClaimed: true });
+  const lifecycle = getGeminiClientLifecycle(client, {
+    ...options,
+    requireClaimed: true,
+    requireCommandReady: true,
+  });
   const error = new Error(`${lifecycle.code}: ${lifecycle.message}`);
   Object.assign(error, { code: lifecycle.code, data: { lifecycle } });
   throw error;

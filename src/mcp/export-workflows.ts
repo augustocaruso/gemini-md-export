@@ -1,6 +1,7 @@
 import { canonicalGeminiChatUrl, parseChatId } from '../core/chat-id.js';
 import { assistantTurnCount, sectionsForRole } from '../core/markdown-note.js';
 import { hashText } from '../core/text-hash.js';
+import { portableIsoSeconds } from '../core/date.js';
 import type {
   BlockedResult,
   ChatId,
@@ -251,6 +252,10 @@ export const validateMcpExportPayloadBeforeWrite = (
       turns: snapshotTurns,
       metadata: {
         model: parsed.data.model ? stringValue(parsed.data.model) : undefined,
+        dateCreated: portableIsoSeconds(parsed.data.date_created) || undefined,
+        dateLastMessage: portableIsoSeconds(parsed.data.date_last_message) || undefined,
+        dateExported:
+          portableIsoSeconds(parsed.data.date_exported || parsed.data.exported_at) || undefined,
         assistantTurnCount: bodyAssistantTurns,
       },
       evidence: sanitizedEvidence,

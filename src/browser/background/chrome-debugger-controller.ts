@@ -1,9 +1,4 @@
-export type BrowserPageKind =
-  | 'gemini'
-  | 'my_activity'
-  | 'google_login'
-  | 'google_sorry'
-  | 'other';
+export type BrowserPageKind = 'gemini' | 'my_activity' | 'google_login' | 'google_sorry' | 'other';
 
 export type DebuggerTabInspection = Readonly<{
   ok: boolean;

@@ -61,10 +61,13 @@ export const browserSidebarCountEvidenceGroups = (client = {}) => {
     if (!page || typeof page !== 'object') return;
     const kind = normalizeKind(page.kind, page.pageKind, pageKind);
     const isNotebook = kind === 'notebook';
+    const sidebarUsable = page.sidebarOpen !== false || page.reachedSidebarEnd === true;
     const evidence = [];
-    addCountEvidence(evidence, 'sidebarConversationCount', page.sidebarConversationCount, 'sidebar');
-    addCountEvidence(evidence, 'bridgeConversationCount', page.bridgeConversationCount, 'sidebar');
-    if (!isNotebook) {
+    if (sidebarUsable) {
+      addCountEvidence(evidence, 'sidebarConversationCount', page.sidebarConversationCount, 'sidebar');
+      addCountEvidence(evidence, 'bridgeConversationCount', page.bridgeConversationCount, 'sidebar');
+    }
+    if (!isNotebook && sidebarUsable) {
       addCountEvidence(evidence, 'listedConversationCount', page.listedConversationCount, 'listed');
     }
     if (evidence.length > 0) groups.push({ source: name, pageKind: kind, evidence });

@@ -22,81 +22,49 @@ import { dirname, resolve } from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
+const readUtf8 = (...parts) => readFileSync(resolve(ROOT, ...parts), 'utf-8');
 
-const pkg = JSON.parse(readFileSync(resolve(ROOT, 'package.json'), 'utf-8'));
-const bridgeVersion = JSON.parse(readFileSync(resolve(ROOT, 'bridge-version.json'), 'utf-8'));
+const pkg = JSON.parse(readUtf8('package.json'));
+const bridgeVersion = JSON.parse(readUtf8('bridge-version.json'));
 if (bridgeVersion.extensionVersion !== pkg.version) {
   console.error(
     `[build] bridge-version.json extensionVersion (${bridgeVersion.extensionVersion}) precisa bater com package.json (${pkg.version})`,
   );
   process.exit(1);
 }
-const extractSrc = readFileSync(resolve(ROOT, 'src/extract.mjs'), 'utf-8');
-const notebookReturnPlanSrc = readFileSync(
-  resolve(ROOT, 'src/notebook-return-plan.mjs'),
-  'utf-8',
+const extractSrc = readUtf8('src/extract.mjs');
+const notebookReturnPlanSrc = readUtf8('src/notebook-return-plan.mjs');
+const batchSessionSrc = readUtf8('src/batch-session.mjs');
+const domRunnerSrc = readUtf8('src/dom-runner.mjs');
+const hostPaletteSrc = readUtf8('build', 'ts', 'browser', 'shared', 'host-palette.js');
+const nativeStyleProfileSrc = readUtf8('build', 'ts', 'browser', 'shared', 'native-style-profile.js');
+const modalVirtualListSrc = readUtf8('build', 'ts', 'browser', 'shared', 'modal-virtual-list.js');
+const progressDockUiSrc = readUtf8('build', 'ts', 'browser', 'shared', 'progress-dock-ui.js');
+const progressStateSrc = readUtf8('build', 'ts', 'browser', 'shared', 'progress-state.js');
+const progressPortSrc = readUtf8('build', 'ts', 'browser', 'shared', 'progress-port.js');
+const tabCommandsSrc = readUtf8('build', 'ts', 'browser', 'shared', 'tab-commands.js');
+const bridgeClientSrc = readUtf8('build', 'ts', 'browser', 'shared', 'bridge-client.js');
+const pageBlockerSrc = readUtf8('build', 'ts', 'browser', 'shared', 'page-blocker.js');
+const coreChatIdSrc = readUtf8('build', 'ts', 'core', 'chat-id.js');
+const geminiDomAdapterSrc = readUtf8(
+  'build',
+  'ts',
+  'browser',
+  'dom-adapter',
+  'gemini-web-current.js',
 );
-const batchSessionSrc = readFileSync(resolve(ROOT, 'src/batch-session.mjs'), 'utf-8');
-const domRunnerSrc = readFileSync(resolve(ROOT, 'src/dom-runner.mjs'), 'utf-8');
-const hostPaletteSrc = readFileSync(
-  resolve(ROOT, 'build', 'ts', 'browser', 'shared', 'host-palette.js'),
-  'utf-8',
+const navigationEngineSrc = readUtf8('build', 'ts', 'browser', 'navigation', 'navigation-engine.js');
+const hydrationProgressSrc = readUtf8('build', 'ts', 'browser', 'navigation', 'hydration-progress.js');
+const shellGeneratedSrc = readUtf8('build', 'ts', 'userscript-shell.js');
+const artifactCaptureSrc = readUtf8('src/artifact-capture.js');
+const activityContentScriptGeneratedSrc = readUtf8('build', 'ts', 'activity-content-script.js');
+const googleBlockerContentScriptGeneratedSrc = readUtf8(
+  'build',
+  'ts',
+  'google-blocker-content-script.js',
 );
-const progressDockUiSrc = readFileSync(
-  resolve(ROOT, 'build', 'ts', 'browser', 'shared', 'progress-dock-ui.js'),
-  'utf-8',
-);
-const progressStateSrc = readFileSync(
-  resolve(ROOT, 'build', 'ts', 'browser', 'shared', 'progress-state.js'),
-  'utf-8',
-);
-const progressPortSrc = readFileSync(
-  resolve(ROOT, 'build', 'ts', 'browser', 'shared', 'progress-port.js'),
-  'utf-8',
-);
-const tabCommandsSrc = readFileSync(
-  resolve(ROOT, 'build', 'ts', 'browser', 'shared', 'tab-commands.js'),
-  'utf-8',
-);
-const bridgeClientSrc = readFileSync(
-  resolve(ROOT, 'build', 'ts', 'browser', 'shared', 'bridge-client.js'),
-  'utf-8',
-);
-const pageBlockerSrc = readFileSync(
-  resolve(ROOT, 'build', 'ts', 'browser', 'shared', 'page-blocker.js'),
-  'utf-8',
-);
-const coreChatIdSrc = readFileSync(resolve(ROOT, 'build', 'ts', 'core', 'chat-id.js'), 'utf-8');
-const geminiDomAdapterSrc = readFileSync(
-  resolve(ROOT, 'build', 'ts', 'browser', 'dom-adapter', 'gemini-web-current.js'),
-  'utf-8',
-);
-const navigationEngineSrc = readFileSync(
-  resolve(ROOT, 'build', 'ts', 'browser', 'navigation', 'navigation-engine.js'),
-  'utf-8',
-);
-const hydrationProgressSrc = readFileSync(
-  resolve(ROOT, 'build', 'ts', 'browser', 'navigation', 'hydration-progress.js'),
-  'utf-8',
-);
-const shellGeneratedSrc = readFileSync(resolve(ROOT, 'build', 'ts', 'userscript-shell.js'), 'utf-8');
-const artifactCaptureSrc = readFileSync(resolve(ROOT, 'src/artifact-capture.js'), 'utf-8');
-const activityContentScriptGeneratedSrc = readFileSync(
-  resolve(ROOT, 'build', 'ts', 'activity-content-script.js'),
-  'utf-8',
-);
-const googleBlockerContentScriptGeneratedSrc = readFileSync(
-  resolve(ROOT, 'build', 'ts', 'google-blocker-content-script.js'),
-  'utf-8',
-);
-const extensionBackgroundSrc = readFileSync(
-  resolve(ROOT, 'build', 'ts', 'extension-background.js'),
-  'utf-8',
-);
-const geminiCliExtensionContextSrc = readFileSync(
-  resolve(ROOT, 'gemini-cli-extension', 'GEMINI.md'),
-  'utf-8',
-);
+const extensionBackgroundSrc = readUtf8('build', 'ts', 'extension-background.js');
+const geminiCliExtensionContextSrc = readUtf8('gemini-cli-extension', 'GEMINI.md');
 
 // Remove `export` keywords para transformar o módulo em código top-level
 // válido dentro do IIFE do userscript. Preserva o resto do código intacto.
@@ -116,6 +84,8 @@ const inlineableNotebookReturnPlan = stripModuleSyntax(notebookReturnPlanSrc);
 const inlineableBatchSession = stripModuleSyntax(batchSessionSrc);
 const inlineableDomRunner = stripModuleSyntax(domRunnerSrc);
 const inlineableHostPalette = stripModuleSyntax(hostPaletteSrc);
+const inlineableNativeStyleProfile = stripModuleSyntax(nativeStyleProfileSrc);
+const inlineableModalVirtualList = stripModuleSyntax(modalVirtualListSrc);
 const inlineableProgressDockUi = stripModuleSyntax(progressDockUiSrc);
 const inlineableProgressState = stripModuleSyntax(progressStateSrc);
 const inlineableProgressPort = stripModuleSyntax(progressPortSrc);
@@ -217,54 +187,22 @@ if (!googleBlockerContentScriptGeneratedSrc.includes(pageBlockerMarker)) {
   process.exit(1);
 }
 
-const extractBanner =
-  '  // ============================================================\n' +
-  '  // Inlined from src/extract.mjs (auto-generated — do not edit)\n' +
-  '  // ============================================================\n';
-const notebookReturnPlanBanner =
-  '  // ============================================================\n' +
-  '  // Inlined from src/notebook-return-plan.mjs (auto-generated — do not edit)\n' +
-  '  // ============================================================\n';
-const batchSessionBanner =
-  '  // ============================================================\n' +
-  '  // Inlined from src/batch-session.mjs (auto-generated — do not edit)\n' +
-  '  // ============================================================\n';
-const domRunnerBanner =
-  '  // ============================================================\n' +
-  '  // Inlined from src/dom-runner.mjs (auto-generated — do not edit)\n' +
-  '  // ============================================================\n';
-const progressDockUiBanner =
-  '  // ============================================================\n' +
-  '  // Inlined from src/browser/shared/progress-dock-ui.ts (auto-generated — do not edit)\n' +
-  '  // ============================================================\n';
-const progressStateBanner =
-  '  // ============================================================\n' +
-  '  // Inlined from src/browser/shared/progress-state.ts (auto-generated — do not edit)\n' +
-  '  // ============================================================\n';
-const hostPaletteBanner =
-  '  // ============================================================\n' +
-  '  // Inlined from src/browser/shared/host-palette.ts (auto-generated — do not edit)\n' +
-  '  // ============================================================\n';
-const progressPortBanner =
-  '  // ============================================================\n' +
-  '  // Inlined from src/browser/shared/progress-port.ts (auto-generated — do not edit)\n' +
-  '  // ============================================================\n';
-const tabCommandsBanner =
-  '  // ============================================================\n' +
-  '  // Inlined from src/browser/shared/tab-commands.ts (auto-generated — do not edit)\n' +
-  '  // ============================================================\n';
-const bridgeClientBanner =
-  '  // ============================================================\n' +
-  '  // Inlined from src/browser/shared/bridge-client.ts (auto-generated — do not edit)\n' +
-  '  // ============================================================\n';
-const pageBlockerBanner =
-  '  // ============================================================\n' +
-  '  // Inlined from src/browser/shared/page-blocker.ts (auto-generated — do not edit)\n' +
-  '  // ============================================================\n';
-const browserNavigationStackBanner =
-  '  // ============================================================\n' +
-  '  // Inlined from src/core/chat-id.ts + browser DOM/navigation modules (auto-generated — do not edit)\n' +
-  '  // ============================================================\n';
+const banner = (source) =>
+  `  // ============================================================\n  // Inlined from ${source} (auto-generated — do not edit)\n  // ============================================================\n`;
+const extractBanner = banner('src/extract.mjs');
+const notebookReturnPlanBanner = banner('src/notebook-return-plan.mjs');
+const batchSessionBanner = banner('src/batch-session.mjs');
+const domRunnerBanner = banner('src/dom-runner.mjs');
+const progressDockUiBanner = banner('src/browser/shared/progress-dock-ui.ts');
+const progressStateBanner = banner('src/browser/shared/progress-state.ts');
+const hostPaletteBanner = banner('src/browser/shared/host-palette.ts');
+const nativeStyleProfileBanner = banner('src/browser/shared/native-style-profile.ts');
+const modalVirtualListBanner = banner('src/browser/shared/modal-virtual-list.ts');
+const progressPortBanner = banner('src/browser/shared/progress-port.ts');
+const tabCommandsBanner = banner('src/browser/shared/tab-commands.ts');
+const bridgeClientBanner = banner('src/browser/shared/bridge-client.ts');
+const pageBlockerBanner = banner('src/browser/shared/page-blocker.ts');
+const browserNavigationStackBanner = banner('src/core/chat-id.ts + browser DOM/navigation modules');
 const inlinedExtract =
   extractBanner + inlineable.split('\n').map((l) => (l ? '  ' + l : l)).join('\n');
 const inlinedNotebookReturnPlan =
@@ -279,6 +217,12 @@ const inlinedDomRunner =
 const inlinedProgressDockUi =
   hostPaletteBanner +
   inlineableHostPalette.split('\n').map((l) => (l ? '  ' + l : l)).join('\n') +
+  '\n' +
+  nativeStyleProfileBanner +
+  inlineableNativeStyleProfile.split('\n').map((l) => (l ? '  ' + l : l)).join('\n') +
+  '\n' +
+  modalVirtualListBanner +
+  inlineableModalVirtualList.split('\n').map((l) => (l ? '  ' + l : l)).join('\n') +
   '\n' +
   progressStateBanner +
   inlineableProgressState.split('\n').map((l) => (l ? '  ' + l : l)).join('\n') +
@@ -434,10 +378,10 @@ writeFileSync(
 );
 cpSync(resolve(ROOT, 'src', 'offscreen.html'), resolve(extensionDir, 'offscreen.html'));
 cpSync(resolve(ROOT, 'src', 'offscreen.js'), resolve(extensionDir, 'offscreen.js'));
-mkdirSync(resolve(extensionDir, 'browser', 'shared'), { recursive: true });
 cpSync(
-  resolve(ROOT, 'build', 'ts', 'browser', 'shared', 'chrome-debugger.js'),
-  resolve(extensionDir, 'browser', 'shared', 'chrome-debugger.js'),
+  resolve(ROOT, 'build', 'ts', 'browser'),
+  resolve(extensionDir, 'browser'),
+  { recursive: true },
 );
 writeFileSync(
   resolve(extensionDir, 'background.js'),

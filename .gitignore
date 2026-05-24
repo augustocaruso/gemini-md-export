@@ -1,6 +1,10 @@
 node_modules/
 dist/
+build/
 release/
+output/
+.playwright-cli/
+.playwright-mcp/
 *.log
 .DS_Store
 Thumbs.db

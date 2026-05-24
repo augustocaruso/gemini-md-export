@@ -1,14 +1,14 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { type ChildProcess, spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { decodeNativeFrameBuffer, encodeNativeFrame } from './frame.js';
 import { createBrokerIpcServer, defaultBrokerIpcPath } from './local-ipc.js';
 import {
-  nativeBrokerError,
-  nativeBrokerOk,
   type NativeBrokerRequest,
   type NativeBrokerResponse,
+  nativeBrokerError,
+  nativeBrokerOk,
 } from './protocol.js';
 
 const DEFAULT_BRIDGE_URL = process.env.GEMINI_MD_EXPORT_BRIDGE_URL || 'http://127.0.0.1:47283';
@@ -291,6 +291,7 @@ export const startNativeHostRuntime = (options: NativeHostRuntimeOptions = {}): 
     }
   >();
   let extensionConnected = false;
+  let brokerIpcStartPromise: Promise<{ path: string; close(): Promise<void> }> | null = null;
 
   const sendToExtension = (
     request: NativeBrokerRequest,
@@ -323,9 +324,18 @@ export const startNativeHostRuntime = (options: NativeHostRuntimeOptions = {}): 
       return null;
     }
 
-    if (message && typeof message === 'object' && 'command' in message && message.command === 'extension.hello') {
+    if (
+      message &&
+      typeof message === 'object' &&
+      'command' in message &&
+      message.command === 'extension.hello'
+    ) {
       extensionConnected = true;
-      return nativeBrokerOk(message as NativeBrokerRequest, { connected: true });
+      const brokerIpc = await ensureBrokerIpcServer();
+      return nativeBrokerOk(message as NativeBrokerRequest, {
+        connected: true,
+        brokerIpc: brokerIpc ? { path: brokerIpc.path } : { disabled: true },
+      });
     }
 
     return handleCommand(message as NativeHostCommand, { root, bridgeUrl });
@@ -360,14 +370,19 @@ export const startNativeHostRuntime = (options: NativeHostRuntimeOptions = {}): 
     return toBrokerResponse(request, result);
   };
 
-  if (process.env.GEMINI_MD_EXPORT_NATIVE_BROKER_IPC !== 'disabled') {
-    createBrokerIpcServer({
+  const ensureBrokerIpcServer = async () => {
+    if (process.env.GEMINI_MD_EXPORT_NATIVE_BROKER_IPC === 'disabled') {
+      return null;
+    }
+    brokerIpcStartPromise ||= createBrokerIpcServer({
       path: process.env.GEMINI_MD_EXPORT_NATIVE_BROKER_IPC || defaultBrokerIpcPath(),
       handleRequest: handleBrokerIpcRequest,
-    }).catch(() => {
-      // Native Messaging request handling still works if IPC cannot bind.
+    }).catch((err) => {
+      brokerIpcStartPromise = null;
+      throw err;
     });
-  }
+    return brokerIpcStartPromise;
+  };
 
   const handleNativeMessage = async (message: unknown) => {
     const command = message as NativeHostCommand;

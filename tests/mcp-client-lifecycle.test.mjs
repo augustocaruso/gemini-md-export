@@ -102,9 +102,53 @@ test('rejects version, protocol and build mismatches with specific codes', () =>
     'extension_protocol_mismatch',
   );
   assert.equal(
-    getGeminiClientLifecycle({ ...baseClient, buildStamp: 'old' }, options).code,
+    getGeminiClientLifecycle(
+      { ...baseClient, buildStamp: 'old', page: { ...baseClient.page, buildStamp: 'old' } },
+      options,
+    ).code,
     'extension_build_mismatch',
   );
+});
+
+test('prefers page build stamp when service worker stamp is stale', () => {
+  const state = getGeminiClientLifecycle(
+    {
+      ...baseClient,
+      buildStamp: 'old-service-worker',
+      page: {
+        ...baseClient.page,
+        buildStamp: options.expectedBuildStamp,
+      },
+    },
+    options,
+  );
+
+  assert.equal(state.state, 'claimable');
+  assert.equal(state.code, null);
+});
+
+test('prioritizes terminal Google blockers over extension mismatch diagnostics', () => {
+  const state = getGeminiClientLifecycle(
+    {
+      ...baseClient,
+      extensionVersion: '0.0.1',
+      protocolVersion: 1,
+      buildStamp: 'old',
+      page: {
+        url: 'https://www.google.com/sorry/index?continue=https://gemini.google.com/app',
+        pathname: '/sorry/index',
+        blocker: {
+          code: 'google_verification_required',
+          kind: 'google_sorry',
+          terminal: true,
+        },
+      },
+    },
+    options,
+  );
+
+  assert.equal(state.state, 'blocked');
+  assert.equal(state.code, 'google_verification_required');
 });
 
 test('rejects inactive, non-Gemini, unhydrated, command-unready and busy clients', () => {
@@ -133,6 +177,24 @@ test('rejects inactive, non-Gemini, unhydrated, command-unready and busy clients
     'page_not_hydrated',
   );
   assert.equal(
+    getGeminiClientLifecycle(
+      {
+        ...baseClient,
+        page: {
+          url: 'https://www.google.com/sorry/index?continue=https://gemini.google.com/app',
+          pathname: '/sorry/index',
+          blocker: {
+            code: 'google_verification_required',
+            kind: 'google_sorry',
+            terminal: true,
+          },
+        },
+      },
+      options,
+    ).code,
+    'google_verification_required',
+  );
+  assert.equal(
     getGeminiClientLifecycle({ ...baseClient, commandReady: false }, options).code,
     'command_channel_unready',
   );
@@ -145,6 +207,8 @@ test('rejects inactive, non-Gemini, unhydrated, command-unready and busy clients
 test('creates branded claimable and claimed-ready capabilities only after validation', () => {
   const claimable = toClaimableGeminiTab(baseClient, options);
   assert.equal(claimable.clientId, 'chat-active');
+  assert.equal(claimable.lastRuntimeSignalAt, 1_100);
+  assert.equal(Object.hasOwn(claimable, 'lastHeartbeatAt'), true);
 
   const claimed = toClaimedReadyGeminiTab(baseClient, {
     ...options,
@@ -159,6 +223,50 @@ test('creates branded claimable and claimed-ready capabilities only after valida
     ],
   });
   assert.equal(claimed.claim.claimId, 'claim-a');
+  assert.equal(claimed.commandReady, true);
+  assert.equal(claimed.lastRuntimeSignalAt, 1_100);
+});
+
+test('claimed-ready can be proven by runtime signal without requiring heartbeat', () => {
+  const state = toClaimedReadyGeminiTab(
+    {
+      ...baseClient,
+      lastHeartbeatAt: null,
+      lastSeenAt: 1_400,
+      commandReady: true,
+    },
+    {
+      ...options,
+      claims: [
+        {
+          claimId: 'claim-runtime',
+          clientId: 'chat-active',
+          sessionId: 'session-a',
+          tabId: 123,
+          expiresAtMs: 10_000,
+        },
+      ],
+    },
+  );
+
+  assert.equal(state.clientId, 'chat-active');
+  assert.equal(state.lastRuntimeSignalAt, 1_400);
+  assert.equal(state.commandReady, true);
+});
+
+test('claimable tab can be proven by fresh snapshot without heartbeat', () => {
+  const state = toClaimableGeminiTab(
+    {
+      ...baseClient,
+      lastHeartbeatAt: null,
+      lastSeenAt: null,
+      lastSnapshotAt: 1_400,
+    },
+    options,
+  );
+
+  assert.equal(state.clientId, 'chat-active');
+  assert.equal(state.lastRuntimeSignalAt, 1_400);
 });
 
 test('claimed-ready rejects missing and conflicting claims', () => {
@@ -220,7 +328,12 @@ test('classify helper exposes compact diagnostics for raw clients', () => {
   const classified = classifyGeminiClientLifecycle(
     [
       baseClient,
-      { ...baseClient, clientId: 'old-build', buildStamp: 'old' },
+      {
+        ...baseClient,
+        clientId: 'old-build',
+        buildStamp: 'old',
+        page: { ...baseClient.page, buildStamp: 'old' },
+      },
     ],
     options,
   );

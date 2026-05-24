@@ -27,6 +27,7 @@ test('bridge smoke valida healthz, snapshot, SSE, ready, clients e diagnostico s
     'bridge_events_sse',
     'bridge_heartbeat',
     'bridge_heartbeat_extension_origin',
+    'bridge_clears_released_tab_state',
     'agent_ready',
     'agent_clients',
     'agent_diagnostics',

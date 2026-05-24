@@ -1,14 +1,14 @@
+import type {
+  ClaimedDebuggableGeminiTab,
+  DebuggableGeminiTab,
+  RawBrowserTab,
+} from '../src/browser/background/browser-session-broker.js';
 import {
   type BrowserCommandRequest,
   type CommandClientLease,
   type CommandClientState,
   enqueueBrowserCommandWithLease,
 } from '../src/mcp/command-lease.js';
-import type {
-  ClaimedDebuggableGeminiTab,
-  DebuggableGeminiTab,
-  RawBrowserTab,
-} from '../src/browser/background/browser-session-broker.js';
 
 declare const rawClient: CommandClientState;
 declare const lease: CommandClientLease;

@@ -378,6 +378,25 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.match(vaultSyncSkill, /job list --active --tui --result-json/);
 });
 
+test('repair runner chama gemini_ready com intencao diagnostica explicita', () => {
+  const source = readFileSync(
+    resolve(ROOT, 'gemini-cli-extension', 'scripts', 'vault-repair.mjs'),
+    'utf-8',
+  );
+  const readyCall = source.match(/name:\s*'gemini_ready'[\s\S]*?allowReload:\s*true[\s\S]*?\}/)?.[0] || '';
+  assert.match(readyCall, /diagnostic:\s*true|intent:\s*'diagnostic'/);
+  assert.match(readyCall, /\.\.\.targetArgs/);
+});
+
+test('repair runner delega validacao do schema gemini_ready ao contrato tipado', () => {
+  const source = readFileSync(
+    resolve(ROOT, 'gemini-cli-extension', 'scripts', 'vault-repair.mjs'),
+    'utf-8',
+  );
+  assert.match(source, /browser-ready-contract\.js/);
+  assert.match(source, /assertBrowserReadyForRepair\(status\)/);
+});
+
 test('auditor coleta todos os links Gemini de origem em nota wiki consolidada', () => {
   const root = mkdtempSync(resolve(tmpdir(), 'gemini-md-export-wiki-'));
   try {
@@ -468,7 +487,7 @@ test('repair runner aceita Takeout como evidencia sanitizada de integridade', ()
         '<html><body>',
         '<div class="outer-cell">',
         '<div>Gemini Apps</div>',
-        '<div>Explique o mecanismo dos ISRS com detalhes clinicos</div>',
+        '<div>Prompted&nbsp;Explique o mecanismo dos ISRS com detalhes clinicos</div>',
         '<div>Os ISRS bloqueiam o transportador de serotonina e aumentam serotonina sinaptica.</div>',
         '<div>10 de mai. de 2026, 06:46:09 BRT</div>',
         '</div>',

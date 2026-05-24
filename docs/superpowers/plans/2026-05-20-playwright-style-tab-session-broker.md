@@ -836,6 +836,17 @@ git add docs/superpowers/plans/2026-05-20-playwright-style-tab-session-broker.md
 git commit -m "docs: record tab session broker verification"
 ```
 
+### Verification Update - 2026-05-20 05:01 BRT
+
+- [x] `npm run build` passed; generated browser/MCP bundle with build stamp `20260520-0500`.
+- [x] `npm run typecheck` passed.
+- [x] `node --test tests/mcp-bridge-health.test.mjs tests/page-blocker.test.mjs tests/mcp-client-lifecycle.test.mjs tests/mcp-command-channel.test.mjs tests/gemini-cli-extension.test.mjs` passed: 41/41.
+- [x] `node scripts/run-tests.mjs` passed: 366 passed, 2 skipped, 0 failed.
+- [x] `node scripts/bridge-smoke.mjs --spawn --json` passed in isolated bridge mode.
+- [x] Synced `dist/gemini-cli-extension/` to `~/.gemini/extensions/gemini-md-export/` and `~/Library/Application Support/GeminiMdExport/gemini-cli-extension/`.
+- [x] Synthetic Google Sorry heartbeat against an isolated bridge returned `bridgeHealth.status="blocked"`, `blockingIssue="google_verification_required"`, `clientKind="blocker"`, and `/agent/ready` returned `ready=false`, `claimableTabCount=0`, lifecycle `state="blocked"`.
+- [ ] Real 50-chat export smoke not run in this verification slice. The current slice focused on making blocked/stale/inactive clients fail before export instead of being silently selected.
+
 ## Self-Review
 
 - Spec coverage: lifecycle states, branded capability types, public-tool simplicity, active-tab claim enforcement, claim/session model, diagnostics, and deferred transport upgrade are covered.

@@ -3,10 +3,9 @@
 import { spawn } from 'node:child_process';
 import { createServer as createNetServer } from 'node:net';
 import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { dirname } from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
@@ -142,8 +141,10 @@ const spawnBridge = (port) => {
     env: {
       ...process.env,
       GEMINI_MCP_BRIDGE_PORT: String(port),
+      GEMINI_MCP_BROWSER_CONTROL: 'cli',
       GEMINI_MCP_CHROME_LAUNCH_IF_CLOSED: 'false',
       GEMINI_MCP_DEBUG: 'false',
+      GEMINI_MCP_DIAGNOSTIC_DIR: resolve(ROOT, '.playwright-cli', 'bridge-smoke-diagnostics'),
       GEMINI_MCP_PORT_OWNER_DIAGNOSTIC_TIMEOUT_MS: '1000',
       GEMINI_MCP_PROCESS_DIAGNOSTIC_TIMEOUT_MS: '1000',
     },
@@ -230,7 +231,7 @@ const syntheticCommandResult = (command, expectedChromeExtension, tabId) => {
     return {
       ok: true,
       visual: {
-        mode: 'fixture-tab-group',
+        mode: 'tab-group',
         tabId,
         groupId: 9001,
         color: command.args?.color || 'blue',
@@ -345,7 +346,9 @@ const runSmoke = async (options) => {
           isActiveTab: true,
           capabilities: ['snapshot', 'events'],
           page: {
-            url: 'https://gemini.google.com/app',
+            url: 'https://gemini.google.com/app/88a98a108cdcfb61',
+            pathname: '/app/88a98a108cdcfb61',
+            chatId: '88a98a108cdcfb61',
             title: 'Smoke test',
             buildStamp: expectedChromeExtension.buildStamp || 'smoke-test',
           },
@@ -387,7 +390,9 @@ const runSmoke = async (options) => {
           snapshotHash: 'smoke-empty',
           commandPoll: { polling: true },
           page: {
-            url: 'https://gemini.google.com/app',
+            url: 'https://gemini.google.com/app/88a98a108cdcfb61',
+            pathname: '/app/88a98a108cdcfb61',
+            chatId: '88a98a108cdcfb61',
             title: 'Smoke test',
             buildStamp: expectedChromeExtension.buildStamp || 'smoke-test',
           },
@@ -418,7 +423,9 @@ const runSmoke = async (options) => {
           snapshotHash: 'smoke-empty',
           commandPoll: { polling: true },
           page: {
-            url: 'https://gemini.google.com/app',
+            url: 'https://gemini.google.com/app/88a98a108cdcfb61',
+            pathname: '/app/88a98a108cdcfb61',
+            chatId: '88a98a108cdcfb61',
             title: 'Smoke test extension origin',
             buildStamp: expectedChromeExtension.buildStamp || 'smoke-test',
           },
@@ -429,6 +436,109 @@ const runSmoke = async (options) => {
         clientId: value.clientId,
         transport: value.transport,
         bridgeHealth: value.bridgeHealth,
+      };
+    });
+
+    await runCheck(checks, 'bridge_clears_released_tab_state', async () => {
+      const claimId = `smoke-claim-${process.pid}-${Date.now()}`;
+      const startedAt = new Date(Date.now() - 1000).toISOString();
+      const expiresAt = new Date(Date.now() + 120000).toISOString();
+      const baseBody = {
+        clientId,
+        extensionVersion: expectedChromeExtension.extensionVersion,
+        protocolVersion: expectedChromeExtension.protocolVersion,
+        buildStamp: expectedChromeExtension.buildStamp || 'smoke-test',
+        tabId,
+        windowId: 9001,
+        isActiveTab: true,
+        capabilities: ['snapshot', 'events', 'tab-claim-v1', 'tab-backpressure-v1'],
+        snapshotHash: 'smoke-empty',
+        commandPoll: { polling: true },
+        page: {
+          url: 'https://gemini.google.com/app/88a98a108cdcfb61',
+          pathname: '/app/88a98a108cdcfb61',
+          chatId: '88a98a108cdcfb61',
+          title: 'Smoke test tab state',
+          buildStamp: expectedChromeExtension.buildStamp || 'smoke-test',
+        },
+      };
+
+      await requestJson(bridgeUrl, '/bridge/heartbeat', {
+        method: 'POST',
+        origin: DEFAULT_EXTENSION_ORIGIN,
+        timeoutMs: options.timeoutMs,
+        body: {
+          ...baseBody,
+          tabClaim: {
+            claimId,
+            sessionId: 'smoke-session',
+            label: '📥 Exportando',
+            color: 'green',
+            expiresAt,
+          },
+          metrics: {
+            tabOperation: {
+              active: {
+                type: 'list-conversations',
+                label: 'listando conversas',
+                commandId: 'smoke-command',
+                startedAt,
+              },
+              completed: 0,
+              rejected: 0,
+            },
+          },
+        },
+      });
+
+      const activeClients = await requestJson(bridgeUrl, '/agent/clients?diagnostics=1', {
+        timeoutMs: options.timeoutMs,
+      });
+      const activeClient = activeClients.connectedClients?.find((item) => item.clientId === clientId);
+      if (activeClient?.tabClaim?.claimId !== claimId) {
+        throw new Error('claim ativo nao apareceu no diagnostico');
+      }
+      if (activeClient?.lifecycle?.code !== 'tab_operation_in_progress') {
+        throw new Error(
+          `operacao ativa nao bloqueou lifecycle (${activeClient?.lifecycle?.code || 'sem codigo'})`,
+        );
+      }
+
+      await requestJson(bridgeUrl, '/bridge/heartbeat', {
+        method: 'POST',
+        origin: DEFAULT_EXTENSION_ORIGIN,
+        timeoutMs: options.timeoutMs,
+        body: {
+          ...baseBody,
+          tabClaim: null,
+          metrics: {
+            tabOperation: {
+              active: null,
+              completed: 1,
+              rejected: 0,
+            },
+          },
+        },
+      });
+
+      const clearedClients = await requestJson(bridgeUrl, '/agent/clients?diagnostics=1', {
+        timeoutMs: options.timeoutMs,
+      });
+      const clearedClient = clearedClients.connectedClients?.find(
+        (item) => item.clientId === clientId,
+      );
+      if (!clearedClient) throw new Error('cliente sintetico sumiu apos limpeza');
+      if (clearedClient.tabClaim !== null) {
+        throw new Error('tabClaim null do heartbeat nao limpou o claim antigo');
+      }
+      if (clearedClient.lifecycle?.code === 'tab_operation_in_progress') {
+        throw new Error('operacao ativa continuou stale depois do heartbeat de limpeza');
+      }
+      return {
+        claimId,
+        activeLifecycle: activeClient.lifecycle,
+        clearedLifecycle: clearedClient.lifecycle,
+        clearedTabClaim: clearedClient.tabClaim,
       };
     });
 

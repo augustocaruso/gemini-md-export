@@ -1,0 +1,410 @@
+{
+  "schemaVersion": 1,
+  "profileName": "gemini-lr26-dia-native",
+  "profileVersion": 1,
+  "source": {
+    "method": "playwright-computed-style",
+    "capturedAt": "2026-05-23T20:54:00.000Z",
+    "host": "gemini.google.com",
+    "routeKind": "app",
+    "browser": "dia",
+    "fixture": "sanitized"
+  },
+  "targets": [
+    {
+      "id": "topbar.iconButton",
+      "selector": "top-bar-actions .right-section button.mat-mdc-icon-button",
+      "matchedBy": "Gemini right-section icon button",
+      "states": {
+        "base": {
+          "tokens": [
+            {
+              "cssVar": "--gmn-topbar-slot-size",
+              "property": "width",
+              "value": "40px"
+            },
+            {
+              "cssVar": "--gmn-topbar-button-size",
+              "property": "height",
+              "value": "40px"
+            },
+            {
+              "cssVar": "--gmn-topbar-button-padding",
+              "property": "padding",
+              "value": "10px"
+            },
+            {
+              "cssVar": "--gmn-topbar-icon-size",
+              "property": "font-size",
+              "value": "20px"
+            },
+            {
+              "cssVar": "--gmn-topbar-radius",
+              "property": "border-radius",
+              "value": "9999px"
+            }
+          ]
+        },
+        "hover": {
+          "tokens": [
+            {
+              "cssVar": "--gmn-topbar-state-hover",
+              "property": "background-color",
+              "value": "var(--gem-sys-color--surface-container-highest, rgba(232, 234, 237, 0.08))"
+            }
+          ]
+        },
+        "focus": {
+          "tokens": [
+            {
+              "cssVar": "--gmn-topbar-state-focus",
+              "property": "background-color",
+              "value": "var(--gem-sys-color--surface-container-highest, rgba(232, 234, 237, 0.10))"
+            }
+          ]
+        },
+        "pressed": {
+          "tokens": [
+            {
+              "cssVar": "--gmn-topbar-state-pressed",
+              "property": "background-color",
+              "value": "var(--gem-sys-color--surface-container-highest, rgba(232, 234, 237, 0.14))"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "topbar.tooltip",
+      "selector": ".native-tooltip-reference",
+      "matchedBy": "Gemini tooltip surface",
+      "states": {
+        "base": {
+          "tokens": [
+            {
+              "cssVar": "--gmn-tooltip-bg",
+              "property": "background-color",
+              "value": "rgb(241, 243, 244)"
+            },
+            {
+              "cssVar": "--gmn-tooltip-text",
+              "property": "color",
+              "value": "rgb(32, 33, 36)"
+            },
+            {
+              "cssVar": "--gmn-tooltip-radius",
+              "property": "border-radius",
+              "value": "18px"
+            },
+            {
+              "cssVar": "--gmn-tooltip-padding",
+              "property": "padding",
+              "value": "12px 28px"
+            },
+            {
+              "cssVar": "--gmn-tooltip-min-height",
+              "property": "min-height",
+              "value": "40px"
+            },
+            {
+              "cssVar": "--gmn-tooltip-font-size",
+              "property": "font-size",
+              "value": "14px"
+            },
+            {
+              "cssVar": "--gmn-tooltip-line-height",
+              "property": "line-height",
+              "value": "20px"
+            },
+            {
+              "cssVar": "--gmn-tooltip-font-weight",
+              "property": "font-weight",
+              "value": "400"
+            },
+            {
+              "cssVar": "--gmn-tooltip-arrow-size",
+              "property": "width",
+              "value": "14px"
+            },
+            {
+              "cssVar": "--gmn-tooltip-arrow-radius",
+              "property": "border-radius",
+              "value": "2px"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "menu.panel",
+      "selector": ".mat-mdc-menu-panel",
+      "matchedBy": "Gemini Material menu panel",
+      "states": {
+        "base": {
+          "tokens": [
+            {
+              "cssVar": "--gmn-menu-width",
+              "property": "width",
+              "value": "242px"
+            },
+            {
+              "cssVar": "--gmn-menu-radius",
+              "property": "border-radius",
+              "value": "20px"
+            },
+            {
+              "cssVar": "--gmn-menu-shadow",
+              "property": "box-shadow",
+              "value": "rgba(0, 0, 0, 0.28) 0px 0px 20px 0px"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "menu.item",
+      "selector": ".mat-mdc-menu-item",
+      "matchedBy": "Gemini Material menu item",
+      "states": {
+        "base": {
+          "tokens": [
+            {
+              "cssVar": "--gmn-menu-item-min-height",
+              "property": "min-height",
+              "value": "56px"
+            },
+            {
+              "cssVar": "--gmn-menu-item-padding",
+              "property": "padding",
+              "value": "8px 16px"
+            },
+            {
+              "cssVar": "--gmn-menu-item-radius",
+              "property": "border-radius",
+              "value": "0"
+            },
+            {
+              "cssVar": "--gmn-menu-font-size",
+              "property": "font-size",
+              "value": "14px"
+            },
+            {
+              "cssVar": "--gmn-menu-line-height",
+              "property": "line-height",
+              "value": "20px"
+            },
+            {
+              "cssVar": "--gmn-menu-font-weight",
+              "property": "font-weight",
+              "value": "400"
+            },
+            {
+              "cssVar": "--gmn-menu-leading-slot-size",
+              "property": "width",
+              "value": "20px"
+            },
+            {
+              "cssVar": "--gmn-menu-leading-gap",
+              "property": "gap",
+              "value": "12px"
+            },
+            {
+              "cssVar": "--gmn-menu-divider-margin",
+              "property": "margin",
+              "value": "0 16px"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "menu.itemChecked",
+      "selector": ".mat-mdc-menu-item[role=\"menuitemcheckbox\"]",
+      "matchedBy": "Gemini checked menu item",
+      "states": {
+        "checked": {
+          "tokens": [
+            {
+              "cssVar": "--gmn-menu-checkbox-item-min-height",
+              "property": "min-height",
+              "value": "76px"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "modal.panel",
+      "selector": ".native-dialog-panel-reference",
+      "matchedBy": "Gemini dialog surface",
+      "states": {
+        "base": {
+          "tokens": [
+            {
+              "cssVar": "--gmn-modal-panel-width",
+              "property": "width",
+              "value": "min(760px, calc(100vw - 24px))"
+            },
+            {
+              "cssVar": "--gmn-modal-panel-height",
+              "property": "height",
+              "value": "min(680px, calc(100vh - 24px))"
+            },
+            {
+              "cssVar": "--gmn-modal-panel-max-height",
+              "property": "max-height",
+              "value": "min(680px, calc(100vh - 24px))"
+            },
+            {
+              "cssVar": "--gmn-modal-panel-radius",
+              "property": "border-radius",
+              "value": "28px"
+            },
+            {
+              "cssVar": "--gmn-modal-panel-padding",
+              "property": "padding",
+              "value": "22px"
+            },
+            {
+              "cssVar": "--gmn-modal-panel-gap",
+              "property": "gap",
+              "value": "14px"
+            },
+            {
+              "cssVar": "--gmn-modal-font-size",
+              "property": "font-size",
+              "value": "14px"
+            },
+            {
+              "cssVar": "--gmn-modal-line-height",
+              "property": "line-height",
+              "value": "1.4"
+            },
+            {
+              "cssVar": "--gmn-modal-title-font-size",
+              "property": "font-size",
+              "value": "20px"
+            },
+            {
+              "cssVar": "--gmn-modal-title-line-height",
+              "property": "line-height",
+              "value": "1.2"
+            },
+            {
+              "cssVar": "--gmn-modal-button-height",
+              "property": "height",
+              "value": "40px"
+            },
+            {
+              "cssVar": "--gmn-modal-button-radius",
+              "property": "border-radius",
+              "value": "999px"
+            },
+            {
+              "cssVar": "--gmn-modal-button-font-size",
+              "property": "font-size",
+              "value": "13px"
+            },
+            {
+              "cssVar": "--gmn-modal-button-font-weight",
+              "property": "font-weight",
+              "value": "500"
+            },
+            {
+              "cssVar": "--gmn-modal-input-height",
+              "property": "height",
+              "value": "40px"
+            },
+            {
+              "cssVar": "--gmn-modal-input-radius",
+              "property": "border-radius",
+              "value": "999px"
+            },
+            {
+              "cssVar": "--gmn-modal-destination-radius",
+              "property": "border-radius",
+              "value": "18px"
+            },
+            {
+              "cssVar": "--gmn-modal-destination-icon-size",
+              "property": "width",
+              "value": "36px"
+            },
+            {
+              "cssVar": "--gmn-modal-destination-icon-glyph-size",
+              "property": "width",
+              "value": "18px"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "modal.list",
+      "selector": ".native-scroll-list-reference",
+      "matchedBy": "Gemini scrollable list",
+      "states": {
+        "base": {
+          "tokens": [
+            {
+              "cssVar": "--gmn-modal-list-flex",
+              "property": "flex",
+              "value": "1 1 0"
+            },
+            {
+              "cssVar": "--gmn-modal-list-min-height",
+              "property": "min-height",
+              "value": "0"
+            },
+            {
+              "cssVar": "--gmn-modal-list-gap",
+              "property": "gap",
+              "value": "2px"
+            },
+            {
+              "cssVar": "--gmn-modal-list-scrollbar-width",
+              "property": "scrollbar-width",
+              "value": "10px"
+            },
+            {
+              "cssVar": "--gmn-modal-list-row-min-height",
+              "property": "min-height",
+              "value": "56px"
+            },
+            {
+              "cssVar": "--gmn-modal-list-row-radius",
+              "property": "border-radius",
+              "value": "16px"
+            },
+            {
+              "cssVar": "--gmn-modal-list-row-padding",
+              "property": "padding",
+              "value": "10px 14px"
+            },
+            {
+              "cssVar": "--gmn-modal-list-row-gap",
+              "property": "gap",
+              "value": "12px"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "modal.checkbox",
+      "selector": ".native-checkbox-reference",
+      "matchedBy": "Gemini checkbox",
+      "states": {
+        "base": {
+          "tokens": [
+            {
+              "cssVar": "--gmn-modal-checkbox-size",
+              "property": "width",
+              "value": "18px"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

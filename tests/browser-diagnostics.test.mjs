@@ -30,7 +30,9 @@ test('diagnostico local encontra extensao e native host no Dia', async () => {
       manifest_version: 3,
       name: 'Gemini Chat -> Markdown Export',
       version: '0.8.6',
+      background: { service_worker: 'background.js', type: 'module' },
     });
+    writeFileSync(resolve(extensionPath, 'background.js'), '', 'utf-8');
 
     const securePrefs = securePreferencesPath({
       browser: 'dia',
@@ -105,7 +107,9 @@ test('diagnostico local sem browser explicito prefere perfil com extensao carreg
       manifest_version: 3,
       name: 'Gemini Chat -> Markdown Export',
       version: '0.8.16',
+      background: { service_worker: 'background.js', type: 'module' },
     });
+    writeFileSync(resolve(extensionPath, 'background.js'), '', 'utf-8');
     writeJson(
       securePreferencesPath({
         browser: 'dia',
@@ -153,12 +157,16 @@ test('diagnostico local sinaliza runtime antigo e native host ausente', async ()
       manifest_version: 3,
       name: 'Gemini Chat -> Markdown Export',
       version: '0.8.6',
+      background: { service_worker: 'background.js', type: 'module' },
     });
+    writeFileSync(resolve(extensionPath, 'background.js'), '', 'utf-8');
     writeJson(resolve(staleExtensionPath, 'manifest.json'), {
       manifest_version: 3,
       name: 'Gemini Chat -> Markdown Export',
       version: '0.8.5',
+      background: { service_worker: 'background.js', type: 'module' },
     });
+    writeFileSync(resolve(staleExtensionPath, 'background.js'), '', 'utf-8');
     writeJson(
       securePreferencesPath({
         browser: 'dia',
@@ -190,6 +198,78 @@ test('diagnostico local sinaliza runtime antigo e native host ausente', async ()
     assert.equal(report.ok, false);
     assert.ok(report.warnings.includes('runtime_versao_diferente_dos_arquivos'));
     assert.ok(report.warnings.includes('native_host_missing'));
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('diagnostico local sinaliza bundle da extensao com import estatico ausente', async () => {
+  const home = await mkdtemp(resolve(tmpdir(), 'gme-broken-extension-doctor-'));
+  try {
+    const packageRoot = resolve(home, 'pkg');
+    const extensionId = 'abcdefghijklmnopabcdefghijklmnop';
+    const extensionPath = resolve(packageRoot, 'browser-extension');
+    const nativeHostPath = resolve(packageRoot, 'bin', 'gemini-md-export-native-host.mjs');
+    mkdirSync(extensionPath, { recursive: true });
+    mkdirSync(resolve(packageRoot, 'bin'), { recursive: true });
+    writeFileSync(nativeHostPath, '#!/usr/bin/env node\n', 'utf-8');
+    writeJson(resolve(extensionPath, 'manifest.json'), {
+      manifest_version: 3,
+      name: 'Gemini Chat -> Markdown Export',
+      version: '0.8.53',
+      background: { service_worker: 'background.js', type: 'module' },
+    });
+    writeFileSync(
+      resolve(extensionPath, 'background.js'),
+      "import './browser/background/native-broker-client.js';\n",
+      'utf-8',
+    );
+
+    writeJson(
+      securePreferencesPath({
+        browser: 'dia',
+        home,
+        platform: 'darwin',
+        profileDirectory: 'Default',
+      }),
+      {
+        extensions: {
+          settings: {
+            [extensionId]: {
+              location: 4,
+              path: extensionPath,
+            },
+          },
+        },
+      },
+    );
+    writeJson(
+      nativeHostManifestPath({ browser: 'dia', home, platform: 'darwin' }),
+      {
+        name: 'com.augustocaruso.gemini_md_export',
+        description: 'Gemini Markdown Export native host',
+        path: nativeHostPath,
+        type: 'stdio',
+        allowed_origins: [`chrome-extension://${extensionId}/`],
+      },
+    );
+
+    const report = buildLocalDoctorReport({
+      browser: 'dia',
+      home,
+      packageRoot,
+      platform: 'darwin',
+      profileDirectory: 'Default',
+      version: '0.8.53',
+    });
+
+    assert.equal(report.ok, false);
+    assert.ok(report.warnings.includes('browser_extension_bundle_missing_imports'));
+    assert.equal(report.loadedExtension.extension.bundleHealth.ok, false);
+    assert.match(
+      report.loadedExtension.extension.bundleHealth.missingImports[0].resolvedPath,
+      /native-broker-client\.js$/,
+    );
   } finally {
     await rm(home, { recursive: true, force: true });
   }

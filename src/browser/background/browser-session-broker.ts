@@ -1,6 +1,6 @@
 import {
-  inspectTabWithDebugger,
   type DebuggerTabInspection,
+  inspectTabWithDebugger,
 } from './chrome-debugger-controller.js';
 
 const INSPECTABLE_BROWSER_TAB: unique symbol = Symbol('InspectableBrowserTab');

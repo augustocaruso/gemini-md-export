@@ -1,7 +1,12 @@
+// @ts-nocheck
+
 (function () {
   'use strict';
 
   /* __INLINE_PROGRESS_DOCK_UI__ */
+  /* __INLINE_PROGRESS_PORT__ */
+  /* __INLINE_TAB_COMMANDS__ */
+  /* __INLINE_BRIDGE_CLIENT__ */
 
   const pageWindow = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   const BRIDGE_BASE_URL =
@@ -9,6 +14,7 @@
   const CLIENT_ID_STORAGE_KEY = 'gemini-md-export.activityClientId.v1';
   const HEARTBEAT_INTERVAL_MS = 3000;
   const COMMAND_POLL_TIMEOUT_MS = 30000;
+  const CONTENT_SCRIPT_PING_TYPE = 'gemini-md-export/content-ping';
   const SCROLL_SETTLE_MS = 500;
   const DEFAULT_MAX_CARDS = 1000;
   const DEFAULT_MAX_SCROLL_ROUNDS = 80;
@@ -44,17 +50,12 @@
     return date.toISOString().replace(/\.\d{3}Z$/, 'Z');
   };
 
-  const getOrCreateClientId = () => {
-    try {
-      const existing = pageWindow.sessionStorage?.getItem(CLIENT_ID_STORAGE_KEY);
-      if (existing) return existing;
-      const created = `activity-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-      pageWindow.sessionStorage?.setItem(CLIENT_ID_STORAGE_KEY, created);
-      return created;
-    } catch {
-      return `activity-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-    }
-  };
+  const getOrCreateActivityClientId = () =>
+    getOrCreateBridgeClientId({
+      storage: pageWindow.sessionStorage,
+      storageKey: CLIENT_ID_STORAGE_KEY,
+      prefix: 'activity',
+    });
 
   const bridgeRequest = async (path, { method = 'GET', payload, timeoutMs = 10000 } = {}) => {
     const controller = new AbortController();
@@ -135,6 +136,22 @@
     return response;
   };
 
+  const sharedTabCommands = createSharedTabCommandHandlers({
+    state,
+    defaultReason: 'activity-bridge-command',
+    defaultClaimLabel: TAB_CLAIM_DEFAULT_LABEL,
+    defaultClaimColor: 'blue',
+    extensionSendMessage,
+    getExtensionInfo: async () => {
+      const response = await refreshExtensionInfo({ force: true });
+      return {
+        ...(response || { ok: false, reason: 'empty-extension-info-response' }),
+        contentScript: true,
+        serviceWorker: response?.ok === true,
+      };
+    },
+  });
+
   const normalizeText = (value) =>
     String(value || '')
       .normalize('NFD')
@@ -175,6 +192,7 @@
     for (const sample of candidate.assistantSamples || []) {
       if (sample) fields.push({ kind: 'last_message', text: sample });
     }
+    if (!fields.length && candidate.title) fields.push({ kind: 'unknown', text: candidate.title });
     return fields;
   };
 
@@ -374,49 +392,63 @@
     }
   };
 
-  const ensureActivityProgressDock = () => {
-    return ensureSharedProgressDock({
-      dockId: PROGRESS_DOCK_ID,
-      initialTitle: 'Buscando datas',
-    });
+  let activityProgressPort = null;
+
+  const ensureActivityProgressPort = () => {
+    if (!activityProgressPort) {
+      activityProgressPort = createSharedProgressPort({
+        dockId: PROGRESS_DOCK_ID,
+        initialTitle: 'Buscando datas',
+        documentRef: document,
+        isDarkTheme,
+        ensureDock: ensureSharedProgressDock,
+        applyTheme: applySharedProgressDockTheme,
+        getElements: getSharedProgressDockElements,
+        setVisible: setSharedProgressDockVisible,
+      });
+    }
+    return activityProgressPort;
   };
 
-  const updateActivityProgressDock = () => {
-    const dock = ensureActivityProgressDock();
-    const progress = state.activityProgress;
-    if (!progress) {
-      setSharedProgressDockVisible(dock, false);
-      dock.classList.remove('gm-dock-done');
-      return;
-    }
-
-    applySharedProgressDockTheme(dock, { dark: isDarkTheme() });
-
-    const { titleEl, countEl, labelEl, barEl } = getSharedProgressDockElements({
-      dockId: PROGRESS_DOCK_ID,
-    });
+  const activityProgressSnapshot = (progress) => {
     const candidateTotal = Math.max(0, Number(progress.candidateTotal || 0));
     const resolved = Math.max(0, Number(progress.resolvedCount || 0));
     const scanned = Math.max(0, Number(progress.scannedCardCount || 0));
     const loaded = Math.max(scanned, Number(progress.loadedCardCount || 0));
     const maxCards = Math.max(1, Number(progress.maxCards || loaded || 1));
-    const status = progress.status || 'running';
-    const width = status === 'completed' ? 100 : Math.min(100, Math.round((scanned / maxCards) * 100));
+    const rawStatus = progress.status || 'running';
+    const pending = Math.max(0, candidateTotal - Math.min(resolved, candidateTotal));
+    const status = rawStatus === 'completed' && pending > 0 ? 'failed' : rawStatus;
+    let label = `${scanned} itens lidos`;
+    if (status === 'completed') label = 'Todas as datas encontradas';
+    else if (rawStatus === 'completed' && pending > 0) label = `${pending} pendente(s)`;
+    else if (status === 'failed') label = 'Falhou';
+    else if (loaded > scanned) label = `${scanned} itens lidos · ${loaded} carregados`;
+    const total = candidateTotal > 0 ? candidateTotal : maxCards;
+    const current = candidateTotal > 0 ? Math.min(resolved, candidateTotal) : scanned;
+    return {
+      title: 'Identificando chats',
+      label,
+      current,
+      total,
+      status,
+      countLabel: candidateTotal > 0 ? `${Math.min(resolved, candidateTotal)} de ${candidateTotal}` : '',
+    };
+  };
 
-    if (titleEl) titleEl.textContent = 'Buscando datas';
-    if (countEl) {
-      countEl.textContent = candidateTotal > 0 ? `${Math.min(resolved, candidateTotal)} de ${candidateTotal}` : '';
+  const updateActivityProgressDock = () => {
+    const port = ensureActivityProgressPort();
+    const progress = state.activityProgress;
+    if (!progress) {
+      port.hide();
+      return;
     }
-    if (labelEl) {
-      if (status === 'completed') labelEl.textContent = 'Concluído';
-      else if (status === 'failed') labelEl.textContent = 'Falhou';
-      else if (loaded > scanned) labelEl.textContent = `${scanned} itens lidos · ${loaded} carregados`;
-      else labelEl.textContent = `${scanned} itens lidos`;
-    }
-    if (barEl) barEl.style.width = `${width}%`;
-    if (status === 'completed') dock.classList.add('gm-dock-done');
-    else dock.classList.remove('gm-dock-done');
-    setSharedProgressDockVisible(dock, true);
+    const snapshot = activityProgressSnapshot(progress);
+    port.update(snapshot);
+    const { countEl } = getSharedProgressDockElements({
+      dockId: PROGRESS_DOCK_ID,
+    });
+    if (countEl) countEl.textContent = snapshot.countLabel;
   };
 
   const beginActivityProgress = ({ candidateTotal = 0, maxCards = DEFAULT_MAX_CARDS } = {}) => {
@@ -448,12 +480,10 @@
 
   const finishActivityProgress = ({ status = 'completed', resolvedCount = null } = {}) => {
     if (!state.activityProgress) beginActivityProgress();
-    const maxCards = Math.max(1, Number(state.activityProgress.maxCards || DEFAULT_MAX_CARDS));
     state.activityProgress = {
       ...state.activityProgress,
       status,
       resolvedCount: resolvedCount ?? state.activityProgress.resolvedCount ?? 0,
-      scannedCardCount: status === 'completed' ? maxCards : state.activityProgress.scannedCardCount,
     };
     updateActivityProgressDock();
     if (state.activityProgressHideTimer) clearTimeout(state.activityProgressHideTimer);
@@ -497,7 +527,10 @@
     loadedCardCount = cards.length;
     for (let cardIndex = 0; cardIndex < cards.length; cardIndex += 1) {
       const card = cards[cardIndex];
-      const detail = await openDetailsForCard(card);
+      const detail =
+        options.openDetails === true
+          ? await openDetailsForCard(card)
+          : card.querySelector('[data-gm-activity-details]');
       const scoringText = `${card.textContent || ''}\n${detail?.textContent || ''}`;
       for (const [chatId, candidate] of candidateMap.entries()) {
         for (const score of scoreCandidateByKind(candidate, scoringText)) {
@@ -510,7 +543,7 @@
         }
       }
       lastSeenActivityToken = extractCardDate(card) || hashText(card.textContent || '');
-      await closeOpenDetails();
+      if (options.openDetails === true) await closeOpenDetails();
       const resolvedCount = Array.from(new Set(matches.map((match) => match.chatId))).length;
       options.onProgress?.({
         scannedCardCount: cardIndex + 1,
@@ -614,21 +647,49 @@
       path: location.pathname,
       title: document.title,
     },
-    capabilities: ['activity-scan-batch-v1'],
+    capabilities: ['activity-scan-batch-v1', 'tab-activation-v1'],
   });
 
-  const postCommandResult = async (command, result) =>
-    bridgeRequest('/bridge/command-result', {
-      method: 'POST',
-      payload: {
-        clientId: state.clientId,
-        commandId: command.id,
-        result,
-      },
-      timeoutMs: 10000,
+  let contentScriptMessageListenerInstalled = false;
+
+  const contentScriptRuntimeStatus = () => {
+    const heartbeat = buildHeartbeatPayload();
+    return {
+      ok: true,
+      kind: 'activity',
+      contentScript: true,
+      extensionVersion: state.extensionVersion || '__VERSION__',
+      version: state.extensionVersion || '__VERSION__',
+      protocolVersion: state.protocolVersion ?? Number('__EXTENSION_PROTOCOL_VERSION__'),
+      buildStamp: state.buildStamp || '__BUILD_STAMP__',
+      tabId: state.tabId ?? null,
+      windowId: state.windowId ?? null,
+      isActiveTab: state.isActiveTab ?? null,
+      clientId: state.clientId || null,
+      page: heartbeat.page,
+    };
+  };
+
+  const installContentScriptMessageListener = () => {
+    if (
+      contentScriptMessageListenerInstalled ||
+      typeof chrome === 'undefined' ||
+      !chrome.runtime?.onMessage?.addListener
+    ) {
+      return;
+    }
+    chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+      if (message?.type !== CONTENT_SCRIPT_PING_TYPE) return false;
+      sendResponse(contentScriptRuntimeStatus());
+      return false;
     });
+    contentScriptMessageListenerInstalled = true;
+  };
 
   const executeCommand = async (command) => {
+    const sharedResult = await sharedTabCommands.execute(command);
+    if (sharedResult !== undefined) return sharedResult;
+
     if (command.type === 'get-extension-info') {
       const response = await refreshExtensionInfo({ force: true });
       return {
@@ -647,6 +708,18 @@
           expectedBuildStamp: command.args?.expectedBuildStamp || null,
         },
         { timeoutMs: 3500 },
+      );
+    }
+    if (command.type === 'activate-browser-tab') {
+      const requestedTabId = Number(command.args?.tabId ?? command.args?.targetTabId);
+      return extensionSendMessage(
+        {
+          type: 'gemini-md-export/activate-tab',
+          tabId: Number.isInteger(requestedTabId) ? requestedTabId : undefined,
+          reason: command.args?.reason || 'activity-bridge-command',
+          focusWindow: command.args?.focusWindow === true,
+        },
+        { timeoutMs: 5000 },
       );
     }
     if (command.type === 'claim-tab') {
@@ -718,105 +791,79 @@
     };
   };
 
-  const handleCommand = async (command) => {
-    if (!command?.id) return;
-    const cached = state.commandResultCache.get(command.id);
-    if (cached) {
-      await postCommandResult(command, cached);
-      return;
-    }
-    let result;
-    try {
-      result = await executeCommand(command);
-    } catch (err) {
-      result = { ok: false, error: err?.message || String(err) };
-    }
-    state.commandResultCache.set(command.id, result);
-    await postCommandResult(command, result);
+  let activityBridgeClient = null;
+
+  const syncActivityBridgeState = () => {
+    if (!activityBridgeClient) return;
+    state.clientId = activityBridgeClient.state.clientId;
+    state.started = activityBridgeClient.state.started;
+    state.heartbeatTimer = activityBridgeClient.state.heartbeatTimer;
+    state.heartbeatInFlight = activityBridgeClient.state.heartbeatInFlight;
+    state.eventSource = activityBridgeClient.state.eventSource;
+    state.commandResultCache = activityBridgeClient.state.commandResultCache;
+  };
+
+  const getActivityBridgeClient = () => {
+    if (activityBridgeClient) return activityBridgeClient;
+    state.clientId = state.clientId || getOrCreateActivityClientId();
+    activityBridgeClient = createBrowserBridgeClient({
+      kind: 'activity',
+      bridgeBaseUrl: BRIDGE_BASE_URL,
+      capabilities: ['activity-scan-batch-v1', 'tab-activation-v1'],
+      clientId: state.clientId,
+      heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
+      pollTimeoutMs: COMMAND_POLL_TIMEOUT_MS,
+      getPageSnapshot: () => buildHeartbeatPayload().page,
+      buildHeartbeatPayload,
+      beforeHeartbeat: () => refreshExtensionInfo(),
+      executeCommand,
+      bridgeRequest,
+      eventSourceFactory: (url) => {
+        if (typeof EventSource !== 'function') throw new Error('EventSource indisponível');
+        return new EventSource(url);
+      },
+      onError: () => {
+        // Bridge pode estar fechado enquanto o usuário navega. O próximo heartbeat tenta de novo.
+      },
+    });
+    syncActivityBridgeState();
+    return activityBridgeClient;
   };
 
   const sendHeartbeat = async () => {
-    if (!state.started || state.heartbeatInFlight) return;
-    state.heartbeatInFlight = true;
-    try {
-      await refreshExtensionInfo();
-      const response = await bridgeRequest('/bridge/heartbeat', {
-        method: 'POST',
-        payload: buildHeartbeatPayload(),
-        timeoutMs: 10000,
-      });
-      if (response?.command) await handleCommand(response.command);
-      if (response?.commandPollRequired) pollCommands();
-    } catch {
-      // Bridge pode estar fechado enquanto o usuário navega. O próximo heartbeat tenta de novo.
-    } finally {
-      state.heartbeatInFlight = false;
-    }
+    const client = getActivityBridgeClient();
+    await client.sendHeartbeat();
+    syncActivityBridgeState();
   };
 
   const pollCommands = async () => {
-    if (!state.started) return;
-    try {
-      const response = await bridgeRequest(`/bridge/command?clientId=${encodeURIComponent(state.clientId)}`, {
-        timeoutMs: COMMAND_POLL_TIMEOUT_MS,
-      });
-      if (response?.command) await handleCommand(response.command);
-    } catch {
-      // O heartbeat reabre o caminho quando a bridge voltar.
-    }
+    const client = getActivityBridgeClient();
+    await client.pollCommands();
+    syncActivityBridgeState();
   };
 
   const connectEvents = () => {
-    if (!state.started || typeof EventSource !== 'function') return;
-    try {
-      const events = new EventSource(
-        `${BRIDGE_BASE_URL}/bridge/events?clientId=${encodeURIComponent(state.clientId)}`,
-      );
-      state.eventSource = events;
-      if (typeof events.addEventListener === 'function') {
-        events.addEventListener('command', (event) => {
-          try {
-            const payload = JSON.parse(event.data || '{}');
-            if (payload?.command) handleCommand(payload.command);
-          } catch {
-            // Evento malformado: ignora e espera o próximo.
-          }
-        });
-        events.addEventListener('error', () => {
-          try {
-            events.close();
-          } catch {
-            // ignore
-          }
-          state.eventSource = null;
-        });
-      }
-    } catch {
-      state.eventSource = null;
-    }
+    const client = getActivityBridgeClient();
+    client.connectEvents();
+    syncActivityBridgeState();
   };
 
-  const startBridgeClient = () => {
-    if (state.started) return;
-    state.clientId = getOrCreateClientId();
-    state.started = true;
-    sendHeartbeat();
-    connectEvents();
-    state.heartbeatTimer = setInterval(sendHeartbeat, HEARTBEAT_INTERVAL_MS);
+  const startBridgeClient = async () => {
+    const client = getActivityBridgeClient();
+    if (client.state.started) {
+      syncActivityBridgeState();
+      return;
+    }
+    await client.start({ connectEvents: false });
+    syncActivityBridgeState();
+    await client.sendHeartbeat();
+    client.connectEvents();
+    syncActivityBridgeState();
   };
 
   const stopBridgeClient = () => {
-    state.started = false;
-    if (state.heartbeatTimer) clearInterval(state.heartbeatTimer);
-    state.heartbeatTimer = 0;
-    if (state.eventSource) {
-      try {
-        state.eventSource.close();
-      } catch {
-        // ignore
-      }
-    }
-    state.eventSource = null;
+    getActivityBridgeClient().stop();
+    syncActivityBridgeState();
   };
 
   pageWindow.__geminiMdActivityDebug = {
@@ -829,11 +876,14 @@
       updateActivityProgress,
       finishActivityProgress,
       buildHeartbeatPayload,
+      getActivityBridgeClient,
       extractCardDate,
       hashText,
       normalizeText,
     },
   };
+
+  installContentScriptMessageListener();
 
   if (!pageWindow.__GEMINI_MD_ACTIVITY_DISABLE_AUTO_START__) {
     startBridgeClient();

@@ -1,10 +1,16 @@
+import { applyCssVars, buildDockHostPalette } from './host-palette.js';
+
 export const SHARED_PROGRESS_DOCK_ID = 'gm-md-export-progress-dock';
 
 export const ensureSharedProgressDock = ({
   dockId = SHARED_PROGRESS_DOCK_ID,
   initialTitle = '',
   documentRef = document,
-} = {}) => {
+}: {
+  dockId?: string;
+  initialTitle?: string;
+  documentRef?: Document;
+} = {}): HTMLElement => {
   let dock = documentRef.getElementById(dockId);
   if (dock) return dock;
 
@@ -28,14 +34,16 @@ export const ensureSharedProgressDock = ({
         font-family: var(--gm-font);
         display: flex;
         flex-direction: column;
-        gap: 8px;
-        padding: 12px 14px;
-        border-radius: 18px;
+        gap: 10px;
+        padding: 14px 16px;
+        border-radius: 22px;
         background: var(--gm-dock-bg);
         color: var(--gm-dock-text);
         border: 1px solid var(--gm-dock-border);
-        box-shadow: 0 10px 30px rgba(0,0,0,0.16);
-        backdrop-filter: blur(10px);
+        box-shadow:
+          0 16px 40px rgba(0,0,0,0.40),
+          0 2px 8px rgba(0,0,0,0.24);
+        backdrop-filter: blur(14px);
       }
       #${dockId} .gm-dock-track {
         height: 6px;
@@ -67,6 +75,9 @@ export const ensureSharedProgressDock = ({
         transform: translateX(-100%);
         animation: gm-dock-shimmer 1500ms linear infinite;
       }
+      #${dockId}.gm-dock-done .gm-dock-bar {
+        background: var(--gm-dock-done-bg, var(--gm-accent));
+      }
       #${dockId}.gm-dock-done .gm-dock-bar::after {
         animation: none;
         opacity: 0;
@@ -93,41 +104,33 @@ export const ensureSharedProgressDock = ({
   return dock;
 };
 
-export const applySharedProgressDockTheme = (dock, { dark = false } = {}) => {
+export const applySharedProgressDockTheme = (
+  dock: HTMLElement | null,
+  { dark = false, documentRef = document }: { dark?: boolean; documentRef?: Document } = {},
+): void => {
   if (!dock) return;
-  const vars = dark
-    ? {
-        '--gm-dock-bg': 'rgba(31,35,41,0.94)',
-        '--gm-dock-text': '#e8eaed',
-        '--gm-dock-muted': '#aab4be',
-        '--gm-dock-border': 'rgba(255,255,255,0.08)',
-        '--gm-dock-track': 'rgba(255,255,255,0.08)',
-        '--gm-font': '"Google Sans Text","Google Sans",Roboto,"Segoe UI",system-ui,sans-serif',
-        '--gm-accent': '#8ab4f8',
-      }
-    : {
-        '--gm-dock-bg': 'rgba(255,255,255,0.94)',
-        '--gm-dock-text': '#202124',
-        '--gm-dock-muted': '#5f6368',
-        '--gm-dock-border': 'rgba(60,64,67,0.12)',
-        '--gm-dock-track': 'rgba(60,64,67,0.12)',
-        '--gm-font': '"Google Sans Text","Google Sans",Roboto,"Segoe UI",system-ui,sans-serif',
-        '--gm-accent': '#1a73e8',
-      };
-  Object.entries(vars).forEach(([key, value]) => dock.style.setProperty(key, value));
+  applyCssVars(dock, buildDockHostPalette({ documentRef, isDark: dark }));
 };
 
 export const getSharedProgressDockElements = ({
   dockId = SHARED_PROGRESS_DOCK_ID,
   documentRef = document,
-} = {}) => ({
+}: {
+  dockId?: string;
+  documentRef?: Document;
+} = {}): {
+  titleEl: HTMLElement | null;
+  countEl: HTMLElement | null;
+  labelEl: HTMLElement | null;
+  barEl: HTMLElement | null;
+} => ({
   titleEl: documentRef.getElementById(`${dockId}-title`),
   countEl: documentRef.getElementById(`${dockId}-count`),
   labelEl: documentRef.getElementById(`${dockId}-label`),
   barEl: documentRef.getElementById(`${dockId}-bar`),
 });
 
-export const setSharedProgressDockVisible = (dock, visible) => {
+export const setSharedProgressDockVisible = (dock: HTMLElement | null, visible: boolean): void => {
   if (!dock) return;
   dock.hidden = !visible;
   dock.style.display = visible ? 'block' : 'none';

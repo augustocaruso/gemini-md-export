@@ -1,10 +1,10 @@
 import type { NativeBrokerRequest, NativeBrokerResponse } from '../../native/protocol.js';
-import { inspectTabWithDebugger } from './chrome-debugger-controller.js';
 import {
   claimDebuggableGeminiTab,
   classifyBrowserTabs,
   type RawBrowserTab,
 } from './browser-session-broker.js';
+import { inspectTabWithDebugger } from './chrome-debugger-controller.js';
 
 type ChromeRuntimePort = Readonly<{
   onMessage: { addListener(listener: (message: unknown) => void): void };
@@ -82,13 +82,17 @@ export const handleNativeBrowserBrokerCommand = async (
 const isBrokerResponse = (message: unknown): message is NativeBrokerResponse =>
   !!message && typeof message === 'object' && 'ok' in message;
 
-const isBrowserBrokerCommand = (command: unknown): command is NativeBrowserBrokerCommand['command'] =>
+const isBrowserBrokerCommand = (
+  command: unknown,
+): command is NativeBrowserBrokerCommand['command'] =>
   command === 'tabs.list' ||
   command === 'tabs.status' ||
   command === 'tabs.claim' ||
   command === 'tabs.release';
 
-const unsupportedCommandResponse = (request: Pick<NativeBrokerRequest, 'id'>): NativeBrokerResponse => ({
+const unsupportedCommandResponse = (
+  request: Pick<NativeBrokerRequest, 'id'>,
+): NativeBrokerResponse => ({
   id: request.id,
   ok: false,
   error: {

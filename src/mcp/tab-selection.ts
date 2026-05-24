@@ -1,13 +1,13 @@
 import {
   assertClaimableGeminiTab,
-  explainGeminiClientLifecycleRejection,
-  getClaimableGeminiTabs,
-  toClaimableGeminiTab,
   type ClaimableGeminiTab,
+  explainGeminiClientLifecycleRejection,
   type GeminiClientLifecycleCode,
   type GeminiClientLifecycleOptions,
   type GeminiClientSnapshot,
   type GeminiPageSnapshot,
+  getClaimableGeminiTabs,
+  toClaimableGeminiTab,
 } from './client-lifecycle.js';
 
 export type { GeminiClientSnapshot, GeminiPageSnapshot };
@@ -26,8 +26,7 @@ export type ActiveClaimableGeminiClientDiagnostic = Readonly<{
   manualReloadRecommended?: boolean;
 }>;
 
-export const explainActiveClaimableGeminiClientRejection =
-  explainGeminiClientLifecycleRejection;
+export const explainActiveClaimableGeminiClientRejection = explainGeminiClientLifecycleRejection;
 
 export const toActiveClaimableGeminiClient = toClaimableGeminiTab;
 

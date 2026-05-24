@@ -10,6 +10,7 @@ import {
   describeRecentBrowserLaunch,
   detectBrowserWithLoadedExtension,
   launchGeminiBrowser,
+  readBrowserTabsForGeminiDiagnostics,
   readBrowserLaunchState,
   resolveGeminiBrowserLaunchPlan,
   writeBrowserLaunchState,
@@ -295,7 +296,7 @@ test('launcher macOS usa open -g -a Chrome para reduzir troca de foco', async ()
   ]);
 });
 
-test('launcher macOS recarrega aba My Activity existente em vez de abrir duplicata', async () => {
+test('launcher macOS reaproveita aba My Activity existente sem recarregar nem focar', async () => {
   const calls = [];
   const syncCalls = [];
   const result = await launchGeminiBrowser({
@@ -319,11 +320,12 @@ test('launcher macOS recarrega aba My Activity existente em vez de abrir duplica
 
   assert.equal(result.reusedExistingTab, true);
   assert.equal(result.openedNewTab, false);
+  assert.equal(result.reloaded, false);
   assert.equal(result.targetUrl, 'https://myactivity.google.com/product/gemini');
   assert.equal(calls.length, 0);
   assert.equal(syncCalls[0].command, 'osascript');
   assert.equal(syncCalls[0].options.timeout, 5000);
-  assert.match(syncCalls[0].args.join('\n'), /set URL of t to currentUrl/);
+  assert.doesNotMatch(syncCalls[0].args.join('\n'), /set URL of t to currentUrl/);
   assert.doesNotMatch(syncCalls[0].args.join('\n'), /set active tab index/);
   assert.doesNotMatch(syncCalls[0].args.join('\n'), /set index of w to 1/);
 });
@@ -343,4 +345,59 @@ test('launcher macOS não envia profile arg quando perfil não foi configurado',
 
   assert.equal(result.browserName, 'Chrome');
   assert.deepEqual(calls[0].args, ['-g', '-a', 'Google Chrome', 'https://gemini.google.com/app']);
+});
+
+test('launcher macOS com perfil alvo nao reutiliza aba de perfil desconhecido', async () => {
+  const calls = [];
+  const result = await launchGeminiBrowser({
+    platform: 'darwin',
+    profileDirectory: 'Default',
+    env: {},
+    exists: (candidate) => candidate === '/Applications/Dia.app',
+    spawnSyncFn: () => {
+      throw new Error('nao deve inspecionar abas quando um perfil alvo foi definido');
+    },
+    spawnFn: (command, args, options) => {
+      calls.push({ command, args, options });
+      return { unref() {} };
+    },
+  });
+
+  assert.equal(result.browserName, 'Dia');
+  assert.equal(result.reusedExistingTab, false);
+  assert.equal(result.openedNewTab, true);
+  assert.equal(result.profileDirectory, 'Default');
+  assert.deepEqual(calls[0].args, [
+    '-g',
+    '-a',
+    'Dia',
+    'https://gemini.google.com/app',
+    '--args',
+    '--profile-directory=Default',
+  ]);
+});
+
+test('diagnostico de launch nao bloqueia por aba ativa externa quando inventario vem parcial', () => {
+  const partial = readBrowserTabsForGeminiDiagnostics({
+    env: {
+      GEMINI_MD_EXPORT_ACTIVE_TAB_URL: 'https://chatgpt.com/c/6a0e1ccb-1db0-83e9-a023-07c296350e29',
+    },
+    platform: 'linux',
+  });
+
+  assert.equal(partial.source, 'env');
+  assert.equal(partial.diagnosis.kind, 'unknown');
+  assert.equal(partial.diagnosis.terminal, false);
+  assert.equal(partial.diagnosis.inventoryComplete, false);
+
+  const complete = readBrowserTabsForGeminiDiagnostics({
+    env: {
+      GEMINI_MD_EXPORT_BROWSER_TAB_URLS: 'https://chatgpt.com/c/6a0e1ccb-1db0-83e9-a023-07c296350e29',
+    },
+    platform: 'linux',
+  });
+
+  assert.equal(complete.diagnosis.kind, 'other');
+  assert.equal(complete.diagnosis.terminal, true);
+  assert.equal(complete.diagnosis.inventoryComplete, true);
 });
