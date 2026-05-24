@@ -6,6 +6,7 @@
 // --- constantes ---------------------------------------------------------
 
 const TURN_SELECTOR = 'user-query, model-response';
+const HIDDEN_STYLE_RE = /(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*(?:hidden|collapse))\b/i;
 
 // Labels de acessibilidade que o Gemini injeta como nós de texto.
 // Match case-insensitive, com ou sem ponto final, PT e EN.
@@ -48,6 +49,36 @@ const MEDIA_SELECTOR = [
   'a[href]',
 ].join(',');
 
+const isHiddenInConversationDom = (node) => {
+  let el = node?.nodeType === 1 ? node : node?.parentElement;
+  while (el && el.nodeType === 1) {
+    if (el.hidden || el.getAttribute?.('aria-hidden') === 'true' || el.hasAttribute?.('inert')) {
+      return true;
+    }
+    if (HIDDEN_STYLE_RE.test(el.getAttribute?.('style') || '')) return true;
+
+    const win = el.ownerDocument?.defaultView;
+    const style = typeof win?.getComputedStyle === 'function' ? win.getComputedStyle(el) : null;
+    if (
+      style &&
+      (style.display === 'none' ||
+        style.visibility === 'hidden' ||
+        style.visibility === 'collapse')
+    ) {
+      return true;
+    }
+    el = el.parentElement;
+  }
+  return false;
+};
+
+const collectTurnNodes = (root) => {
+  const nodes = [];
+  if (root?.matches?.(TURN_SELECTOR)) nodes.push(root);
+  nodes.push(...Array.from(root.querySelectorAll(TURN_SELECTOR)));
+  return nodes.filter((node) => !isHiddenInConversationDom(node));
+};
+
 // --- chat id ------------------------------------------------------------
 
 /**
@@ -68,6 +99,16 @@ export const extractChatId = (pathname) => {
 
 const yamlEscapeDouble = (s) => String(s).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 
+export const portableIsoSeconds = (value) => {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toISOString().replace(/\.\d{3}Z$/, 'Z');
+};
+
+const assistantTurnCount = (turns = []) =>
+  Array.isArray(turns) ? turns.filter((turn) => turn?.role === 'assistant').length : 0;
+
 /**
  * Monta o bloco de frontmatter YAML do arquivo exportado.
  *
@@ -75,18 +116,37 @@ const yamlEscapeDouble = (s) => String(s).replace(/\\/g, '\\\\').replace(/"/g, '
  * @param {string} meta.chatId
  * @param {string} [meta.title]
  * @param {string} meta.url
- * @param {string} meta.exportedAt   ISO string
+ * @param {string} [meta.dateCreated] ISO string UTC, sem milissegundos
+ * @param {string} [meta.dateLastMessage] ISO string UTC, sem milissegundos
+ * @param {string} [meta.dateExported] ISO string UTC, sem milissegundos
+ * @param {number} [meta.turnCount] número de respostas da IA
  * @param {string} [meta.model]
  * @returns {string}
  */
-export const buildFrontmatter = ({ chatId, title, url, exportedAt, model }) => {
+export const buildFrontmatter = ({
+  chatId,
+  title,
+  url,
+  dateCreated,
+  dateLastMessage,
+  dateExported,
+  exportedAt,
+  turnCount,
+  model,
+}) => {
   const lines = ['---'];
+  lines.push('type: gemini_chat');
   lines.push(`chat_id: ${chatId}`);
   if (title) lines.push(`title: "${yamlEscapeDouble(title)}"`);
   lines.push(`url: ${url}`);
-  lines.push(`exported_at: ${exportedAt}`);
+  const normalizedDateCreated = portableIsoSeconds(dateCreated);
+  const normalizedDateLastMessage = portableIsoSeconds(dateLastMessage);
+  const normalizedDateExported = portableIsoSeconds(dateExported || exportedAt);
+  if (normalizedDateCreated) lines.push(`date_created: ${normalizedDateCreated}`);
+  if (normalizedDateLastMessage) lines.push(`date_last_message: ${normalizedDateLastMessage}`);
+  if (normalizedDateExported) lines.push(`date_exported: ${normalizedDateExported}`);
+  if (Number.isFinite(turnCount)) lines.push(`turn_count: ${Math.max(0, Math.trunc(turnCount))}`);
   if (model) lines.push(`model: "${yamlEscapeDouble(model)}"`);
-  lines.push('source: gemini-web');
   lines.push('tags: [gemini-export]');
   lines.push('---', '', '');
   return lines.join('\n');
@@ -528,7 +588,7 @@ export const roleOf = (el) => {
  * @returns {Array<{role: 'user' | 'assistant', text: string}>}
  */
 export const scrapeTurns = (doc) => {
-  const nodes = doc.querySelectorAll(TURN_SELECTOR);
+  const nodes = collectTurnNodes(doc);
   const out = [];
   nodes.forEach((n) => {
     const role = roleOf(n);
@@ -549,7 +609,10 @@ export const scrapeTurns = (doc) => {
  * @returns {string}
  */
 export const buildDocument = ({ meta, turns }) => {
-  const frontmatter = buildFrontmatter(meta);
+  const frontmatter = buildFrontmatter({
+    ...meta,
+    turnCount: Number.isFinite(meta?.turnCount) ? meta.turnCount : assistantTurnCount(turns),
+  });
   const body = turns
     .map((t) => {
       const header = t.role === 'user' ? '## 🧑 Usuário' : '## 🤖 Gemini';

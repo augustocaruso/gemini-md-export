@@ -4,7 +4,11 @@
 
 **Goal:** Normalize raw Gemini chat Markdown files to a canonical YAML schema and backfill `date_created` / `date_last_message` from Google Gemini Activity.
 
-**Architecture:** Keep metadata normalization separate from contaminated-content repair. New exports should emit the canonical YAML directly, while a dedicated backfill runner scans existing raw chat files, first matches them against the authenticated My Activity web UI, later accepts Takeout records when the export email arrives, reports the proposed changes, and only rewrites files with `--apply` after creating backups.
+**Architecture:** New exports emit the canonical YAML directly. For the back
+catalog, the public entrypoint is now `fix-vault`: it runs integrity audit,
+canonical YAML normalization, Takeout matching, and My Activity matching in one
+human-facing flow. The lower-level metadata and repair runners remain internal
+implementation pieces.
 
 **Tech Stack:** Node.js ESM, built-in `node:test`, existing MV3 Chrome extension build, local MCP bridge, Markdown frontmatter parsing with the repo's lightweight parser style.
 
@@ -40,6 +44,57 @@ Rules:
 - `date_last_message` is the last matched Gemini Activity item that confirms a Gemini response for the chat. If the available Activity timestamp is the prompt event time, use that timestamp and record the limitation in the JSON report, not in the YAML.
 - If a date cannot be matched confidently, omit that date field and report the file as `unresolved` or `ambiguous`.
 - Scope is raw chats only. Wiki notes, consolidated notes, or manually edited derived notes must be skipped.
+
+## My Activity Bridge Client
+
+Closed implementation direction:
+
+- The runtime scraper is the MV3 extension, not Playwright.
+- `src/activity-content-script.js` runs on `https://myactivity.google.com/product/gemini*`.
+- The My Activity page connects to the local bridge as `kind: "activity"` and exposes `activity-scan-batch`.
+- The bridge accepts My Activity origin only for heartbeat/events/command result style client communication.
+- Sensitive endpoints such as `pick-directory`, `save-files`, and `fetch-asset` remain restricted to Gemini/chrome-extension origins.
+- Scan results are sanitized: dates, score, hashes, sample lengths, card indexes, and checkpoints only.
+
+## Scanner And Checkpoint
+
+The default live path is resumable and exhaustive:
+
+```bash
+gemini-md-export fix-vault <vaultDir> --report <report.json>
+```
+
+The internal metadata runner builds in-memory candidates with `{ chatId, firstPrompt, lastPrompt, assistantSamples }`, sends them to the Activity client, and records checkpoint fields such as `lastSeenActivityToken`, `loadedCardCount`, and `resolvedChatIds`. Files without confident matches are still normalized and reported as `unresolved`; date fields are omitted.
+
+`date_last_message` means the timestamp of the latest Gemini Activity item that confirms the last known Gemini response. It is not a promise that the timestamp is the exact end of model generation.
+
+## Takeout Later
+
+When the Google export arrives, the same runner accepts:
+
+```bash
+gemini-md-export fix-vault <vaultDir> --takeout <Minhaatividade.html|MyActivity.json> --report <report.json>
+```
+
+The observed Google Takeout shape for Gemini Apps is `Minha atividade/Gemini Apps/Minhaatividade.html`: one HTML card per Gemini Activity item, with prompt text, model response text, attachments, and a local timestamp such as `17 de mai. de 2026, 13:58:18 BRT`, but no `gemini.google.com/app/<chatId>` URL. That means the offline path must infer `chat_id` by scoring the HTML card text against the already-exported Markdown candidates `{ chatId, firstPrompt, lastPrompt, assistantSamples }`.
+
+Takeout is normalized into the same match shape as the live My Activity scraper and does not require browser/bridge readiness. Reports must store only source, dates, scores, hashes, and lengths.
+
+## Manifest Permission And Reload
+
+`https://myactivity.google.com/*` is a new MV3 host permission. A browser runtime that loaded an older manifest will not inject the Activity content script. Readiness/bridge errors should return a concrete action: open `https://myactivity.google.com/product/gemini` and, if the new permission has not reached the loaded runtime, reload the extension card manually in `chrome://extensions` / `edge://extensions`.
+
+## Activity UX
+
+The live My Activity scan reuses the extension's existing visual language:
+
+- the MCP applies the same tab-claim visual path used by Gemini tabs, so the My Activity tab is marked with Tab Group/badge while the scan runs;
+- `src/activity-content-script.js` renders the same `gm-md-export-progress-dock` pattern used by long exports, with a moving bar, shimmer, resolved-chat count, loaded/scanned item text, and terminal "Concluído"/"Falhou" states;
+- the visual claim is best-effort and auto-released after the scan, so a claim failure does not block YAML normalization.
+
+## Privacy Gate
+
+Prompts and responses may exist only in memory during scoring. Reports, telemetry, flight recorder events, and operational logs must contain only hashes, sizes, scores, counts, timestamps, file paths, and status. Tests must fail if sensitive prompt/response text appears in report output.
 
 ## File Structure
 
@@ -313,9 +368,11 @@ Expected: pass.
 
 - [ ] **Step 1: Add Takeout fixture tests**
 
-Add tests proving `--takeout <MyActivity.json>`:
+Add tests proving `--takeout <Minhaatividade.html|MyActivity.json>`:
 
 - parses Google Activity JSON;
+- parses Google Takeout `Minhaatividade.html` for Gemini Apps;
+- matches HTML activity cards to exported Markdown chats by content when the Takeout has no `chat_id`;
 - fills the same match model used by My Activity web scraping;
 - does not require browser/bridge readiness;
 - takes precedence over live scraping when both are supplied and scores tie.
@@ -326,6 +383,14 @@ Accept Google My Activity JSON forms commonly exported by Takeout/Data Portabili
 
 - top-level array of activity objects;
 - object with an array property containing activity objects.
+
+Also accept the concrete Takeout HTML shape:
+
+- split `outer-cell` activity cards from `Minhaatividade.html`;
+- extract the Portuguese/BRT timestamp and convert it to UTC `YYYY-MM-DDTHH:mm:ssZ`;
+- normalize visible card text in memory;
+- score cards against candidate prompts/responses;
+- skip low-confidence or tied matches instead of inventing dates.
 
 For each activity item, extract:
 
@@ -363,21 +428,24 @@ Expected: pass.
 
 Add tests that:
 
-- `gemini-md-export help metadata` lists `metadata backfill`;
-- `metadata backfill <vault> --use-my-activity` spawns `chat-metadata-backfill.mjs`;
-- `metadata backfill <vault> --takeout <file>` remains supported once Takeout arrives;
-- unknown metadata subcommands return a usage error.
+- `gemini-md-export --help` lists `fix-vault`;
+- public help does not list `repair-vault` or `metadata backfill`;
+- `gemini-md-export help fix-vault` explains Takeout and My Activity;
+- `fix-vault <vault> --takeout <file>` calls the internal repair audit and
+  metadata backfill runners, writes a combined report, and guides the user if
+  My Activity is unavailable.
 
 - [ ] **Step 2: Wire the command**
 
 Add command shape:
 
 ```bash
-gemini-md-export metadata backfill <vault-or-folder> --use-my-activity [--apply]
-gemini-md-export metadata backfill <vault-or-folder> --takeout <MyActivity.json> [--apply]
+gemini-md-export fix-vault <vault-or-folder> --report <report.json>
+gemini-md-export fix-vault <vault-or-folder> --takeout <Minhaatividade.html|MyActivity.json> --report <report.json>
 ```
 
-Forward unrecognized backfill-specific flags to `chat-metadata-backfill.mjs` the same way `repair-vault` delegates to its runner.
+The public command calls `vault-repair.mjs` and `chat-metadata-backfill.mjs`
+internally. `repair-vault` is no longer a public slash command.
 
 - [ ] **Step 3: Verify**
 
@@ -394,7 +462,7 @@ Expected: pass.
 **Files:**
 - Modify: `README.md`
 - Modify: `gemini-cli-extension/GEMINI.md`
-- Create: `gemini-cli-extension/commands/exporter/backfill-metadata.toml`
+- Create: `gemini-cli-extension/commands/exporter/fix-vault.toml`
 - Test: `tests/gemini-cli-extension.test.mjs`
 
 - [ ] **Step 1: Update README**
@@ -404,25 +472,26 @@ Document:
 - canonical YAML schema;
 - `turn_count` semantics as number of Gemini responses;
 - UTC `Z` date format;
-- My Activity web scraping command as the first implementation path;
-- Takeout command as the later stable/offline path once the email arrives;
-- dry-run/apply behavior and backup location.
+- `fix-vault` as the single public back catalog command;
+- Takeout as offline evidence first, then My Activity for remaining dates;
+- privacy rule: reports store hashes, sizes, scores, counts, dates and status.
 
 - [ ] **Step 2: Add Gemini CLI command**
 
-Create `/exporter:backfill-metadata` command that tells the agent to call:
+Create `/exporter:fix-vault` command that tells the agent to call:
 
 ```bash
-node "${extensionPath}/bin/gemini-md-export.mjs" metadata backfill "<vaultDir>" --use-my-activity
+node "${extensionPath}/bin/gemini-md-export.mjs" fix-vault "<vaultDir>" --report "<report.json>"
 ```
 
 or:
 
 ```bash
-node "${extensionPath}/bin/gemini-md-export.mjs" metadata backfill "<vaultDir>" --takeout "<MyActivity.json>"
+node "${extensionPath}/bin/gemini-md-export.mjs" fix-vault "<vaultDir>" --takeout "<Minhaatividade.html|MyActivity.json>" --report "<report.json>"
 ```
 
-The command must say explicitly that `--apply` is required to mutate files.
+The command must say explicitly that `repair-vault` is not public; repair is an
+internal subflow of `fix-vault`.
 
 - [ ] **Step 3: Verify bundle tests**
 
@@ -468,13 +537,13 @@ Expected:
 After the Takeout email/file arrives, also run:
 
 ```bash
-node gemini-cli-extension/scripts/chat-metadata-backfill.mjs /tmp/gme-vault-fixture --takeout /tmp/gme-takeout-fixture.json --report /tmp/gme-report-takeout.json
+node gemini-cli-extension/scripts/chat-metadata-backfill.mjs /tmp/gme-vault-fixture --takeout /tmp/gme-takeout-fixture.html --report /tmp/gme-report-takeout.json
 ```
 
 Expected:
 
 - no browser/bridge is required;
-- report uses `source: "takeout"`;
+- report uses `source: "takeout-html"` or `source: "takeout"`;
 - no Markdown files changed without `--apply`.
 
 - [ ] **Step 3: Manual My Activity apply smoke**

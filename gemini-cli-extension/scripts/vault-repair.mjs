@@ -13,19 +13,39 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, dirname, join, relative, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const BRIDGE_URL = 'http://127.0.0.1:47283';
 const DIRECT_REEXPORT_CHUNK_SIZE = 500;
-const TERMINAL_JOB_STATUSES = new Set([
-  'completed',
-  'completed_with_errors',
-  'failed',
-  'cancelled',
-]);
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const auditScriptPath = resolve(__dirname, 'vault-repair-audit.mjs');
+
+const compiledModuleUrl = (...segments) => {
+  const candidates = [
+    resolve(__dirname, '..', '..', 'build', 'ts', ...segments),
+    resolve(__dirname, '..', 'build', 'ts', ...segments),
+  ];
+  const found = candidates.find((candidate) => existsSync(candidate));
+  if (!found) {
+    throw new Error(
+      `Modulo TypeScript compilado nao encontrado: ${segments.join('/')} (rode npm run build:ts).`,
+    );
+  }
+  return pathToFileURL(found).href;
+};
+
+const { loadTakeoutEvidence: loadSharedTakeoutEvidence } = await import(
+  compiledModuleUrl('takeout', 'takeout-adapter.js')
+);
+const { assertBrowserReadyForRepair } = await import(
+  compiledModuleUrl('core', 'browser-ready-contract.js')
+);
+const {
+  pollWebRepairExportJob,
+  webRepairExitCodeForStatusCounts,
+  webRepairTargetRequestArgs,
+} = await import(compiledModuleUrl('core', 'web-repair-job-policy.js'));
 
 const sleep = (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 
@@ -47,6 +67,16 @@ const normalizeText = (value) =>
     .replace(/[ \t]+$/gm, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
+
+const portableIsoSeconds = (value) => {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toISOString().replace(/\.\d{3}Z$/, 'Z');
+};
+
+const sampleText = (value, max = 1200) =>
+  String(value || '').replace(/\s+/g, ' ').trim().slice(0, max);
 
 const parseFrontmatter = (text) => {
   if (!String(text || '').startsWith('---\n')) return { frontmatter: '', body: text || '', fields: {} };
@@ -116,6 +146,68 @@ const bodyFingerprintFor = (markdown) => {
   return hashText(normalizeText(body));
 };
 
+const sectionsForRole = (body, role) => {
+  const emoji = role === 'user' ? '🧑' : '🤖';
+  const otherEmoji = role === 'user' ? '🤖' : '🧑';
+  const re = new RegExp(
+    `^##\\s*${emoji}\\s*[^\\n]*\\n\\n([\\s\\S]*?)(?=\\n\\n---\\n\\n##\\s*${otherEmoji}|\\n\\n---\\n\\n##\\s*${emoji}|$)`,
+    'gm',
+  );
+  return Array.from(String(body || '').matchAll(re), (match) => match[1].trim()).filter(Boolean);
+};
+
+const buildTakeoutCandidate = (note) => {
+  const chatId = String(note.chatId || '').toLowerCase();
+  if (!/^[a-f0-9]{12,}$/.test(chatId) || !note.path || !existsSync(note.path)) return null;
+  const raw = readFileSync(note.path, 'utf-8');
+  const { body } = parseFrontmatter(raw);
+  const userTurns = sectionsForRole(body, 'user');
+  const assistantTurns = sectionsForRole(body, 'assistant');
+  const firstAssistant = sampleText(assistantTurns[0] || '');
+  const lastAssistant = sampleText(assistantTurns.at(-1) || '');
+  return {
+    chatId,
+    turnCount: assistantTurns.length,
+    scoring: {
+      firstPrompt: sampleText(userTurns[0] || ''),
+      lastPrompt: sampleText(userTurns.at(-1) || ''),
+      firstAssistant,
+      lastAssistant,
+      assistantSamples: [lastAssistant, firstAssistant].filter(Boolean),
+    },
+  };
+};
+
+const loadTakeoutEvidence = ({ takeoutPath, notes }) => {
+  if (!takeoutPath) return loadSharedTakeoutEvidence({ takeoutPath: '', candidates: [] });
+  const resolved = resolve(expandHome(takeoutPath));
+  if (!existsSync(resolved) || !statSync(resolved).isFile()) {
+    throw new Error(`Takeout nao encontrado: ${resolved}`);
+  }
+
+  const candidates = notes.map(buildTakeoutCandidate).filter(Boolean);
+  return loadSharedTakeoutEvidence({ takeoutPath: resolved, candidates });
+};
+
+const takeoutEvidenceFor = (takeoutEvidence, chatId) => {
+  if (!takeoutEvidence?.summary?.enabled) return undefined;
+  const evidence = takeoutEvidence.byChatId.get(String(chatId || '').toLowerCase());
+  return {
+    status: evidence?.status || 'unmatched',
+    dateCreated: evidence?.dateCreated || null,
+    dateLastMessage: evidence?.dateLastMessage || null,
+    evidence: (evidence?.evidence || []).map((item) => ({
+      kind: item.kind || 'unknown',
+      date: item.date || null,
+      score: item.score ?? null,
+      source: item.source || null,
+      textHash: item.textHash || null,
+      sampleHash: item.sampleHash || null,
+      sampleLength: item.sampleLength || null,
+    })),
+  };
+};
+
 const parseArgs = (argv) => {
   const options = {
     dryRun: false,
@@ -126,7 +218,14 @@ const parseArgs = (argv) => {
     pollMs: 2000,
     jobTimeoutMs: 30 * 60 * 1000,
     explicitPaths: [],
+    takeout: '',
   };
+  const valueOptions = new Map([
+    ['--claim-id', 'claimId'],
+    ['--client-id', 'clientId'],
+    ['--tab-id', 'tabId'],
+    ['--session', 'sessionId'],
+  ]);
   let root = null;
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -148,6 +247,12 @@ const parseArgs = (argv) => {
       options.skipBrowserCheck = true;
     } else if (arg === '--allow-staged-duplicates') {
       options.allowStagedDuplicates = true;
+    } else if (arg === '--takeout') {
+      options.takeout = takeValue();
+    } else if (valueOptions.has(arg)) {
+      options[valueOptions.get(arg)] = takeValue();
+    } else if (arg === '--activate-tab') {
+      options.activateTab = true;
     } else if (arg === '--bridge-url') {
       options.bridgeUrl = takeValue().replace(/\/+$/, '');
     } else if (arg === '--report-dir') {
@@ -185,6 +290,7 @@ const usage = () => {
       '  --dry-run                 Audita e escreve relatorio preliminar, sem reexportar nem sobrescrever.',
       '  --quick-triage            Reexporta apenas candidatos heuristicos, nao todos os raw exports.',
       '  --path <file.md>          Prioriza/limita a verificacao a um caminho explicito. Pode repetir.',
+      '  --takeout <file>          Usa Takeout/My Activity como evidencia sanitizada de integridade.',
       '  --report-dir <dir>        Default: <vault>/.gemini-md-export-repair',
       '  --staging-dir <dir>       Default: <report-dir>/staging',
       '  --backup-dir <dir>        Default: <report-dir>/backups/<timestamp>',
@@ -222,6 +328,7 @@ const createPreliminaryReport = ({
   rawQueue,
   wikiQueue,
   explicitPaths,
+  takeoutEvidence,
 }) => ({
   createdAt: new Date().toISOString(),
   mode,
@@ -234,6 +341,12 @@ const createPreliminaryReport = ({
   heuristicSuspectCount: audit.summary.suspectNotes,
   wikiCandidateCount: audit.summary.wikiCandidates,
   duplicateGroups: audit.duplicateGroups || [],
+  takeoutEvidence: takeoutEvidence?.summary?.enabled
+    ? {
+        sourceFile: takeoutEvidence.sourceFile,
+        summary: takeoutEvidence.summary,
+      }
+    : { summary: { enabled: false } },
   explicitPaths,
   paths,
   itemsNeedingDirectVerificationFirst: rawQueue.slice(0, 200).map((note) => ({
@@ -243,6 +356,7 @@ const createPreliminaryReport = ({
     title: note.title || '',
     suspect: note.suspect === true,
     reasons: note.reasons || [],
+    takeoutEvidence: takeoutEvidenceFor(takeoutEvidence, note.chatId),
   })),
   truncatedItemsNeedingDirectVerification:
     rawQueue.length > 200 ? rawQueue.length - 200 : 0,
@@ -292,50 +406,21 @@ const callAgentEndpoint = async ({ bridgeUrl, path, method = 'GET', body = null 
 };
 
 const ensureBrowserReady = async (options) => {
+  const targetArgs = webRepairTargetRequestArgs(options);
   const status = await callMcpTool({
     bridgeUrl: options.bridgeUrl,
     name: 'gemini_ready',
     args: {
       action: 'status',
-      wakeBrowser: true,
+      wakeBrowser: !targetArgs.claimId && !targetArgs.clientId && targetArgs.tabId === undefined,
       selfHeal: true,
       allowReload: true,
+      diagnostic: true,
+      ...targetArgs,
     },
   });
-  if (
-    status.ready !== true ||
-    status.blockingIssue ||
-    !Array.isArray(status.connectedClients) ||
-    status.connectedClients.length === 0
-  ) {
-    const problem = {
-      ready: status.ready === true,
-      blockingIssue: status.blockingIssue || null,
-      expectedChromeExtension: status.expectedChromeExtension || null,
-      browserWake: status.browserWake || null,
-      selfHeal: status.selfHeal || null,
-      connectedClients: status.connectedClients || [],
-    };
-    throw new Error(`Browser/MCP nao esta pronto para reexportar: ${JSON.stringify(problem)}`);
-  }
+  assertBrowserReadyForRepair(status);
   return status;
-};
-
-const pollExportJob = async ({ bridgeUrl, jobId, pollMs, timeoutMs }) => {
-  const startedAt = Date.now();
-  let status = null;
-
-  while (Date.now() - startedAt <= timeoutMs) {
-    status = await callMcpTool({
-      bridgeUrl,
-      name: 'gemini_job',
-      args: { action: 'status', jobId },
-    });
-    if (TERMINAL_JOB_STATUSES.has(status.status)) return status;
-    await sleep(pollMs);
-  }
-
-  throw new Error(`Timeout aguardando job de reexportacao ${jobId}.`);
 };
 
 const readJobReport = (status) => {
@@ -356,6 +441,7 @@ const reexportChats = async ({ items, paths, options }) => {
   const successes = [];
   const failures = [];
   const jobs = [];
+  let unavailable = null;
 
   for (const chunk of chunkItems(items, DIRECT_REEXPORT_CHUNK_SIZE)) {
     const started = await callAgentEndpoint({
@@ -365,27 +451,33 @@ const reexportChats = async ({ items, paths, options }) => {
       body: {
         outputDir: paths.stagingDir,
         items: chunk,
+        ...webRepairTargetRequestArgs(options),
       },
     });
-    const status = await pollExportJob({
+    const status = await pollWebRepairExportJob({
       bridgeUrl: options.bridgeUrl,
       jobId: started.jobId,
       pollMs: options.pollMs,
       timeoutMs: options.jobTimeoutMs,
+      callMcpTool,
+      sleep,
     });
     const report = readJobReport(status);
     successes.push(...(Array.isArray(report.successes) ? report.successes : []));
     failures.push(...(Array.isArray(report.failures) ? report.failures : []));
+    if (status.webRepairUnavailable && !unavailable) unavailable = status.webRepairUnavailable;
     jobs.push({
       jobId: status.jobId,
       status: status.status,
       reportFile: status.reportFile || null,
       successCount: status.successCount || 0,
       failureCount: status.failureCount || 0,
+      webRepairUnavailable: status.webRepairUnavailable || null,
     });
+    if (unavailable) break;
   }
 
-  return { successes, failures, jobs };
+  return { successes, failures, jobs, unavailable };
 };
 
 const buildReexportItems = (notes) => {
@@ -717,6 +809,10 @@ const main = async () => {
   );
   const mode =
     explicitPathSet.size > 0 ? 'explicit-paths' : options.quickTriage ? 'quick-triage' : 'full';
+  const takeoutEvidence = loadTakeoutEvidence({
+    takeoutPath: options.takeout,
+    notes: selectedNotes,
+  });
 
   const preliminary = createPreliminaryReport({
     audit,
@@ -726,6 +822,7 @@ const main = async () => {
     rawQueue,
     wikiQueue,
     explicitPaths: options.explicitPaths,
+    takeoutEvidence,
   });
   writeJson(paths.preliminaryReportPath, preliminary);
 
@@ -793,7 +890,10 @@ const main = async () => {
     });
   });
 
-  const itemResults = [...rawResults, ...wikiResults];
+  const itemResults = [...rawResults, ...wikiResults].map((item) => ({
+    ...item,
+    takeoutEvidence: takeoutEvidenceFor(takeoutEvidence, item.chatId),
+  }));
   const statusCounts = countStatuses(itemResults);
   const finalReport = {
     createdAt: new Date().toISOString(),
@@ -808,21 +908,33 @@ const main = async () => {
     ).length,
     heuristicSuspectCount: audit.summary.suspectNotes,
     wikiCandidateCount: audit.summary.wikiCandidates,
+    takeoutEvidence: takeoutEvidence?.summary?.enabled
+      ? {
+          sourceFile: takeoutEvidence.sourceFile,
+          summary: takeoutEvidence.summary,
+        }
+      : { summary: { enabled: false } },
     reexportJobs: reexport.jobs,
     reexportFailures: reexport.failures,
+    webRepairUnavailable: reexport.unavailable || null,
     statusCounts,
     items: itemResults,
   };
   writeJson(paths.finalReportPath, finalReport);
+  const exitCode = webRepairExitCodeForStatusCounts({
+    failed: statusCounts.failed || 0,
+    unavailable: reexport.unavailable || null,
+  });
 
   process.stdout.write(
     `${JSON.stringify(
       {
-        ok: true,
+        ok: exitCode === 0,
         mode,
         scannedMarkdownFiles: finalReport.scannedMarkdownFiles,
         geminiExportNotes: finalReport.geminiExportNotes,
         directLinkVerified: finalReport.directLinkVerified,
+        webRepairUnavailable: finalReport.webRepairUnavailable,
         statusCounts,
         auditReportPath: paths.auditReportPath,
         preliminaryReportPath: paths.preliminaryReportPath,
@@ -835,6 +947,7 @@ const main = async () => {
       2,
     )}\n`,
   );
+  process.exitCode = exitCode;
 };
 
 main().catch((err) => {

@@ -6,7 +6,7 @@ import test from 'node:test';
 const ROOT = resolve(import.meta.dirname, '..');
 
 test('service worker cria offscreen sob demanda e expõe diagnóstico', () => {
-  const source = readFileSync(resolve(ROOT, 'src', 'extension-background.js'), 'utf-8');
+  const source = readFileSync(resolve(ROOT, 'src', 'extension-background.ts'), 'utf-8');
 
   assert.match(source, /OFFSCREEN_DOCUMENT_PATH\s*=\s*'offscreen\.html'/);
   assert.match(source, /chrome\.offscreen\.createDocument/);

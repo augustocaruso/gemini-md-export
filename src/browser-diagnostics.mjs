@@ -1,6 +1,10 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { homedir, platform as osPlatform } from 'node:os';
 import { isAbsolute, resolve } from 'node:path';
+import {
+  diagnoseExtensionBundle,
+  summarizeLocalDoctorStatus,
+} from '../build/ts/mcp/extension-bundle-health.js';
 
 export const NATIVE_HOST_NAME = 'com.augustocaruso.gemini_md_export';
 export const EXTENSION_DISPLAY_NAME = 'Gemini Chat -> Markdown Export';
@@ -235,6 +239,7 @@ export const discoverLoadedExtension = ({
               ? null
               : 'other',
       pathMatchesExpected: samePath(selected.path, expectedPath),
+      bundleHealth: diagnoseExtensionBundle(selected.path),
     },
   };
 };
@@ -482,18 +487,16 @@ export const buildLocalDoctorReport = ({
   const runtimeVersion = loaded.extension?.version || null;
   const versionMatches =
     !!runtimeVersion && !!sourceVersion && String(runtimeVersion) === String(sourceVersion);
-  const warnings = [];
-  if (!loaded.ok) warnings.push('extensao_nao_encontrada_no_perfil');
-  if (loaded.ok && !versionMatches) warnings.push('runtime_versao_diferente_dos_arquivos');
-  if (!nativeHost.ok) warnings.push(`native_host_${nativeHost.status}`);
-  const nextAction = (() => {
-    if (!loaded.ok) return 'Carregue a extensão unpacked correta neste navegador/perfil.';
-    if (!versionMatches) return 'Recarregue o card da extensão e a aba Gemini.';
-    if (!nativeHost.ok) return nativeHost.nextAction;
-    return 'Diagnóstico local ok.';
-  })();
+  const localStatus = summarizeLocalDoctorStatus({
+    loadedOk: loaded.ok,
+    versionMatches,
+    nativeHostOk: nativeHost.ok,
+    nativeHostStatus: nativeHost.status,
+    nativeHostNextAction: nativeHost.nextAction,
+    bundleHealthOk: loaded.extension?.bundleHealth?.ok,
+  });
   return {
-    ok: loaded.ok && versionMatches && nativeHost.ok,
+    ok: localStatus.ok,
     browser: key,
     profileDirectory,
     packageRoot,
@@ -502,7 +505,7 @@ export const buildLocalDoctorReport = ({
     loadedExtension: loaded,
     playwrightExtension,
     nativeHost,
-    warnings,
-    nextAction,
+    warnings: localStatus.warnings,
+    nextAction: localStatus.nextAction,
   };
 };

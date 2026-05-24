@@ -5,11 +5,14 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  DEFAULT_RECENT_CHATS_LOAD_MORE_BROWSER_TIMEOUT_MS,
+  DEFAULT_RECENT_CHATS_LOAD_MORE_BUDGET_MS,
   DEFAULT_RECENT_CHATS_LOAD_ATTEMPTS_PER_ROUND,
   DEFAULT_RECENT_CHATS_LOAD_MORE_ROUNDS,
   MAX_RECENT_CHATS_LOAD_TARGET,
   normalizeRecentChatsLoadMorePlan,
-} from '../src/recent-chats-load-more.mjs';
+  recentChatsLoadMoreRuntimeConfig,
+} from '../build/ts/mcp/recent-chats-load-more.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
@@ -45,6 +48,25 @@ test('load more: limita o alvo máximo para paginação longa', () => {
   const plan = normalizeRecentChatsLoadMorePlan(1, 5000);
   assert.equal(plan.targetCount, MAX_RECENT_CHATS_LOAD_TARGET);
   assert.equal(plan.shouldLoadMore, true);
+});
+
+test('load more: defaults de runtime vivem no modulo TypeScript', () => {
+  assert.equal(DEFAULT_RECENT_CHATS_LOAD_MORE_BUDGET_MS, 15_000);
+  assert.equal(DEFAULT_RECENT_CHATS_LOAD_MORE_BROWSER_TIMEOUT_MS, 10_000);
+  assert.deepEqual(recentChatsLoadMoreRuntimeConfig({}), {
+    loadMoreBudgetMs: 15_000,
+    loadMoreBrowserTimeoutMs: 10_000,
+  });
+  assert.deepEqual(
+    recentChatsLoadMoreRuntimeConfig({
+      GEMINI_MCP_RECENT_CHATS_LOAD_MORE_BUDGET_MS: '21000',
+      GEMINI_MCP_RECENT_CHATS_LOAD_MORE_BROWSER_TIMEOUT_MS: '11000',
+    }),
+    {
+      loadMoreBudgetMs: 21_000,
+      loadMoreBrowserTimeoutMs: 11_000,
+    },
+  );
 });
 
 test('export all mantém lista acumulada do browser a cada rodada', () => {
@@ -102,6 +124,27 @@ test('contagem usa timeout total sem vazar para rodada interna do browser', () =
   assert.match(source, /RECENT_CHATS_CLIENT_RECOVERY_WAIT_MS/);
 });
 
+test('listagem curta nao espera timeout longo do browser quando refresh trava', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const block = source.match(
+    /const listRecentChatsForClient = async[\s\S]*?\nconst emptyTimingBucket/,
+  )?.[0];
+  assert.ok(block, 'listRecentChatsForClient deve existir');
+  assert.match(block, /const shouldBoundRefresh = refreshPlan\.preferFastRefresh \|\| !untilEnd/);
+  assert.match(block, /shouldBoundRefresh\s*\?\s*await withTimeout\(refreshPromise, RECENT_CHATS_REFRESH_BUDGET_MS\)\s*:\s*await refreshPromise/s);
+});
+
+test('load more parcial tem budget maior que abertura atrasada do sidebar', () => {
+  const mcpSource = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const contentSource = readFileSync(resolve(ROOT, 'src', 'userscript-shell.ts'), 'utf-8');
+  const runtimeSource = readFileSync(resolve(ROOT, 'src', 'mcp', 'recent-chats-load-more.ts'), 'utf-8');
+
+  assert.match(contentSource, /const SIDEBAR_OPEN_WAIT_MS = 6000/);
+  assert.match(mcpSource, /recentChatsLoadMoreRuntimeConfig\(process\.env\)/);
+  assert.match(runtimeSource, /DEFAULT_RECENT_CHATS_LOAD_MORE_BUDGET_MS = 15_000/);
+  assert.match(runtimeSource, /DEFAULT_RECENT_CHATS_LOAD_MORE_BROWSER_TIMEOUT_MS = 10_000/);
+});
+
 test('contagem longa aplica claim visual temporaria na aba', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const block = source.match(
@@ -110,7 +153,7 @@ test('contagem longa aplica claim visual temporaria na aba', () => {
   assert.ok(block, '/agent/recent-chats deve existir');
   assert.match(block, /shouldTemporarilyClaimTab/);
   assert.match(block, /const temporaryClaimArgs = \{ \.\.\.args \}/);
-  assert.match(block, /ensureTabClaimForJob\(\s*client,\s*temporaryClaimArgs,\s*args\.countOnly \? 'GME Count' : 'GME List'/);
+  assert.match(block, /ensureTabClaimForJob\(\s*client,\s*temporaryClaimArgs,\s*args\.countOnly \? TAB_CLAIM_LABELS\.count : TAB_CLAIM_LABELS\.list/);
   assert.match(block, /claimVisibleAtMs = claim \? Date\.now\(\) : null/);
   assert.match(block, /waitForTabClaimMinimumVisibility\(claimVisibleAtMs, args\)/);
   assert.match(block, /temporaryClaimArgs\.ttlMs/);
@@ -131,7 +174,126 @@ test('jobs renovam claim existente para recriar indicador visual ausente', () =>
   const block = source.match(/const ensureTabClaimForJob = async[\s\S]*?\n};/)?.[0];
   assert.ok(block, 'ensureTabClaimForJob deve existir');
   assert.match(block, /args\.renewExistingClaim === false/);
-  assert.match(block, /claimTabForClient\(client/);
+  assert.match(block, /claimGeminiTabForClient\(client/);
+  assert.match(block, /client\.lastTabClaimWarning = warning/);
+  assert.match(block, /args\.requireTabClaim === true/);
+  assert.match(block, /return null/);
+  assert.match(source, /tabClaimWarning: client\.lastTabClaimWarning \|\| null/);
+  assert.match(source, /tabClaimWarning: job\.tabClaimWarning \|\| null/);
+});
+
+test('export pesado ativa a aba real antes de hidratar conversa', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const prepareBlock = source.match(
+    /const ensureClientActiveForExport = async[\s\S]*?\n\};\n\nconst compareRecentExportClientPreference/,
+  )?.[0] || '';
+  const collectBlock = source.match(
+    /const collectConversationItemPayloadForClient = async[\s\S]*?\nconst saveCollectedConversationPayload/,
+  )?.[0] || '';
+
+  assert.match(source, /EXPORT_TAB_ACTIVATION_TIMEOUT_MS/);
+  assert.match(source, /const activateBrowserTabById = async/);
+  assert.match(source, /const tabActivationBrokerClients = \(/);
+  assert.match(prepareBlock, /activateBrowserTabById\(client\?\.tabId/);
+  assert.match(source, /'activate-browser-tab'/);
+  assert.match(prepareBlock, /activateTabBeforeExport === true \|\| args\.activateTab === true/);
+  assert.match(prepareBlock, /tab_activation_failed/);
+  assert.match(collectBlock, /const prepared = await ensureClientActiveForExport\(client, args\)/);
+  assert.ok(
+    collectBlock.indexOf('ensureClientActiveForExport') <
+      collectBlock.indexOf("'get-chat-by-id'"),
+    'ativacao precisa acontecer antes do comando pesado get-chat-by-id',
+  );
+});
+
+test('export recente prepara automaticamente uma aba hidratada antes da claim', () => {
+  const serverSource = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const cliSource = readFileSync(resolve(ROOT, 'bin', 'gemini-md-export.mjs'), 'utf-8');
+  const prepareBlock = serverSource.match(
+    /const selectRecentExportClient = async[\s\S]*?\n\};\n\nconst collectConversationItemPayloadForClient/,
+  )?.[0] || '';
+  const recentEndpointBlock = serverSource.match(
+    /url\.pathname === '\/agent\/export-recent-chats'[\s\S]*?\n  if \(req\.method === 'GET' && url\.pathname === '\/agent\/export-missing-chats'\)/,
+  )?.[0] || '';
+  const runExportBlock = cliSource.match(
+    /const runExport = async[\s\S]*?\nconst runJob = async/,
+  )?.[0] || '';
+
+  assert.match(serverSource, /const prepareClientForBrowserExport = async/);
+  assert.match(prepareBlock, /recentExportCandidateClients\(\)/);
+  assert.match(prepareBlock, /prepareClientForBrowserExport\(candidates\[0\], selector\)/);
+  assert.match(serverSource, /assertActiveClaimableGeminiClient\(\s*\n\s*hydrateClientLifecycleFields\(prepared\.client\)/);
+  assert.match(recentEndpointBlock, /const client = await selectRecentExportClient\(selector\)/);
+  assert.ok(
+    recentEndpointBlock.indexOf('selectRecentExportClient') <
+      recentEndpointBlock.indexOf('ensureTabClaimForJob'),
+    'export recent precisa ativar/validar a aba antes de criar claim visual',
+  );
+  assert.match(cliSource, /const ensureReadyForExport = async/);
+  assert.match(cliSource, /canPrepareExportFromReady/);
+  assert.match(runExportBlock, /await ensureReadyForExport\(flags\.bridgeUrl, flags, ui\)/);
+  assert.doesNotMatch(runExportBlock, /await ensureReady\(flags\.bridgeUrl, flags, ui\)/);
+});
+
+test('export parcial carrega mais historico ate maxChats antes de fatiar', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const block = source.match(
+    /const runRecentChatsExportJob = async[\s\S]*?\nconst startRecentChatsExportJob/,
+  )?.[0];
+  assert.ok(block, 'runRecentChatsExportJob deve existir');
+  assert.match(block, /const partialLoadTargetCount = Math\.min\(MAX_RECENT_CHATS_LOAD_TARGET, job\.startIndex - 1 \+ job\.maxChats\)/);
+  assert.match(block, /const shouldLoadPartialHistory =/);
+  assert.match(block, /!job\.exportAll[\s\S]*!job\.exportMissingOnly[\s\S]*!job\.syncMode/);
+  assert.match(block, /recentConversationsForClient\(client\)\.length < partialLoadTargetCount/);
+  assert.match(block, /loadMoreRecentChatsForClient\(client, partialLoadTargetCount, \{/);
+  assert.ok(
+    block.indexOf('partialLoadTargetCount') < block.indexOf('const allConversations = recentConversationsForClient(client)'),
+    'lazy-load parcial precisa acontecer antes de calcular allConversations',
+  );
+  assert.ok(
+    block.indexOf('loadMoreRecentChatsForClient(client, partialLoadTargetCount') <
+      block.indexOf('conversations.slice(job.startIndex - 1, job.startIndex - 1 + job.maxChats)'),
+    'export parcial nao pode fatiar antes de carregar ate maxChats',
+  );
+  assert.match(block, /operation: 'load-more-partial-recent-chats'/);
+  assert.match(block, /job\.loadMoreRoundsCompleted = loadMore\.roundsCompleted/);
+  assert.match(block, /job\.loadMoreTimedOut = loadMore\.timedOut === true && !loadMoreResolved/);
+});
+
+test('start de export tem budget para preparar aba automaticamente', () => {
+  const cliSource = readFileSync(resolve(ROOT, 'bin', 'gemini-md-export.mjs'), 'utf-8');
+  const startExportBlock = cliSource.match(
+    /const startExportJob = async[\s\S]*?\n\};\n\nconst fetchJobStatus/,
+  )?.[0] || '';
+  const startSyncStart = cliSource.indexOf('const startSyncJob = async');
+  const startExportStart = cliSource.indexOf('const startExportJob = async');
+  const startSyncBlock =
+    startSyncStart >= 0 && startExportStart > startSyncStart
+      ? cliSource.slice(startSyncStart, startExportStart)
+      : '';
+
+  assert.match(cliSource, /const EXPORT_JOB_START_TIMEOUT_MS = 120_000/);
+  assert.match(startSyncBlock, /timeoutMs: EXPORT_JOB_START_TIMEOUT_MS/);
+  assert.match(startExportBlock, /timeoutMs: EXPORT_JOB_START_TIMEOUT_MS/);
+  assert.doesNotMatch(startSyncBlock, /timeoutMs: 20000/);
+  assert.doesNotMatch(startExportBlock, /timeoutMs: 20000/);
+});
+
+test('ativacao automatica de aba limita brokers possivelmente obsoletos', () => {
+  const serverSource = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const activationBrokerBlock = serverSource.match(
+    /const tabActivationBrokerClients = \(preferredClient = null\) =>[\s\S]*?\n\};\n\nconst activateBrowserTabById/,
+  )?.[0] || '';
+  const activationBlock = serverSource.match(
+    /const activateBrowserTabById = async[\s\S]*?\n\};\n\nconst ensureClientActiveForExport/,
+  )?.[0] || '';
+
+  assert.match(serverSource, /EXPORT_TAB_ACTIVATION_BROKER_LIMIT/);
+  assert.match(serverSource, /EXPORT_TAB_ACTIVATION_CONFIRM_WAIT_MS/);
+  assert.match(activationBrokerBlock, /slice\(0, EXPORT_TAB_ACTIVATION_BROKER_LIMIT\)/);
+  assert.match(serverSource, /const waitForActivatedBrowserTabById = async/);
+  assert.match(activationBlock, /waitForActivatedBrowserTabById\(tabId, args\)/);
+  assert.match(activationBlock, /activation-inferred-from-heartbeat/);
 });
 
 test('export all incompleto vira aviso em vez de sucesso silencioso', () => {
@@ -188,12 +350,18 @@ test('listagem de chats expõe contagem parcial sem fingir total', () => {
   assert.match(source, /activeClients\.length === 1/);
   assert.match(source, /usefulRecentClients/);
   assert.match(source, /recentConversationCountForClient\(client\) > 0 \|\| !!client\.page\?\.chatId/);
+  assert.match(source, /const hasExportableRecentConversationIdentity = \(conversation = \{\}\) =>/);
+  assert.match(source, /filter\(hasExportableRecentConversationIdentity\)/);
   assert.match(source, /action:\s*\{\s*type:\s*'string',\s*enum:\s*\['list', 'count'/);
 });
 
 test('export total registra métricas de performance no status e relatório', () => {
   const serverSource = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
-  const contentSource = readFileSync(resolve(ROOT, 'src', 'userscript-shell.js'), 'utf-8');
+  const contentSource = readFileSync(resolve(ROOT, 'src', 'userscript-shell.ts'), 'utf-8');
+  const recordingSource = readFileSync(
+    resolve(ROOT, 'src', 'mcp', 'export-job-recording.ts'),
+    'utf-8',
+  );
   const jobBlock = serverSource.match(
     /const runRecentChatsExportJob = async[\s\S]*?\nconst startRecentChatsExportJob/,
   )?.[0];
@@ -210,10 +378,11 @@ test('export total registra métricas de performance no status e relatório', ()
   assert.match(serverSource, /lazyLoad:\s*summarizeLoadMoreMetrics/);
   assert.match(serverSource, /assets:\s*\{/);
   assert.match(jobBlock, /startConversationMetric/);
-  assert.match(jobBlock, /finishConversationMetric/);
-  assert.match(jobBlock, /mediaWarnings/);
-  assert.match(jobBlock, /assetTimeouts/);
-  assert.match(jobBlock, /result\.metrics/);
+  assert.match(jobBlock, /recordConversationExportSuccess/);
+  assert.match(recordingSource, /finishConversationMetric/);
+  assert.match(recordingSource, /mediaWarnings/);
+  assert.match(recordingSource, /assetTimeouts/);
+  assert.match(recordingSource, /result\.metrics/);
   assert.match(contentSource, /openConversationMs/);
   assert.match(contentSource, /hydrateDomMs/);
   assert.match(contentSource, /extractMarkdownMs/);
@@ -251,8 +420,11 @@ test('export jobs bloqueiam novo export ativo antes de tentar claim-tab', () => 
     const escaped = route.replaceAll('/', '\\/');
     const block = source.match(new RegExp(`url\\.pathname === '${escaped}'[\\s\\S]*?catch \\(err\\)`))?.[0];
     assert.ok(block, `${route} deve existir`);
-    assert.match(block, /const client = requireClient\(selector\);[\s\S]*?assertNoRunningBrowserExportJob\(client\);[\s\S]*?ensureTabClaimForJob/);
+    assert.match(block, /const client = (?:await selectRecentExportClient\(selector\)|requireClient\(selector\));[\s\S]*?assertNoRunningBrowserExportJob\(client\);[\s\S]*?ensureTabClaimForJob[\s\S]*?start(?:Recent|Direct)ChatsExportJob/);
   }
+  assert.match(source, /const assertClientClaimedReadyForSession = \(client, args = \{\}\) =>/);
+  assert.match(source, /const startRecentChatsExportJob = \(client, args = \{\}\) => \{[\s\S]*?assertClientClaimedReadyForSession\(client, args\)/);
+  assert.match(source, /const startDirectChatsExportJob = \(client, args = \{\}\) => \{[\s\S]*?assertClientClaimedReadyForSession\(client, args\)/);
   assert.match(source, /sendAgentError\(res, 503, err\)/);
 });
 
@@ -440,6 +612,12 @@ test('export recente faz retry para aba ocupada antes de registrar falha', () =>
   assert.match(source, /const downloadConversationItemWithRetry = async/);
   assert.match(source, /RECENT_CHATS_TRANSIENT_BUSY_RETRY_LIMIT/);
   assert.match(jobBlock, /downloadConversationItemWithRetry\(job, client, conversation/);
+  assert.match(jobBlock, /const key = normalizeConversationChatId\(conversation\);/);
+  assert.doesNotMatch(
+    jobBlock,
+    /stripGeminiPrefix\(conversation\.chatId \|\| conversation\.id\)\s*\|\|\s*conversation\.url/,
+    'export recente nao pode deduplicar/exportar conversa sem chatId real',
+  );
 });
 
 test('reexport de chatIds conhecidos roda como job em background', () => {
@@ -453,7 +631,7 @@ test('reexport de chatIds conhecidos roda como job em background', () => {
   assert.match(source, /const runDirectChatsExportJob = async/);
   assert.match(source, /extractChatIdFromUrl\(idLike\)/);
   assert.match(source, /writeExportReport\(\s*'direct-chats'/);
-  assert.match(source, /findRunningBrowserExportJob\(client\.clientId\)/);
+  assert.match(source, /findRunningBrowserExportJob\(client\)/);
   assert.match(source, /DIRECT_REEXPORT_RETRY_LIMIT/);
   assert.match(jobBlock, /downloadConversationItemWithRetry\(job, client, conversation/);
   assert.match(source, /'gemini_reexport_chats'/);
@@ -485,8 +663,56 @@ test('reexport direto retoma pelo relatório sem baixar tudo de novo', () => {
   assert.match(jobBlock, /const successes = Array\.isArray\(job\.resumedSuccesses\)/);
   assert.match(jobBlock, /const pendingItems = Array\.isArray\(job\.pendingItems\)/);
   assert.match(jobBlock, /for \(let i = 0; i < pendingItems\.length; i \+= 1\)/);
+  assert.match(jobBlock, /rebindExportJobToClient\(job, resultClient, 'conversation-download'\)/);
   assert.match(jobBlock, /job\.completed = Math\.min\(job\.requested, resumedCompletedCount \+ i \+ 1\)/);
   assert.match(endpointBlock, /\.\.\.bodySelector/);
+  assert.match(source, /action: 'reexport'/);
+  assert.match(source, /selectionFile: job\.selectionFile/);
+  assert.match(source, /expectedCount: job\.expectedCount/);
+});
+
+test('reexport direto preserva origem sidebar para navegação SPA', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const normalizeBlock = source.match(
+    /const normalizeDirectReexportSelection = \(args = \{\}\) => \{[\s\S]*?\nconst normalizeDirectReexportItems/,
+  )?.[0];
+  assert.ok(normalizeBlock, 'normalizeDirectReexportSelection deve existir');
+  assert.match(normalizeBlock, /source: item\.source \|\| 'direct-url'/);
+  assert.doesNotMatch(
+    normalizeBlock,
+    /source: 'direct-url'/,
+    'selection-file vindo do sidebar nao pode ser degradado para direct-url',
+  );
+});
+
+test('job em lote reata progresso ao client novo quando a mesma aba reconecta', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const matchBlock = source.match(
+    /const browserExportJobMatchesClient = \(job, clientOrId\) => \{[\s\S]*?\n\};/,
+  )?.[0];
+  const rebindBlock = source.match(
+    /const rebindExportJobToClient = \(job, client, reason = 'client-reconnected'\) => \{[\s\S]*?\n\};/,
+  )?.[0];
+  const rebroadcastBlock = source.match(
+    /const rebroadcastActiveBrowserExportJobForClient = \(client, reason = 'client-upsert'\) => \{[\s\S]*?\n\};/,
+  )?.[0];
+  const upsertBlock = source.match(
+    /const upsertClient = \(payload, meta = \{\}\) => \{[\s\S]*?\n\};\n\nconst upsertClientSnapshot/,
+  )?.[0];
+
+  assert.ok(matchBlock, 'matcher de job por client deve existir');
+  assert.ok(rebindBlock, 'rebind de job por client deve existir');
+  assert.ok(rebroadcastBlock, 'rebroadcast de progresso deve existir');
+  assert.ok(upsertBlock, 'upsertClient deve existir');
+  assert.match(matchBlock, /job\.tabClaimId/);
+  assert.match(matchBlock, /exportJobTabId\(job\)/);
+  assert.match(rebindBlock, /job_client_rebound/);
+  assert.match(rebindBlock, /job\.clientId = client\.clientId/);
+  assert.match(rebindBlock, /job\.tabSession\.clientId = client\.clientId/);
+  assert.match(rebroadcastBlock, /findRunningBrowserExportJob\(client\)/);
+  assert.match(rebroadcastBlock, /broadcastDirectChatsJobProgress\(job, client\)/);
+  assert.match(rebroadcastBlock, /broadcastRecentChatsJobProgress\(job, client\)/);
+  assert.match(upsertBlock, /rebroadcastActiveBrowserExportJobForClient\(next, 'client-upsert'\)/);
 });
 
 test('cancelamento preso vira terminal depois da janela de seguranca', () => {

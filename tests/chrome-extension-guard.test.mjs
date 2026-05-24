@@ -172,6 +172,98 @@ test('recarrega quando o build stamp está antigo', async () => {
   assert.equal(reloadArgs.expectedBuildStamp, expectedWithBuild.buildStamp);
 });
 
+test('nao tenta self-reload quando o cliente antigo nunca enviou heartbeat', async () => {
+  const expectedWithBuild = {
+    ...expected,
+    buildStamp: '20260428-0021',
+  };
+  let reloads = 0;
+  const staleRuntimeClient = {
+    ...client('stale-runtime'),
+    extensionVersion: expectedWithBuild.extensionVersion,
+    protocolVersion: expectedWithBuild.protocolVersion,
+    buildStamp: '20260428-0017',
+    lastHeartbeatAt: null,
+    commandChannel: {
+      eventStreamConnected: true,
+      lastCommandTimeoutType: 'reload-extension-self',
+      lastCommandTimeoutCode: 'command_timeout',
+    },
+    bridgeHealth: {
+      status: 'stale',
+      blockingIssue: 'stale_client',
+      heartbeatAgeMs: null,
+      lastHeartbeatAt: null,
+    },
+  };
+
+  await assert.rejects(
+    () =>
+      ensureChromeExtensionReady(
+        baseDeps({
+          expected: expectedWithBuild,
+          getLiveClients: () => [staleRuntimeClient],
+          getChromeExtensionInfo: async () => {
+            throw new Error('command_timeout');
+          },
+          reloadChromeExtension: async () => {
+            reloads += 1;
+            return { ok: true, reloading: true };
+          },
+          sleep: async () => {},
+        }),
+    ),
+    (err) => {
+      assert.equal(err.code, 'chrome_extension_stale_build_no_heartbeat');
+      assert.match(err.message, /build antigo/i);
+      assert.match(err.message, /sem heartbeat/i);
+      return true;
+    },
+  );
+  assert.equal(reloads, 0);
+});
+
+test('nao tenta self-reload quando o build antigo vem de cliente sem heartbeat', async () => {
+  const expectedWithBuild = {
+    ...expected,
+    buildStamp: '20260428-0021',
+  };
+  let reloads = 0;
+  const staleClientWithoutHeartbeat = {
+    ...client('stale-no-heartbeat'),
+    extensionVersion: expectedWithBuild.extensionVersion,
+    protocolVersion: expectedWithBuild.protocolVersion,
+    buildStamp: '20260428-0017',
+    lastHeartbeatAt: null,
+  };
+
+  await assert.rejects(
+    () =>
+      ensureChromeExtensionReady(
+        baseDeps({
+          expected: expectedWithBuild,
+          getLiveClients: () => [staleClientWithoutHeartbeat],
+          getChromeExtensionInfo: async () =>
+            info({
+              buildStamp: staleClientWithoutHeartbeat.buildStamp,
+              source: 'heartbeat-fallback',
+            }),
+          reloadChromeExtension: async () => {
+            reloads += 1;
+            return { ok: true, reloading: true };
+          },
+        }),
+      ),
+    (err) => {
+      assert.equal(err.code, 'chrome_extension_stale_build_no_heartbeat');
+      assert.match(err.message, /build antigo/i);
+      assert.match(err.message, /sem heartbeat/i);
+      return true;
+    },
+  );
+  assert.equal(reloads, 0);
+});
+
 test('depois do reload prefere cliente atualizado a heartbeat antigo da mesma aba', async () => {
   const expectedWithBuild = {
     ...expected,

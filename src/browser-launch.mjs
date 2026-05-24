@@ -3,10 +3,17 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, resolve, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  classifyManagedBrowserUrl,
+  diagnoseManagedBrowserTabs,
+  splitBrowserUrlList,
+} from '../build/ts/mcp/browser-tab-diagnostics.js';
 import { discoverLoadedExtension } from './browser-diagnostics.mjs';
 
 const GEMINI_URL = 'https://gemini.google.com/app';
+const MANAGED_BROWSER_URL_ORIGINS = new Set(['https://gemini.google.com', 'https://myactivity.google.com']);
 const DEFAULT_LAUNCH_OBSERVE_MS = 180;
+const DEFAULT_MAC_TAB_REUSE_TIMEOUT_MS = 5000;
 export const BROWSER_LAUNCH_STATE_FILENAME = 'browser-launch.json';
 export const LEGACY_BROWSER_LAUNCH_STATE_FILENAME = 'hook-browser-launch.json';
 const WINDOWS_RESTORE_FOCUS_SCRIPT_FILENAME = 'open-gemini-restore-focus.ps1';
@@ -307,6 +314,7 @@ export const resolveGeminiBrowserLaunchPlan = ({
         browserKey: key,
         browserName: browser.name,
         app: browser.app,
+        profileDirectory: autoDetected?.browserKey === key ? autoDetected.profileDirectory : null,
         fallbackFrom: key === preferredKey ? null : browsers[preferredKey]?.name || preferredKey,
         method: 'macos-open-app',
       };
@@ -414,72 +422,8 @@ export const resolveGeminiBrowserLaunchPlan = ({
   };
 };
 
-const splitBrowserUrlList = (value) =>
-  String(value || '')
-    .split(/\r?\n|,\s*(?=https?:|about:|chrome:|edge:|brave:|dia:)/i)
-    .map((item) => item.trim())
-    .filter(Boolean);
-
-export const classifyGeminiBrowserUrl = (value) => {
-  const url = String(value || '').trim();
-  if (!url) return { kind: 'unknown', terminal: false, url: null };
-  try {
-    const parsed = new URL(url);
-    const hostname = parsed.hostname.toLowerCase();
-    const pathname = parsed.pathname.toLowerCase();
-    const continueUrl = parsed.searchParams.get('continue') || '';
-    const lowerContinue = continueUrl.toLowerCase();
-    if (
-      hostname.endsWith('google.com') &&
-      pathname.startsWith('/sorry') &&
-      lowerContinue.includes('gemini.google.com')
-    ) {
-      return { kind: 'google_sorry', terminal: true, url };
-    }
-    if (hostname === 'accounts.google.com') {
-      return { kind: 'google_login', terminal: true, url };
-    }
-    if (hostname === 'gemini.google.com') {
-      return { kind: 'gemini', terminal: false, url };
-    }
-    if (/^(about:blank|chrome:\/\/newtab|edge:\/\/newtab|brave:\/\/newtab|dia:\/\/)/i.test(url)) {
-      return { kind: 'loading', terminal: false, url };
-    }
-    return { kind: 'other', terminal: true, url, hostname };
-  } catch {
-    return { kind: 'unknown', terminal: false, url };
-  }
-};
-
-export const diagnoseGeminiBrowserTabs = ({ activeUrl = null, urls = [] } = {}) => {
-  const items = [
-    ...splitBrowserUrlList(activeUrl),
-    ...(Array.isArray(urls) ? urls : splitBrowserUrlList(urls)),
-  ];
-  const classified = items.map(classifyGeminiBrowserUrl);
-  const first = (...kinds) => classified.find((item) => kinds.includes(item.kind));
-  const relevant =
-    first('google_sorry') ||
-    first('google_login') ||
-    first('gemini') ||
-    first('loading') ||
-    null;
-  if (relevant) {
-    return {
-      ok: true,
-      ...relevant,
-      activeUrl: activeUrl || null,
-      urls: items,
-    };
-  }
-  const active = classifyGeminiBrowserUrl(activeUrl);
-  return {
-    ok: true,
-    ...active,
-    activeUrl: activeUrl || null,
-    urls: items,
-  };
-};
+export const classifyGeminiBrowserUrl = classifyManagedBrowserUrl;
+export const diagnoseGeminiBrowserTabs = diagnoseManagedBrowserTabs;
 
 const runOsaScript = (spawnSyncFn, lines, timeoutMs) =>
   spawnSyncFn('osascript', lines.flatMap((line) => ['-e', line]), {
@@ -487,6 +431,71 @@ const runOsaScript = (spawnSyncFn, lines, timeoutMs) =>
     timeout: timeoutMs,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+
+const appleScriptString = (value) => `"${String(value || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+
+const normalizeManagedLaunchUrl = (value) => {
+  const url = String(value || GEMINI_URL).trim() || GEMINI_URL;
+  try {
+    const parsed = new URL(url);
+    const origin = parsed.origin.toLowerCase();
+    if (!MANAGED_BROWSER_URL_ORIGINS.has(origin)) return GEMINI_URL;
+    if (origin === 'https://gemini.google.com' && !parsed.pathname.startsWith('/app')) {
+      return GEMINI_URL;
+    }
+    if (
+      origin === 'https://myactivity.google.com' &&
+      !parsed.pathname.startsWith('/product/gemini')
+    ) {
+      return GEMINI_URL;
+    }
+    return `${parsed.origin}${parsed.pathname}${parsed.search}`;
+  } catch {
+    return GEMINI_URL;
+  }
+};
+
+const reuseExistingMacBrowserTab = ({
+  plan,
+  targetUrl,
+  spawnSyncFn = spawnSync,
+  timeoutMs = 1000,
+} = {}) => {
+  if (!plan?.app || !targetUrl) return null;
+  const result = runOsaScript(
+    spawnSyncFn,
+    [
+      `set targetUrl to ${appleScriptString(targetUrl)}`,
+      `tell application ${appleScriptString(plan.app)}`,
+      'repeat with w in windows',
+      'set tabIndex to 1',
+      'repeat with t in tabs of w',
+      'set currentUrl to URL of t as text',
+      'if currentUrl starts with targetUrl then',
+      'return currentUrl',
+      'end if',
+      'set tabIndex to tabIndex + 1',
+      'end repeat',
+      'end repeat',
+      'return ""',
+      'end tell',
+    ],
+    timeoutMs,
+  );
+  const matchedUrl = result.status === 0 ? String(result.stdout || '').trim() : '';
+  if (!matchedUrl) return null;
+  return {
+    attempted: true,
+    supported: true,
+    ...plan,
+    method: 'macos-reuse-existing-tab',
+    targetUrl,
+    matchedUrl,
+    reusedExistingTab: true,
+    openedNewTab: false,
+    reloaded: false,
+  };
+};
 
 export const readBrowserTabsForGeminiDiagnostics = ({
   env = process.env,
@@ -505,7 +514,11 @@ export const readBrowserTabsForGeminiDiagnostics = ({
       source: 'env',
       activeUrl,
       urls,
-      diagnosis: diagnoseGeminiBrowserTabs({ activeUrl, urls }),
+      diagnosis: diagnoseGeminiBrowserTabs({
+        activeUrl,
+        urls,
+        inventoryComplete: !!envUrls,
+      }),
     };
   }
 
@@ -552,7 +565,9 @@ export const readBrowserTabsForGeminiDiagnostics = ({
   );
   const urls = allTabs.status === 0 ? splitBrowserUrlList(allTabs.stdout) : [];
   const activeUrl = active.status === 0 ? String(active.stdout || '').trim() : urls[0] || null;
-  const diagnosis = diagnoseGeminiBrowserTabs({ activeUrl, urls });
+  const inventoryComplete =
+    allTabs.status === 0 && (!activeUrl || urls.length > 0 || classifyGeminiBrowserUrl(activeUrl).kind !== 'other');
+  const diagnosis = diagnoseGeminiBrowserTabs({ activeUrl, urls, inventoryComplete });
   return {
     ok: allTabs.status === 0 || active.status === 0,
     source: 'macos-osascript',
@@ -620,6 +635,9 @@ const observeDetachedSpawn = (spawnFn, command, args, options, observeMs) =>
 
 export const launchGeminiBrowser = async ({
   profileDirectory,
+  targetUrl = GEMINI_URL,
+  reuseExistingTab = true,
+  reuseExistingOnly = false,
   env = process.env,
   platform = process.platform,
   exists = existsSync,
@@ -628,30 +646,92 @@ export const launchGeminiBrowser = async ({
   launchObserveMs,
 } = {}) => {
   const plan = resolveGeminiBrowserLaunchPlan({ env, platform, exists, spawnSyncFn });
-  const profileArg = profileDirectory ? `--profile-directory=${profileDirectory}` : null;
+  const launchUrl = normalizeManagedLaunchUrl(targetUrl);
+  const resolvedProfileDirectory = profileDirectory || plan.profileDirectory || null;
+  const profileArg = resolvedProfileDirectory
+    ? `--profile-directory=${resolvedProfileDirectory}`
+    : null;
   const observeMs = normalizeObserveMs(
     launchObserveMs ?? env.GEMINI_MCP_BROWSER_LAUNCH_OBSERVE_MS,
   );
 
   try {
+    if (platform === 'darwin' && reuseExistingTab !== false && !resolvedProfileDirectory) {
+      const reused = reuseExistingMacBrowserTab({
+        plan,
+        targetUrl: launchUrl,
+        spawnSyncFn,
+        timeoutMs: Number(
+          env.GEMINI_MCP_BROWSER_TAB_REUSE_TIMEOUT_MS || DEFAULT_MAC_TAB_REUSE_TIMEOUT_MS,
+        ),
+      });
+      if (reused) {
+        return {
+          ...reused,
+          profileDirectory: resolvedProfileDirectory,
+        };
+      }
+      if (reuseExistingOnly) {
+        return {
+          attempted: false,
+          supported: true,
+          ...plan,
+          targetUrl: launchUrl,
+          reusedExistingTab: false,
+          openedNewTab: false,
+          reason: 'existing-tab-not-found',
+          profileDirectory: resolvedProfileDirectory,
+        };
+      }
+    }
+
     if (platform === 'darwin') {
       const args = ['-g'];
       if (plan.app) args.push('-a', plan.app);
-      args.push(GEMINI_URL);
+      args.push(launchUrl);
       if (profileArg && plan.app) args.push('--args', profileArg);
       const child = spawnFn('open', args, { detached: true, stdio: 'ignore' });
       child.unref?.();
-      return { attempted: true, supported: true, ...plan, profileDirectory: profileDirectory || null };
+      return {
+        attempted: true,
+        supported: true,
+        ...plan,
+        targetUrl: launchUrl,
+        reusedExistingTab: false,
+        openedNewTab: true,
+        profileDirectory: resolvedProfileDirectory,
+      };
+    }
+
+    if (reuseExistingOnly) {
+      return {
+        attempted: false,
+        supported: platform === 'linux' || platform === 'win32',
+        ...plan,
+        targetUrl: launchUrl,
+        reusedExistingTab: false,
+        openedNewTab: false,
+        reason: 'existing-tab-reuse-unavailable',
+        profileDirectory: resolvedProfileDirectory,
+      };
     }
 
     if (platform === 'linux') {
       const command = plan.command || 'xdg-open';
       const args = plan.method === 'linux-xdg-open'
-        ? [GEMINI_URL]
-        : [profileArg, GEMINI_URL].filter(Boolean);
+        ? [launchUrl]
+        : [profileArg, launchUrl].filter(Boolean);
       const child = spawnFn(command, args, { detached: true, stdio: 'ignore' });
       child.unref?.();
-      return { attempted: true, supported: true, ...plan, profileDirectory: profileDirectory || null };
+      return {
+        attempted: true,
+        supported: true,
+        ...plan,
+        targetUrl: launchUrl,
+        reusedExistingTab: false,
+        openedNewTab: true,
+        profileDirectory: resolvedProfileDirectory,
+      };
     }
 
     if (platform === 'win32') {
@@ -661,10 +741,10 @@ export const launchGeminiBrowser = async ({
           supported: true,
           ...plan,
           reason: 'browser-not-found',
-          profileDirectory: profileDirectory || null,
+          profileDirectory: resolvedProfileDirectory,
         };
       }
-      const args = [profileArg, '--new-tab', GEMINI_URL].filter(Boolean);
+      const args = [profileArg, '--new-tab', launchUrl].filter(Boolean);
       let restoreFocusScriptPath = null;
       try {
         restoreFocusScriptPath = writeWindowsRestoreFocusLaunchScript(plan.binary, args, {
@@ -690,7 +770,10 @@ export const launchGeminiBrowser = async ({
             supported: true,
             ...plan,
             method: 'windows-powershell-minimized-restore-focus',
-            profileDirectory: profileDirectory || null,
+            targetUrl: launchUrl,
+            reusedExistingTab: false,
+            openedNewTab: true,
+            profileDirectory: resolvedProfileDirectory,
             launch: restoreFocus,
             browserCommand: plan.binary,
             browserArgs: args,
@@ -712,7 +795,10 @@ export const launchGeminiBrowser = async ({
           supported: true,
           ...plan,
           method: 'windows-direct-spawn',
-          profileDirectory: profileDirectory || null,
+          targetUrl: launchUrl,
+          reusedExistingTab: false,
+          openedNewTab: true,
+          profileDirectory: resolvedProfileDirectory,
           launch: direct,
           restoreFocusScriptPath,
         };
@@ -723,7 +809,10 @@ export const launchGeminiBrowser = async ({
         supported: true,
         ...plan,
         method: 'windows-direct-spawn-failed',
-        profileDirectory: profileDirectory || null,
+        targetUrl: launchUrl,
+        reusedExistingTab: false,
+        openedNewTab: false,
+        profileDirectory: resolvedProfileDirectory,
         launch: direct,
         directLaunch: direct,
         restoreFocusScriptPath,
@@ -736,16 +825,22 @@ export const launchGeminiBrowser = async ({
       attempted: false,
       supported: false,
       ...plan,
+      targetUrl: launchUrl,
+      reusedExistingTab: false,
+      openedNewTab: false,
       reason: 'unsupported-platform',
-      profileDirectory: profileDirectory || null,
+      profileDirectory: resolvedProfileDirectory,
     };
   } catch (err) {
     return {
       attempted: true,
       supported: platform === 'darwin' || platform === 'linux' || platform === 'win32',
       ...plan,
+      targetUrl: normalizeManagedLaunchUrl(targetUrl),
+      reusedExistingTab: false,
+      openedNewTab: false,
       error: err?.message || String(err),
-      profileDirectory: profileDirectory || null,
+      profileDirectory: resolvedProfileDirectory,
     };
   }
 };

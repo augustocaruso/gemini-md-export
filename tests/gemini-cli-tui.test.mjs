@@ -85,6 +85,10 @@ const withEnv = async (patch, fn) => {
   }
 };
 
+const writeExecutableScript = (path, source) => {
+  writeFileSync(path, source, { encoding: 'utf-8', mode: 0o755 });
+};
+
 const getFreePort = async () => {
   const server = createNetServer();
   await new Promise((resolveListen, rejectListen) => {
@@ -301,7 +305,9 @@ test('CLI --help na posicao inicial sai com sucesso', async () => {
   assert.match(stdout.text(), /export selected/);
   assert.match(stdout.text(), /export reexport/);
   assert.match(stdout.text(), /export notebook/);
-  assert.match(stdout.text(), /repair-vault/);
+  assert.match(stdout.text(), /fix-vault/);
+  assert.doesNotMatch(stdout.text(), /repair-vault/);
+  assert.doesNotMatch(stdout.text(), /metadata backfill/);
   assert.equal(stderr.text(), '');
 });
 
@@ -315,6 +321,340 @@ test('CLI --version imprime versao sem tocar na bridge', async () => {
   assert.equal(stderr.text(), '');
 });
 
+test('CLI fix-vault expõe ajuda pública única e executa backfill com Takeout', async () => {
+  const helpStdout = captureStream();
+  const help = await main(['help', 'fix-vault'], {
+    stdout: helpStdout,
+    stderr: captureStream(),
+  });
+  assert.equal(help.exitCode, 0);
+  assert.match(helpStdout.text(), /fix-vault/);
+  assert.match(helpStdout.text(), /--use-my-activity/);
+  assert.match(helpStdout.text(), /--takeout/);
+  assert.doesNotMatch(helpStdout.text(), /repair-vault/);
+
+  const vault = mkdtempSync(resolve(tmpdir(), 'gme-cli-fix-vault-'));
+  const reportPath = resolve(vault, 'fix-report.json');
+  const takeoutPath = resolve(vault, 'Minhaatividade.html');
+  const chatPath = resolve(vault, 'b8e7c075effe9457.md');
+  writeFileSync(
+    chatPath,
+    [
+      '---',
+      'chat_id: b8e7c075effe9457',
+      'url: https://gemini.google.com/app/b8e7c075effe9457',
+      'exported_at: 2026-05-17T18:55:08.245Z',
+      'source: gemini-web',
+      'tags: [gemini-export]',
+      '---',
+      '',
+      '## 🧑 Usuário',
+      '',
+      'Explique o mecanismo dos ISRS com detalhes clinicos',
+      '',
+      '---',
+      '',
+      '## 🤖 Gemini',
+      '',
+      'Os ISRS bloqueiam o transportador de serotonina e aumentam serotonina sinaptica.',
+      '',
+    ].join('\n'),
+    'utf-8',
+  );
+  writeFileSync(
+    takeoutPath,
+    [
+      '<html><body>',
+      '<div class="outer-cell">',
+      '<div>Gemini Apps</div>',
+      '<div>Prompted&nbsp;Explique o mecanismo dos ISRS com detalhes clinicos</div>',
+      '<div>Os ISRS bloqueiam o transportador de serotonina e aumentam serotonina sinaptica.</div>',
+      '<div>10 de mai. de 2026, 06:46:09 BRT</div>',
+      '</div>',
+      '</body></html>',
+    ].join('\n'),
+    'utf-8',
+  );
+
+  try {
+    const stdout = captureStream();
+    const run = await main(
+      ['fix-vault', vault, '--takeout', takeoutPath, '--report', reportPath, '--no-open-if-missing'],
+      {
+      stdout,
+      stderr: captureStream(),
+      },
+    );
+    assert.equal(run.exitCode, 0);
+    assert.match(stdout.text(), /Fix vault/);
+    assert.match(stdout.text(), /My Activity/);
+    assert.doesNotMatch(stdout.text(), /preliminaryReportPath/);
+    const updated = readFileSync(chatPath, 'utf-8');
+    assert.match(updated, /^---\ntype: gemini_chat\n/);
+    assert.match(updated, /\ndate_created: 2026-05-10T09:46:09Z\n/);
+    assert.match(updated, /\ndate_last_message: 2026-05-10T09:46:09Z\n/);
+    assert.match(updated, /\ndate_exported: 2026-05-17T18:55:08Z\n/);
+    assert.match(updated, /\nturn_count: 1\n/);
+    assert.equal(existsSync(reportPath), true);
+    const report = JSON.parse(readFileSync(reportPath, 'utf-8'));
+    assert.equal(report.schema, 'gemini-md-export.fix-vault-report.v1');
+    assert.equal(report.summary.metadata.matched, 1);
+    assert.equal(report.summary.repair.takeoutEvidence.matched, 1);
+  } finally {
+    rmSync(vault, { recursive: true, force: true });
+  }
+});
+
+test('CLI fix-vault bloqueia relatório quando datas ficam pendentes', async () => {
+  const vault = mkdtempSync(resolve(tmpdir(), 'gme-cli-fix-vault-blocked-'));
+  const reportPath = resolve(vault, 'fix-report.json');
+  const chatPath = resolve(vault, 'bbbbbbbbbbbb.md');
+  writeFileSync(
+    chatPath,
+    [
+      '---',
+      'chat_id: bbbbbbbbbbbb',
+      'url: https://gemini.google.com/app/bbbbbbbbbbbb',
+      'exported_at: 2026-05-17T18:55:08.245Z',
+      'source: gemini-web',
+      'tags: [gemini-export]',
+      '---',
+      '',
+      '## 🧑 Usuário',
+      '',
+      'Conversa sem evidencia externa',
+      '',
+      '---',
+      '',
+      '## 🤖 Gemini',
+      '',
+      'Resposta sem data confiavel.',
+      '',
+    ].join('\n'),
+    'utf-8',
+  );
+
+  try {
+    const stdout = captureStream();
+    const run = await main(
+      ['fix-vault', vault, '--report', reportPath, '--no-my-activity', '--no-open-if-missing'],
+      {
+        stdout,
+        stderr: captureStream(),
+      },
+    );
+
+    assert.equal(run.exitCode, 2);
+    assert.match(stdout.text(), /0\/1 com datas completas/);
+    assert.match(stdout.text(), /Fluxo bloqueado/);
+    const report = JSON.parse(readFileSync(reportPath, 'utf-8'));
+    assert.equal(report.ok, false);
+    assert.equal(report.steps.find((step) => step.name === 'metadata-backfill').status, 'blocked');
+    assert.equal(report.summary.metadata.contractStatus, 'blocked');
+    assert.equal(report.summary.metadata.unresolved, 1);
+    assert.equal(report.warnings[0].code, 'metadata_unresolved');
+    assert.deepEqual(report.warnings[0].unresolvedChatIds, ['bbbbbbbbbbbb']);
+  } finally {
+    rmSync(vault, { recursive: true, force: true });
+  }
+});
+
+test('CLI fix-vault com Takeout diagnostica, repara e só depois escreve datas', async () => {
+  const vault = mkdtempSync(resolve(tmpdir(), 'gme-cli-fix-vault-phases-'));
+  const reportPath = resolve(vault, 'fix-report.json');
+  const takeoutPath = resolve(vault, 'Minhaatividade.html');
+  const repairScript = resolve(vault, 'fake-repair.mjs');
+  const metadataScript = resolve(vault, 'fake-metadata.mjs');
+  const eventsPath = resolve(vault, 'events.jsonl');
+  const chatPath = resolve(vault, 'cccccccccccc.md');
+  writeFileSync(
+    chatPath,
+    [
+      '---',
+      'chat_id: cccccccccccc',
+      'url: https://gemini.google.com/app/cccccccccccc',
+      'tags: [gemini-export]',
+      '---',
+      '',
+      '## 🧑 Usuário',
+      '',
+      'raw suspeito',
+      '',
+      '---',
+      '',
+      '## 🤖 Gemini',
+      '',
+      'resposta raw suspeita',
+      '',
+    ].join('\n'),
+    'utf-8',
+  );
+  writeFileSync(takeoutPath, '<html><body>Gemini Apps</body></html>', 'utf-8');
+
+  writeExecutableScript(
+    repairScript,
+    `
+import { existsSync, mkdirSync, writeFileSync, appendFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+const delayMs = Number(process.env.GME_FAKE_DELAY_MS || 0);
+if (delayMs > 0) await new Promise((resolveDelay) => setTimeout(resolveDelay, delayMs));
+const eventsPath = process.env.GME_FAKE_EVENTS;
+const args = process.argv.slice(2);
+const reportDir = args[args.indexOf('--report-dir') + 1];
+const dryRun = args.includes('--dry-run');
+const paths = [];
+for (let index = 0; index < args.length; index += 1) {
+  if (args[index] === '--path') paths.push(args[index + 1]);
+}
+appendFileSync(eventsPath, JSON.stringify({ tool: 'repair', dryRun, paths }) + '\\n');
+mkdirSync(reportDir, { recursive: true });
+const preliminaryReportPath = resolve(reportDir, 'preliminary.json');
+writeFileSync(preliminaryReportPath, JSON.stringify({
+  verificationQueueSize: 1,
+  wikiReviewQueueSize: 0,
+  takeoutEvidence: { summary: { enabled: true, matched: 0, unmatched: 1 } }
+}, null, 2));
+if (!dryRun) {
+  const marker = resolve(dirname(eventsPath), 'repair-done');
+  writeFileSync(marker, 'ok');
+}
+process.stdout.write(JSON.stringify({ ok: true, dryRun, preliminaryReportPath }) + '\\n');
+`,
+  );
+
+  writeExecutableScript(
+    metadataScript,
+    `
+import { existsSync, mkdirSync, writeFileSync, appendFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+const delayMs = Number(process.env.GME_FAKE_DELAY_MS || 0);
+if (delayMs > 0) await new Promise((resolveDelay) => setTimeout(resolveDelay, delayMs));
+const eventsPath = process.env.GME_FAKE_EVENTS;
+const args = process.argv.slice(2);
+const vault = args[0];
+const reportPath = args[args.indexOf('--report') + 1];
+const diagnoseOnly = args.includes('--diagnose-only');
+appendFileSync(eventsPath, JSON.stringify({ tool: 'metadata', diagnoseOnly, repairDone: existsSync(resolve(dirname(eventsPath), 'repair-done')) }) + '\\n');
+mkdirSync(dirname(reportPath), { recursive: true });
+const blocked = {
+  schema: 'gemini-md-export.metadata-backfill-report.v1',
+  ok: false,
+  diagnoseOnly,
+  contract: {
+    ok: false,
+    status: 'blocked',
+    code: 'raw_export_suspected',
+    message: '1 chat parece ter export raw inconsistente.',
+    unresolvedChatIds: ['cccccccccccc']
+  },
+  summary: {
+    totalChats: 1,
+    filesRewritten: 0,
+    datesMatched: 0,
+    matched: 0,
+    partial: 0,
+    unresolved: 0,
+    ambiguous: 0,
+    exportErrors: 1,
+    sourceGaps: 0,
+    updated: 0,
+    complete: false,
+    contractStatus: 'blocked'
+  },
+  rawExportDiagnostics: {
+    enabled: true,
+    diagnosed: 1,
+    byCode: { takeout_no_evidence_for_raw_chat: 1 }
+  },
+  items: [{
+    chatId: 'cccccccccccc',
+    file: 'cccccccccccc.md',
+    status: 'export_error',
+    dateCreated: null,
+    dateLastMessage: null,
+    diagnostic: { status: 'raw_export_suspected', repair: { action: 'reexport_chat' } }
+  }]
+};
+const complete = {
+  schema: 'gemini-md-export.metadata-backfill-report.v1',
+  ok: true,
+  diagnoseOnly,
+  contract: { ok: true, status: 'complete', code: null, message: 'Todos os chats têm datas completas.', unresolvedChatIds: [] },
+  summary: {
+    totalChats: 1,
+    filesRewritten: 1,
+    datesMatched: 1,
+    matched: 1,
+    partial: 0,
+    unresolved: 0,
+    ambiguous: 0,
+    exportErrors: 0,
+    sourceGaps: 0,
+    updated: 1,
+    complete: true,
+    contractStatus: 'complete'
+  },
+  rawExportDiagnostics: { enabled: true, diagnosed: 0, byCode: {} },
+  items: [{ chatId: 'cccccccccccc', file: 'cccccccccccc.md', status: 'matched', dateCreated: '2026-05-10T09:46:09Z', dateLastMessage: '2026-05-10T09:46:09Z' }]
+};
+writeFileSync(reportPath, JSON.stringify(diagnoseOnly ? blocked : complete, null, 2));
+process.stdout.write(diagnoseOnly ? 'Backfill metadata: 0 arquivo(s) normalizado(s); 0/1 com datas completas; 1 export raw suspeito(s).\\n' : 'Backfill metadata: 1 arquivo(s) normalizado(s); 1/1 com datas completas; 0 pendente(s).\\n');
+if (!diagnoseOnly && !existsSync(resolve(dirname(eventsPath), 'repair-done'))) process.exitCode = 9;
+else if (diagnoseOnly) process.exitCode = 2;
+`,
+  );
+
+  try {
+    await withEnv(
+      {
+        GEMINI_MD_EXPORT_REPAIR_SCRIPT: repairScript,
+        GEMINI_MD_EXPORT_METADATA_SCRIPT: metadataScript,
+        GEMINI_MD_EXPORT_PROGRESS_TICK_MS: '10',
+        GME_FAKE_DELAY_MS: '350',
+        GME_FAKE_EVENTS: eventsPath,
+      },
+      async () => {
+        const stdout = captureStream({ isTTY: true });
+        const run = await main(
+          ['fix-vault', vault, '--takeout', takeoutPath, '--report', reportPath, '--no-open-if-missing'],
+          { stdout, stderr: captureStream() },
+        );
+        assert.equal(run.exitCode, 0);
+        assert.match(stdout.text(), /Diagnosticando Takeout e chats do vault/);
+        assert.match(stdout.text(), /Reparando exports suspeitos/);
+        assert.match(stdout.text(), /Atualizando datas do vault/);
+        assert.match(stdout.text(), /Validando vault atualizado/);
+        assert.match(stdout.text(), /em andamento/);
+        assert.match(stdout.text(), /▕/);
+        assert.match(stdout.text(), /5\/5 Fluxo concluido/);
+      },
+    );
+
+    const events = readFileSync(eventsPath, 'utf-8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    assert.deepEqual(
+      events.map((event) => `${event.tool}:${event.tool === 'metadata' ? event.diagnoseOnly : event.dryRun}`),
+      ['repair:true', 'metadata:true', 'repair:false', 'metadata:false'],
+    );
+    assert.equal(events[2].paths.length, 1);
+    assert.equal(events[2].paths[0], chatPath);
+    assert.equal(events[3].repairDone, true);
+
+    const report = JSON.parse(readFileSync(reportPath, 'utf-8'));
+    assert.equal(report.ok, true);
+    assert.deepEqual(
+      report.steps.map((step) => step.name),
+      ['repair-audit', 'metadata-diagnosis', 'web-repair', 'metadata-backfill', 'vault-validation'],
+    );
+    assert.equal(report.summary.metadata.matched, 1);
+    assert.equal(report.summary.diagnosis.exportErrors, 1);
+  } finally {
+    rmSync(vault, { recursive: true, force: true });
+  }
+});
+
 test('CLI expõe ajuda contextual para comandos e subcomandos', async () => {
   const syncStdout = captureStream();
   const jobStdout = captureStream();
@@ -322,6 +662,8 @@ test('CLI expõe ajuda contextual para comandos e subcomandos', async () => {
   assert.equal((await main(['sync', '--help'], { stdout: syncStdout })).exitCode, 0);
   assert.match(syncStdout.text(), /gemini-md-export sync/);
   assert.match(syncStdout.text(), /--resume-report-file/);
+  assert.match(syncStdout.text(), /--takeout/);
+  assert.match(syncStdout.text(), /--no-my-activity/);
   assert.match(syncStdout.text(), /Contrato para agentes/);
 
   assert.equal((await main(['help', 'job', 'status'], { stdout: jobStdout })).exitCode, 0);
@@ -338,6 +680,8 @@ test('CLI expõe ajuda contextual para comandos e subcomandos', async () => {
   assert.equal((await main(['export', 'missing', '--help'], { stdout: exportStdout })).exitCode, 0);
   assert.match(exportStdout.text(), /gemini-md-export export missing/);
   assert.match(exportStdout.text(), /--max-chats/);
+  assert.match(exportStdout.text(), /--takeout/);
+  assert.match(exportStdout.text(), /--no-my-activity/);
 
   const selectedStdout = captureStream();
   assert.equal((await main(['export', 'selected', '--help'], { stdout: selectedStdout })).exitCode, 0);
@@ -427,6 +771,44 @@ test('CLI tabs list usa endpoint proprio sem preflight gemini_ready', async () =
     assert.equal(run.result.tabs[0].listedConversationCount, 42);
     assert.equal(stderr.text(), '');
     assert.equal(requests.some((item) => item.pathname === '/agent/ready'), false);
+  });
+});
+
+test('CLI encaminha cdp-url para o broker de abas sem transformar CDP em scraper', async () => {
+  await withServer((req, res, url) => {
+    if (url.pathname === '/agent/tabs') {
+      sendJson(res, 200, {
+        ok: true,
+        action: 'list',
+        controlPlane: 'cdp',
+        cdp: { attempted: true, controlPlane: 'cdp', geminiTargets: [] },
+        connectedTabCount: 0,
+        connectedClientCount: 0,
+        tabs: [],
+      });
+      return;
+    }
+    sendJson(res, 404, { error: `not found: ${url.pathname}` });
+  }, async (bridgeUrl, requests) => {
+    const stdout = captureStream();
+    const run = await main(
+      [
+        'tabs',
+        'list',
+        '--bridge-url',
+        bridgeUrl,
+        '--cdp-url',
+        'http://127.0.0.1:9222',
+        '--plain',
+      ],
+      { stdout },
+    );
+
+    assert.equal(run.exitCode, 0);
+    const tabsRequest = requests.find((request) => request.pathname === '/agent/tabs');
+    assert.ok(tabsRequest);
+    assert.equal(tabsRequest.searchParams.get('cdpUrl'), 'http://127.0.0.1:9222');
+    assert.equal(tabsRequest.searchParams.get('controlPlane'), 'cdp');
   });
 });
 
@@ -571,12 +953,13 @@ test('CLI chats count carrega ate o fim sem despejar lista no chat', async () =>
       return;
     }
     if (url.pathname === '/agent/tabs' && url.searchParams.get('action') === 'claim') {
+      assert.equal(url.searchParams.get('label'), '🔎 Conferindo');
       sendJson(res, 200, {
         ok: true,
         claim: {
           claimId: 'count-claim',
           tabId: 101,
-          label: 'GME Count',
+          label: '🔎 Conferindo',
         },
       });
       return;
@@ -748,7 +1131,7 @@ test('CLI chats count --result-json reativa RESULT_JSON explicitamente', async (
         claim: {
           claimId: 'count-claim',
           tabId: 101,
-          label: 'GME Count',
+          label: '🔎 Conferindo',
         },
       });
       return;
@@ -802,7 +1185,7 @@ test('CLI chats count nao transforma contagem parcial em total', async () => {
         claim: {
           claimId: 'count-claim',
           tabId: 101,
-          label: 'GME Count',
+          label: '🔎 Conferindo',
         },
       });
       return;
@@ -874,7 +1257,7 @@ test('CLI chats count espera e tenta de novo quando a aba esta ocupada', async (
         claim: {
           claimId: 'count-claim',
           tabId: 101,
-          label: 'GME Count',
+          label: '🔎 Conferindo',
         },
       });
       return;
@@ -958,7 +1341,7 @@ test('CLI chats count --tui mostra contagem indeterminada com feedback humano', 
         claim: {
           claimId: 'count-claim',
           tabId: 101,
-          label: 'GME Count',
+          label: '🔎 Conferindo',
         },
       });
       return;
@@ -978,7 +1361,7 @@ test('CLI chats count --tui mostra contagem indeterminada com feedback humano', 
             },
             serverClaim: {
               claimId: 'count-claim',
-              label: 'GME Count',
+              label: '🔎 Conferindo',
             },
           },
         ],
@@ -1176,7 +1559,7 @@ test('CLI chats count libera claim propria quando a bridge cai durante a contage
         claim: {
           claimId: 'count-claim',
           tabId: 101,
-          label: 'GME Count',
+          label: '🔎 Conferindo',
         },
       });
       return;
@@ -1620,7 +2003,7 @@ test('CLI export cancela job e libera claim ao receber SIGTERM externo', { timeo
   });
 });
 
-test('CLI sync acorda Gemini Web pela propria CLI antes de exportar', async () => {
+test('CLI sync acorda Gemini Web pela propria CLI antes de exportar quando --wake foi pedido', async () => {
   const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-cli-launch-'));
   let readyCalls = 0;
   try {
@@ -1660,6 +2043,7 @@ test('CLI sync acorda Gemini Web pela propria CLI antes de exportar', async () =
               '--bridge-url',
               bridgeUrl,
               '--plain',
+              '--wake',
               '--ready-wait-ms',
               '300',
               '--poll-ms',
@@ -1972,6 +2356,7 @@ test('CLI sync reaproveita estado legado de launch em andamento para evitar aba 
             '--bridge-url',
             bridgeUrl,
             '--plain',
+            '--wake',
             '--ready-wait-ms',
             '300',
             '--poll-ms',
@@ -2078,7 +2463,7 @@ test('CLI --tui renderiza readiness sem misturar logs plain', async () => {
                 ],
                 { stdout, stderr },
               ),
-            /no_connected_clients/,
+            /extension_not_connected|no_connected_clients/,
           );
 
           assert.match(stdout.text(), /Gemini Markdown Export/);

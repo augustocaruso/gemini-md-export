@@ -1,8 +1,16 @@
+import {
+  clientMatchesExpected,
+  formatMismatchPolicyError,
+  getSelfReloadBlocker,
+  mismatchFor,
+} from '../build/ts/mcp/chrome-extension-guard-policy.js';
+
 export const DEFAULT_CHROME_GUARD_CONFIG = Object.freeze({
   profileDirectory: null,
   launchIfClosed: true,
   initialConnectTimeoutMs: 20_000,
   reloadTimeoutMs: 75_000,
+  selfReloadHeartbeatFreshMs: 45_000,
   maxReloadAttempts: 1,
   pollIntervalMs: 500,
   useExtensionsReloaderFallback: false,
@@ -23,15 +31,6 @@ const normalizeConfig = (config = {}) => ({
     Object.entries(config).filter(([, value]) => value !== undefined && value !== null),
   ),
 });
-
-const clientBuildStamp = (client) => client?.buildStamp || client?.page?.buildStamp || null;
-
-const clientMatchesExpected = (client, expected) =>
-  !!client &&
-  (!expected ||
-    (isProtocolMatch(client.protocolVersion, expected.protocolVersion) &&
-      isVersionMatch(client.extensionVersion, expected.extensionVersion) &&
-      isBuildStampMatch(clientBuildStamp(client), expected.buildStamp)));
 
 const selectClient = (clients, preferredClientId, previousClient = null, expected = null) => {
   const liveClients = Array.isArray(clients) ? clients : [];
@@ -71,76 +70,8 @@ const selectClient = (clients, preferredClientId, previousClient = null, expecte
   return liveClients[0] || null;
 };
 
-const isVersionMatch = (actual, expected) => String(actual || '') === String(expected || '');
-
-const isProtocolMatch = (actual, expected) => Number(actual) === Number(expected);
-
-const isBuildStampMatch = (actual, expected) =>
-  !expected || String(actual || '') === String(expected || '');
-
-const mismatchFor = (info, expected) => {
-  if (!info) return { kind: 'unreachable' };
-  if (!isProtocolMatch(info.protocolVersion, expected.protocolVersion)) {
-    return {
-      kind: 'protocol',
-      actual: info.protocolVersion ?? null,
-      expected: expected.protocolVersion,
-    };
-  }
-  if (!isVersionMatch(info.extensionVersion, expected.extensionVersion)) {
-    return {
-      kind: 'version',
-      actual: info.extensionVersion ?? null,
-      expected: expected.extensionVersion,
-    };
-  }
-  if (!isBuildStampMatch(info.buildStamp, expected.buildStamp)) {
-    return {
-      kind: 'build',
-      actual: info.buildStamp ?? null,
-      expected: expected.buildStamp,
-    };
-  }
-  return null;
-};
-
-const formatMismatchError = (mismatch, { afterReload = false } = {}) => {
-  if (mismatch.kind === 'protocol') {
-    return makeUserError(
-      `O protocolo da extensão do Chrome está incompatível. Esperado ${mismatch.expected}, recebido ${mismatch.actual ?? 'desconhecido'}. O MCP tenta reload automático quando permitido; se continuar assim, confirme se a extensão unpacked aponta para a pasta browser-extension atualizada pelo Gemini CLI.`,
-      'chrome_extension_protocol_mismatch',
-      mismatch,
-    );
-  }
-
-  if (mismatch.kind === 'version') {
-    const prefix = afterReload
-      ? 'A extensão do Chrome ainda está antiga depois do reload.'
-      : 'A extensão do Chrome está antiga.';
-    return makeUserError(
-      `${prefix} Esperado ${mismatch.expected}, recebido ${mismatch.actual ?? 'desconhecido'}. Verifique se o Chrome está carregando a extensão a partir da mesma pasta browser-extension atualizada pelo Gemini CLI.`,
-      'chrome_extension_version_mismatch',
-      mismatch,
-    );
-  }
-
-  if (mismatch.kind === 'build') {
-    const prefix = afterReload
-      ? 'A extensão do Chrome/Dia ainda está com build antigo depois do reload.'
-      : 'A extensão do Chrome/Dia está com build antigo.';
-    return makeUserError(
-      `${prefix} Esperado ${mismatch.expected}, recebido ${mismatch.actual ?? 'desconhecido'}. O MCP tentou/permite reload automático; se continuar, confirme se a extensão unpacked aponta para a pasta browser-extension atualizada.`,
-      'chrome_extension_build_mismatch',
-      mismatch,
-    );
-  }
-
-  return makeUserError(
-    'A extensão do Chrome não está acessível. Abra Chrome/Edge com o perfil correto, confirme que a extensão unpacked está ativa e abra https://gemini.google.com/app.',
-    'chrome_extension_unreachable',
-    mismatch,
-  );
-};
+const makePolicyError = (policyError) =>
+  makeUserError(policyError.message, policyError.code, policyError.data);
 
 const probeExtensionInfo = async (deps, state) => {
   const startedAt = Date.now();
@@ -345,7 +276,23 @@ export const ensureChromeExtensionReady = async (deps, options = {}) => {
 
     const allowReload = options.allowReload ?? true;
     if (!allowReload || reloadAttempts >= config.maxReloadAttempts) {
-      throw formatMismatchError(mismatch, { afterReload: reloadAttempts > 0 });
+      throw makePolicyError(formatMismatchPolicyError(mismatch, { afterReload: reloadAttempts > 0 }));
+    }
+
+    const selfReloadBlocker = getSelfReloadBlocker({
+      client: probe.client,
+      info: probe.info,
+      mismatch,
+      heartbeatFreshMs: config.selfReloadHeartbeatFreshMs,
+    });
+    if (selfReloadBlocker) {
+      throw makePolicyError({
+        ...selfReloadBlocker,
+        data: {
+          ...selfReloadBlocker.data,
+          mismatch,
+        },
+      });
     }
 
     reloadAttempts += 1;

@@ -217,12 +217,15 @@ sobrescritos quando a gravação acontece via MCP local.
 
 ```markdown
 ---
+type: gemini_chat
 chat_id: b8e7c075effe9457
 title: "Exemplo"
 url: https://gemini.google.com/app/b8e7c075effe9457
-exported_at: 2026-04-22T18:32:11.245Z
+date_created: 2026-05-10T06:46:09Z
+date_last_message: 2026-05-10T07:12:31Z
+date_exported: 2026-05-17T18:55:08Z
+turn_count: 6
 model: "2.5 Pro"
-source: gemini-web
 tags: [gemini-export]
 ---
 
@@ -235,6 +238,34 @@ tags: [gemini-export]
 ## 🤖 Gemini
 
 ...resposta...
+```
+
+As datas ficam em UTC com `Z` e precisão de segundos. `turn_count` é o número
+de respostas do Gemini, não o total de mensagens. Em exports novos,
+`date_exported` sai direto do navegador; `date_created` e
+`date_last_message` podem ser preenchidos depois pelo backfill de metadados.
+
+Para normalizar o back catalog antigo, recuperar datas e auditar integridade,
+use o fluxo único de correção do vault:
+
+```bash
+gemini-md-export fix-vault "/caminho/do/vault" --takeout "/caminho/Minhaatividade.html" --report "/caminho/do/report.json"
+```
+
+O Takeout é usado primeiro como evidência offline. O fluxo também usa a
+extensão MV3 em `https://myactivity.google.com/product/gemini` para tentar
+resolver datas remanescentes. Depois de instalar uma versão que adiciona essa
+permissão, recarregue manualmente o card da extensão em
+`chrome://extensions`/`edge://extensions` se o navegador ainda estiver com o
+runtime antigo. Durante a varredura, a aba My Activity usa o mesmo indicador
+visual de claim da extensão (Tab Group/badge) e o mesmo dock de progresso usado
+nos exports longos. O relatório não grava prompts, respostas, HTML ou Markdown
+cru: somente hashes, tamanhos, scores, contagens, datas e status.
+
+Se o Takeout ainda não chegou, rode o mesmo comando sem `--takeout`:
+
+```bash
+gemini-md-export fix-vault "/caminho/do/vault" --report "/caminho/do/report.json"
 ```
 
 ## CLI, MCP e Gemini CLI
@@ -470,11 +501,13 @@ arquivo é salvo. O MCP também valida `chatId` retornado pela extensão antes d
 gravar em disco.
 
 Se você já tem um vault com notas possivelmente afetadas pelo bug antigo de
-conteúdo trocado, a extensão Gemini CLI inclui o subagent
-`gemini-vault-repair` e o comando `/exporter:repair-vault <caminho-do-vault>`.
-Ele roda um scanner local (`scripts/vault-repair-audit.mjs`), acha duplicatas
-suspeitas/mismatches, reexporta por `chatId` para staging, cria backup antes de
-sobrescrever e bloqueia qualquer nota que pareça ter virado wiki/nota editada.
+conteúdo trocado, use `/exporter:fix-vault <caminho-do-vault>`. A extensão
+Gemini CLI mantém o subagent `gemini-vault-repair` como subfluxo interno desse
+comando. A primeira passada roda um scanner local
+(`scripts/vault-repair-audit.mjs`) e usa Takeout como evidência sanitizada. Em
+casos que exigem reparo de conteúdo, o subfluxo reexporta por `chatId` para
+staging, cria backup antes de sobrescrever e bloqueia qualquer nota que pareça
+ter virado wiki/nota editada.
 Essas notas wiki também entram no escopo de reparo: o agente preserva a nota,
 faz backup, reexporta o raw correto e cria um caso em `wiki-review/` para
 regenerar ou mesclar a wiki a partir da fonte corrigida. Elas não são

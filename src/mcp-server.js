@@ -13,7 +13,7 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import readline from 'node:readline';
@@ -22,10 +22,6 @@ import {
   DEFAULT_RECENT_CHATS_CACHE_MAX_AGE_MS,
   inferRecentChatsCountStatus,
 } from './recent-chats-policy.mjs';
-import {
-  MAX_RECENT_CHATS_LOAD_TARGET,
-  normalizeRecentChatsLoadMorePlan,
-} from './recent-chats-load-more.mjs';
 import { formatBridgeListenError } from './mcp-server-errors.mjs';
 import { ensureChromeExtensionReady } from './chrome-extension-guard.mjs';
 import {
@@ -58,11 +54,140 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
 const pkg = JSON.parse(readFileSync(resolve(ROOT, 'package.json'), 'utf-8'));
 const bridgeVersion = JSON.parse(readFileSync(resolve(ROOT, 'bridge-version.json'), 'utf-8'));
+let mcpExportWorkflowsPromise = null;
+let mcpCommandLeasePromise = null;
+
+const compiledTsModuleUrl = (...segments) => {
+  const modulePath = resolve(ROOT, 'build', 'ts', ...segments);
+  if (!existsSync(modulePath)) {
+    throw new Error(
+      `Modulo TypeScript compilado nao encontrado: build/ts/${segments.join('/')} (rode npm run build:ts).`,
+    );
+  }
+  return pathToFileURL(modulePath).href;
+};
+
+const loadMcpExportWorkflows = () => {
+  mcpExportWorkflowsPromise ||= import(
+    compiledTsModuleUrl('mcp', 'export-workflows.js')
+  );
+  return mcpExportWorkflowsPromise;
+};
+
+const loadMcpCommandLease = () => {
+  mcpCommandLeasePromise ||= import(
+    compiledTsModuleUrl('mcp', 'command-lease.js')
+  );
+  return mcpCommandLeasePromise;
+};
+
+const validateMcpExportPayload = async (payload, input = {}) => {
+  const { validateMcpExportPayloadBeforeWrite } = await loadMcpExportWorkflows();
+  return validateMcpExportPayloadBeforeWrite(payload, input);
+};
+
+const validateExportTabLeaseForJob = async (tab) => {
+  const { validateExportTabLease } = await loadMcpExportWorkflows();
+  return validateExportTabLease(tab);
+};
+
+const {
+  clientHasLiveRuntimeEvidence,
+  selectReconnectSourcesForTab,
+  shouldIncludeHeartbeatJobProgress,
+} = await import(compiledTsModuleUrl('mcp', 'tab-runtime.js'));
+const {
+  createExpectedChromeExtensionInfo,
+} = await import(compiledTsModuleUrl('mcp', 'runtime-version-info.js'));
+const { isTabClaimReceipt } = await import(compiledTsModuleUrl('mcp', 'tab-claim-visual.js'));
+const {
+  buildExportDateImportBatchEvidenceWithActivityFallback,
+  createExportDateImportContextForArgs,
+  dateImportArgsFromSearchParams,
+  dateImportToolProperties,
+  defaultDateImportSummary,
+  enrichExportPayloadWithDates,
+  hasDateImportSource,
+  saveCollectedConversationPayloadViaDateImportBatch,
+  summarizeExportDateImportContextForJob,
+} = await import(compiledTsModuleUrl('mcp', 'export-date-import-runtime.js'));
+const {
+  buildConversationExportFailure,
+  buildConversationExportSuccess,
+  loadDateImportForExportJob,
+  recordConversationExportFailure,
+  recordConversationExportSuccess,
+  saveDeferredDateImportExports,
+} = await import(compiledTsModuleUrl('mcp', 'export-job-recording.js'));
+const {
+  assertActiveClaimableGeminiClient,
+  explainActiveClaimableGeminiClientRejection,
+  getActiveClaimableGeminiClients,
+  toActiveClaimableGeminiClient,
+} = await import(compiledTsModuleUrl('mcp', 'tab-selection.js'));
+const {
+  canFallbackFromNativeBrowserBrokerFailure,
+  createNativeBrowserBrokerClient,
+  shouldUseNativeBrowserBroker,
+} = await import(compiledTsModuleUrl('mcp', 'native-browser-broker.js'));
+const {
+  assertClaimedReadyGeminiTab,
+  classifyGeminiClientLifecycle,
+  getGeminiClientLifecycle,
+} = await import(compiledTsModuleUrl('mcp', 'client-lifecycle.js'));
+const {
+  evaluateBridgeHealth,
+} = await import(compiledTsModuleUrl('mcp', 'bridge-health.js'));
+const {
+  isCommandSseDeliveryEnabled,
+} = await import(compiledTsModuleUrl('mcp', 'command-channel.js'));
+const {
+  isAllowedBridgeOrigin,
+  isAllowedGeminiBridgeOrigin,
+} = await import(compiledTsModuleUrl('mcp', 'bridge-origin.js'));
+const {
+  evaluateBrowserReadiness,
+} = await import(compiledTsModuleUrl('mcp', 'browser-readiness.js'));
+const {
+  browserTransportMode,
+} = await import(compiledTsModuleUrl('mcp', 'browser-transport-mode.js'));
+const {
+  currentTabOperationInProgress,
+  mergeExplicitNullableClientState,
+} = await import(compiledTsModuleUrl('mcp', 'client-state.js'));
+const {
+  activateRuntimeExtensionClientWithCdp,
+  buildRuntimeCdpControlSnapshot,
+  defaultCdpUrlFromEnv,
+} = await import(compiledTsModuleUrl('cdp', 'runtime-options.js'));
+const {
+  assertBrowserSideEffectAllowed,
+  browserControlRuntimeState,
+  browserCommandSideEffectKind,
+  browserSideEffectsStatePath,
+  clearBrowserSideEffectsState,
+  markBrowserSideEffectCommandArgs,
+  readBrowserSideEffectsState,
+  setBrowserSideEffectsDisabled,
+  shouldStartBrowserBridgeHttp,
+} = await import(compiledTsModuleUrl('mcp', 'browser-side-effects.js'));
+const {
+  MAX_RECENT_CHATS_LOAD_TARGET,
+  normalizeRecentChatsLoadMorePlan,
+  recentChatsLoadMoreRuntimeConfig,
+} = await import(compiledTsModuleUrl('mcp', 'recent-chats-load-more.js'));
+const {
+  selectExplicitReloadClient,
+} = await import(compiledTsModuleUrl('mcp', 'reload-target.js'));
+const agentJson = await import(
+  compiledTsModuleUrl('mcp', 'agent-json.js')
+);
 
 const SERVER_NAME = 'gemini-md-export';
 const SERVER_VERSION = pkg.version;
 const EXTENSION_PROTOCOL_VERSION = Number(bridgeVersion.protocolVersion);
 const PROTOCOL_VERSION = '2025-03-26';
+const nativeBrowserBroker = createNativeBrowserBrokerClient();
 const PROCESS_STARTED_AT = new Date();
 const PROCESS_SESSION_ID =
   process.env.GEMINI_MCP_SESSION_ID ||
@@ -71,6 +196,7 @@ const PROCESS_SESSION_ID =
   `mcp-${process.pid}-${PROCESS_STARTED_AT.getTime().toString(36)}`;
 const DEFAULT_HOST = process.env.GEMINI_MCP_BRIDGE_HOST || '127.0.0.1';
 const DEFAULT_PORT = Number(process.env.GEMINI_MCP_BRIDGE_PORT || 47283);
+const DEFAULT_CDP_URL = defaultCdpUrlFromEnv(process.env);
 const DEFAULT_EXPORT_DIR = process.env.GEMINI_MCP_EXPORT_DIR || resolve(homedir(), 'Downloads');
 const DIAGNOSTIC_DIR =
   process.env.GEMINI_MCP_DIAGNOSTIC_DIR || resolve(homedir(), '.gemini-md-export');
@@ -105,7 +231,14 @@ const TAB_CLAIM_MIN_VISIBLE_MS = Math.max(
   Math.min(15_000, Number(process.env.GEMINI_MCP_TAB_CLAIM_MIN_VISIBLE_MS || 5000)),
 );
 const TAB_CLAIM_COLORS = ['green', 'blue', 'yellow', 'purple', 'cyan', 'orange', 'pink'];
-const TAB_CLAIM_LABEL_PREFIX = 'GME';
+const TAB_CLAIM_LABEL_MAX_GRAPHEMES = 16;
+const TAB_CLAIM_LABELS = Object.freeze({
+  generic: '✨ Em uso',
+  count: '🔎 Conferindo',
+  list: '🔎 Conferindo',
+  export: '📥 Exportando',
+  sync: '🔄 Sincroniza',
+});
 const CLIENT_DEGRADED_HEARTBEAT_MS = Number(
   process.env.GEMINI_MCP_CLIENT_DEGRADED_HEARTBEAT_MS || 20_000,
 );
@@ -115,6 +248,11 @@ const COMMAND_CHANNEL_FAILURE_COOLDOWN_MS = Math.max(
 );
 const LONG_POLL_TIMEOUT_MS = 25_000;
 const SSE_KEEPALIVE_MS = Number(process.env.GEMINI_MCP_SSE_KEEPALIVE_MS || 15_000);
+const SSE_COMMAND_FAILURE_BACKOFF_MS = Math.max(
+  5000,
+  Math.min(300_000, Number(process.env.GEMINI_MCP_SSE_COMMAND_FAILURE_BACKOFF_MS || 60_000)),
+);
+const SSE_COMMAND_DELIVERY_ENABLED = isCommandSseDeliveryEnabled(process.env);
 const COMMAND_TIMEOUT_MS = Number(process.env.GEMINI_MCP_COMMAND_TIMEOUT_MS || 180_000);
 const DEFAULT_EXPORT_HYDRATION_LOAD_WAIT_MS = 2500;
 const DEFAULT_EXPORT_HYDRATION_TOP_SETTLE_MS = 8000;
@@ -122,6 +260,22 @@ const DEFAULT_EXPORT_HYDRATION_STALL_TIMEOUT_MS = 45_000;
 const DEFAULT_EXPORT_HYDRATION_MAX_TOTAL_MS = 10 * 60_000;
 const EXPORT_COMMAND_TIMEOUT_MS = Number(
   process.env.GEMINI_MCP_EXPORT_COMMAND_TIMEOUT_MS || 15 * 60_000,
+);
+const EXPORT_COMMAND_STALE_ABORT_MS = Math.max(
+  CLIENT_STALE_MS + 15_000,
+  Math.min(10 * 60_000, Number(process.env.GEMINI_MCP_EXPORT_COMMAND_STALE_ABORT_MS || 90_000)),
+);
+const EXPORT_TAB_ACTIVATION_TIMEOUT_MS = Math.max(
+  3000,
+  Math.min(30_000, Number(process.env.GEMINI_MCP_EXPORT_TAB_ACTIVATION_TIMEOUT_MS || 8000)),
+);
+const EXPORT_TAB_ACTIVATION_BROKER_LIMIT = Math.max(
+  1,
+  Math.min(5, Number(process.env.GEMINI_MCP_EXPORT_TAB_ACTIVATION_BROKER_LIMIT || 3)),
+);
+const EXPORT_TAB_ACTIVATION_CONFIRM_WAIT_MS = Math.max(
+  500,
+  Math.min(15_000, Number(process.env.GEMINI_MCP_EXPORT_TAB_ACTIVATION_CONFIRM_WAIT_MS || 3000)),
 );
 const COMMAND_DISPATCH_TIMEOUT_MS = Number(
   process.env.GEMINI_MCP_COMMAND_DISPATCH_TIMEOUT_MS || 20_000,
@@ -167,20 +321,19 @@ const BRIDGE_ASSET_HOST_BACKOFF_MAX_MS = Math.max(
   BRIDGE_ASSET_HOST_BACKOFF_BASE_MS,
   Math.min(10 * 60_000, Number(process.env.GEMINI_MCP_ASSET_HOST_BACKOFF_MAX_MS || 30_000)),
 );
-const ALLOWED_BRIDGE_PAGE_ORIGIN = 'https://gemini.google.com';
-const CHROMIUM_EXTENSION_ID_RE = /^[a-p]{32}$/;
+const GEMINI_BRIDGE_PAGE_ORIGIN = 'https://gemini.google.com';
+const ACTIVITY_BRIDGE_PAGE_ORIGIN = 'https://myactivity.google.com';
+const ACTIVITY_GEMINI_URL = 'https://myactivity.google.com/product/gemini';
 const RECENT_CHATS_CACHE_MAX_AGE_MS = Number(
   process.env.GEMINI_MCP_RECENT_CHATS_CACHE_MAX_AGE_MS || DEFAULT_RECENT_CHATS_CACHE_MAX_AGE_MS,
 );
 const RECENT_CHATS_REFRESH_BUDGET_MS = Number(
   process.env.GEMINI_MCP_RECENT_CHATS_REFRESH_BUDGET_MS || 2500,
 );
-const RECENT_CHATS_LOAD_MORE_BUDGET_MS = Number(
-  process.env.GEMINI_MCP_RECENT_CHATS_LOAD_MORE_BUDGET_MS || 6000,
-);
-const RECENT_CHATS_LOAD_MORE_BROWSER_TIMEOUT_MS = Number(
-  process.env.GEMINI_MCP_RECENT_CHATS_LOAD_MORE_BROWSER_TIMEOUT_MS || 3500,
-);
+const recentChatsLoadMoreRuntime = recentChatsLoadMoreRuntimeConfig(process.env);
+const RECENT_CHATS_LOAD_MORE_BUDGET_MS = recentChatsLoadMoreRuntime.loadMoreBudgetMs;
+const RECENT_CHATS_LOAD_MORE_BROWSER_TIMEOUT_MS =
+  recentChatsLoadMoreRuntime.loadMoreBrowserTimeoutMs;
 const RECENT_CHATS_EXPORT_ALL_LOAD_MORE_BROWSER_TIMEOUT_MS = Number(
   process.env.GEMINI_MCP_RECENT_CHATS_EXPORT_ALL_LOAD_MORE_BROWSER_TIMEOUT_MS || 30_000,
 );
@@ -227,7 +380,7 @@ const CHROME_GUARD_CONFIG = {
     process.env.GEMINI_MCP_CHROME_PROFILE_DIRECTORY ||
     process.env.GME_CHROME_PROFILE_DIRECTORY ||
     null,
-  launchIfClosed: process.env.GEMINI_MCP_CHROME_LAUNCH_IF_CLOSED !== 'false',
+  launchIfClosed: process.env.GEMINI_MCP_CHROME_LAUNCH_IF_CLOSED === 'true',
   initialConnectTimeoutMs: Number(process.env.GEMINI_MCP_CHROME_INITIAL_CONNECT_TIMEOUT_MS || 8000),
   reloadTimeoutMs: Number(process.env.GEMINI_MCP_CHROME_RELOAD_TIMEOUT_MS || 75_000),
   maxReloadAttempts: Number(process.env.GEMINI_MCP_CHROME_MAX_RELOAD_ATTEMPTS || 1),
@@ -243,6 +396,9 @@ const BROWSER_LAUNCH_COOLDOWN_MS = Number(
 );
 const BROWSER_STATUS_WAKE_WAIT_MS = Number(
   process.env.GEMINI_MCP_BROWSER_STATUS_WAKE_WAIT_MS || 8_000,
+);
+const ACTIVITY_PRE_LAUNCH_WAIT_MS = Number(
+  process.env.GEMINI_MCP_ACTIVITY_PRE_LAUNCH_WAIT_MS || 4_500,
 );
 const PRIMARY_BRIDGE_HEALTH_TIMEOUT_MS = Number(
   process.env.GEMINI_MCP_PRIMARY_BRIDGE_HEALTH_TIMEOUT_MS || 1200,
@@ -260,33 +416,6 @@ const PROCESS_CLEANUP_TIMEOUT_MS = Number(
   process.env.GEMINI_MCP_PROCESS_CLEANUP_TIMEOUT_MS || 8000,
 );
 const EXPORTER_PROCESS_RE = /gemini-md-export|mcp-server\.js/i;
-const detectExpectedBrowserBuildStamp = () => {
-  if (process.env.GEMINI_MCP_EXPECTED_BUILD_STAMP) {
-    return process.env.GEMINI_MCP_EXPECTED_BUILD_STAMP;
-  }
-  if (bridgeVersion.buildStamp) return bridgeVersion.buildStamp;
-
-  const candidates = [
-    resolve(ROOT, 'browser-extension', 'background.js'),
-    resolve(ROOT, 'dist', 'extension', 'background.js'),
-    resolve(ROOT, 'dist', 'extension', 'content.js'),
-  ];
-  for (const candidate of candidates) {
-    try {
-      if (!existsSync(candidate)) continue;
-      const source = readFileSync(candidate, 'utf-8');
-      const match =
-        source.match(/\bbuildStamp:\s*['"](\d{8}-\d{4})['"]/) ||
-        source.match(/\bBUILD_STAMP\s*=\s*['"](\d{8}-\d{4})['"]/) ||
-        source.match(/\bbuild\s+(\d{8}-\d{4})\b/);
-      if (match?.[1]) return match[1];
-    } catch {
-      // Build stamp ausente não deve impedir o MCP de iniciar.
-    }
-  }
-  return null;
-};
-
 const pathContains = (candidate, fragment) =>
   String(candidate || '').replace(/\\/g, '/').toLowerCase().includes(fragment);
 
@@ -311,11 +440,15 @@ const releaseAutoUpdateDirectoryCwd = () => {
 
 releaseAutoUpdateDirectoryCwd();
 
-const EXPECTED_CHROME_EXTENSION_INFO = {
-  extensionVersion: bridgeVersion.extensionVersion || SERVER_VERSION,
+const EXPECTED_CHROME_EXTENSION_INFO = createExpectedChromeExtensionInfo({
+  root: ROOT,
+  bridgeVersion,
+  packageVersion: pkg.version,
+  serverVersion: SERVER_VERSION,
   protocolVersion: EXTENSION_PROTOCOL_VERSION,
-  buildStamp: detectExpectedBrowserBuildStamp(),
-};
+  env: process.env,
+  homeDir: homedir(),
+});
 
 const clients = new Map();
 const pendingCommands = new Map();
@@ -351,6 +484,58 @@ const log = (...args) => {
 const errorLog = (...args) => {
   writeLog(...args);
 };
+
+const currentBrowserSideEffectsState = () =>
+  readBrowserSideEffectsState({
+    diagnosticDir: DIAGNOSTIC_DIR,
+    env: process.env,
+  });
+
+const browserSideEffectsStatus = () => ({
+  ...currentBrowserSideEffectsState(),
+  path: browserSideEffectsStatePath(DIAGNOSTIC_DIR),
+  browserControl: BROWSER_CONTROL_RUNTIME,
+  bridgeHttpEnabled: BRIDGE_HTTP_ENABLED,
+});
+
+const withSoftTimeout = (promise, timeoutMs, fallback) =>
+  Promise.race([
+    promise,
+    new Promise((resolve) => {
+      setTimeout(() => resolve(fallback), timeoutMs);
+    }),
+  ]);
+
+const probeNativeBrowserBrokerAvailability = async () => {
+  if (!shouldUseNativeBrowserBroker()) return false;
+  const response = await withSoftTimeout(
+    nativeBrowserBroker.status({ allowFallback: true }),
+    750,
+    { ok: false, code: 'native_broker_probe_timeout' },
+  );
+  if (response?.ok === true) return true;
+  if (response?.code === 'native_broker_unavailable') return false;
+  return null;
+};
+
+const browserTransportStatus = async () => {
+  const nativeBrokerAvailable = await probeNativeBrowserBrokerAvailability();
+  return browserTransportMode({
+    bridgeHttpEnabled: BRIDGE_HTTP_ENABLED,
+    nativeMessagingConfigured: shouldUseNativeBrowserBroker(),
+    nativeBrokerAvailable,
+    contentScriptTransport:
+      BRIDGE_HTTP_ENABLED && shouldUseNativeBrowserBroker() ? 'native-proxy-http' : 'unknown',
+  });
+};
+
+const assertBrowserSideEffect = (kind, { explicit = false } = {}) =>
+  assertBrowserSideEffectAllowed({
+    kind,
+    explicit,
+    bridgeRole,
+    state: currentBrowserSideEffectsState(),
+  });
 
 const debugLog = (...args) => {
   if (process.env.GEMINI_MCP_DEBUG === 'true') writeLog(...args);
@@ -1297,7 +1482,7 @@ const clientMatchesExpectedInfo = (client) =>
   String(client?.extensionVersion || '') === EXPECTED_CHROME_EXTENSION_INFO.extensionVersion &&
   Number(client?.protocolVersion) === Number(EXPECTED_CHROME_EXTENSION_INFO.protocolVersion) &&
   (!EXPECTED_CHROME_EXTENSION_INFO.buildStamp ||
-    String(client?.buildStamp || client?.page?.buildStamp || '') ===
+    String(client?.page?.buildStamp || client?.buildStamp || '') ===
       EXPECTED_CHROME_EXTENSION_INFO.buildStamp);
 
 const compactUnique = (items) => [
@@ -1320,7 +1505,7 @@ const extensionMismatchForClient = (client, expected = EXPECTED_CHROME_EXTENSION
       expected: expected.extensionVersion,
     };
   }
-  const actualBuildStamp = client.buildStamp || client.page?.buildStamp || null;
+  const actualBuildStamp = client.page?.buildStamp || client.buildStamp || null;
   if (expected.buildStamp && String(actualBuildStamp || '') !== String(expected.buildStamp)) {
     return {
       kind: 'build',
@@ -1359,7 +1544,7 @@ const buildExtensionReadiness = ({
       mismatch: extensionMismatchForClient(client, expected),
       extensionVersion: client.extensionVersion ?? null,
       protocolVersion: client.protocolVersion ?? null,
-      buildStamp: client.buildStamp ?? client.page?.buildStamp ?? null,
+      buildStamp: client.page?.buildStamp ?? client.buildStamp ?? null,
     }))
     .filter((item) => item.mismatch);
   const reloadAttempts = Number(selfHeal?.reloadAttempts || 0);
@@ -1406,7 +1591,7 @@ const buildExtensionReadiness = ({
     },
     buildStamp: {
       expected: expected.buildStamp || null,
-      running: compactUnique(clients.map((client) => client.buildStamp || client.page?.buildStamp || null)),
+      running: compactUnique(clients.map((client) => client.page?.buildStamp || client.buildStamp || null)),
     },
     reload: {
       attempted: selfHeal?.attempted === true && reloadAttempts > 0,
@@ -1509,6 +1694,7 @@ const buildEnvironmentDiagnostics = async () => {
     browser: {
       launchIfClosed: CHROME_GUARD_CONFIG.launchIfClosed,
       profileDirectory: CHROME_GUARD_CONFIG.profileDirectory,
+      sideEffects: browserSideEffectsStatus(),
       configuredBrowser:
         process.env.GEMINI_MCP_BROWSER || process.env.GME_BROWSER || browserLaunchPlan.browserKey,
       launchPlan: browserLaunchPlan,
@@ -1652,6 +1838,15 @@ const terminateProcessCandidate = async (target, { force = false, waitMs = PROCE
 };
 
 const retryBridgeListen = async () => {
+  if (!BRIDGE_HTTP_ENABLED) {
+    return {
+      attempted: false,
+      ok: false,
+      reason: 'bridge-http-disabled',
+      bridgeRole,
+      browserControl: BROWSER_CONTROL_RUNTIME,
+    };
+  }
   if (bridgeListening) {
     return { attempted: false, ok: true, reason: 'already-listening', bridgeRole };
   }
@@ -1809,6 +2004,11 @@ const parseArgs = (argv) => {
 };
 
 const cli = parseArgs(process.argv.slice(2));
+const BROWSER_CONTROL_RUNTIME = browserControlRuntimeState(process.env);
+const BRIDGE_HTTP_ENABLED = shouldStartBrowserBridgeHttp({
+  bridgeOnly: cli.bridgeOnly === true,
+  env: process.env,
+});
 
 if (cli.help) {
   process.stdout.write(
@@ -1843,19 +2043,6 @@ const sendJson = (res, statusCode, payload) => {
   res.end(JSON.stringify(payload));
 };
 
-const isAllowedBridgeOrigin = (origin) => {
-  if (!origin) return true;
-  try {
-    const parsed = new URL(origin);
-    if (parsed.origin === ALLOWED_BRIDGE_PAGE_ORIGIN) return true;
-    // Dia/Chromium podem emitir fetch de content script com Origin
-    // chrome-extension://<id>; sem isto o heartbeat morre antes da aba aparecer.
-    return parsed.protocol === 'chrome-extension:' && CHROMIUM_EXTENSION_ID_RE.test(parsed.hostname);
-  } catch {
-    return false;
-  }
-};
-
 const bridgeCorsHeaders = (req) => {
   const origin = req.headers.origin;
   if (!origin || !isAllowedBridgeOrigin(origin)) {
@@ -1870,6 +2057,13 @@ const bridgeCorsHeaders = (req) => {
 const requireAllowedBridgeOrigin = (req) => {
   if (isAllowedBridgeOrigin(req.headers.origin)) return;
   const error = new Error(`Origin não autorizada para o bridge: ${req.headers.origin}`);
+  error.statusCode = 403;
+  throw error;
+};
+
+const requireGeminiBridgeOrigin = (req) => {
+  if (isAllowedGeminiBridgeOrigin(req.headers.origin)) return;
+  const error = new Error(`Origin não autorizada para endpoint de escrita: ${req.headers.origin}`);
   error.statusCode = 403;
   throw error;
 };
@@ -1900,7 +2094,7 @@ const sendAgentJson = (res, statusCode, payload) => {
     'content-type': 'application/json; charset=utf-8',
     'cache-control': 'no-store',
   });
-  res.end(JSON.stringify(payload));
+  res.end(agentJson.stringifyAgentPayload(payload));
 };
 
 const sendAgentError = (res, statusCode, err) =>
@@ -1908,7 +2102,7 @@ const sendAgentError = (res, statusCode, err) =>
     ok: false,
     error: err?.message || String(err),
     code: err?.code || null,
-    data: err?.data || null,
+    data: agentJson.sanitizeAgentJsonValue(err?.data) ?? null,
   });
 
 const sendNoContent = (res) => {
@@ -1938,6 +2132,22 @@ const closeEventStream = (client) => {
     // ignore stale socket
   }
   client.eventStream = null;
+};
+
+const clientEventStreamUsable = (client) =>
+  !!client?.eventStream?.res &&
+  !client.eventStream.res.destroyed;
+
+const clientCommandEventStreamUsable = (client) =>
+  SSE_COMMAND_DELIVERY_ENABLED &&
+  clientEventStreamUsable(client) &&
+  Date.now() >= Number(client.sseDisabledUntil || 0);
+
+const disableClientSseCommandChannel = (clientId) => {
+  const client = clients.get(clientId);
+  if (!client) return null;
+  client.sseDisabledUntil = Date.now() + SSE_COMMAND_FAILURE_BACKOFF_MS;
+  return client;
 };
 
 const sendClientEvent = (client, event, payload = {}) => {
@@ -1974,14 +2184,32 @@ const clientSelectorFromSearchParams = (searchParams) => ({
   tabId: searchParams.get('tabId') || undefined,
   claimId: searchParams.get('claimId') || undefined,
   sessionId: searchParams.get('sessionId') || undefined,
+  cdpUrl: searchParams.get('cdpUrl') || undefined,
+  controlPlane: searchParams.get('controlPlane') || undefined,
+  wakeBrowser: parseOptionalBoolean(searchParams.get('wakeBrowser')),
+  openIfMissing: parseOptionalBoolean(searchParams.get('openIfMissing')),
+  activateTab: parseOptionalBoolean(searchParams.get('activateTab')),
+  focusWindow: parseOptionalBoolean(searchParams.get('focusWindow')),
   preferActive: parseOptionalBoolean(searchParams.get('preferActive')),
   preferRecent: parseOptionalBoolean(searchParams.get('preferRecent')),
 });
 
+const clientHasLiveRuntimeEvidenceForServer = (client, now = Date.now()) =>
+  clientHasLiveRuntimeEvidence(client, {
+    now,
+    staleAfterMs: CLIENT_STALE_MS,
+    warmupGraceMs: 4000,
+    eventStreamConnected: !!client?.eventStream?.res && !client.eventStream.res.destroyed,
+    longPollConnected: !!client?.pendingPoll,
+    expectedExtensionVersion: EXPECTED_CHROME_EXTENSION_INFO.extensionVersion,
+    expectedProtocolVersion: EXPECTED_CHROME_EXTENSION_INFO.protocolVersion,
+    expectedBuildStamp: EXPECTED_CHROME_EXTENSION_INFO.buildStamp,
+  });
+
 const getLiveClients = () => {
   const now = Date.now();
   return Array.from(clients.values())
-    .filter((client) => now - client.lastSeenAt <= CLIENT_STALE_MS)
+    .filter((client) => clientHasLiveRuntimeEvidenceForServer(client, now))
     .sort(
       (a, b) =>
         Number(b.isActiveTab === true) - Number(a.isActiveTab === true) ||
@@ -2015,8 +2243,7 @@ const cleanupStaleClients = () => {
   for (const [clientId, client] of clients.entries()) {
     if (now - client.lastSeenAt <= CLIENT_STALE_MS) continue;
     if (hasPendingCommandForClient(clientId)) {
-      client.lastSeenAt = now;
-      client.lastSeenAtExtendedByCommandAt = new Date(now).toISOString();
+      client.retainedByPendingCommandAt = new Date(now).toISOString();
       continue;
     }
     removeClient(clientId);
@@ -2085,6 +2312,7 @@ const normalizeClaimId = (value) => {
 };
 
 const normalizeTabId = (value) => {
+  if (value === null || value === undefined || value === '') return null;
   const parsed = Number(value);
   return Number.isInteger(parsed) ? parsed : null;
 };
@@ -2103,15 +2331,12 @@ const colorForSession = (sessionId) => {
   return TAB_CLAIM_COLORS[Math.abs(hash) % TAB_CLAIM_COLORS.length] || 'green';
 };
 
-const labelForSession = (sessionId, provided) => {
-  const text = String(provided || '').replace(/\s+/g, ' ').trim();
-  if (text) return text.slice(0, 16);
-  const suffix = String(sessionId || PROCESS_SESSION_ID)
-    .replace(/[^a-z0-9]/gi, '')
-    .slice(-4)
-    .toUpperCase();
-  return `${TAB_CLAIM_LABEL_PREFIX}${suffix ? ` ${suffix}` : ''}`.slice(0, 16);
+const clampClaimLabel = (value, fallback = TAB_CLAIM_LABELS.generic) => {
+  const text = String(value || '').replace(/\s+/g, ' ').trim() || fallback;
+  return Array.from(text).slice(0, TAB_CLAIM_LABEL_MAX_GRAPHEMES).join('');
 };
+
+const labelForSession = (_sessionId, provided) => clampClaimLabel(provided);
 
 const clientSelectorProperties = () => ({
   clientId: { type: 'string' },
@@ -2250,6 +2475,17 @@ const summarizeTabClaims = () => {
   return [...tabClaims.values()].map(summarizeTabClaim);
 };
 
+const summarizeRawTabClaims = () => {
+  cleanupExpiredTabClaims();
+  return [...tabClaims.values()].map((claim) => ({
+    claimId: claim.claimId,
+    clientId: claim.clientId,
+    tabId: claim.tabId ?? null,
+    sessionId: claim.sessionId,
+    expiresAtMs: claim.expiresAtMs,
+  }));
+};
+
 const claimForSession = (sessionId) => {
   cleanupExpiredTabClaims();
   const claimId = sessionClaims.get(normalizeSessionId(sessionId));
@@ -2300,6 +2536,7 @@ const releaseTabClaimVisualByTabId = async ({
         {
           timeoutMs: 8000,
           dispatchTimeoutMs: 4000,
+          browserSideEffectExplicit: true,
         },
       );
       if (visual?.ok) break;
@@ -2336,27 +2573,54 @@ const ambiguousTabsError = (liveClients, selector = {}) => {
   return error;
 };
 
-const reconnectSourceForClient = (client) => {
-  if (!client) return null;
-  return Array.from(clients.values())
-    .filter((candidate) => candidate.clientId !== client.clientId)
-    .filter((candidate) => {
-      const sameTab =
-        client.tabId !== null &&
-        client.tabId !== undefined &&
-        candidate.tabId !== null &&
-        candidate.tabId !== undefined &&
-        Number(client.tabId) === Number(candidate.tabId);
-      if (sameTab) return true;
-      const claim = claimForClient(candidate);
-      return claim ? clientCarriesClaim(client, claim) : false;
-    })
-    .sort((a, b) => (b.conversations?.length || 0) - (a.conversations?.length || 0))[0] || null;
+const tabRuntimeClientState = (client) => {
+  if (!client?.clientId) return null;
+  const claim = claimForClient(client) || clientTabClaim(client) || null;
+  return {
+    clientId: client.clientId,
+    tabId: client.tabId ?? null,
+    claimId: claim?.claimId || null,
+    sessionId: claim?.sessionId || client.tabClaim?.sessionId || client.summary?.tabClaim?.sessionId || null,
+    conversationCount: Array.isArray(client.conversations) ? client.conversations.length : 0,
+    hasPendingCommand: hasPendingCommandForClient(client.clientId),
+    lastSeenAt: client.lastSeenAt || null,
+  };
+};
+
+const reconnectSourcesForClient = (client) => {
+  const nextClient = tabRuntimeClientState(client);
+  if (!nextClient) {
+    return {
+      abortClients: [],
+      cacheSource: null,
+      selection: { abortClientIds: [], cacheSourceClientId: null },
+    };
+  }
+  const candidates = Array.from(clients.values()).map(tabRuntimeClientState).filter(Boolean);
+  const selection = selectReconnectSourcesForTab({ nextClient, candidates });
+  return {
+    abortClients: selection.abortClientIds
+      .map((clientId) => clients.get(clientId))
+      .filter(Boolean),
+    cacheSource: selection.cacheSourceClientId
+      ? clients.get(selection.cacheSourceClientId) || null
+      : null,
+    selection,
+  };
 };
 
 const preserveReconnectConversationCache = (client, payload = {}) => {
-  const source = reconnectSourceForClient(client);
-  if (!source?.conversations?.length) return;
+  const { abortClients, cacheSource } = reconnectSourcesForClient(client);
+  for (const source of abortClients) {
+    abortPendingCommandsForClient(source.clientId, {
+      code: 'client_reconnected_during_command',
+      reason: 'client-reconnected-same-tab',
+      replacementClientId: client.clientId,
+    });
+  }
+  const source = cacheSource;
+  if (!source) return;
+  if (!source.conversations?.length) return;
   const incomingCount = Array.isArray(payload.conversations) ? payload.conversations.length : 0;
   const currentCount = client.conversations?.length || 0;
   if (Math.max(incomingCount, currentCount) >= source.conversations.length) return;
@@ -2407,15 +2671,17 @@ const upsertClient = (payload, meta = {}) => {
     : next.capabilities || [];
   next.snapshotDirty = payload.snapshotDirty === true;
   next.snapshotHash = payload.snapshotHash || next.snapshotHash || null;
-  next.metrics = payload.metrics || next.metrics || null;
+  const runtimeState = mergeExplicitNullableClientState(next, payload);
+  next.metrics = runtimeState.metrics;
   next.tabId = payload.tabId ?? next.tabId ?? null;
   next.windowId = payload.windowId ?? next.windowId ?? null;
   next.isActiveTab = payload.isActiveTab ?? next.isActiveTab ?? null;
   next.extensionVersion = payload.extensionVersion || next.extensionVersion || null;
   next.protocolVersion =
     payload.protocolVersion !== undefined ? payload.protocolVersion : next.protocolVersion ?? null;
-  next.buildStamp = payload.buildStamp || payload.page?.buildStamp || next.buildStamp || null;
-  next.tabClaim = payload.tabClaim || next.tabClaim || null;
+  next.buildStamp = payload.page?.buildStamp || payload.buildStamp || next.buildStamp || null;
+  next.tabClaim = runtimeState.tabClaim;
+  next.kind = payload.kind || payload.clientKind || payload.page?.kind || next.kind || 'gemini';
   next.page = payload.page || next.page || null;
   next.commandPoll = payload.commandPoll || next.commandPoll || null;
   preserveReconnectConversationCache(next, payload);
@@ -2437,6 +2703,7 @@ const upsertClient = (payload, meta = {}) => {
   clients.set(next.clientId, next);
   const claim = claimForClient(next);
   if (claim) rebindTabClaimToClient(claim, next, 'client-upsert');
+  rebroadcastActiveBrowserExportJobForClient(next, 'client-upsert');
   return next;
 };
 
@@ -2492,30 +2759,87 @@ const takeQueuedCommand = (client) => {
   return command;
 };
 
-const flushQueuedCommand = (client, { allowSse = true } = {}) => {
+const flushQueuedCommand = (client) => {
   if (!client?.queue?.length) return null;
   const command = takeQueuedCommand(client);
   if (!command) return null;
-  if (allowSse && sendClientEvent(client, 'command', { command })) {
+  if (client.pendingPoll) {
+    const { res, timer } = client.pendingPoll;
+    clearTimeout(timer);
+    client.pendingPoll = null;
+    const pending = pendingCommands.get(command.id);
+    if (pending) pending.delivery = 'long-poll';
+    sendJson(res, 200, { command });
+    return 'long-poll';
+  }
+  if (clientCommandEventStreamUsable(client) && sendClientEvent(client, 'command', { command })) {
+    const pending = pendingCommands.get(command.id);
+    if (pending) pending.delivery = 'sse';
     return 'sse';
   }
-  if (!client.pendingPoll) {
-    client.queue.unshift(command);
-    const pending = pendingCommands.get(command.id);
-    if (pending) pending.dispatchedAt = null;
-    return null;
+  client.queue.unshift(command);
+  const pending = pendingCommands.get(command.id);
+  if (pending) {
+    pending.dispatchedAt = null;
+    pending.delivery = null;
   }
-  const { res, timer } = client.pendingPoll;
-  clearTimeout(timer);
-  client.pendingPoll = null;
-  sendJson(res, 200, { command });
-  return 'long-poll';
+  return null;
 };
 
 const removeQueuedCommand = (clientId, commandId) => {
   const client = clients.get(clientId);
   if (!client?.queue?.length) return;
   client.queue = client.queue.filter((command) => command.id !== commandId);
+};
+
+const abortPendingCommandsForClient = (
+  clientId,
+  { code = 'client_command_aborted', message = null, reason = null, replacementClientId = null } = {},
+) => {
+  let aborted = 0;
+  for (const [commandId, pending] of pendingCommands.entries()) {
+    if (pending.clientId !== clientId) continue;
+    pendingCommands.delete(commandId);
+    removeQueuedCommand(clientId, commandId);
+    if (pending.timer) clearTimeout(pending.timer);
+    if (pending.dispatchTimer) clearTimeout(pending.dispatchTimer);
+    if (pending.staleTimer) clearInterval(pending.staleTimer);
+    const error = new Error(
+      message ||
+        `A aba do Gemini reconectou durante ${pending.type}. Vou tentar continuar pela nova conexão.`,
+    );
+    error.code = code;
+    error.commandType = pending.type;
+    error.commandDispatched = !!pending.dispatchedAt;
+    error.clientId = clientId;
+    error.replacementClientId = replacementClientId;
+    error.reason = reason;
+    decorateErrorWithTimeoutContext(error, {
+      layer: 'browser',
+      operation: pending.type,
+      timeoutMs: 0,
+    });
+    markClientCommandTimeout(clientId, pending.type, {
+      dispatched: !!pending.dispatchedAt,
+      code,
+    });
+    if (pending.delivery === 'sse') {
+      disableClientSseCommandChannel(clientId, reason || code);
+    }
+    recordFlightEvent('command_aborted_for_client_reconnect', {
+      commandId,
+      clientId,
+      nextClientId: replacementClientId,
+      type: pending.type,
+      dispatched: !!pending.dispatchedAt,
+      delivery: pending.delivery || null,
+      code,
+      reason,
+    });
+    pending.reject(error);
+    aborted += 1;
+  }
+  return aborted;
 };
 
 const markClientCommandTimeout = (clientId, type, { dispatched = false, code = 'command_timeout' } = {}) => {
@@ -2552,10 +2876,22 @@ const enqueueCommand = (clientId, type, args = {}, options = {}) => {
     throw error;
   }
 
+  const browserSideEffectKind = browserCommandSideEffectKind(type);
+  const browserSideEffectExplicit =
+    options.browserSideEffectExplicit === true ||
+    args?.browserSideEffectExplicit === true ||
+    args?.explicitBrowserSideEffect === true;
+  if (browserSideEffectKind) {
+    assertBrowserSideEffect(browserSideEffectKind, {
+      explicit: browserSideEffectExplicit,
+    });
+  }
+  const commandArgs = markBrowserSideEffectCommandArgs(type, args, browserSideEffectExplicit);
+
   const command = {
     id: randomUUID(),
     type,
-    args,
+    args: commandArgs,
     createdAt: new Date().toISOString(),
   };
   recordFlightEvent('command_enqueued', {
@@ -2564,6 +2900,7 @@ const enqueueCommand = (clientId, type, args = {}, options = {}) => {
     type,
     timeoutMs: options.timeoutMs || COMMAND_TIMEOUT_MS,
     dispatchTimeoutMs: options.dispatchTimeoutMs ?? COMMAND_DISPATCH_TIMEOUT_MS,
+    staleAbortMs: options.staleAbortMs || null,
   });
 
   return new Promise((resolve, reject) => {
@@ -2572,19 +2909,34 @@ const enqueueCommand = (clientId, type, args = {}, options = {}) => {
       0,
       Number(options.dispatchTimeoutMs ?? COMMAND_DISPATCH_TIMEOUT_MS),
     );
+    const staleAbortMs = Math.max(0, Number(options.staleAbortMs || 0));
+    const staleCheckIntervalMs = Math.max(
+      500,
+      Math.min(10_000, Number(options.staleCheckIntervalMs || 2500)),
+    );
     const pending = {
       clientId,
       resolve,
       reject,
       timer: null,
       dispatchTimer: null,
+      staleTimer: null,
       type,
       dispatchedAt: null,
+      delivery: null,
+    };
+    const clearPendingTimers = () => {
+      if (pending.timer) clearTimeout(pending.timer);
+      if (pending.dispatchTimer) clearTimeout(pending.dispatchTimer);
+      if (pending.staleTimer) clearInterval(pending.staleTimer);
+      pending.timer = null;
+      pending.dispatchTimer = null;
+      pending.staleTimer = null;
     };
     const timer = setTimeout(() => {
       pendingCommands.delete(command.id);
       removeQueuedCommand(clientId, command.id);
-      if (pending.dispatchTimer) clearTimeout(pending.dispatchTimer);
+      clearPendingTimers();
       const error = new Error(`Timeout aguardando resposta do comando ${type}.`);
       error.code = 'command_timeout';
       error.commandType = type;
@@ -2598,22 +2950,71 @@ const enqueueCommand = (clientId, type, args = {}, options = {}) => {
         dispatched: !!pending.dispatchedAt,
         code: 'command_timeout',
       });
+      if (pending.delivery === 'sse') {
+        disableClientSseCommandChannel(clientId, 'command-timeout');
+      }
       recordFlightEvent('command_timeout', {
         commandId: command.id,
         clientId,
         type,
         dispatched: !!pending.dispatchedAt,
+        delivery: pending.delivery || null,
       });
       reject(error);
     }, timeoutMs);
 
     pending.timer = timer;
+    if (staleAbortMs > 0) {
+      pending.staleTimer = setInterval(() => {
+        if (!pendingCommands.has(command.id)) {
+          clearPendingTimers();
+          return;
+        }
+        if (!pending.dispatchedAt) return;
+        const watchedClient = clients.get(clientId);
+        const staleForMs = Date.now() - Number(watchedClient?.lastSeenAt || 0);
+        if (staleForMs <= staleAbortMs) return;
+
+        pendingCommands.delete(command.id);
+        removeQueuedCommand(clientId, command.id);
+        clearPendingTimers();
+        const error = new Error(
+          `A aba do Gemini parou de responder durante ${type}. Recarregue a aba e tente novamente; nenhum arquivo foi salvo por este comando.`,
+        );
+        error.code = 'client_stale_during_command';
+        error.commandType = type;
+        error.commandDispatched = true;
+        error.clientId = clientId;
+        error.staleForMs = staleForMs;
+        decorateErrorWithTimeoutContext(error, {
+          layer: 'browser',
+          operation: type,
+          timeoutMs: staleAbortMs,
+        });
+        markClientCommandTimeout(clientId, type, {
+          dispatched: true,
+          code: 'client_stale_during_command',
+        });
+        if (pending.delivery === 'sse') {
+          disableClientSseCommandChannel(clientId, 'client-stale-during-command');
+        }
+        recordFlightEvent('command_stale_abort', {
+          commandId: command.id,
+          clientId,
+          type,
+          staleForMs,
+          staleAbortMs,
+          delivery: pending.delivery || null,
+        });
+        reject(error);
+      }, staleCheckIntervalMs);
+    }
     if (dispatchTimeoutMs > 0) {
       pending.dispatchTimer = setTimeout(() => {
         if (pending.dispatchedAt) return;
         pendingCommands.delete(command.id);
         removeQueuedCommand(clientId, command.id);
-        clearTimeout(pending.timer);
+        clearPendingTimers();
         const error = new Error(
           `A aba do Gemini está conectada, mas não abriu o canal de comandos para ${type}. Recarregue a aba do Gemini e confirme que a extensão está ativa no navegador.`,
         );
@@ -2649,6 +3050,7 @@ const resolveCommand = (commandId, result) => {
   if (!pending) return false;
   clearTimeout(pending.timer);
   if (pending.dispatchTimer) clearTimeout(pending.dispatchTimer);
+  if (pending.staleTimer) clearInterval(pending.staleTimer);
   pendingCommands.delete(commandId);
   const client = clients.get(pending.clientId);
   if (client) {
@@ -2676,6 +3078,136 @@ const toolTextResult = (structuredContent, { isError = false } = {}) => ({
   structuredContent,
   isError,
 });
+
+const nativeBrowserBrokerToolResult = (response, action) => {
+  if (!response) return null;
+  if (response.ok === false && response.allowFallback === true) return null;
+  if (response.ok === false) {
+    return {
+      ok: false,
+      action,
+      source: 'native-browser-broker',
+      code: response.error?.code || response.code || 'native_broker_failed',
+      error: response.error?.message || response.error || 'Native browser broker failed.',
+      nativeBroker: response,
+    };
+  }
+
+  const result = response.result && typeof response.result === 'object' ? response.result : {};
+  const tabs = Array.isArray(result.tabs) ? result.tabs : [];
+  return {
+    ok: result.ok !== false,
+    action,
+    source: 'native-browser-broker',
+    ...result,
+    connectedTabCount:
+      action === 'list' || action === 'status'
+        ? tabs.filter((item) => item?.state === 'debuggable').length
+        : undefined,
+    nativeBroker: {
+      ok: response.ok,
+    },
+  };
+};
+
+const tryNativeBrowserBrokerTabsAction = async (action, args = {}) => {
+  if (!shouldUseNativeBrowserBroker()) return null;
+  if (action === 'list') {
+    return nativeBrowserBrokerToolResult(
+      await nativeBrowserBroker.listTabs({ allowFallback: true }),
+      action,
+    );
+  }
+  if (action === 'status') {
+    return nativeBrowserBrokerToolResult(
+      await nativeBrowserBroker.status({ allowFallback: true }),
+      action,
+    );
+  }
+  if (action === 'claim') {
+    if (args.clientId || args.index || args.chatId) return null;
+    return nativeBrowserBrokerToolResult(
+      await nativeBrowserBroker.claim(
+        {
+          tabId: args.tabId ?? null,
+          claimId: args.claimId || null,
+        },
+        { allowFallback: true },
+      ),
+      action,
+    );
+  }
+  if (action === 'release') {
+    return nativeBrowserBrokerToolResult(
+      await nativeBrowserBroker.release(
+        {
+          tabId: args.tabId ?? null,
+          claimId: args.claimId || null,
+        },
+        { allowFallback: true },
+      ),
+      action,
+    );
+  }
+  return null;
+};
+
+const shouldRequireNativeExportTabLease = (label, args = {}) =>
+  shouldUseNativeBrowserBroker() &&
+  (args.requireNativeExportLease === true ||
+    label === TAB_CLAIM_LABELS.export ||
+    label === TAB_CLAIM_LABELS.sync);
+
+const validateLocalExportTabLeaseForJob = async (localClaim = null, client = null) =>
+  validateExportTabLeaseForJob({
+    ...localClaim,
+    url: client?.page?.url || client?.url || 'https://gemini.google.com/app',
+  });
+
+const validateNativeExportTabLeaseForJob = async (args = {}, localClaim = null, client = null) => {
+  if (!shouldUseNativeBrowserBroker()) return localClaim;
+  const nativeClaim = await nativeBrowserBroker.claim(
+    {
+      tabId: args.tabId ?? localClaim?.tabId ?? null,
+      claimId: args.claimId || localClaim?.claimId || null,
+    },
+    { allowFallback: false },
+  );
+  if (nativeClaim?.ok === false) {
+    if (
+      localClaim &&
+      canFallbackFromNativeBrowserBrokerFailure(nativeClaim, {
+        strict: args.requireNativeExportLease === true,
+      })
+    ) {
+      return validateLocalExportTabLeaseForJob(localClaim, client);
+    }
+    const error = new Error(
+      nativeClaim.error?.message ||
+        nativeClaim.error ||
+        'Native browser broker did not return a claimed tab.',
+    );
+    error.code = nativeClaim.error?.code || nativeClaim.code || 'native_broker_claim_failed';
+    error.data = nativeClaim;
+    throw error;
+  }
+  const result = nativeClaim?.result && typeof nativeClaim.result === 'object' ? nativeClaim.result : {};
+  if (result.ok === false) {
+    if (
+      localClaim &&
+      canFallbackFromNativeBrowserBrokerFailure(result, {
+        strict: args.requireNativeExportLease === true,
+      })
+    ) {
+      return validateLocalExportTabLeaseForJob(localClaim, client);
+    }
+    const error = new Error(result.error || result.code || 'native_broker_claim_rejected');
+    error.code = result.code || 'native_broker_claim_rejected';
+    error.data = nativeClaim;
+    throw error;
+  }
+  return validateExportTabLeaseForJob(result.tab || result);
+};
 
 const requireClient = (selector = {}) => {
   cleanupStaleClients();
@@ -2719,6 +3251,9 @@ const requireClient = (selector = {}) => {
     return selectableClients[0];
   }
 
+  const implicitClient = selectUnambiguousImplicitGeminiClient(selectableClients);
+  if (implicitClient) return implicitClient;
+
   throw ambiguousTabsError(selectableClients, normalized);
 };
 
@@ -2726,6 +3261,21 @@ const isNotebookClient = (client) =>
   client?.page?.kind === 'notebook' ||
   String(client?.page?.pathname || '').startsWith('/notebook/') ||
   (client?.conversations || []).some((conversation) => conversation.source === 'notebook');
+
+const clientHasUsefulGeminiContext = (client) =>
+  !!client?.page?.chatId || recentConversationCountForClient(client) > 0 || isNotebookClient(client);
+
+const selectUnambiguousImplicitGeminiClient = (selectableClients = []) => {
+  const usefulClients = selectableClients.filter(clientHasUsefulGeminiContext);
+  const candidates = usefulClients.length > 0 ? usefulClients : selectableClients;
+  const activeUsefulClients = candidates.filter((client) => client.isActiveTab === true);
+  if (activeUsefulClients.length === 1) return activeUsefulClients[0];
+
+  const concreteChatClients = candidates.filter((client) => !!client?.page?.chatId);
+  if (concreteChatClients.length === 1 && candidates.length === 1) return concreteChatClients[0];
+
+  return null;
+};
 
 const requireNotebookClient = (selector = {}) => {
   const normalized = normalizeClientSelector(selector);
@@ -2762,13 +3312,39 @@ const requireNotebookClient = (selector = {}) => {
 let lastBrowserLaunchAt = 0;
 let lastBrowserLaunchResult = null;
 
-const launchChromeForGemini = async ({ profileDirectory } = {}) => {
+const launchChromeForGemini = async ({ profileDirectory, targetUrl, explicit = false } = {}) => {
+  assertBrowserSideEffect('browser-launch', { explicit });
   const now = Date.now();
+  const launchMatchesTarget = (launch = {}) => {
+    if (!targetUrl) return true;
+    return launch.targetUrl === targetUrl;
+  };
+  const reuseProbe = await launchGeminiBrowser({
+    profileDirectory,
+    targetUrl,
+    reuseExistingOnly: true,
+  });
+  if (reuseProbe?.reusedExistingTab) {
+    lastBrowserLaunchAt = now;
+    lastBrowserLaunchResult = reuseProbe;
+    try {
+      writeBrowserLaunchState({
+        source: 'mcp',
+        lastAttemptAt: now,
+        profileDirectory: profileDirectory || null,
+        ...reuseProbe,
+      });
+    } catch (err) {
+      log('[browser-launch]', 'failed to write shared launch state', err?.message || String(err));
+    }
+    return reuseProbe;
+  }
+
   const sharedRecentLaunch = describeRecentBrowserLaunch(readBrowserLaunchState(), {
     now,
     cooldownMs: BROWSER_LAUNCH_COOLDOWN_MS,
   });
-  if (sharedRecentLaunch) {
+  if (sharedRecentLaunch && launchMatchesTarget(sharedRecentLaunch.previousLaunch)) {
     return {
       attempted: false,
       supported: true,
@@ -2781,7 +3357,8 @@ const launchChromeForGemini = async ({ profileDirectory } = {}) => {
   if (
     lastBrowserLaunchResult &&
     BROWSER_LAUNCH_COOLDOWN_MS > 0 &&
-    now - lastBrowserLaunchAt < BROWSER_LAUNCH_COOLDOWN_MS
+    now - lastBrowserLaunchAt < BROWSER_LAUNCH_COOLDOWN_MS &&
+    launchMatchesTarget(lastBrowserLaunchResult)
   ) {
     return {
       ...lastBrowserLaunchResult,
@@ -2793,7 +3370,7 @@ const launchChromeForGemini = async ({ profileDirectory } = {}) => {
     };
   }
 
-  const result = await launchGeminiBrowser({ profileDirectory });
+  const result = await launchGeminiBrowser({ profileDirectory, targetUrl });
   lastBrowserLaunchAt = now;
   lastBrowserLaunchResult = result;
   try {
@@ -2868,6 +3445,14 @@ const exportCommandTimeoutMs = (args = {}) => {
   );
 };
 
+const exportCommandStaleAbortMs = (args = {}) =>
+  normalizeExportWaitMs(
+    args.exportStaleAbortMs ?? args.browserStaleAbortMs,
+    EXPORT_COMMAND_STALE_ABORT_MS,
+    CLIENT_STALE_MS + 1000,
+    10 * 60_000,
+  );
+
 const normalizeReloadWaitMs = (value, fallback, max = 120_000) => {
   const parsed = Number(value ?? fallback);
   const safe = Number.isFinite(parsed) ? parsed : fallback;
@@ -2894,9 +3479,11 @@ const getChromeExtensionInfo = async (client) => {
 };
 
 const reloadChromeExtensionForClient = async (client, args = {}) => {
+  assertBrowserSideEffect('extension-reload', { explicit: args.explicit === true });
   try {
     const result = await enqueueCommand(client.clientId, 'reload-extension-self', args, {
       timeoutMs: RELOAD_EXTENSION_COMMAND_TIMEOUT_MS,
+      browserSideEffectExplicit: args.explicit === true,
     });
     return result || null;
   } catch (err) {
@@ -2951,47 +3538,198 @@ const reloadChromeExtension = async (client, args = {}) => {
   };
 };
 
-const ensureBrowserExtensionReady = (args = {}, options = {}) =>
-  ensureChromeExtensionReady(
+const ensureBrowserExtensionReady = (args = {}, options = {}) => {
+  const allowLaunchChrome = options.allowLaunchChrome === true;
+  const allowReload = options.allowReload === true;
+  if (allowReload) {
+    assertBrowserSideEffect('extension-reload', { explicit: true });
+  }
+  return ensureChromeExtensionReady(
     {
       expected: EXPECTED_CHROME_EXTENSION_INFO,
       config: CHROME_GUARD_CONFIG,
       getLiveClients,
       getChromeExtensionInfo,
-      reloadChromeExtension,
-      launchChromeForGemini,
+      reloadChromeExtension: (client, reloadArgs = {}) =>
+        reloadChromeExtension(client, { ...reloadArgs, explicit: allowReload }),
+      launchChromeForGemini: (launchArgs = {}) =>
+        launchChromeForGemini({ ...launchArgs, explicit: allowLaunchChrome }),
       log: debugLog,
     },
     {
       clientId: args.clientId || null,
       ...options,
+      allowLaunchChrome,
+      allowReload,
     },
   );
+};
+
+const selectorHasExplicitTabTarget = (selector = {}) =>
+  !!selector.clientId || selector.tabId !== null || !!selector.claimId;
+
+const sameClientIdentity = (left, right) =>
+  !!left?.clientId && !!right?.clientId && left.clientId === right.clientId;
+
+const clientMatchesNormalizedSelector = (client, normalized) => {
+  if (!client) return false;
+  if (normalized.clientId) return client.clientId === normalized.clientId;
+  if (normalized.tabId !== null) return Number(client.tabId) === normalized.tabId;
+  return false;
+};
+
+const findClaimClientForSelector = (normalized) => {
+  if (normalized.claimId) return liveClientForClaim(tabClaims.get(normalized.claimId));
+  return null;
+};
+
+const findClientByClaimableSelector = (candidateClients, normalized) => {
+  const direct = candidateClients.find((client) => clientMatchesNormalizedSelector(client, normalized));
+  if (direct) return direct;
+  const claimClient = findClaimClientForSelector(normalized);
+  if (!claimClient) return null;
+  return candidateClients.find((client) => sameClientIdentity(client, claimClient)) || null;
+};
+
+const inactiveGeminiTabClaimNotAllowedError = (candidateClients = [], selector = {}) => {
+  const diagnostics = candidateClients.map((client) => ({
+    client: summarizeClient(client),
+    rejection: explainActiveClaimableGeminiClientRejection(
+      hydrateClientLifecycleFields(client),
+      activeClaimableGeminiClientOptions(),
+    ),
+  }));
+  const error = new Error(
+    'inactive_gemini_tab_claim_not_allowed: só uma aba Gemini ativa, com heartbeat fresco e build esperado, pode ser reivindicada para exportação.',
+  );
+  error.code = 'inactive_gemini_tab_claim_not_allowed';
+  error.data = {
+    selector: normalizeClientSelector(selector),
+    connectedTabs: candidateClients.map(summarizeClient),
+    diagnostics,
+  };
+  return error;
+};
+
+const selectClaimActivationCandidate = (selectableClients = [], normalized = {}, args = {}) => {
+  const direct = findClientByClaimableSelector(selectableClients, normalized);
+  if (direct) return direct;
+
+  const sessionClaimClient = liveClientForClaim(claimForSession(normalized.sessionId));
+  if (sessionClaimClient) {
+    const sessionClient = selectableClients.find((client) =>
+      sameClientIdentity(client, sessionClaimClient),
+    );
+    if (sessionClient) return sessionClient;
+  }
+
+  const chatId = String(args.chatId || '').trim().toLowerCase();
+  if (chatId) {
+    return (
+      selectableClients.find(
+        (client) =>
+          String(client.page?.chatId || '').toLowerCase() === chatId ||
+          (client.conversations || []).some(
+            (conversation) => String(conversation.chatId || '').toLowerCase() === chatId,
+          ),
+      ) || null
+    );
+  }
+
+  const usefulClients = selectableClients
+    .filter(clientHasUsefulGeminiContext)
+    .sort(compareSelectableClientPreference);
+  if (usefulClients.length === 1 || (args.preferRecent === true && usefulClients[0])) {
+    return usefulClients[0];
+  }
+
+  if (selectableClients.length === 1) return selectableClients[0];
+  return null;
+};
 
 const selectClaimableClient = async (args = {}) => {
   cleanupStaleClients();
   cleanupExpiredTabClaims();
-  let liveClients = getSelectableGeminiClients();
-  const openIfMissing = args.openIfMissing !== false && args.wakeBrowser !== false;
+  const normalized = normalizeClientSelector(args);
+  let selectableClients = getSelectableGeminiClients();
+  let claimableClients = getActiveClaimableGeminiClients(
+    selectableClients,
+    activeClaimableGeminiClientOptions(),
+  );
+  const openIfMissing = args.openIfMissing === true && args.wakeBrowser !== false;
 
-  if (liveClients.length === 0 && openIfMissing) {
+  if (claimableClients.length === 0 && selectableClients.length === 0 && openIfMissing) {
     await launchChromeForGemini({
       profileDirectory: CHROME_GUARD_CONFIG.profileDirectory,
+      explicit: true,
     });
     await waitForLiveClients(
       normalizeWaitMs(args.waitMs, BROWSER_STATUS_WAKE_WAIT_MS),
       CHROME_GUARD_CONFIG.pollIntervalMs || 500,
     );
-    liveClients = getSelectableGeminiClients();
+    selectableClients = getSelectableGeminiClients();
+    claimableClients = getActiveClaimableGeminiClients(
+      selectableClients,
+      activeClaimableGeminiClientOptions(),
+    );
+  }
+
+  const selectedClaimable = findClientByClaimableSelector(claimableClients, normalized);
+  if (selectedClaimable) return selectedClaimable;
+
+  const activationCandidate = selectClaimActivationCandidate(selectableClients, normalized, args);
+  if (
+    activationCandidate &&
+    activationCandidate.isActiveTab !== true &&
+    (args.activateTab === true || args.activateTabBeforeClaim === true)
+  ) {
+    try {
+      const activation = await activateBrowserTabById(
+        activationCandidate.tabId,
+        {
+          ...args,
+          activateTabReason: args.activateTabReason || 'claim-tab',
+        },
+        activationCandidate,
+      );
+      cleanupStaleClients();
+      selectableClients = getSelectableGeminiClients();
+      claimableClients = getActiveClaimableGeminiClients(
+        selectableClients,
+        activeClaimableGeminiClientOptions(),
+      );
+      const activatedClaimable =
+        findClientByClaimableSelector(claimableClients, normalized) ||
+        claimableClients.find(
+          (client) =>
+            sameClientIdentity(client, activation?.client) ||
+            normalizeTabId(client.tabId) === normalizeTabId(activationCandidate.tabId),
+        );
+      if (activatedClaimable) return activatedClaimable;
+    } catch {
+      // A falha detalhada vem abaixo via lifecycle diagnostics; aqui só evitamos
+      // transformar uma tentativa de ativação em seleção de aba errada.
+    }
+  }
+
+  const selectedNonClaimable = findClientByClaimableSelector(selectableClients, normalized);
+  if (
+    selectedNonClaimable &&
+    selectorHasExplicitTabTarget(normalized) &&
+    !toActiveClaimableGeminiClient(
+      hydrateClientLifecycleFields(selectedNonClaimable),
+      activeClaimableGeminiClientOptions(),
+    )
+  ) {
+    throw inactiveGeminiTabClaimNotAllowedError([selectedNonClaimable], normalized);
   }
 
   if (args.preferActive === true) {
-    const activeClients = liveClients.filter((client) => client.isActiveTab === true);
-    if (activeClients.length === 1) return activeClients[0];
+    if (claimableClients.length === 1) return claimableClients[0];
   }
 
   if (args.preferRecent === true) {
-    const candidates = [...liveClients].sort(
+    const candidates = [...claimableClients].sort(
       (a, b) =>
         recentConversationCountForClient(b) - recentConversationCountForClient(a) ||
         Number(b.isActiveTab === true) - Number(a.isActiveTab === true) ||
@@ -3002,15 +3740,15 @@ const selectClaimableClient = async (args = {}) => {
 
   if (Number.isInteger(Number(args.index))) {
     const index = Number(args.index);
-    if (index < 1 || index > liveClients.length) {
+    if (index < 1 || index > claimableClients.length) {
       throw new Error(`Índice de aba inválido: ${args.index}.`);
     }
-    return liveClients[index - 1];
+    return claimableClients[index - 1];
   }
 
   const chatId = String(args.chatId || '').trim().toLowerCase();
   if (chatId) {
-    const match = liveClients.find(
+    const match = claimableClients.find(
       (client) =>
         String(client.page?.chatId || '').toLowerCase() === chatId ||
         (client.conversations || []).some(
@@ -3021,20 +3759,49 @@ const selectClaimableClient = async (args = {}) => {
     throw new Error(`Nenhuma aba conectada corresponde ao chatId ${chatId}.`);
   }
 
-  return requireClient(args);
+  const sessionClaimClient = liveClientForClaim(claimForSession(normalized.sessionId));
+  if (sessionClaimClient) {
+    const sessionClaimable = claimableClients.find((client) =>
+      sameClientIdentity(client, sessionClaimClient),
+    );
+    if (sessionClaimable) return sessionClaimable;
+  }
+
+  if (claimableClients.length === 0) {
+    throw inactiveGeminiTabClaimNotAllowedError(selectableClients, normalized);
+  }
+
+  if (claimableClients.length === 1) return claimableClients[0];
+
+  const implicitClient = selectUnambiguousImplicitGeminiClient(claimableClients);
+  if (implicitClient) {
+    return assertActiveClaimableGeminiClient(
+      hydrateClientLifecycleFields(implicitClient),
+      activeClaimableGeminiClientOptions(),
+    );
+  }
+
+  throw ambiguousTabsError(claimableClients, normalized);
 };
 
-const claimTabForClient = async (client, args = {}) => {
+const claimTabForClient = async (client, args = {}, options = {}) => {
+  const requestedClient =
+    options.requireActiveGemini === true
+      ? assertActiveClaimableGeminiClient(
+          hydrateClientLifecycleFields(client),
+          activeClaimableGeminiClientOptions(),
+        )
+      : client;
   cleanupExpiredTabClaims();
   const sessionId = normalizeSessionId(args.sessionId || args._proxySessionId);
   const ttlMs = normalizeClaimTtlMs(args.ttlMs);
   const now = Date.now();
   const existingSessionClaim = claimForSession(sessionId);
-  const existingClientClaim = claimForClient(client);
+  const existingClientClaim = claimForClient(requestedClient);
 
   if (
     existingSessionClaim &&
-    existingSessionClaim.clientId !== client.clientId &&
+    existingSessionClaim.clientId !== requestedClient.clientId &&
     args.force !== true
   ) {
     const error = new Error(
@@ -3043,14 +3810,14 @@ const claimTabForClient = async (client, args = {}) => {
     error.code = 'tab_claim_conflict';
     error.data = {
       currentClaim: summarizeTabClaim(existingSessionClaim),
-      requestedClient: summarizeClient(client),
+      requestedClient: summarizeClient(requestedClient),
     };
     throw error;
   }
 
   if (
     existingSessionClaim &&
-    existingSessionClaim.clientId !== client.clientId &&
+    existingSessionClaim.clientId !== requestedClient.clientId &&
     args.force === true
   ) {
     await releaseTabClaim({ claimId: existingSessionClaim.claimId, reason: 'claim-replaced' });
@@ -3081,7 +3848,7 @@ const claimTabForClient = async (client, args = {}) => {
   }
 
   const claimId =
-    existingSessionClaim?.clientId === client.clientId
+    existingSessionClaim?.clientId === requestedClient.clientId
       ? existingSessionClaim.claimId
       : normalizeClaimId(args.claimId);
   const label = labelForSession(sessionId, args.label);
@@ -3089,13 +3856,19 @@ const claimTabForClient = async (client, args = {}) => {
   const expiresAtMs = now + ttlMs;
 
   const ready = await ensureBrowserExtensionReady(
-    { clientId: client.clientId },
+    { clientId: requestedClient.clientId },
     {
       allowLaunchChrome: false,
-      allowReload: args.allowReload !== false,
+      allowReload: args.allowReload === true,
     },
   );
-  const readyClient = ready.client || client;
+  const readyClient =
+    options.requireActiveGemini === true
+      ? assertActiveClaimableGeminiClient(
+          hydrateClientLifecycleFields(ready.client || requestedClient),
+          activeClaimableGeminiClientOptions(),
+        )
+      : ready.client || requestedClient;
 
   const visual = await enqueueCommand(
     readyClient.clientId,
@@ -3110,13 +3883,12 @@ const claimTabForClient = async (client, args = {}) => {
     {
       timeoutMs: 10_000,
       dispatchTimeoutMs: 5000,
+      browserSideEffectExplicit: true,
     },
   );
 
-  if (!visual?.ok) {
-    const error = new Error(
-      `Não consegui aplicar o indicador visual na aba Gemini (${visual?.reason || visual?.error || 'sem resposta'}).`,
-    );
+  if (!isTabClaimReceipt(visual)) {
+    const error = new Error('Não consegui marcar a aba no navegador.');
     error.code = 'tab_claim_visual_failed';
     error.data = { visual, client: summarizeClient(readyClient) };
     throw error;
@@ -3130,7 +3902,7 @@ const claimTabForClient = async (client, args = {}) => {
     windowId: readyClient.windowId ?? null,
     label,
     color,
-    visual: visual.visual || visual,
+    visual: visual.visual,
     createdAt: existingSessionClaim?.createdAt || new Date(now).toISOString(),
     renewedAt: new Date(now).toISOString(),
     expiresAtMs,
@@ -3146,6 +3918,9 @@ const claimTabForClient = async (client, args = {}) => {
     reloadAttempts: ready.reloadAttempts || 0,
   };
 };
+
+const claimGeminiTabForClient = async (client, args = {}) =>
+  claimTabForClient(client, args, { requireActiveGemini: true });
 
 const releaseTabClaim = async (args = {}) => {
   cleanupExpiredTabClaims();
@@ -3246,6 +4021,7 @@ const releaseTabClaim = async (args = {}) => {
         {
           timeoutMs: 8000,
           dispatchTimeoutMs: 4000,
+          browserSideEffectExplicit: true,
         },
       );
     } catch (err) {
@@ -3310,23 +4086,80 @@ const autoReleaseTabClaimForJob = async (job, reason) => {
   return job.tabClaimRelease;
 };
 
-const ensureTabClaimForJob = async (client, args = {}, label = 'GME Job') => {
+const ensureTabClaimForJob = async (client, args = {}, label = TAB_CLAIM_LABELS.generic) => {
   const sessionId = normalizeSessionId(args.sessionId || args._proxySessionId);
   const existingSessionClaim = claimForSession(sessionId);
   if (existingSessionClaim?.clientId === client.clientId && args.renewExistingClaim === false) {
-    return summarizeTabClaim(existingSessionClaim);
+    client.lastTabClaimWarning = null;
+    const claim = summarizeTabClaim(existingSessionClaim);
+    if (shouldRequireNativeExportTabLease(label, args)) {
+      await validateNativeExportTabLeaseForJob(args, claim, client);
+    }
+    return claim;
   }
   if (args.autoClaim === false) {
-    return existingSessionClaim?.clientId === client.clientId
-      ? summarizeTabClaim(existingSessionClaim)
-      : null;
+    client.lastTabClaimWarning = null;
+    const claim =
+      existingSessionClaim?.clientId === client.clientId
+        ? summarizeTabClaim(existingSessionClaim)
+        : null;
+    if (shouldRequireNativeExportTabLease(label, args)) {
+      await validateNativeExportTabLeaseForJob(args, claim, client);
+    }
+    return claim;
   }
-  const result = await claimTabForClient(client, {
-    ...args,
-    sessionId,
-    label: args.label || label,
-  });
-  return result.claim;
+  try {
+    const result = await claimGeminiTabForClient(client, {
+      ...args,
+      sessionId,
+      label: args.label || label,
+    });
+    client.lastTabClaimWarning = null;
+    if (shouldRequireNativeExportTabLease(label, args)) {
+      await validateNativeExportTabLeaseForJob(args, result.claim, result.client);
+    }
+    return result.claim;
+  } catch (err) {
+    const warning = {
+      ok: false,
+      code: err?.code || 'tab_claim_failed',
+      error: err?.message || String(err),
+      label: args.label || label,
+    };
+    client.lastTabClaimWarning = warning;
+    if (args.requireTabClaim === true || shouldRequireNativeExportTabLease(label, args)) throw err;
+    return null;
+  }
+};
+
+const assertClientClaimedReadyForSession = (client, args = {}) => {
+  const sessionId = normalizeSessionId(args.sessionId || args._proxySessionId);
+  const sessionClaim = claimForSession(sessionId);
+  const clientClaim = claimForClient(client);
+  const browserClaim = clientTabClaim(client);
+  return assertClaimedReadyGeminiTab(
+    hydrateClientLifecycleFields(client),
+    clientLifecycleOptions({
+      sessionId,
+      claimId:
+        args.claimId ||
+        sessionClaim?.claimId ||
+        clientClaim?.claimId ||
+        browserClaim?.claimId ||
+        null,
+      requireClaimed: true,
+    }),
+  );
+};
+
+const clientIsActivityClient = (client) => {
+  if (!client) return false;
+  if (client.kind === 'activity' || client.page?.kind === 'activity') return true;
+  try {
+    return new URL(client.page?.url || '').origin === ACTIVITY_BRIDGE_PAGE_ORIGIN;
+  } catch {
+    return false;
+  }
 };
 
 const buildBridgeHealth = (client, now = Date.now()) => {
@@ -3343,42 +4176,30 @@ const buildBridgeHealth = (client, now = Date.now()) => {
   const pagePolling = client.commandPoll?.polling ?? null;
   const queuedCommands = client.queue?.length || 0;
   const versionMatches = clientMatchesExpectedBrowserExtension(client);
-
-  let status = 'healthy';
-  let blockingIssue = null;
-  let action = 'ok';
-  if (!versionMatches) {
-    status = 'version_mismatch';
-    blockingIssue = 'extension_version_mismatch';
-    action = 'Rode gemini_ready { action: "status", diagnostic: true } para tentar recarregar a extensão automaticamente.';
-  } else if (heartbeatAgeMs === null || heartbeatAgeMs > CLIENT_STALE_MS) {
-    status = 'stale';
-    blockingIssue = 'stale_client';
-    action = 'Recarregue a aba do Gemini ou chame gemini_ready { action: "status", diagnostic: true } para reconectar.';
-  } else if (!eventStreamConnected && !longPollConnected && pagePolling !== true) {
-    status = 'command_channel_stuck';
-    blockingIssue = 'command_channel_stuck';
-    action = 'Use gemini_tabs { action: "reload", intent: "tab_management" } se a aba estiver aberta mas não aceitar comandos.';
-  } else if (clientHasRecentCommandFailure(client, now)) {
-    status = 'command_channel_stuck';
-    blockingIssue = 'command_timeout_recent';
-    action = 'Esta aba acabou de ignorar um comando; a CLI deve preferir outra aba Gemini saudável.';
-  } else if (heartbeatAgeMs > CLIENT_DEGRADED_HEARTBEAT_MS) {
-    status = 'degraded';
-    blockingIssue = 'heartbeat_delayed';
-    action = 'Aguarde alguns segundos; se persistir, rode gemini_ready { action: "status", diagnostic: true }.';
-  }
-
-  return {
-    status,
-    blockingIssue,
-    action,
-    heartbeatAgeMs,
+  const health = evaluateBridgeHealth(client, {
+    now,
     staleAfterMs: CLIENT_STALE_MS,
+    degradedHeartbeatMs: CLIENT_DEGRADED_HEARTBEAT_MS,
+    versionMatches,
     eventStreamConnected,
     longPollConnected,
     pagePolling,
     queuedCommands,
+    recentCommandFailure: clientHasRecentCommandFailure(client, now),
+  });
+
+  return {
+    status: health.status,
+    blockingIssue: health.blockingIssue,
+    action: health.action,
+    clientKind: health.clientKind,
+    heartbeatAgeMs,
+    runtimeSignalAgeMs: health.runtimeSignalAgeMs,
+    staleAfterMs: health.staleAfterMs,
+    eventStreamConnected: health.eventStreamConnected,
+    longPollConnected: health.longPollConnected,
+    pagePolling: health.pagePolling,
+    queuedCommands: health.queuedCommands,
     lastHeartbeatAt: client.lastHeartbeatAt ? new Date(client.lastHeartbeatAt).toISOString() : null,
     lastSnapshotAt: client.lastSnapshotAt ? new Date(client.lastSnapshotAt).toISOString() : null,
     lastHeartbeatPayloadBytes: client.lastHeartbeatPayloadBytes ?? null,
@@ -3394,12 +4215,13 @@ const buildBridgeHealth = (client, now = Date.now()) => {
 
 const summarizeClient = (client) => ({
   clientId: client.clientId,
+  kind: client.kind || client.page?.kind || 'gemini',
   tabId: client.tabId ?? null,
   windowId: client.windowId ?? null,
   isActiveTab: client.isActiveTab ?? null,
   extensionVersion: client.extensionVersion ?? null,
   protocolVersion: client.protocolVersion ?? null,
-  buildStamp: client.buildStamp ?? client.page?.buildStamp ?? null,
+  buildStamp: client.page?.buildStamp ?? client.buildStamp ?? null,
   lastSeenAt: new Date(client.lastSeenAt).toISOString(),
   commandChannel: {
     eventStreamConnected: !!client.eventStream?.res && !client.eventStream.res.destroyed,
@@ -3417,6 +4239,7 @@ const summarizeClient = (client) => ({
     lastCommandTimeoutCode: client.lastCommandTimeoutCode || null,
   },
   page: client.page || null,
+  lifecycle: lifecycleSummaryForClient(client),
   tabClaim: client.tabClaim || null,
   serverClaim: summarizeTabClaim(claimForClient(client)),
   bridgeHealth: buildBridgeHealth(client),
@@ -3427,25 +4250,13 @@ const summarizeClient = (client) => ({
 });
 
 const clientHasOpenCommandChannel = (client) =>
-  (!!client?.eventStream?.res && !client.eventStream.res.destroyed) ||
+  clientCommandEventStreamUsable(client) ||
   !!client?.pendingPoll ||
   client?.commandPoll?.polling === true;
 
 const commandChannelReadyForClient = (client) =>
-  clientHasOpenCommandChannel(client);
-
-const browserReadyBlockingIssue = ({
-  allLiveClients = [],
-  selectableClients = [],
-  matchingClients = [],
-  commandReadyClients = [],
-} = {}) => {
-  if (allLiveClients.length === 0) return 'no_connected_clients';
-  if (matchingClients.length === 0) return 'extension_version_mismatch';
-  if (selectableClients.length === 0) return 'no_selectable_gemini_tab';
-  if (commandReadyClients.length === 0) return 'command_channel_not_ready';
-  return null;
-};
+  clientHasOpenCommandChannel(client) &&
+  !clientHasRecentCommandFailure(client);
 
 const buildLightweightBrowserReady = async (args = {}) => {
   const startedAt = Date.now();
@@ -3456,6 +4267,7 @@ const buildLightweightBrowserReady = async (args = {}) => {
   };
   let launchResult = null;
   let waitedMs = 0;
+  const cdp = await buildCdpSnapshotForArgs(args);
 
   if (args.selfHeal === true) {
     try {
@@ -3464,8 +4276,8 @@ const buildLightweightBrowserReady = async (args = {}) => {
           clientId: args.clientId || null,
         },
         {
-          allowLaunchChrome: args.wakeBrowser !== false,
-          allowReload: args.allowReload !== false,
+          allowLaunchChrome: args.wakeBrowser === true,
+          allowReload: args.allowReload === true,
           config: {
             initialConnectTimeoutMs: normalizeWaitMs(args.initialWaitMs, 1000),
             reloadTimeoutMs: normalizeReloadWaitMs(args.reloadWaitMs, 30_000),
@@ -3494,13 +4306,19 @@ const buildLightweightBrowserReady = async (args = {}) => {
 
   let allLiveClients = getLiveClients();
   let selectableClients = getSelectableGeminiClients();
+  let claimableClients = getActiveClaimableGeminiClients(
+    selectableClients,
+    activeClaimableGeminiClientOptions(),
+  );
   if (
+    claimableClients.length === 0 &&
     selectableClients.length === 0 &&
     args.wakeBrowser === true &&
     CHROME_GUARD_CONFIG.launchIfClosed
   ) {
     launchResult = await launchChromeForGemini({
       profileDirectory: CHROME_GUARD_CONFIG.profileDirectory,
+      explicit: true,
     });
     const waitStartedAt = Date.now();
     await waitForLiveClients(
@@ -3510,6 +4328,10 @@ const buildLightweightBrowserReady = async (args = {}) => {
     waitedMs = Math.max(0, Date.now() - waitStartedAt);
     allLiveClients = getLiveClients();
     selectableClients = getSelectableGeminiClients();
+    claimableClients = getActiveClaimableGeminiClients(
+      selectableClients,
+      activeClaimableGeminiClientOptions(),
+    );
   }
 
   const matchingClients = allLiveClients.filter(clientMatchesExpectedBrowserExtension);
@@ -3520,15 +4342,15 @@ const buildLightweightBrowserReady = async (args = {}) => {
       : launchResult?.attempted || waitedMs > 0 || (selfHeal.timings?.initialWaitMs || 0) > 0
         ? 'cold'
         : 'hot';
-  const ready = selectableClients.length > 0 && commandReadyClients.length > 0;
-  const blockingIssue = ready
-    ? null
-    : browserReadyBlockingIssue({
-        allLiveClients,
-        selectableClients,
-        matchingClients,
-        commandReadyClients,
-      });
+  const readiness = evaluateBrowserReadiness({
+    allLiveClients,
+    selectableClients,
+    matchingClients,
+    commandReadyClients,
+    claimableClients,
+  });
+  const ready = readiness.ready;
+  const blockingIssue = readiness.blockingIssue || (!ready ? cdp.blocker?.code || null : null);
   const summarizedClients = selectableClients.map(summarizeClient);
   const summarizedMatchingClients = matchingClients.map(summarizeClient);
   return {
@@ -3539,10 +4361,11 @@ const buildLightweightBrowserReady = async (args = {}) => {
     generatedAt: new Date().toISOString(),
     expectedChromeExtension: EXPECTED_CHROME_EXTENSION_INFO,
     sessionId: PROCESS_SESSION_ID,
-    connectedClientCount: allLiveClients.length,
-    selectableTabCount: selectableClients.length,
-    matchingClientCount: matchingClients.length,
-    commandReadyClientCount: commandReadyClients.length,
+    connectedClientCount: readiness.connectedClientCount,
+    selectableTabCount: readiness.selectableTabCount,
+    claimableTabCount: readiness.claimableTabCount,
+    matchingClientCount: readiness.matchingClientCount,
+    commandReadyClientCount: readiness.commandReadyClientCount,
     timings: {
       totalMs: Math.max(0, Date.now() - startedAt),
       bridgeReadyMs: 0,
@@ -3554,7 +4377,17 @@ const buildLightweightBrowserReady = async (args = {}) => {
       guard: selfHeal.timings || null,
     },
     clients: summarizedClients,
-    diagnosticClients: tabSelectionDiagnostics(allLiveClients, selectableClients),
+    diagnosticClients: tabSelectionDiagnostics(allLiveClients, claimableClients),
+    controlPlane: cdp.attempted ? 'cdp' : 'extension-bridge',
+    cdp,
+    browserDiagnostic: cdp.blocker
+      ? {
+          code: cdp.blocker.code,
+          message: cdp.blocker.message,
+          nextAction: cdp.blocker.nextAction,
+          url: cdp.blocker.url,
+        }
+      : null,
     extensionReadiness: buildExtensionReadiness({
       connectedClients: allLiveClients.map(summarizeClient),
       matchingClients: summarizedMatchingClients,
@@ -3589,12 +4422,15 @@ const normalizeOffset = (value, max = MAX_RECENT_CHATS_LOAD_TARGET - 1) => {
 const notebookConversationsForClient = (client) =>
   (client.conversations || []).filter((conversation) => conversation.source === 'notebook');
 
+const hasExportableRecentConversationIdentity = (conversation = {}) =>
+  conversation.source !== 'notebook' && !!normalizeConversationChatId(conversation);
+
 const recentConversationsForClient = (client) =>
-  (client.conversations || []).filter((conversation) => conversation.source !== 'notebook');
+  (client.conversations || []).filter(hasExportableRecentConversationIdentity);
 
 const recentConversationCountForClient = (client) => recentConversationsForClient(client).length;
 
-const clientBuildStamp = (client) => client?.buildStamp || client?.page?.buildStamp || null;
+const clientBuildStamp = (client) => client?.page?.buildStamp || client?.buildStamp || null;
 
 const clientMatchesExpectedBrowserExtension = (client) =>
   String(client?.extensionVersion || '') === EXPECTED_CHROME_EXTENSION_INFO.extensionVersion &&
@@ -3602,35 +4438,312 @@ const clientMatchesExpectedBrowserExtension = (client) =>
   (!EXPECTED_CHROME_EXTENSION_INFO.buildStamp ||
     String(clientBuildStamp(client) || '') === EXPECTED_CHROME_EXTENSION_INFO.buildStamp);
 
+const activeClaimableGeminiClientOptions = (overrides = {}) => ({
+  now: Date.now(),
+  staleAfterMs: CLIENT_STALE_MS,
+  expectedExtensionVersion: EXPECTED_CHROME_EXTENSION_INFO.extensionVersion,
+  expectedProtocolVersion: EXPECTED_CHROME_EXTENSION_INFO.protocolVersion,
+  expectedBuildStamp: EXPECTED_CHROME_EXTENSION_INFO.buildStamp,
+  requireCommandReady: true,
+  ...overrides,
+});
+
+const clientLifecycleOptions = (overrides = {}) => ({
+  ...activeClaimableGeminiClientOptions(),
+  hydrationGraceMs: 4000,
+  sessionId: PROCESS_SESSION_ID,
+  claims: summarizeRawTabClaims(),
+  ...overrides,
+});
+
+const clientPageOrigin = (client) => {
+  try {
+    return new URL(client?.page?.url || '').origin;
+  } catch {
+    return null;
+  }
+};
+
+const clientHasPageBlocker = (client) => !!client?.page?.blocker?.terminal;
+
+const hydrateClientLifecycleFields = (client) => {
+  if (!client) return client;
+  client.commandReady = commandChannelReadyForClient(client);
+  client.recentCommandFailure = clientHasRecentCommandFailure(client);
+  client.tabOperationInProgress = currentTabOperationInProgress(client);
+  return client;
+};
+
+const lifecycleSummaryForClient = (client, overrides = {}) => {
+  const lifecycle = getGeminiClientLifecycle(
+    hydrateClientLifecycleFields(client),
+    clientLifecycleOptions(overrides),
+  );
+  return {
+    state: lifecycle.state,
+    code: lifecycle.code,
+    message: lifecycle.message,
+    nextAction: lifecycle.nextAction,
+    retryable: lifecycle.retryable,
+    manualReloadRecommended: lifecycle.manualReloadRecommended,
+  };
+};
+
 const clientHasConcreteTabIdentity = (client) =>
   client?.tabId !== undefined && client?.tabId !== null;
 
+const clientHasFreshPageHeartbeat = (client, now = Date.now()) =>
+  !!client?.page && !!client?.lastHeartbeatAt && now - client.lastHeartbeatAt <= CLIENT_STALE_MS;
+
 const clientIsSelectableGeminiTab = (client) =>
   isLiveClient(client) &&
+  !clientIsActivityClient(client) &&
+  !clientHasPageBlocker(client) &&
+  clientPageOrigin(client) === GEMINI_BRIDGE_PAGE_ORIGIN &&
   clientHasConcreteTabIdentity(client) &&
+  clientHasFreshPageHeartbeat(client) &&
   clientMatchesExpectedBrowserExtension(client);
 
+const compareSelectableClientPreference = (a, b) =>
+  Number(commandChannelReadyForClient(b)) - Number(commandChannelReadyForClient(a)) ||
+  Number(!clientHasRecentCommandFailure(b)) - Number(!clientHasRecentCommandFailure(a)) ||
+  Number(!!b?.page?.chatId) - Number(!!a?.page?.chatId) ||
+  recentConversationCountForClient(b) - recentConversationCountForClient(a) ||
+  Number(b?.isActiveTab === true) - Number(a?.isActiveTab === true) ||
+  Number(b?.lastCommandResultAt || 0) - Number(a?.lastCommandResultAt || 0) ||
+  Number(b?.lastSeenAt || 0) - Number(a?.lastSeenAt || 0);
+
+const dedupeSelectableClientsByTabId = (selectableClients = []) => {
+  const byTabId = new Map();
+  for (const client of selectableClients) {
+    const tabKey = String(client.tabId);
+    const existing = byTabId.get(tabKey);
+    if (!existing || compareSelectableClientPreference(client, existing) < 0) {
+      byTabId.set(tabKey, client);
+    }
+  }
+  return [...byTabId.values()].sort(compareSelectableClientPreference);
+};
+
 const getSelectableGeminiClients = () => {
-  const liveClients = getLiveClients();
-  const healthyTabs = liveClients.filter(clientIsSelectableGeminiTab);
-  if (healthyTabs.length > 0) return healthyTabs;
-  const matchingClients = liveClients.filter(clientMatchesExpectedBrowserExtension);
-  return matchingClients.length > 0 ? matchingClients : liveClients;
+  const liveClients = getLiveClients().map(hydrateClientLifecycleFields);
+  return dedupeSelectableClientsByTabId(liveClients.filter(clientIsSelectableGeminiTab));
+};
+
+const getActivityClients = () =>
+  getLiveClients()
+    .filter(clientIsActivityClient)
+    .sort(
+      (a, b) =>
+        Number(clientMatchesExpectedBrowserExtension(b)) -
+          Number(clientMatchesExpectedBrowserExtension(a)) ||
+        Number(!!b.eventStream?.res && !b.eventStream.res.destroyed) -
+          Number(!!a.eventStream?.res && !a.eventStream.res.destroyed) ||
+        Number(!!b.pendingPoll) - Number(!!a.pendingPoll) ||
+        b.lastSeenAt - a.lastSeenAt,
+    );
+
+const activityClientCommandReady = (client) =>
+  !!client &&
+  clientMatchesExpectedBrowserExtension(client) &&
+  ((!!client.eventStream?.res && !client.eventStream.res.destroyed) ||
+    !!client.pendingPoll ||
+    client.commandPoll?.polling === true);
+
+const waitForActivityClient = async (selector = {}, timeoutMs = BROWSER_STATUS_WAKE_WAIT_MS) => {
+  const startedAt = Date.now();
+  const waitLimitMs = normalizeWaitMs(timeoutMs, BROWSER_STATUS_WAKE_WAIT_MS, 120_000);
+  while (Date.now() - startedAt <= waitLimitMs) {
+    cleanupStaleClients();
+    const activityClients = getActivityClients();
+    const candidates = selector.clientId
+      ? activityClients.filter((client) => client.clientId === selector.clientId)
+      : activityClients;
+    const ready = candidates.find(activityClientCommandReady);
+    if (ready) return ready;
+    const matching = candidates.find(clientMatchesExpectedBrowserExtension);
+    if (matching) return matching;
+    await sleep(CHROME_GUARD_CONFIG.pollIntervalMs || 500);
+  }
+  return null;
+};
+
+const activityClientMissingError = () => {
+  const error = new Error(
+    'Nenhuma aba do My Activity conectada à extensão. Abra https://myactivity.google.com/product/gemini e, se a extensão foi atualizada agora, recarregue manualmente o card da extensão no navegador.',
+  );
+  error.code = 'activity_client_missing';
+  return error;
+};
+
+const activityClientVersionMismatchError = (activityClients = []) => {
+  const error = new Error(
+    'A aba do My Activity conectada não bate com a versão/build esperados da extensão. Recarregue o card da extensão no navegador e recarregue a página do My Activity.',
+  );
+  error.code = 'activity_client_version_mismatch';
+  error.data = {
+    expectedChromeExtension: EXPECTED_CHROME_EXTENSION_INFO,
+    clients: activityClients.map((client) => ({
+      clientId: client.clientId,
+      tabId: client.tabId ?? null,
+      extensionVersion: client.extensionVersion ?? null,
+      protocolVersion: client.protocolVersion ?? null,
+      buildStamp: clientBuildStamp(client),
+      page: client.page || null,
+    })),
+  };
+  return error;
+};
+
+const requireActivityClient = (selector = {}) => {
+  cleanupStaleClients();
+  const activityClients = getActivityClients();
+  const matchingClients = activityClients.filter(clientMatchesExpectedBrowserExtension);
+  if (selector.clientId) {
+    const selected = activityClients.find((client) => client.clientId === selector.clientId);
+    if (selected && clientMatchesExpectedBrowserExtension(selected)) return selected;
+    if (selected) throw activityClientVersionMismatchError([selected]);
+    throw activityClientMissingError();
+  }
+  if (activityClients.length > 0 && matchingClients.length === 0) {
+    throw activityClientVersionMismatchError(activityClients);
+  }
+  const ready = matchingClients.find(
+    (client) =>
+      (!!client.eventStream?.res && !client.eventStream.res.destroyed) ||
+      !!client.pendingPoll ||
+      client.commandPoll?.polling === true,
+  );
+  if (ready) return ready;
+  if (matchingClients[0]) return matchingClients[0];
+  throw activityClientMissingError();
+};
+
+const ensureActivityClientForScan = async (args = {}) => {
+  const selector = { clientId: args.activityClientId || args.clientId };
+  try {
+    const client = requireActivityClient(selector);
+    return {
+      client,
+      browserWake: {
+        attempted: false,
+        reason: 'activity-client-already-connected',
+      },
+    };
+  } catch (err) {
+    if (err?.code !== 'activity_client_missing' || args.openIfMissing !== true) {
+      throw err;
+    }
+  }
+
+  const existingClient = await waitForActivityClient(
+    selector,
+    args.preLaunchWaitMs ?? ACTIVITY_PRE_LAUNCH_WAIT_MS,
+  );
+  if (existingClient) {
+    return {
+      client: existingClient,
+      browserWake: {
+        attempted: false,
+        reason: 'activity-client-connected-before-launch',
+      },
+    };
+  }
+
+  const launchResult = await launchChromeForGemini({
+    profileDirectory: CHROME_GUARD_CONFIG.profileDirectory,
+    targetUrl: ACTIVITY_GEMINI_URL,
+    explicit: true,
+  });
+  const client = await waitForActivityClient(selector, args.waitMs);
+  if (!client) throw activityClientMissingError();
+  return {
+    client,
+    browserWake: {
+      ...launchResult,
+      connectedAfterWake: getActivityClients().length,
+    },
+  };
+};
+
+const scanActivityWithClient = async (args = {}) => {
+  const { client, browserWake } = await ensureActivityClientForScan(args);
+  let claim = null;
+  let claimVisibleAtMs = null;
+  let tabClaimWarning = null;
+  let tabClaimRelease = null;
+  if (args.claimVisual !== false) {
+    try {
+      const claimed = await claimTabForClient(client, {
+        ...args,
+        label: args.claimLabel || TAB_CLAIM_LABELS.count,
+        color: args.claimColor || 'blue',
+        force: args.forceClaim === true || args.force === true,
+      });
+      claim = claimed.claim || null;
+      claimVisibleAtMs = Date.now();
+    } catch (err) {
+      tabClaimWarning = {
+        ok: false,
+        code: err?.code || 'activity_tab_claim_failed',
+        message: err?.message || String(err),
+      };
+    }
+  }
+  const scanClient = claim?.clientId ? clients.get(claim.clientId) || client : client;
+  let result;
+  try {
+    result = await enqueueCommand(scanClient.clientId, 'activity-scan-batch', args, {
+      timeoutMs: Math.max(60_000, Number(args.timeoutMs || 10 * 60_000)),
+    });
+  } finally {
+    if (claim?.claimId && shouldAutoReleaseTabClaim(args)) {
+      try {
+        await waitForTabClaimMinimumVisibility(claimVisibleAtMs, args);
+        tabClaimRelease = await releaseTabClaim({
+          claimId: claim.claimId,
+          reason: 'activity-scan-complete',
+        });
+      } catch (err) {
+        tabClaimRelease = {
+          ok: false,
+          claimId: claim.claimId,
+          code: err?.code || 'activity_tab_claim_release_failed',
+          message: err?.message || String(err),
+        };
+      }
+    }
+  }
+  return {
+    ...result,
+    client: summarizeClient(scanClient),
+    browserWake,
+    tabClaim: claim,
+    tabClaimWarning,
+    tabClaimRelease,
+  };
 };
 
 const tabSelectionDiagnostics = (liveClients, selectableClients) => {
   const selectableIds = new Set(selectableClients.map((client) => client.clientId));
-  return liveClients
-    .filter((client) => !selectableIds.has(client.clientId))
-    .map((client) => ({
-      ...summarizeClient(client),
-      demotedFromTabSelection: true,
-      demotionReason: !clientHasConcreteTabIdentity(client)
-        ? 'missing-tab-id'
-        : !clientMatchesExpectedBrowserExtension(client)
-          ? 'version-or-build-mismatch'
-          : 'not-selected',
-    }));
+  const classified = classifyGeminiClientLifecycle(
+    liveClients.map(hydrateClientLifecycleFields),
+    clientLifecycleOptions(),
+  );
+  return classified
+    .filter(({ client }) => !selectableIds.has(client.clientId))
+    .map(({ client, lifecycle }) => {
+      return {
+        ...summarizeClient(client),
+        lifecycle: lifecycleSummaryForClient(client),
+        demotedFromTabSelection: true,
+        demotionReason: !clientHasConcreteTabIdentity(client)
+          ? 'missing-tab-id'
+          : !clientMatchesExpectedBrowserExtension(client)
+            ? 'version-or-build-mismatch'
+            : lifecycle.code || lifecycle.state || 'not-selected',
+      };
+    });
 };
 
 const requireRecentChatsClient = (selector = {}) => {
@@ -5066,12 +6179,272 @@ const resolveNotebookConversationRequest = (client, args = {}) => {
   throw new Error('Informe index, chatId ou title para escolher a conversa do caderno.');
 };
 
-const downloadConversationItemForClient = async (client, conversation, args = {}) => {
+const buildCdpSnapshotForArgs = async (args = {}) =>
+  buildRuntimeCdpControlSnapshot(args, { defaultCdpUrl: DEFAULT_CDP_URL });
+
+const activateBrowserTabWithCdp = async (client, args = {}) =>
+  activateRuntimeExtensionClientWithCdp(client, args, { defaultCdpUrl: DEFAULT_CDP_URL });
+
+const tabActivationBrokerClients = (preferredClient = null) => {
+  cleanupStaleClients();
+  const preferred =
+    preferredClient?.clientId && isLiveClient(clients.get(preferredClient.clientId))
+      ? clients.get(preferredClient.clientId)
+      : null;
+  const candidates = getLiveClients()
+    .filter(clientMatchesExpectedBrowserExtension)
+    .filter(clientHasOpenCommandChannel)
+    .filter((client) => !clientHasRecentCommandFailure(client));
+  const ordered = [];
+  const add = (client) => {
+    if (!client?.clientId || ordered.some((item) => item.clientId === client.clientId)) return;
+    if (!candidates.some((item) => item.clientId === client.clientId)) return;
+    ordered.push(client);
+  };
+  add(preferred);
+  candidates.filter(clientIsActivityClient).forEach(add);
+  candidates.filter((client) => !clientIsActivityClient(client)).forEach(add);
+  return ordered.slice(0, EXPORT_TAB_ACTIVATION_BROKER_LIMIT);
+};
+
+const liveClientForBrowserTabId = (rawTabId) => {
+  const tabId = normalizeTabId(rawTabId);
+  if (tabId === null) return null;
+  return getLiveClients()
+    .map(hydrateClientLifecycleFields)
+    .filter(
+      (client) =>
+        clientHasConcreteTabIdentity(client) &&
+        normalizeTabId(client.tabId) === tabId &&
+        clientMatchesExpectedBrowserExtension(client),
+    )
+    .sort(compareSelectableClientPreference)[0] || null;
+};
+
+const activeClientForBrowserTabId = (rawTabId) => {
+  const tabId = normalizeTabId(rawTabId);
+  if (tabId === null) return null;
+  return getLiveClients()
+    .map(hydrateClientLifecycleFields)
+    .filter(
+      (client) =>
+        clientHasConcreteTabIdentity(client) &&
+        normalizeTabId(client.tabId) === tabId &&
+        client.isActiveTab === true &&
+        clientMatchesExpectedBrowserExtension(client),
+    )
+    .sort(compareSelectableClientPreference)[0] || null;
+};
+
+const waitForActivatedBrowserTabById = async (rawTabId, args = {}) => {
+  const tabId = normalizeTabId(rawTabId);
+  if (tabId === null) return null;
+  const waitMs = normalizeWaitMs(
+    args.activateTabConfirmWaitMs ?? args.activationConfirmWaitMs,
+    EXPORT_TAB_ACTIVATION_CONFIRM_WAIT_MS,
+    15_000,
+  );
+  const startedAt = Date.now();
+  do {
+    cleanupStaleClients();
+    const activeClient = activeClientForBrowserTabId(tabId);
+    if (activeClient) return activeClient;
+    await sleep(250);
+  } while (Date.now() - startedAt <= waitMs);
+  return null;
+};
+
+const activateBrowserTabById = async (rawTabId, args = {}, preferredClient = null) => {
+  const tabId = normalizeTabId(rawTabId);
+  if (tabId === null) {
+    const error = new Error('Não há tabId confiável para ativar a aba do Gemini.');
+    error.code = 'tab_activation_failed';
+    throw error;
+  }
+
+  const cdpActivation = await activateBrowserTabWithCdp(preferredClient, args);
+  if (cdpActivation?.ok) {
+    const confirmedClient =
+      (await waitForActivatedBrowserTabById(tabId, args)) ||
+      liveClientForBrowserTabId(tabId) ||
+      preferredClient;
+    if (confirmedClient) {
+      confirmedClient.isActiveTab = true;
+    }
+    return {
+      broker: null,
+      client: confirmedClient || preferredClient,
+      result: {
+        ok: true,
+        mode: 'cdp',
+        tabId,
+        windowId: confirmedClient?.windowId ?? preferredClient?.windowId ?? null,
+        isActiveTab: true,
+        targetId: cdpActivation.targetId,
+      },
+    };
+  }
+
+  const brokers = tabActivationBrokerClients(preferredClient);
+  if (brokers.length === 0) {
+    const error = new Error(
+      'Nenhuma aba da extensão está com canal de comando saudável para ativar a aba do Gemini.',
+    );
+    error.code = 'tab_activation_broker_missing';
+    throw error;
+  }
+
+  let lastError = null;
+  for (const broker of brokers) {
+    try {
+      const command = await enqueueCommandWithClientRecovery(
+        broker,
+        'activate-browser-tab',
+        {
+          tabId,
+          reason: args.activateTabReason || 'export',
+          focusWindow: args.focusWindow === true,
+        },
+        {
+          timeoutMs: EXPORT_TAB_ACTIVATION_TIMEOUT_MS,
+          dispatchTimeoutMs: 4000,
+          staleAbortMs: CLIENT_STALE_MS + 1000,
+        },
+        { clientId: broker.clientId },
+      );
+      const result = command.result || null;
+      if (result?.ok && result.isActiveTab !== false) {
+        return {
+          broker: command.client || broker,
+          client: activeClientForBrowserTabId(tabId) || liveClientForBrowserTabId(tabId) || command.client || broker,
+          result,
+        };
+      }
+      lastError = new Error(result?.error || result?.reason || 'Falha ao ativar aba do navegador.');
+      lastError.code = result?.code || 'tab_activation_failed';
+      lastError.data = result;
+    } catch (err) {
+      lastError = err;
+      const confirmedClient = await waitForActivatedBrowserTabById(tabId, args);
+      if (confirmedClient) {
+        clearClientCommandTimeout(confirmedClient);
+        return {
+          broker,
+          client: confirmedClient,
+          result: {
+            ok: true,
+            inferred: true,
+            reason: 'activation-inferred-from-heartbeat',
+            tabId,
+            windowId: confirmedClient.windowId ?? null,
+            isActiveTab: true,
+            timeout: err?.code === 'command_timeout' ? err.message : null,
+          },
+        };
+      }
+    }
+  }
+
+  const error = new Error(
+    lastError?.message || 'Não consegui ativar a aba do Gemini antes da exportação.',
+  );
+  error.code = lastError?.code || 'tab_activation_failed';
+  error.cause = lastError || null;
+  throw error;
+};
+
+const ensureClientActiveForExport = async (client, args = {}) => {
+  const shouldActivateTab =
+    args.activateTabBeforeExport === true || args.activateTab === true;
+  if (!shouldActivateTab) {
+    return { client, activation: null };
+  }
+  if (client?.isActiveTab === true) return { client, activation: { ok: true, alreadyActive: true } };
+
+  const { result: activation, client: activatedClient } = await activateBrowserTabById(client?.tabId, args, client);
+  const activeClient = activatedClient || resolveContinuationClient(client, args);
+  if (activation?.isActiveTab !== undefined) activeClient.isActiveTab = activation.isActiveTab;
+
+  if (!activation?.ok || activation.isActiveTab === false) {
+    const error = new Error(
+      activation?.error ||
+        activation?.reason ||
+        'Não consegui ativar a aba do Gemini antes da exportação. Nenhum arquivo foi salvo.',
+    );
+    error.code = 'tab_activation_failed';
+    error.data = { activation, client: summarizeClient(activeClient) };
+    throw error;
+  }
+
+  return { client: activeClient, activation };
+};
+
+const compareRecentExportClientPreference = (a, b) =>
+  Number(commandChannelReadyForClient(b)) - Number(commandChannelReadyForClient(a)) ||
+  Number(!clientHasRecentCommandFailure(b)) - Number(!clientHasRecentCommandFailure(a)) ||
+  recentConversationCountForClient(b) - recentConversationCountForClient(a) ||
+  Number(!!b?.page?.chatId) - Number(!!a?.page?.chatId) ||
+  Number(b?.isActiveTab === true) - Number(a?.isActiveTab === true) ||
+  (b?.lastSeenAt || 0) - (a?.lastSeenAt || 0);
+
+const recentExportCandidateClients = () => {
+  const selectableClients = getSelectableGeminiClients();
+  const healthyClients = selectableClients.filter(
+    (client) => commandChannelReadyForClient(client) && !clientHasRecentCommandFailure(client),
+  );
+  const pool = healthyClients.length > 0 ? healthyClients : selectableClients;
+  const usefulClients = pool.filter(clientHasUsefulGeminiContext);
+  return (usefulClients.length > 0 ? usefulClients : pool).sort(
+    compareRecentExportClientPreference,
+  );
+};
+
+const prepareClientForBrowserExport = async (client, args = {}) => {
+  const prepared = await ensureClientActiveForExport(client, {
+    ...args,
+    activateTabReason: args.activateTabReason || 'browser-export',
+  });
+  return assertActiveClaimableGeminiClient(
+    hydrateClientLifecycleFields(prepared.client),
+    activeClaimableGeminiClientOptions(),
+  );
+};
+
+const selectRecentExportClient = async (selector = {}) => {
+  cleanupStaleClients();
+  cleanupExpiredTabClaims();
+  const normalized = normalizeClientSelector(selector);
+  const explicitTarget =
+    normalized.clientId || normalized.tabId !== null || normalized.claimId || claimForSession(normalized.sessionId);
+  if (explicitTarget) {
+    return prepareClientForBrowserExport(requireClient(normalized), selector);
+  }
+
+  if (getSelectableGeminiClients().length === 0 && selector.openIfMissing === true) {
+    await launchChromeForGemini({
+      profileDirectory: CHROME_GUARD_CONFIG.profileDirectory,
+      explicit: true,
+    });
+    await waitForLiveClients(
+      normalizeWaitMs(selector.waitMs, BROWSER_STATUS_WAKE_WAIT_MS),
+      CHROME_GUARD_CONFIG.pollIntervalMs || 500,
+    );
+  }
+
+  const candidates = recentExportCandidateClients();
+  if (candidates.length === 0) {
+    throw new Error('Nenhuma aba do Gemini conectada à extensão.');
+  }
+  return prepareClientForBrowserExport(candidates[0], selector);
+};
+
+const collectConversationItemPayloadForClient = async (client, conversation, args = {}) => {
   const commandStartedAt = Date.now();
   const hydrationArgs = exportHydrationArgs(args);
   const commandTimeoutMs = exportCommandTimeoutMs(args);
+  const prepared = await ensureClientActiveForExport(client, args);
   const command = await enqueueCommandWithClientRecovery(
-    client,
+    prepared.client,
     'get-chat-by-id',
     {
       item: conversation,
@@ -5079,7 +6452,7 @@ const downloadConversationItemForClient = async (client, conversation, args = {}
       notebookReturnMode: args.notebookReturnMode || null,
       ...hydrationArgs,
     },
-    { timeoutMs: commandTimeoutMs },
+    { timeoutMs: commandTimeoutMs, staleAbortMs: exportCommandStaleAbortMs(args) },
     args,
   );
   const activeClient = command.client;
@@ -5094,29 +6467,67 @@ const downloadConversationItemForClient = async (client, conversation, args = {}
   }
 
   const expectedChatId = normalizeConversationChatId(conversation);
-  const payloadChatId = stripGeminiPrefix(result.payload?.chatId || '');
-  if (expectedChatId && payloadChatId && expectedChatId !== payloadChatId) {
-    throw new Error(
-      `Exportacao abortada: o browser retornou o chat ${payloadChatId}, mas o MCP pediu ${expectedChatId}. Nenhum arquivo foi salvo.`,
-    );
+  let integrity = await validateMcpExportPayload(result.payload, {
+    expectedChatId,
+    requestedChatId: conversation.chatId || conversation.id || conversation.url || null,
+  });
+  if (!integrity.ok) {
+    const error = new Error(integrity.message);
+    error.code = integrity.code;
+    error.data = integrity;
+    throw error;
   }
-  if (expectedChatId && !payloadChatId) {
-    throw new Error(
-      `Exportacao abortada: a extensao nao retornou chatId para confirmar a conversa ${expectedChatId}. Nenhum arquivo foi salvo.`,
-    );
+
+  return {
+    activeClient,
+    result,
+    conversation,
+    integrity,
+    browserCommandMs,
+    expectedChatId,
+    requestedChatId: conversation.chatId || conversation.id || conversation.url || null,
+  };
+};
+
+const saveCollectedConversationPayload = async (collected, args = {}) => {
+  let { integrity } = collected;
+  const dateImport = await enrichExportPayloadWithDates({
+    payload: collected.result.payload,
+    integrity,
+    args,
+  });
+  if (!dateImport.ok) {
+    const error = new Error(dateImport.message);
+    error.code = dateImport.code;
+    error.data = {
+      code: dateImport.code,
+      dateImport: dateImport.receipt,
+      evidence: dateImport.evidence,
+    };
+    throw error;
+  }
+  integrity = await validateMcpExportPayload(dateImport.payload, {
+    expectedChatId: collected.expectedChatId,
+    requestedChatId: collected.requestedChatId,
+  });
+  if (!integrity.ok) {
+    const error = new Error(integrity.message);
+    error.code = integrity.code;
+    error.data = integrity;
+    throw error;
   }
 
   const saveStartedAt = Date.now();
-  const saved = writeExportPayloadBundle(result.payload, { outputDir: args.outputDir });
+  const saved = writeExportPayloadBundle(dateImport.payload, { outputDir: args.outputDir });
   const saveFilesMs = Date.now() - saveStartedAt;
   const savedMediaBytes = Array.isArray(saved.mediaFiles)
     ? saved.mediaFiles.reduce((sum, file) => sum + Number(file.bytes || 0), 0)
     : 0;
-  const payloadMetrics = result.payload?.metrics || {};
+  const payloadMetrics = collected.result.payload?.metrics || {};
   const metrics = {
     version: 1,
     timings: {
-      browserCommandMs,
+      browserCommandMs: collected.browserCommandMs,
       saveFilesMs,
       ...(payloadMetrics.timings || {}),
     },
@@ -5127,23 +6538,42 @@ const downloadConversationItemForClient = async (client, conversation, args = {}
       savedBytes: saved.bytes || 0,
       savedMediaBytes,
     },
-    hydration: result.payload?.hydration || null,
-    navigation: result.payload?.hydration?.navigation || null,
+    hydration: collected.result.payload?.hydration || null,
+    navigation: collected.result.payload?.hydration?.navigation || null,
     media: payloadMetrics.media || null,
   };
   return {
-    client: summarizeClient(activeClient),
-    conversation: result.conversation || conversation,
-    chatId: result.payload?.chatId || conversation.chatId || null,
-    title: result.payload?.title || conversation.title || null,
-    turns: Array.isArray(result.payload?.turns) ? result.payload.turns.length : null,
-    hydration: result.payload?.hydration || null,
-    returnedToOriginal: result.returnedToOriginal ?? null,
-    returnError: result.returnError || null,
+    client: summarizeClient(collected.activeClient),
+    conversation: collected.result.conversation || collected.conversation,
+    chatId: integrity.snapshot.chatId || collected.result.payload?.chatId || collected.conversation.chatId || null,
+    title: integrity.snapshot.title || collected.result.payload?.title || collected.conversation.title || null,
+    turns: integrity.assistantTurnCount,
+    hydration: collected.result.payload?.hydration || null,
+    returnedToOriginal: collected.result.returnedToOriginal ?? null,
+    returnError: collected.result.returnError || null,
+    integrity: {
+      markdownHash: integrity.markdownHash,
+      assistantTurnCount: integrity.assistantTurnCount,
+      evidence: integrity.evidence,
+      warnings: integrity.warnings,
+    },
+    dateImport: dateImport.receipt,
     metrics,
     ...saved,
   };
 };
+
+const saveCollectedConversationPayloadWithDateImportBatch = (collected, args = {}) =>
+  saveCollectedConversationPayloadViaDateImportBatch(collected, args, {
+    buildBatchEvidence: buildExportDateImportBatchEvidenceForPayloads,
+    saveCollectedConversationPayload,
+  });
+
+const downloadConversationItemForClient = async (client, conversation, args = {}) =>
+  saveCollectedConversationPayloadWithDateImportBatch(
+    await collectConversationItemPayloadForClient(client, conversation, args),
+    args,
+  );
 
 const isTransientTabBusyError = (err) =>
   err?.code === 'tab_operation_in_progress' ||
@@ -5154,6 +6584,12 @@ const isTransientTabBusyError = (err) =>
 
 const retryableConversationExportReason = (err) => {
   if (isTransientTabBusyError(err)) return 'tab_operation_in_progress';
+  if (
+    err?.code === 'client_reconnected_during_command' ||
+    err?.code === 'client_stale_during_command'
+  ) {
+    return err.code;
+  }
   const message = String(err?.message || err?.data?.error || '');
   if (
     /conte[úu]do da conversa ainda parece ser o chat anterior|URL mudou/i.test(message)
@@ -5175,6 +6611,8 @@ const isRetryableConversationExportError = (err) =>
 
 const isRecoverableClientDisconnectError = (err) =>
   err?.code === 'client_not_found' ||
+  err?.code === 'client_reconnected_during_command' ||
+  err?.code === 'client_stale_during_command' ||
   (err?.code === 'command_timeout' && err.commandDispatched !== true) ||
   /Cliente [\w-]+ não encontrado|Cliente [\w-]+ não está ativo|Claim [\w-]+ não está ativa/i.test(
     String(err?.message || ''),
@@ -5204,27 +6642,118 @@ const continuationSelectorForClient = (client, args = {}) => {
   };
 };
 
-const resolveContinuationClient = (client, args = {}) => {
-  cleanupStaleClients();
-  cleanupExpiredTabClaims();
-  const current = client?.clientId ? clients.get(client.clientId) : null;
-  if (isLiveClient(current)) return current;
+const commandClientState = (client) => {
+  if (!client?.clientId) return null;
+  const claim = claimForClient(client) || clientTabClaim(client) || null;
+  return {
+    clientId: client.clientId,
+    tabId: client.tabId ?? null,
+    claimId: claim?.claimId || null,
+    sessionId: claim?.sessionId || client.tabClaim?.sessionId || client.summary?.tabClaim?.sessionId || null,
+    live: isLiveClient(client),
+    commandReady: commandChannelReadyForClient(client),
+    recentCommandFailure: clientHasRecentCommandFailure(client),
+    lastSeenAt: client.lastSeenAt || null,
+  };
+};
 
-  const selector = continuationSelectorForClient(client, args);
-  if (selector.claimId) {
-    const claimClient = liveClientForClaim(tabClaims.get(selector.claimId));
-    if (claimClient) return claimClient;
-  }
-  if (selector.tabId !== undefined && selector.tabId !== null) {
-    const tabId = normalizeTabId(selector.tabId);
-    const sameTab = getSelectableGeminiClients().find(
+const sameTabClientsForContinuation = (selector = {}) => {
+  if (selector.tabId === undefined || selector.tabId === null) return [];
+  const tabId = normalizeTabId(selector.tabId);
+  if (tabId === null) return [];
+  return getLiveClients()
+    .filter(clientIsSelectableGeminiTab)
+    .filter(
       (candidate) =>
         candidate.tabId !== null &&
         candidate.tabId !== undefined &&
         Number(candidate.tabId) === tabId,
-    );
-    if (sameTab) return sameTab;
+    )
+    .sort(compareSelectableClientPreference);
+};
+
+const commandClientPoolForContinuation = (
+  client,
+  args = {},
+  { replacementClientId = null } = {},
+) => {
+  cleanupStaleClients();
+  cleanupExpiredTabClaims();
+  const selector = continuationSelectorForClient(client, args);
+  const current = client?.clientId ? clients.get(client.clientId) || null : null;
+  const claimClient = selector.claimId ? liveClientForClaim(tabClaims.get(selector.claimId)) : null;
+  const sessionClaimClient = liveClientForClaim(claimForSession(selector.sessionId));
+  const replacementClient = replacementClientId ? clients.get(replacementClientId) || null : null;
+  const sameTabClients = sameTabClientsForContinuation(selector);
+  const fallback =
+    sameTabClients[0] ||
+    claimClient ||
+    sessionClaimClient ||
+    (current && isLiveClient(current) ? current : null);
+  return {
+    selector,
+    pool: {
+      current: commandClientState(current),
+      replacement: commandClientState(replacementClient),
+      claim: commandClientState(claimClient),
+      sameTab: sameTabClients.map(commandClientState).filter(Boolean),
+      sessionClaim: commandClientState(sessionClaimClient),
+      fallback: commandClientState(fallback),
+    },
+  };
+};
+
+const commandRecoveryErrorInfo = (err) => ({
+  code: err?.code || null,
+  message: err?.message || null,
+  commandDispatched: err?.commandDispatched ?? null,
+  replacementClientId: err?.replacementClientId || null,
+});
+
+const resolveContinuationClient = (client, args = {}) => {
+  cleanupStaleClients();
+  cleanupExpiredTabClaims();
+  const current = client?.clientId ? clients.get(client.clientId) : null;
+  const selector = continuationSelectorForClient(client, args);
+
+  if (!args.clientId && selector.claimId) {
+    const claimClient = liveClientForClaim(tabClaims.get(selector.claimId));
+    if (
+      claimClient?.clientId &&
+      claimClient.clientId !== current?.clientId &&
+      (!isLiveClient(current) ||
+        clientHasRecentCommandFailure(current) ||
+        !commandChannelReadyForClient(current))
+    ) {
+      return claimClient;
+    }
   }
+
+  if (selector.claimId) {
+    const claimClient = liveClientForClaim(tabClaims.get(selector.claimId));
+    if (!isLiveClient(current) && claimClient) return claimClient;
+  }
+  if (selector.tabId !== undefined && selector.tabId !== null) {
+    const tabId = normalizeTabId(selector.tabId);
+    const sameTab = getLiveClients()
+      .filter(clientIsSelectableGeminiTab)
+      .find(
+      (candidate) =>
+        candidate.clientId !== current?.clientId &&
+        candidate.tabId !== null &&
+        candidate.tabId !== undefined &&
+        Number(candidate.tabId) === tabId,
+      );
+    if (
+      sameTab &&
+      (!isLiveClient(current) ||
+        clientHasRecentCommandFailure(current) ||
+        !commandChannelReadyForClient(current))
+    ) {
+      return sameTab;
+    }
+  }
+  if (isLiveClient(current)) return current;
   const sessionClaimClient = liveClientForClaim(claimForSession(selector.sessionId));
   return sessionClaimClient || current || client;
 };
@@ -5248,19 +6777,32 @@ const enqueueCommandWithClientRecovery = async (
   options = {},
   selector = {},
 ) => {
-  let activeClient = resolveContinuationClient(client, selector);
-  try {
-    const result = await enqueueCommand(activeClient.clientId, type, commandArgs, options);
-    return { client: activeClient, result, recovered: activeClient.clientId !== client?.clientId };
-  } catch (err) {
-    if (!isRecoverableClientDisconnectError(err)) throw err;
-    const recoveredClient = await waitForContinuationClient(activeClient, selector);
-    if (!recoveredClient?.clientId || !isLiveClient(clients.get(recoveredClient.clientId))) {
-      throw err;
-    }
-    const result = await enqueueCommand(recoveredClient.clientId, type, commandArgs, options);
-    return { client: recoveredClient, result, recovered: true };
-  }
+  const { runBrowserCommandWithClientRecovery } = await loadMcpCommandLease();
+  const initialClient = resolveContinuationClient(client, selector);
+  const commandOptions = browserCommandSideEffectKind(type)
+    ? { ...options, browserSideEffectExplicit: options.browserSideEffectExplicit !== false }
+    : options;
+  const { result, lease, recovered } = await runBrowserCommandWithClientRecovery({
+    initialClient: commandClientState(initialClient),
+    selector: continuationSelectorForClient(initialClient, selector),
+    request: {
+      type,
+      args: commandArgs,
+      options: commandOptions,
+    },
+    waitMs: RECENT_CHATS_CLIENT_RECOVERY_WAIT_MS,
+    pollMs: 500,
+    getPool: ({ error }) =>
+      commandClientPoolForContinuation(initialClient, selector, {
+        replacementClientId: error?.replacementClientId || null,
+      }).pool,
+    dispatch: (commandLease, request) =>
+      enqueueCommand(commandLease.clientId, request.type, request.args || {}, request.options || {}),
+    isRecoverableError: isRecoverableClientDisconnectError,
+    describeError: commandRecoveryErrorInfo,
+  });
+  const activeClient = clients.get(lease.clientId) || initialClient;
+  return { client: activeClient, result, recovered };
 };
 
 const downloadConversationItemWithRetry = async (job, client, conversation, args = {}) => {
@@ -5279,12 +6821,22 @@ const downloadConversationItemWithRetry = async (job, client, conversation, args
       : broadcastRecentChatsJobProgress;
   for (let attempt = 1; attempt <= retryLimit; attempt += 1) {
     try {
-      return await downloadConversationItemForClient(client, conversation, args);
+      return args.collectOnly === true
+        ? await collectConversationItemPayloadForClient(client, conversation, args)
+        : await downloadConversationItemForClient(client, conversation, args);
     } catch (err) {
       lastError = err;
       const retryReason = retryableConversationExportReason(err);
       if (!isRetryableConversationExportError(err) || !retryReason || attempt >= retryLimit) {
         throw err;
+      }
+      const recoveredClient = resolveContinuationClient(client, {
+        ...args,
+        clientId: undefined,
+      });
+      if (recoveredClient?.clientId && recoveredClient.clientId !== client?.clientId) {
+        client = recoveredClient;
+        rebindExportJobToClient(job, recoveredClient, retryReason);
       }
       const retryDelayMs = retryBaseMs * attempt;
       job.current = {
@@ -5559,6 +7111,7 @@ const loadMoreRecentChatsForClient = async (client, requestedLimit, args = {}) =
   let timedOut = false;
   let roundsCompleted = 0;
   let previousCount = initialCount;
+  const loadTrace = [];
 
   for (let round = 0; round < plan.rounds; round += 1) {
     activeClient = resolveContinuationClient(activeClient, args);
@@ -5608,6 +7161,18 @@ const loadMoreRecentChatsForClient = async (client, requestedLimit, args = {}) =
     roundsCompleted += 1;
     loadedAny = loadedAny || result.loadedAny === true || currentCount > previousCount;
     timedOut = timedOut || result.timedOut === true;
+    loadTrace.push({
+      round: round + 1,
+      beforeCount: previousCount,
+      targetCount: plan.targetCount,
+      afterCount: currentCount,
+      delta: Math.max(0, currentCount - previousCount),
+      loadedAny: result.loadedAny === true,
+      grew: currentCount > previousCount,
+      reachedEnd,
+      timedOut: result.timedOut === true,
+      browserTrace: Array.isArray(result.loadTrace) ? result.loadTrace : [],
+    });
 
     if (currentCount >= plan.targetCount) break;
     if (reachedEnd) break;
@@ -5623,6 +7188,7 @@ const loadMoreRecentChatsForClient = async (client, requestedLimit, args = {}) =
     timedOut,
     roundsCompleted,
     reachedEnd,
+    loadTrace,
     snapshot: latestSnapshot,
     conversations: recentConversationsForClient(activeClient),
     client: activeClient,
@@ -5906,7 +7472,8 @@ const listRecentChatsForClient = async (client, args = {}) => {
   if (refreshPlan.shouldRefresh) {
     try {
       const refreshPromise = refreshClientConversations(client, { ensureSidebar: true });
-      refresh = refreshPlan.preferFastRefresh
+      const shouldBoundRefresh = refreshPlan.preferFastRefresh || !untilEnd;
+      refresh = shouldBoundRefresh
         ? await withTimeout(refreshPromise, RECENT_CHATS_REFRESH_BUDGET_MS)
         : await refreshPromise;
       if (refresh?.client) client = refresh.client;
@@ -6338,6 +7905,7 @@ const summarizeExportJob = (job) => ({
   tabClaim: summarizeTabClaim(claimForClient(clients.get(job.clientId))),
   autoReleaseTabClaim: job.autoReleaseTabClaim ?? null,
   tabClaimId: job.tabClaimId || null,
+  tabClaimWarning: job.tabClaimWarning || null,
   tabClaimRelease: job.tabClaimRelease || null,
   tabSession: summarizeTabSession(job.tabSession),
   trace: summarizeJobTrace(job.trace),
@@ -6368,6 +7936,7 @@ const summarizeExportJob = (job) => ({
   syncStateUpdate: job.syncStateUpdate || null,
   existingScanDir: job.existingScanDir || null,
   vaultScan: job.vaultScan || null,
+  dateImport: job.dateImport || { enabled: false, source: 'none' },
   webConversationCount: job.webConversationCount ?? null,
   existingVaultCount: job.existingVaultCount ?? 0,
   missingCount: job.missingCount ?? null,
@@ -6415,11 +7984,31 @@ const touchExportJob = (job) => {
 const isTerminalExportJobStatus = (status) =>
   ['completed', 'completed_with_errors', 'failed', 'cancelled'].includes(status);
 
-const findRunningBrowserExportJob = (clientId) =>
+const exportJobTabId = (job) => {
+  const claim = job?.tabClaimId ? tabClaims.get(job.tabClaimId) : null;
+  return normalizeTabId(job?.tabSession?.tabId ?? claim?.tabId);
+};
+
+const browserExportJobMatchesClient = (job, clientOrId) => {
+  if (!['recent-chats-export', 'direct-chats-export'].includes(job?.type)) return false;
+  const client =
+    typeof clientOrId === 'string'
+      ? clients.get(clientOrId) || { clientId: clientOrId }
+      : clientOrId || null;
+  if (!client) return false;
+  if (job.clientId && client.clientId && job.clientId === client.clientId) return true;
+  const claim = claimForClient(client);
+  if (job.tabClaimId && claim?.claimId && job.tabClaimId === claim.claimId) return true;
+  const jobTabId = exportJobTabId(job);
+  const clientTabId = normalizeTabId(client.tabId);
+  return jobTabId !== null && clientTabId !== null && jobTabId === clientTabId;
+};
+
+const findRunningBrowserExportJob = (clientOrId) =>
   Array.from(exportJobs.values()).find(
     (job) =>
       ['recent-chats-export', 'direct-chats-export'].includes(job.type) &&
-      job.clientId === clientId &&
+      browserExportJobMatchesClient(job, clientOrId) &&
       !isTerminalExportJobStatus(job.status),
   );
 
@@ -6449,10 +8038,25 @@ const shellQuoteJson = (value) => JSON.stringify(value);
 const exportJobResumeCommand = (job) => {
   if (!job?.reportFile) return null;
   const tool = 'gemini_export';
-  const args = {
-    action: job.syncMode ? 'sync' : job.exportMissingOnly ? 'missing' : 'recent',
-    resumeReportFile: job.reportFile,
-  };
+  const args =
+    job.type === 'direct-chats-export'
+      ? {
+          action: 'reexport',
+          resumeReportFile: job.reportFile,
+          ...(job.selectionFile ? { selectionFile: job.selectionFile } : {}),
+          ...(job.selectionFile
+            ? {}
+            : {
+                chatIds: (job.items || [])
+                  .map((item) => item.chatId)
+                  .filter(Boolean),
+              }),
+          ...(job.expectedCount ? { expectedCount: job.expectedCount } : {}),
+        }
+      : {
+          action: job.syncMode ? 'sync' : job.exportMissingOnly ? 'missing' : 'recent',
+          resumeReportFile: job.reportFile,
+        };
   if (job.exportMissingOnly && job.existingScanDir) {
     args.vaultDir = job.existingScanDir;
   }
@@ -6495,7 +8099,7 @@ const exportJobInProgressError = (job) => {
 };
 
 const assertNoRunningBrowserExportJob = (client) => {
-  const running = findRunningBrowserExportJob(client.clientId);
+  const running = findRunningBrowserExportJob(client);
   if (!running) return;
   if (maybeFinalizeStaleCancelRequestedJob(running, client, 'cancel-stale-before-new-job')) {
     return;
@@ -6569,6 +8173,12 @@ const exportJobProgressMessage = (job) => {
   if (job.phase === 'scanning-vault') {
     if (job.syncMode) return 'Lendo índice local do vault antes de sincronizar...';
     return 'Cruzando histórico do Gemini com o vault...';
+  }
+  if (job.phase === 'loading-metadata') {
+    return 'Indexando Takeout para preencher datas antes de salvar...';
+  }
+  if (job.phase === 'resolving-metadata') {
+    return 'Conferindo datas do lote antes de salvar...';
   }
   if (job.phase === 'exporting' && job.current?.skippedExisting) {
     const title = job.current.title || job.current.chatId || 'conversa já salva';
@@ -6723,6 +8333,7 @@ const buildRecentChatsExportReport = (job, client, successes, failures) => ({
   syncStateUpdate: job.syncStateUpdate || null,
   existingScanDir: job.existingScanDir || null,
   vaultScan: job.vaultScan || null,
+  dateImport: job.dateImport || { enabled: false, source: 'none' },
   webConversationCount: job.webConversationCount ?? null,
   existingVaultCount: job.existingVaultCount ?? 0,
   missingCount: job.missingCount ?? null,
@@ -6733,6 +8344,7 @@ const buildRecentChatsExportReport = (job, client, successes, failures) => ({
   loadMoreTimedOut: job.loadMoreTimedOut === true,
   loadMoreTrace: Array.isArray(job.loadMoreTrace) ? job.loadMoreTrace : [],
   metrics: summarizeExportJobMetrics(job, client, { includeConversations: true }),
+  tabClaimWarning: job.tabClaimWarning || null,
   tabSession: summarizeTabSession(job.tabSession),
   trace: summarizeJobTrace(job.trace),
   progressMessage: exportJobProgressMessage(job),
@@ -6823,12 +8435,11 @@ const normalizeDirectReexportSelection = (args = {}) => {
       title,
       url: `https://gemini.google.com/app/${key}`,
       current: false,
-      source: 'direct-url',
+      source: item.source || 'direct-url',
       request: {
         title,
         sourcePath: item.sourcePath || item.path || null,
         originalIndex: item.listedIndex || item.index || normalized.length + 1,
-        selectionFile: args.selectionFile || null,
       },
     });
   }
@@ -6903,6 +8514,8 @@ const buildDirectChatsExportReport = (job, client, successes, failures) => ({
   failureCount: failures.length,
   delayMs: job.delayMs,
   metrics: summarizeExportJobMetrics(job, client, { includeConversations: true }),
+  dateImport: job.dateImport || { enabled: false, source: 'none' },
+  tabClaimWarning: job.tabClaimWarning || null,
   tabSession: summarizeTabSession(job.tabSession),
   trace: summarizeJobTrace(job.trace),
   progressMessage: exportJobProgressMessage(job),
@@ -7039,6 +8652,62 @@ const broadcastDirectChatsJobProgress = (job, client, patch = {}) => {
   });
 };
 
+const rebindExportJobToClient = (job, client, reason = 'client-reconnected') => {
+  if (!job || !client?.clientId) return client || null;
+  if (job.clientId === client.clientId) return client;
+  const previousClientId = job.clientId || null;
+  job.clientId = client.clientId;
+  if (job.tabSession) {
+    job.tabSession.clientId = client.clientId;
+    job.tabSession.tabId = normalizeTabId(client.tabId) ?? job.tabSession.tabId ?? null;
+    job.tabSession.windowId = normalizeTabId(client.windowId) ?? job.tabSession.windowId ?? null;
+    job.tabSession.lastSeenAt = new Date().toISOString();
+  }
+  appendExportJobTrace(job, 'job_client_rebound', {
+    previousClientId,
+    nextClientId: client.clientId,
+    tabId: client.tabId ?? null,
+    reason,
+  });
+  touchExportJob(job);
+  return client;
+};
+
+const buildExportDateImportBatchEvidenceForPayloads = (entries, args = {}) =>
+  buildExportDateImportBatchEvidenceWithActivityFallback(entries, args, {
+    scanActivity: scanActivityWithClient,
+    claimLabel: TAB_CLAIM_LABELS.sync,
+  });
+
+const exportJobRecordingDeps = {
+  appendExportJobTrace,
+  assetTimeoutCountFromConversationMetrics,
+  browserTimeoutCountFromConversationMetrics,
+  buildExportDateImportBatchEvidenceForPayloads,
+  createExportDateImportContextForArgs,
+  finishConversationMetric,
+  getClientById: (clientId) => clients.get(clientId) || null,
+  hasDateImportSource,
+  measureJobTiming,
+  rebindExportJobToClient,
+  recordJobCounter,
+  saveCollectedConversationPayload,
+  summarizeExportDateImportContextForJob,
+  touchExportJob,
+};
+
+const rebroadcastActiveBrowserExportJobForClient = (client, reason = 'client-upsert') => {
+  const job = findRunningBrowserExportJob(client);
+  if (!job) return null;
+  rebindExportJobToClient(job, client, reason);
+  if (job.type === 'direct-chats-export') {
+    broadcastDirectChatsJobProgress(job, client);
+  } else {
+    broadcastRecentChatsJobProgress(job, client);
+  }
+  return job;
+};
+
 const cancelRequestedAgeMs = (job) => {
   if (job?.status !== 'cancel_requested') return 0;
   const startedAt = Date.parse(job.cancelledAt || job.updatedAt || job.createdAt || '');
@@ -7117,6 +8786,69 @@ const maybeFinalizeStaleCancelRequestedJob = (job, client = null, reason = 'canc
   return true;
 };
 
+const requestActiveBrowserOperationCancelForJob = (job, reason = 'job-cancel') => {
+  const client = clients.get(job?.clientId);
+  if (!job || !client) return null;
+
+  appendExportJobTrace(job, 'browser_operation_cancel_requested', {
+    reason,
+    clientId: client.clientId,
+    activeOperation: client.activeTabOperation || null,
+  });
+
+  return enqueueCommand(
+    client.clientId,
+    'cancel-active-operation',
+    {
+      jobId: job.jobId,
+      reason,
+    },
+    {
+      timeoutMs: 3000,
+      dispatchTimeoutMs: 2000,
+    },
+  )
+    .then((result) => {
+      appendExportJobTrace(job, 'browser_operation_cancel_result', {
+        reason,
+        ok: result?.ok === true,
+        cancelled: result?.cancelled === true,
+        code: result?.code || null,
+      });
+      touchExportJob(job);
+      return result;
+    })
+    .catch((err) => {
+      appendExportJobTrace(job, 'browser_operation_cancel_failed', {
+        reason,
+        error: err?.message || String(err),
+        code: err?.code || null,
+      });
+      touchExportJob(job);
+      return null;
+    });
+};
+
+const requestExportJobCancel = (job, reason = 'job-cancel') => {
+  if (!job || isTerminalExportJobStatus(job.status)) return;
+  job.cancelRequested = true;
+  job.cancelledAt = job.cancelledAt || new Date().toISOString();
+  job.status = 'cancel_requested';
+  appendExportJobTrace(job, 'job_cancel_requested', { reason });
+  touchExportJob(job);
+
+  const client = clients.get(job.clientId);
+  if (client) {
+    if (job.type === 'direct-chats-export') {
+      broadcastDirectChatsJobProgress(job, client);
+    } else {
+      broadcastRecentChatsJobProgress(job, client);
+    }
+  }
+
+  void requestActiveBrowserOperationCancelForJob(job, reason);
+};
+
 const maybeUpdateSyncState = (job, client, failures = []) => {
   if (!job.syncMode || !job.existingScanDir || !job.syncStateFile) return null;
   const completeEnough =
@@ -7191,6 +8923,16 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
   job.completed = resumedCompletedCount;
   let preloadedVaultScan = null;
   try {
+    await loadDateImportForExportJob({
+      job,
+      client,
+      args,
+      successes,
+      failures,
+      persist: persistRecentChatsExportReport,
+      broadcast: broadcastRecentChatsJobProgress,
+    }, exportJobRecordingDeps);
+
     if (job.syncMode) {
       job.phase = 'scanning-vault';
       touchExportJob(job);
@@ -7254,15 +8996,44 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
         if (job.syncMode) job.syncBoundary = loadMore.boundary || null;
         if (job.loadMoreTimedOut) recordJobCounter(job, 'browserTimeouts');
       } else {
-        const targetCount = Math.min(MAX_RECENT_CHATS_LOAD_TARGET, job.startIndex - 1 + job.maxChats);
-        const listed = await listRecentChatsForClient(client, {
-          ...args,
-          limit: 1,
-          offset: Math.max(0, targetCount - 1),
-          refresh: args.refresh,
-        });
-        const listedClient = listed?.client?.clientId ? clients.get(listed.client.clientId) : null;
-        if (listedClient) client = listedClient;
+        const partialLoadTargetCount = Math.min(MAX_RECENT_CHATS_LOAD_TARGET, job.startIndex - 1 + job.maxChats);
+        const shouldLoadPartialHistory =
+          !job.exportAll &&
+          !job.exportMissingOnly &&
+          !job.syncMode &&
+          recentConversationsForClient(client).length < partialLoadTargetCount &&
+          !recentChatsReachedEndForClient(client);
+        if (shouldLoadPartialHistory) {
+          const loadMore = await withTimeout(
+            loadMoreRecentChatsForClient(client, partialLoadTargetCount, {
+              ...args,
+              shouldStop: () => job.cancelRequested === true,
+            }),
+            Math.max(1000, Number(args.loadMoreTimeoutMs || RECENT_CHATS_LOAD_MORE_BUDGET_MS)),
+          );
+          if (loadMore?.client) client = loadMore.client;
+          const loadMoreResolved =
+            loadMore.reachedEnd === true ||
+            recentConversationsForClient(client).length >= partialLoadTargetCount;
+          job.loadMoreRoundsCompleted = loadMore.roundsCompleted;
+          job.loadMoreTimedOut = loadMore.timedOut === true && !loadMoreResolved;
+          job.loadMoreTrace = Array.isArray(loadMore.loadTrace) ? loadMore.loadTrace : [];
+          job.partialLoadIncomplete = !loadMoreResolved;
+          appendExportJobTrace(job, 'load_more_partial_recent_chats', {
+            operation: 'load-more-partial-recent-chats',
+            targetCount: partialLoadTargetCount,
+            loadedCount: recentConversationsForClient(client).length,
+            reachedEnd: loadMore.reachedEnd === true || recentChatsReachedEndForClient(client),
+            timedOut: loadMore.timedOut === true,
+            resolved: loadMoreResolved,
+          });
+          if (job.loadMoreTimedOut) recordJobCounter(job, 'browserTimeouts');
+          if (!loadMoreResolved) {
+            job.loadWarning =
+              `Nao consegui carregar o sidebar ate ${job.maxChats} conversa(s). ` +
+              'O lote parcial pode estar incompleto.';
+          }
+        }
       }
     });
 
@@ -7283,7 +9054,8 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
     job.reachedEnd = recentChatsReachedEndForClient(client);
     job.truncated = job.exportAll
       ? !job.reachedEnd
-      : !job.reachedEnd && allConversations.length >= MAX_RECENT_CHATS_LOAD_TARGET;
+      : job.partialLoadIncomplete === true ||
+        (!job.reachedEnd && allConversations.length >= MAX_RECENT_CHATS_LOAD_TARGET);
     if (job.syncMode && job.syncBoundary?.found === true) {
       job.truncated = false;
     }
@@ -7302,10 +9074,7 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
         index: job.startIndex + sliceIndex,
       }))
       .filter(({ conversation }) => {
-        const key =
-          normalizeConversationChatId(conversation) ||
-          stripGeminiPrefix(conversation.chatId || conversation.id) ||
-          conversation.url;
+        const key = normalizeConversationChatId(conversation);
         if (!key || seen.has(key)) return false;
         seen.add(key);
         return true;
@@ -7388,6 +9157,8 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
     broadcastRecentChatsJobProgress(job, client);
 
     const exportingStartedAt = Date.now();
+    const deferDateImportSave = hasDateImportSource(args);
+    const deferredSaves = [];
     for (let i = 0; i < selected.length; i += 1) {
       if (job.cancelRequested) {
         job.status = 'cancelled';
@@ -7448,74 +9219,28 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
         const result = await downloadConversationItemWithRetry(job, client, conversation, {
           ...args,
           outputDir: job.outputDir,
+          collectOnly: deferDateImportSave,
           returnToOriginal: false,
         });
-        const resultClient = result.client?.clientId ? clients.get(result.client.clientId) : null;
-        if (resultClient) client = resultClient;
-        const success = {
-          index,
-          chatId: result.chatId,
-          title: result.title,
-          filename: result.filename,
-          filePath: result.filePath,
-          bytes: result.bytes,
-          mediaFileCount: result.mediaFileCount || 0,
-          mediaFailureCount: result.mediaFailureCount || 0,
-          turns: result.turns,
-          overwritten: result.overwritten,
-          metrics: result.metrics || null,
-        };
-        successes.push(success);
-        job.recentSuccesses.push(success);
-        job.recentSuccesses = job.recentSuccesses.slice(-10);
-        job.successCount = successes.length;
-        recordJobCounter(job, 'mediaFiles', result.mediaFileCount || 0);
-        recordJobCounter(job, 'mediaWarnings', result.mediaFailureCount || 0);
-        recordJobCounter(
-          job,
-          'savedBytes',
-          (result.bytes || 0) + (result.metrics?.counters?.savedMediaBytes || 0),
-        );
-        recordJobCounter(job, 'browserTimeouts', browserTimeoutCountFromConversationMetrics(result.metrics));
-        recordJobCounter(job, 'assetTimeouts', assetTimeoutCountFromConversationMetrics(result.metrics));
-        finishConversationMetric(job, itemMetric, 'success', {
-          chatId: result.chatId,
-          filename: result.filename,
-          filePath: result.filePath,
-          bytes: result.bytes,
-          timings: result.metrics?.timings || {},
-          counters: result.metrics?.counters || {},
-          hydration: result.metrics?.hydration || null,
-          navigation: result.metrics?.navigation || null,
-          media: result.metrics?.media || null,
-        });
-      } catch (err) {
-        const failure = {
-          index,
-          chatId: conversation.chatId || conversation.id || null,
-          title: conversation.title || null,
-          error: err.message,
-        };
-        failures.push(failure);
-        job.failures.push(failure);
-        job.failures = job.failures.slice(-20);
-        job.failureCount = failures.length;
-        appendExportJobTrace(job, 'conversation_failed', {
-          index,
-          chatId: failure.chatId,
-          error: err.message,
-          code: err.code || null,
-          layer: err.layer || null,
-          operation: err.operation || null,
-          timeout: err.data?.timeout || null,
-        });
-        recordJobCounter(job, 'failedConversations');
-        if (/timeout|tempo esgotado/i.test(err.message)) {
-          recordJobCounter(job, 'browserTimeouts');
+        if (deferDateImportSave) {
+          const resultClient = result.activeClient?.clientId ? clients.get(result.activeClient.clientId) : null;
+          if (resultClient) client = rebindExportJobToClient(job, resultClient, 'conversation-download');
+          deferredSaves.push({ index, conversation, itemMetric, collected: result });
+          continue;
         }
-        finishConversationMetric(job, itemMetric, 'failed', {
-          error: err.message,
-        });
+        const resultClient = result.client?.clientId ? clients.get(result.client.clientId) : null;
+        if (resultClient) client = rebindExportJobToClient(job, resultClient, 'conversation-download');
+        const success = buildConversationExportSuccess({ index, conversation, result });
+        recordConversationExportSuccess(
+          { job, successes, itemMetric, success, result },
+          exportJobRecordingDeps,
+        );
+      } catch (err) {
+        const failure = buildConversationExportFailure({ index, conversation, err });
+        recordConversationExportFailure(
+          { job, failures, itemMetric, failure, err },
+          exportJobRecordingDeps,
+        );
       } finally {
         job.completed = resumedCompletedCount + i + 1;
         touchExportJob(job);
@@ -7523,6 +9248,17 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
         broadcastRecentChatsJobProgress(job, client);
       }
     }
+
+    client = await saveDeferredDateImportExports({
+      job,
+      client,
+      successes,
+      failures,
+      deferredSaves,
+      args,
+      persist: persistRecentChatsExportReport,
+      broadcast: broadcastRecentChatsJobProgress,
+    }, exportJobRecordingDeps);
     recordJobTimingFrom(job, 'exportConversationsMs', exportingStartedAt);
 
     if (!job.cancelRequested) {
@@ -7604,6 +9340,7 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
 
 const startRecentChatsExportJob = (client, args = {}) => {
   assertNoRunningBrowserExportJob(client);
+  assertClientClaimedReadyForSession(client, args);
 
   const resumeReportFile = args.resumeReportFile || args.reportFile || null;
   const resume = resumeReportFile ? loadRecentChatsResumeCheckpoint(resumeReportFile) : null;
@@ -7629,6 +9366,7 @@ const startRecentChatsExportJob = (client, args = {}) => {
     clientId: client.clientId,
     autoReleaseTabClaim: shouldAutoReleaseTabClaim(args),
     tabClaimId: activeClaim?.claimId || args.claimId || null,
+    tabClaimWarning: client.lastTabClaimWarning || null,
     tabClaimRelease: null,
     outputDir,
     createdAt: new Date().toISOString(),
@@ -7674,7 +9412,9 @@ const startRecentChatsExportJob = (client, args = {}) => {
     loadMoreRoundsCompleted: 0,
     loadMoreTimedOut: false,
     loadMoreTrace: [],
+    partialLoadIncomplete: false,
     metrics: createExportJobMetrics(),
+    dateImport: defaultDateImportSummary(args),
     recentSuccesses: resume?.previousSuccesses?.slice(-10) || [],
     recentSkipped: resume?.previousSkipped?.slice(-10) || [],
     skippedExisting: resume?.previousSkipped ? [...resume.previousSkipped] : [],
@@ -7691,12 +9431,24 @@ const runDirectChatsExportJob = async (job, client, args = {}) => {
   const successes = Array.isArray(job.resumedSuccesses) ? [...job.resumedSuccesses] : [];
   const failures = [];
   try {
+    await loadDateImportForExportJob({
+      job,
+      client,
+      args,
+      successes,
+      failures,
+      persist: persistDirectChatsExportReport,
+      broadcast: broadcastDirectChatsJobProgress,
+    }, exportJobRecordingDeps);
+
     job.phase = 'exporting';
     touchExportJob(job);
     persistDirectChatsExportReport(job, client, successes, failures);
     broadcastDirectChatsJobProgress(job, client);
 
     const exportingStartedAt = Date.now();
+    const deferDateImportSave = hasDateImportSource(args);
+    const deferredSaves = [];
     const pendingItems = Array.isArray(job.pendingItems) ? job.pendingItems : job.items;
     const resumedCompletedCount = Math.max(0, Number(job.resumedCompletedCount || 0));
     for (let i = 0; i < pendingItems.length; i += 1) {
@@ -7729,76 +9481,28 @@ const runDirectChatsExportJob = async (job, client, args = {}) => {
         const result = await downloadConversationItemWithRetry(job, client, conversation, {
           ...args,
           outputDir: job.outputDir,
+          collectOnly: deferDateImportSave,
           returnToOriginal: false,
         });
-        const success = {
-          index,
-          chatId: result.chatId,
-          title: result.title,
-          filename: result.filename,
-          filePath: result.filePath,
-          bytes: result.bytes,
-          mediaFileCount: result.mediaFileCount || 0,
-          mediaFailureCount: result.mediaFailureCount || 0,
-          turns: result.turns,
-          overwritten: result.overwritten,
-          sourcePath: conversation.request?.sourcePath || null,
-          metrics: result.metrics || null,
-        };
-        successes.push(success);
-        job.recentSuccesses.push(success);
-        job.recentSuccesses = job.recentSuccesses.slice(-10);
-        job.successCount = successes.length;
-        recordJobCounter(job, 'mediaFiles', result.mediaFileCount || 0);
-        recordJobCounter(job, 'mediaWarnings', result.mediaFailureCount || 0);
-        recordJobCounter(
-          job,
-          'savedBytes',
-          (result.bytes || 0) + (result.metrics?.counters?.savedMediaBytes || 0),
-        );
-        recordJobCounter(job, 'browserTimeouts', browserTimeoutCountFromConversationMetrics(result.metrics));
-        recordJobCounter(job, 'assetTimeouts', assetTimeoutCountFromConversationMetrics(result.metrics));
-        finishConversationMetric(job, itemMetric, 'success', {
-          chatId: result.chatId,
-          filename: result.filename,
-          filePath: result.filePath,
-          bytes: result.bytes,
-          sourcePath: conversation.request?.sourcePath || null,
-          timings: result.metrics?.timings || {},
-          counters: result.metrics?.counters || {},
-          hydration: result.metrics?.hydration || null,
-          navigation: result.metrics?.navigation || null,
-          media: result.metrics?.media || null,
-        });
-      } catch (err) {
-        const failure = {
-          index,
-          chatId: conversation.chatId,
-          title: conversation.title || null,
-          sourcePath: conversation.request?.sourcePath || null,
-          error: err.message,
-        };
-        failures.push(failure);
-        job.failures.push(failure);
-        job.failures = job.failures.slice(-20);
-        job.failureCount = failures.length;
-        appendExportJobTrace(job, 'conversation_failed', {
-          index,
-          chatId: failure.chatId,
-          error: err.message,
-          code: err.code || null,
-          layer: err.layer || null,
-          operation: err.operation || null,
-          timeout: err.data?.timeout || null,
-        });
-        recordJobCounter(job, 'failedConversations');
-        if (/timeout|tempo esgotado/i.test(err.message)) {
-          recordJobCounter(job, 'browserTimeouts');
+        if (deferDateImportSave) {
+          const resultClient = result.activeClient?.clientId ? clients.get(result.activeClient.clientId) : null;
+          if (resultClient) client = rebindExportJobToClient(job, resultClient, 'conversation-download');
+          deferredSaves.push({ index, conversation, itemMetric, collected: result });
+          continue;
         }
-        finishConversationMetric(job, itemMetric, 'failed', {
-          sourcePath: conversation.request?.sourcePath || null,
-          error: err.message,
-        });
+        const resultClient = result.client?.clientId ? clients.get(result.client.clientId) : null;
+        if (resultClient) client = rebindExportJobToClient(job, resultClient, 'conversation-download');
+        const success = buildConversationExportSuccess({ index, conversation, result });
+        recordConversationExportSuccess(
+          { job, successes, itemMetric, success, result },
+          exportJobRecordingDeps,
+        );
+      } catch (err) {
+        const failure = buildConversationExportFailure({ index, conversation, err });
+        recordConversationExportFailure(
+          { job, failures, itemMetric, failure, err },
+          exportJobRecordingDeps,
+        );
       } finally {
         job.completed = Math.min(job.requested, resumedCompletedCount + i + 1);
         const hasNext = !job.cancelRequested && i < pendingItems.length - 1;
@@ -7819,6 +9523,17 @@ const runDirectChatsExportJob = async (job, client, args = {}) => {
         await sleep(job.delayMs);
       }
     }
+
+    client = await saveDeferredDateImportExports({
+      job,
+      client,
+      successes,
+      failures,
+      deferredSaves,
+      args,
+      persist: persistDirectChatsExportReport,
+      broadcast: broadcastDirectChatsJobProgress,
+    }, exportJobRecordingDeps);
     recordJobTimingFrom(job, 'exportConversationsMs', exportingStartedAt);
 
     if (!job.cancelRequested) {
@@ -7887,6 +9602,7 @@ const runDirectChatsExportJob = async (job, client, args = {}) => {
 
 const startDirectChatsExportJob = (client, args = {}) => {
   assertNoRunningBrowserExportJob(client);
+  assertClientClaimedReadyForSession(client, args);
 
   const selection = normalizeDirectReexportSelection(args);
   const items = selection.items;
@@ -7915,6 +9631,7 @@ const startDirectChatsExportJob = (client, args = {}) => {
     clientId: client.clientId,
     autoReleaseTabClaim: shouldAutoReleaseTabClaim(args),
     tabClaimId: activeClaim?.claimId || args.claimId || null,
+    tabClaimWarning: client.lastTabClaimWarning || null,
     tabClaimRelease: null,
     outputDir,
     createdAt: new Date().toISOString(),
@@ -7944,6 +9661,7 @@ const startDirectChatsExportJob = (client, args = {}) => {
     resumedCompletedCount,
     remainingAfterResume: pendingItems.length,
     metrics: createExportJobMetrics(),
+    dateImport: defaultDateImportSummary(args),
     recentSuccesses: resumedSuccesses.slice(-10),
     failures: [],
   };
@@ -8053,6 +9771,9 @@ const exportNotebookForClient = async (client, args = {}) => {
 };
 
 const reloadGeminiTabs = async (args = {}) => {
+  assertBrowserSideEffect('tab-reload', {
+    explicit: args.explicit === true || args.intent === 'tab_management' || args.diagnostic === true,
+  });
   const delayMs = Math.max(0, Math.min(10_000, Number(args.delayMs || 500)));
   const liveClients = getLiveClients();
   if (liveClients.length === 0) {
@@ -8064,9 +9785,15 @@ const reloadGeminiTabs = async (args = {}) => {
   }
 
   const selector = normalizeClientSelector(args);
-  if (selector.clientId || selector.tabId !== null || selector.claimId || claimForSession(selector.sessionId)) {
-    const client = requireClient(args);
-    const result = await enqueueCommand(client.clientId, 'reload-page', { delayMs });
+  const explicitReloadClient = selectExplicitReloadClient(liveClients, selector);
+  if (explicitReloadClient || selector.claimId || claimForSession(selector.sessionId)) {
+    const client = explicitReloadClient || requireClient(args);
+    const result = await enqueueCommand(
+      client.clientId,
+      'reload-page',
+      { delayMs },
+      { browserSideEffectExplicit: true },
+    );
     return {
       ok: !!result?.ok,
       mode: 'single-tab',
@@ -8080,6 +9807,7 @@ const reloadGeminiTabs = async (args = {}) => {
   const controller = liveClients[0];
   const result = await enqueueCommand(controller.clientId, 'reload-gemini-tabs', {
     reason: args.reason || 'mcp-command',
+    explicitBrowserSideEffect: true,
   });
 
   if (result?.ok) {
@@ -8095,10 +9823,15 @@ const reloadGeminiTabs = async (args = {}) => {
 
   const settled = await Promise.allSettled(
     liveClients.map((client) =>
-      enqueueCommand(client.clientId, 'reload-page', { delayMs }).then((itemResult) => ({
-        client: summarizeClient(client),
-        result: itemResult,
-      })),
+      enqueueCommand(
+        client.clientId,
+        'reload-page',
+        { delayMs },
+        { browserSideEffectExplicit: true },
+      ).then((itemResult) => ({
+          client: summarizeClient(client),
+          result: itemResult,
+        })),
     ),
   );
   const successes = settled
@@ -8127,14 +9860,14 @@ const legacyRawTools = [
   {
     name: 'gemini_browser_status',
     description:
-      'Lista as abas do Gemini conectadas à extensão e acorda o navegador se nenhuma aba estiver conectada.',
+      'Lista as abas do Gemini conectadas à extensão; só acorda o navegador quando wakeBrowser=true.',
     inputSchema: {
       type: 'object',
       properties: {
         wakeBrowser: {
           type: 'boolean',
           description:
-            'Quando true ou omitido, tenta abrir Chrome/Edge/Brave/Dia se nenhuma aba Gemini estiver conectada.',
+            'Quando true, tenta abrir Chrome/Edge/Brave/Dia se nenhuma aba Gemini estiver conectada.',
         },
         waitMs: {
           type: 'number',
@@ -8148,12 +9881,12 @@ const legacyRawTools = [
         selfHeal: {
           type: 'boolean',
           description:
-            'Quando true ou omitido, tenta validar versão/protocolo/build e pedir reload automático da extensão se ela estiver stale.',
+            'Quando true ou omitido, valida versão/protocolo/build sem reload; reload exige allowReload=true.',
         },
         allowReload: {
           type: 'boolean',
           description:
-            'Quando true ou omitido, permite que o status peça reload automático da extensão Chrome se detectar versão/build antigos.',
+            'Quando true, permite reload explícito da extensão Chrome se detectar versão/build antigos.',
         },
         reloadWaitMs: {
           type: 'number',
@@ -8172,7 +9905,7 @@ const legacyRawTools = [
       cleanupStaleClients();
       let launchResult = null;
       let waitedMs = 0;
-      const wakeBrowser = args.wakeBrowser !== false;
+      const wakeBrowser = args.wakeBrowser === true;
       const selfHealEnabled = args.selfHeal !== false;
       let selfHeal = {
         attempted: false,
@@ -8187,7 +9920,7 @@ const legacyRawTools = [
             },
             {
               allowLaunchChrome: wakeBrowser,
-              allowReload: args.allowReload !== false,
+              allowReload: args.allowReload === true,
               config: {
                 initialConnectTimeoutMs: normalizeWaitMs(
                   args.initialWaitMs,
@@ -8233,6 +9966,7 @@ const legacyRawTools = [
       if (wakeBrowser && liveClients.length === 0 && CHROME_GUARD_CONFIG.launchIfClosed) {
         launchResult = await launchChromeForGemini({
           profileDirectory: CHROME_GUARD_CONFIG.profileDirectory,
+          explicit: true,
         });
         const waitMs = normalizeWaitMs(args.waitMs, BROWSER_STATUS_WAKE_WAIT_MS);
         const startedAt = Date.now();
@@ -8241,6 +9975,12 @@ const legacyRawTools = [
       }
 
       const matchingClients = liveClients.filter(clientMatchesExpectedBrowserExtension);
+      const selectableClients = getSelectableGeminiClients();
+      const claimableClients = getActiveClaimableGeminiClients(
+        selectableClients,
+        activeClaimableGeminiClientOptions(),
+      );
+      const commandReadyClients = matchingClients.filter(commandChannelReadyForClient);
       const summarizedClients = liveClients.map(summarizeClient);
       const summarizedMatchingClients = matchingClients.map(summarizeClient);
       const extensionReadiness = buildExtensionReadiness({
@@ -8254,17 +9994,21 @@ const legacyRawTools = [
           : launchResult?.attempted || waitedMs > 0 || (selfHeal.timings?.initialWaitMs || 0) > 0
             ? 'cold'
             : 'hot';
+      const readiness = evaluateBrowserReadiness({
+        allLiveClients: liveClients,
+        selectableClients,
+        matchingClients,
+        commandReadyClients,
+        claimableClients,
+      });
       return toolTextResult({
-        ready: matchingClients.length > 0,
-        blockingIssue:
-          liveClients.length === 0
-            ? 'no_connected_clients'
-            : matchingClients.length === 0
-              ? 'extension_version_mismatch'
-              : null,
+        ready: readiness.ready,
+        blockingIssue: readiness.blockingIssue,
         expectedChromeExtension: EXPECTED_CHROME_EXTENSION_INFO,
         sessionId: PROCESS_SESSION_ID,
-        matchingClientCount: matchingClients.length,
+        matchingClientCount: readiness.matchingClientCount,
+        selectableTabCount: readiness.selectableTabCount,
+        claimableTabCount: readiness.claimableTabCount,
         connectedClients: summarizedClients,
         tabClaims: summarizeTabClaims(),
         extensionReadiness,
@@ -8334,13 +10078,13 @@ const legacyRawTools = [
   {
     name: 'gemini_list_tabs',
     description:
-      'Lista abas Gemini conectadas, claims ativas e IDs para escolher uma aba antes de listar/exportar. Se nenhuma aba existir, abre uma aba Gemini por padrão.',
+      'Lista abas Gemini conectadas, claims ativas e IDs para escolher uma aba antes de listar/exportar. Só abre aba com openIfMissing=true.',
     inputSchema: {
       type: 'object',
       properties: {
         openIfMissing: {
           type: 'boolean',
-          description: 'Quando true ou omitido, abre uma aba Gemini se nenhuma estiver conectada.',
+          description: 'Quando true, abre uma aba Gemini se nenhuma estiver conectada.',
         },
         waitMs: {
           type: 'number',
@@ -8351,27 +10095,46 @@ const legacyRawTools = [
     },
     call: async (args = {}) => {
       cleanupStaleClients();
+      const nativeTabs = await tryNativeBrowserBrokerTabsAction('list', args);
+      if (
+        nativeTabs &&
+        (nativeTabs.ok === false ||
+          args.openIfMissing !== true ||
+          nativeTabs.connectedTabCount > 0 ||
+          (Array.isArray(nativeTabs.tabs) && nativeTabs.tabs.length > 0))
+      ) {
+        return toolTextResult(nativeTabs, { isError: nativeTabs.ok === false });
+      }
       let launchResult = null;
       let allLiveClients = getLiveClients();
-      let liveClients = getSelectableGeminiClients();
-      if (liveClients.length === 0 && args.openIfMissing !== false) {
+      let selectableClients = getSelectableGeminiClients();
+      let claimableClients = getActiveClaimableGeminiClients(
+        selectableClients,
+        activeClaimableGeminiClientOptions(),
+      );
+      if (claimableClients.length === 0 && selectableClients.length === 0 && args.openIfMissing === true) {
         launchResult = await launchChromeForGemini({
           profileDirectory: CHROME_GUARD_CONFIG.profileDirectory,
+          explicit: true,
         });
         await waitForLiveClients(
           normalizeWaitMs(args.waitMs, BROWSER_STATUS_WAKE_WAIT_MS),
           CHROME_GUARD_CONFIG.pollIntervalMs || 500,
         );
         allLiveClients = getLiveClients();
-        liveClients = getSelectableGeminiClients();
+        selectableClients = getSelectableGeminiClients();
+        claimableClients = getActiveClaimableGeminiClients(
+          selectableClients,
+          activeClaimableGeminiClientOptions(),
+        );
       }
-      const diagnosticClients = tabSelectionDiagnostics(allLiveClients, liveClients);
+      const diagnosticClients = tabSelectionDiagnostics(allLiveClients, claimableClients);
       return toolTextResult({
         ok: true,
         sessionId: PROCESS_SESSION_ID,
-        connectedTabCount: liveClients.length,
+        connectedTabCount: claimableClients.length,
         connectedClientCount: allLiveClients.length,
-        tabs: liveClients.map((client, index) => ({
+        tabs: claimableClients.map((client, index) => ({
           index: index + 1,
           ...summarizeClient(client),
         })),
@@ -8380,25 +10143,25 @@ const legacyRawTools = [
         browserWake: launchResult
           ? {
               ...launchResult,
-              connectedAfterWake: liveClients.length,
+              connectedAfterWake: claimableClients.length,
             }
           : {
               attempted: false,
-              reason: liveClients.length > 0 ? 'already-connected' : 'open-disabled',
+              reason: claimableClients.length > 0 ? 'already-connected' : 'open-disabled',
             },
         nextAction:
-          liveClients.length === 0
+          claimableClients.length === 0
             ? {
                 code: 'no_gemini_tab_connected',
                 message:
                   'Abra uma aba do Gemini ou chame gemini_tabs { action: "list", intent: "tab_management", openIfMissing: true }.',
               }
-            : liveClients.length === 1
+            : claimableClients.length === 1
               ? {
                   code: 'claim_single_tab',
                   command: {
                     tool: 'gemini_tabs',
-                    arguments: { action: 'claim', clientId: liveClients[0].clientId },
+                    arguments: { action: 'claim', clientId: claimableClients[0].clientId },
                   },
                 }
               : {
@@ -8428,7 +10191,7 @@ const legacyRawTools = [
         },
         label: {
           type: 'string',
-          description: 'Rótulo curto mostrado no Tab Group, por exemplo GME A.',
+          description: 'Rótulo curto mostrado no Tab Group, por exemplo 📥 Exportando.',
         },
         color: {
           type: 'string',
@@ -8446,7 +10209,7 @@ const legacyRawTools = [
         },
         openIfMissing: {
           type: 'boolean',
-          description: 'Quando true ou omitido, abre uma aba Gemini se nenhuma estiver conectada.',
+          description: 'Quando true, abre uma aba Gemini se nenhuma estiver conectada.',
         },
         waitMs: {
           type: 'number',
@@ -8460,8 +10223,10 @@ const legacyRawTools = [
       additionalProperties: false,
     },
     call: async (args = {}) => {
+      const nativeClaim = await tryNativeBrowserBrokerTabsAction('claim', args);
+      if (nativeClaim) return toolTextResult(nativeClaim, { isError: nativeClaim.ok === false });
       const client = await selectClaimableClient(args);
-      return toolTextResult(await claimTabForClient(client, args));
+      return toolTextResult(await claimGeminiTabForClient(client, args));
     },
   },
   {
@@ -8476,7 +10241,11 @@ const legacyRawTools = [
       },
       additionalProperties: false,
     },
-    call: async (args = {}) => toolTextResult(await releaseTabClaim(args)),
+    call: async (args = {}) => {
+      const nativeRelease = await tryNativeBrowserBrokerTabsAction('release', args);
+      if (nativeRelease) return toolTextResult(nativeRelease, { isError: nativeRelease.ok === false });
+      return toolTextResult(await releaseTabClaim(args));
+    },
   },
   {
     name: 'gemini_mcp_diagnose_processes',
@@ -8523,6 +10292,58 @@ const legacyRawTools = [
     call: async (args = {}) => {
       const result = await cleanupStaleMcpProcesses(args);
       return toolTextResult(result, { isError: args.confirm === true && !result.ok });
+    },
+  },
+  {
+    name: 'gemini_browser_side_effects',
+    description:
+      'Consulta ou altera o freio local de seguranca que bloqueia launch/reload/foco/navegacao do navegador.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['status', 'disable', 'enable'],
+          description: 'status apenas consulta; disable ativa o freio; enable remove o freio local.',
+        },
+        reason: {
+          type: 'string',
+          description: 'Motivo humano para registrar quando action=disable.',
+        },
+        expiresAt: {
+          type: 'string',
+          description: 'ISO opcional para expirar o bloqueio automaticamente.',
+        },
+      },
+      additionalProperties: false,
+    },
+    call: async (args = {}) => {
+      const action = args.action || 'status';
+      if (action === 'disable') {
+        return toolTextResult({
+          ok: true,
+          action,
+          sideEffects: setBrowserSideEffectsDisabled({
+            diagnosticDir: DIAGNOSTIC_DIR,
+            disabled: true,
+            reason: args.reason || 'manual-disable',
+            source: 'mcp',
+            expiresAt: args.expiresAt || null,
+          }),
+        });
+      }
+      if (action === 'enable') {
+        return toolTextResult({
+          ok: true,
+          action,
+          sideEffects: clearBrowserSideEffectsState({ diagnosticDir: DIAGNOSTIC_DIR }),
+        });
+      }
+      return toolTextResult({
+        ok: true,
+        action,
+        sideEffects: browserSideEffectsStatus(),
+      });
     },
   },
   {
@@ -8743,6 +10564,7 @@ const legacyRawTools = [
           type: 'string',
           description: 'Diretório local de destino. Default: ~/Downloads ou GEMINI_MCP_EXPORT_DIR.',
         },
+        ...dateImportToolProperties(),
         returnToOriginal: {
           type: 'boolean',
           description: 'Volta para a conversa original depois de exportar. Default: true.',
@@ -8776,6 +10598,7 @@ const legacyRawTools = [
           type: 'string',
           description: 'Diretório local de destino. Default: diretório MCP configurado.',
         },
+        ...dateImportToolProperties(),
         returnToOriginal: {
           type: 'boolean',
           description: 'Volta para o caderno depois de exportar. Default: true.',
@@ -8801,6 +10624,7 @@ const legacyRawTools = [
           type: 'string',
           description: 'Diretório local de destino. Default: diretório MCP configurado.',
         },
+        ...dateImportToolProperties(),
         resumeReportFile: {
           type: 'string',
           description:
@@ -8897,7 +10721,7 @@ const legacyRawTools = [
     call: async (args = {}) => {
       const client = requireClient(args);
       assertNoRunningBrowserExportJob(client);
-      await ensureTabClaimForJob(client, args, 'GME Export');
+      await ensureTabClaimForJob(client, args, TAB_CLAIM_LABELS.export);
       return toolTextResult(startRecentChatsExportJob(client, args));
     },
   },
@@ -8919,6 +10743,7 @@ const legacyRawTools = [
           description:
             'Diretório local onde salvar os chats faltantes. Default: vaultDir, para manter Markdown e assets dentro do vault.',
         },
+        ...dateImportToolProperties(),
         resumeReportFile: {
           type: 'string',
           description:
@@ -8992,7 +10817,7 @@ const legacyRawTools = [
     call: async (args = {}) => {
       const client = requireClient(args);
       assertNoRunningBrowserExportJob(client);
-      await ensureTabClaimForJob(client, args, 'GME Missing');
+      await ensureTabClaimForJob(client, args, TAB_CLAIM_LABELS.export);
       return toolTextResult(
         startRecentChatsExportJob(client, {
           ...args,
@@ -9020,6 +10845,7 @@ const legacyRawTools = [
           type: 'string',
           description: 'Diretório onde salvar novas conversas. Default: vaultDir.',
         },
+        ...dateImportToolProperties(),
         syncStateFile: {
           type: 'string',
           description:
@@ -9086,7 +10912,7 @@ const legacyRawTools = [
     call: async (args = {}) => {
       const client = requireClient(args);
       assertNoRunningBrowserExportJob(client);
-      await ensureTabClaimForJob(client, args, 'GME Sync');
+      await ensureTabClaimForJob(client, args, TAB_CLAIM_LABELS.sync);
       return toolTextResult(
         startRecentChatsExportJob(client, {
           ...args,
@@ -9111,6 +10937,7 @@ const legacyRawTools = [
           type: 'string',
           description: 'Diretório local de destino. Default: diretório MCP configurado.',
         },
+        ...dateImportToolProperties(),
         chatId: {
           type: 'string',
           description: 'Atalho para reexportar um único chatId.',
@@ -9163,7 +10990,7 @@ const legacyRawTools = [
     call: async (args = {}) => {
       const client = requireClient(args);
       assertNoRunningBrowserExportJob(client);
-      await ensureTabClaimForJob(client, args, 'GME Reexport');
+      await ensureTabClaimForJob(client, args, TAB_CLAIM_LABELS.export);
       return toolTextResult(startDirectChatsExportJob(client, args));
     },
   },
@@ -9252,12 +11079,7 @@ const legacyRawTools = [
       if (!job) {
         return toolTextResult({ error: `Job não encontrado: ${args.jobId}` }, { isError: true });
       }
-      if (!isTerminalExportJobStatus(job.status)) {
-        job.cancelRequested = true;
-        job.cancelledAt = job.cancelledAt || new Date().toISOString();
-        job.status = 'cancel_requested';
-        touchExportJob(job);
-      }
+      requestExportJobCancel(job, 'tool-cancel');
       maybeFinalizeStaleCancelRequestedJob(job, clients.get(job.clientId), 'cancel-stale-cancel');
       return toolTextResult(summarizeExportJob(job));
     },
@@ -9274,6 +11096,7 @@ const legacyRawTools = [
           type: 'string',
           description: 'Diretório local de destino. Default: diretório MCP configurado.',
         },
+        ...dateImportToolProperties(),
         startIndex: {
           type: 'integer',
           minimum: 1,
@@ -9290,7 +11113,7 @@ const legacyRawTools = [
     },
     call: async (args = {}) => {
       const client = requireNotebookClient(args);
-      const claim = await ensureTabClaimForJob(client, args, 'GME Notebook');
+      const claim = await ensureTabClaimForJob(client, args, TAB_CLAIM_LABELS.export);
       let result = null;
       try {
         result = await exportNotebookForClient(client, args);
@@ -9378,7 +11201,9 @@ const legacyRawTools = [
     },
     call: async (args = {}) => {
       const client = args.notebook ? requireNotebookClient(args) : requireClient(args);
-      const result = await enqueueCommand(client.clientId, 'open-chat', args);
+      const result = await enqueueCommand(client.clientId, 'open-chat', args, {
+        browserSideEffectExplicit: true,
+      });
       return toolTextResult({
         client: summarizeClient(client),
         ...result,
@@ -9474,7 +11299,7 @@ const legacyRawTools = [
       additionalProperties: false,
     },
     call: async (args = {}) => {
-      const result = await reloadGeminiTabs(args);
+      const result = await reloadGeminiTabs({ ...args, explicit: true });
       return toolTextResult(result, { isError: !result.ok });
     },
   },
@@ -9523,7 +11348,7 @@ const withChromeExtensionGuard = (tool) => ({
   ...tool,
   call: async (args = {}) => {
     await ensureBrowserExtensionReady(args, {
-      allowLaunchChrome: args.openIfMissing !== false && args.wakeBrowser !== false,
+      allowLaunchChrome: args.openIfMissing === true && args.wakeBrowser !== false,
     });
     return tool.call(args);
   },
@@ -9997,6 +11822,8 @@ const buildCliExportCommand = (action, args = {}) => {
   addCliFlag(commandArgs, '--output-dir', args.outputDir || (action === 'sync' || action === 'missing' ? vaultDir : null));
   addCliFlag(commandArgs, '--resume-report-file', reportFile);
   addCliFlag(commandArgs, '--sync-state-file', args.syncStateFile);
+  addCliFlag(commandArgs, '--takeout', args.takeout || args.takeoutPath || args.metadataTakeout);
+  if (args.noMyActivity === true || args.useMyActivity === false) commandArgs.push('--no-my-activity');
   addCliFlag(commandArgs, '--known-boundary-count', args.knownBoundaryCount);
   addCliFlag(commandArgs, '--max-chats', args.maxChats || args.limit);
   addCliFlag(commandArgs, '--batch-size', args.batchSize);
@@ -10300,6 +12127,7 @@ const rawTools = [
         url: { type: 'string' },
         title: { type: 'string' },
         outputDir: { type: 'string' },
+        ...dateImportToolProperties(),
         returnToOriginal: { type: 'boolean' },
         includeFrameProbe: { type: 'boolean' },
         includeHtmlSample: { type: 'boolean' },
@@ -10382,6 +12210,7 @@ const rawTools = [
         ...domainSelectorProperties(),
         vaultDir: { type: 'string' },
         outputDir: { type: 'string' },
+        ...dateImportToolProperties(),
         syncStateFile: { type: 'string' },
         resumeReportFile: { type: 'string' },
         reportFile: { type: 'string' },
@@ -10485,18 +12314,28 @@ const rawTools = [
   {
     name: 'gemini_support',
     description:
-      'Diagnóstico e suporte operacional: ambiente, processos, cleanup seguro, flight recorder, bundle e snapshot.',
+      'Diagnóstico e suporte operacional: ambiente, processos, cleanup seguro, freio de navegador, flight recorder, bundle e snapshot.',
     inputSchema: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
-          enum: ['diagnose', 'processes', 'cleanup_processes', 'flight_recorder', 'bundle', 'snapshot'],
+          enum: [
+            'diagnose',
+            'processes',
+            'cleanup_processes',
+            'browser_side_effects',
+            'flight_recorder',
+            'bundle',
+            'snapshot',
+          ],
         },
         ...domainSelectorProperties(),
         confirm: { type: 'boolean' },
         dryRun: { type: 'boolean' },
         force: { type: 'boolean' },
+        reason: { type: 'string' },
+        expiresAt: { type: 'string' },
         waitMs: { type: 'integer', minimum: 100, maximum: 30000 },
         limit: { type: 'integer', minimum: 1, maximum: 1000 },
         outputDir: { type: 'string' },
@@ -10512,13 +12351,15 @@ const rawTools = [
           ? 'gemini_mcp_diagnose_processes'
           : action === 'cleanup_processes'
             ? 'gemini_mcp_cleanup_stale_processes'
-            : action === 'flight_recorder'
-              ? 'gemini_flight_recorder'
-              : action === 'bundle'
-                ? 'gemini_collect_support_bundle'
-                : action === 'snapshot'
-                  ? 'gemini_snapshot'
-                  : 'gemini_diagnose_environment';
+            : action === 'browser_side_effects'
+              ? 'gemini_browser_side_effects'
+              : action === 'flight_recorder'
+                ? 'gemini_flight_recorder'
+                : action === 'bundle'
+                  ? 'gemini_collect_support_bundle'
+                  : action === 'snapshot'
+                    ? 'gemini_snapshot'
+                    : 'gemini_diagnose_environment';
       return callLegacyToolCompacted('gemini_support', action, legacyName, args);
     },
   },
@@ -10572,6 +12413,7 @@ const LOCAL_PROXY_SUPPORT_ACTIONS = new Set([
   'diagnose',
   'processes',
   'cleanup_processes',
+  'browser_side_effects',
   'flight_recorder',
   'bundle',
 ]);
@@ -10703,8 +12545,12 @@ const bridgeServer = createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host || '127.0.0.1'}`);
 
   if (req.method === 'OPTIONS') {
-    if (url.pathname === '/bridge/pick-directory' || url.pathname === '/bridge/save-files') {
-      if (!isAllowedBridgeOrigin(req.headers.origin)) {
+    if (
+      url.pathname === '/bridge/pick-directory' ||
+      url.pathname === '/bridge/save-files' ||
+      url.pathname === '/bridge/fetch-asset'
+    ) {
+      if (!isAllowedGeminiBridgeOrigin(req.headers.origin)) {
         sendBridgeJson(req, res, 403, { error: 'origin not allowed' });
         return;
       }
@@ -10725,6 +12571,10 @@ const bridgeServer = createServer(async (req, res) => {
       mcpProtocolVersion: PROTOCOL_VERSION,
       bridgeRole,
       bridgeOnly: cli.bridgeOnly === true,
+      bridgeHttpEnabled: BRIDGE_HTTP_ENABLED,
+      browserControl: BROWSER_CONTROL_RUNTIME,
+      expectedChromeExtension: EXPECTED_CHROME_EXTENSION_INFO,
+      browserTransport: await browserTransportStatus(),
       host: cli.host,
       port: cli.port,
       pid: processInfo.pid,
@@ -10736,10 +12586,30 @@ const bridgeServer = createServer(async (req, res) => {
       cwd: processInfo.cwd,
       argv: processInfo.argv,
       process: processInfo,
+      browserSideEffects: browserSideEffectsStatus(),
       bridgeAssetFetch: snapshotBridgeAssetMetrics(),
       clients: getLiveClients().length,
       idleLifecycle: bridgeIdleLifecycleSnapshot(),
     });
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/agent/activity-scan') {
+    try {
+      const args = await readJsonBody(req);
+      const result = await scanActivityWithClient(args);
+      sendAgentJson(res, 200, result);
+    } catch (err) {
+      sendAgentJson(res, err.code === 'activity_client_missing' ? 503 : 500, {
+        ok: false,
+        error: err.message,
+        code: err.code || null,
+        nextAction:
+          err.code === 'activity_client_missing'
+            ? 'Abra o My Activity em https://myactivity.google.com/product/gemini. Se a extensão acabou de ganhar permissão nova, recarregue manualmente o card da extensão no navegador e recarregue a página.'
+            : null,
+      });
+    }
     return;
   }
 
@@ -10756,6 +12626,7 @@ const bridgeServer = createServer(async (req, res) => {
         sessionId: PROCESS_SESSION_ID,
         process: summarizeProcess(),
       },
+      browserSideEffects: browserSideEffectsStatus(),
       connectedClients,
       tabClaims: summarizeTabClaims(),
       bridgeAssetFetch: snapshotBridgeAssetMetrics(),
@@ -10768,6 +12639,38 @@ const bridgeServer = createServer(async (req, res) => {
             })),
           }
         : {}),
+    });
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/agent/browser-side-effects') {
+    const action = url.searchParams.get('action') || 'status';
+    if (action === 'disable') {
+      sendAgentJson(res, 200, {
+        ok: true,
+        action,
+        sideEffects: setBrowserSideEffectsDisabled({
+          diagnosticDir: DIAGNOSTIC_DIR,
+          disabled: true,
+          reason: url.searchParams.get('reason') || 'manual-disable',
+          source: 'agent-http',
+          expiresAt: url.searchParams.get('expiresAt') || null,
+        }),
+      });
+      return;
+    }
+    if (action === 'enable') {
+      sendAgentJson(res, 200, {
+        ok: true,
+        action,
+        sideEffects: clearBrowserSideEffectsState({ diagnosticDir: DIAGNOSTIC_DIR }),
+      });
+      return;
+    }
+    sendAgentJson(res, 200, {
+      ok: true,
+      action: 'status',
+      sideEffects: browserSideEffectsStatus(),
     });
     return;
   }
@@ -10792,7 +12695,7 @@ const bridgeServer = createServer(async (req, res) => {
       };
       if (action === 'claim') {
         const client = await selectClaimableClient(args);
-        sendAgentJson(res, 200, await claimTabForClient(client, args));
+        sendAgentJson(res, 200, await claimGeminiTabForClient(client, args));
         return;
       }
       if (action === 'release') {
@@ -10800,7 +12703,7 @@ const bridgeServer = createServer(async (req, res) => {
         return;
       }
       if (action === 'reload') {
-        sendAgentJson(res, 200, await reloadGeminiTabs(args));
+        sendAgentJson(res, 200, await reloadGeminiTabs({ ...args, explicit: true }));
         return;
       }
       if (action !== 'list') {
@@ -10808,31 +12711,47 @@ const bridgeServer = createServer(async (req, res) => {
         return;
       }
       let allLiveClients = getLiveClients();
-      let liveClients = getSelectableGeminiClients();
+      let selectableClients = getSelectableGeminiClients();
+      let claimableClients = getActiveClaimableGeminiClients(
+        selectableClients,
+        activeClaimableGeminiClientOptions(),
+      );
+      const cdp = await buildCdpSnapshotForArgs(args);
       let launchResult = null;
-      if (liveClients.length === 0 && parseOptionalBoolean(url.searchParams.get('openIfMissing')) !== false) {
+      if (
+        claimableClients.length === 0 &&
+        selectableClients.length === 0 &&
+        parseOptionalBoolean(url.searchParams.get('openIfMissing')) === true
+      ) {
         launchResult = await launchChromeForGemini({
           profileDirectory: CHROME_GUARD_CONFIG.profileDirectory,
+          explicit: true,
         });
         await waitForLiveClients(
           normalizeWaitMs(url.searchParams.get('waitMs'), BROWSER_STATUS_WAKE_WAIT_MS),
           CHROME_GUARD_CONFIG.pollIntervalMs || 500,
         );
         allLiveClients = getLiveClients();
-        liveClients = getSelectableGeminiClients();
+        selectableClients = getSelectableGeminiClients();
+        claimableClients = getActiveClaimableGeminiClients(
+          selectableClients,
+          activeClaimableGeminiClientOptions(),
+        );
       }
       sendAgentJson(res, 200, {
         ok: true,
         action: 'list',
         sessionId: PROCESS_SESSION_ID,
-        connectedTabCount: liveClients.length,
+        connectedTabCount: claimableClients.length,
         connectedClientCount: allLiveClients.length,
-        tabs: liveClients.map((client, index) => ({
+        tabs: claimableClients.map((client, index) => ({
           index: index + 1,
           ...summarizeClient(client),
         })),
-        connectedClients: liveClients.map(summarizeClient),
-        diagnosticClients: tabSelectionDiagnostics(allLiveClients, liveClients),
+        connectedClients: claimableClients.map(summarizeClient),
+        diagnosticClients: tabSelectionDiagnostics(allLiveClients, claimableClients),
+        controlPlane: cdp.attempted ? 'cdp' : 'extension-bridge',
+        cdp,
         claims: summarizeTabClaims(),
         tabClaims: summarizeTabClaims(),
         browserWake: launchResult || { attempted: false },
@@ -10854,7 +12773,7 @@ const bridgeServer = createServer(async (req, res) => {
         ...body,
       };
       const client = await selectClaimableClient(args);
-      sendAgentJson(res, 200, await claimTabForClient(client, args));
+      sendAgentJson(res, 200, await claimGeminiTabForClient(client, args));
     } catch (err) {
       sendAgentJson(res, 503, {
         ok: false,
@@ -10946,6 +12865,8 @@ const bridgeServer = createServer(async (req, res) => {
       200,
       await buildLightweightBrowserReady({
         clientId: url.searchParams.get('clientId') || undefined,
+        cdpUrl: url.searchParams.get('cdpUrl') || undefined,
+        controlPlane: url.searchParams.get('controlPlane') || undefined,
         wakeBrowser: parseOptionalBoolean(url.searchParams.get('wakeBrowser')),
         waitMs: url.searchParams.get('waitMs') || undefined,
         selfHeal: parseOptionalBoolean(url.searchParams.get('selfHeal')),
@@ -11077,7 +12998,7 @@ const bridgeServer = createServer(async (req, res) => {
           claim = await ensureTabClaimForJob(
             client,
             temporaryClaimArgs,
-            args.countOnly ? 'GME Count' : 'GME List',
+            args.countOnly ? TAB_CLAIM_LABELS.count : TAB_CLAIM_LABELS.list,
           );
           claimVisibleAtMs = claim ? Date.now() : null;
         }
@@ -11113,9 +13034,9 @@ const bridgeServer = createServer(async (req, res) => {
   if (req.method === 'GET' && url.pathname === '/agent/export-recent-chats') {
     try {
       const selector = clientSelectorFromSearchParams(url.searchParams);
-      const client = requireClient(selector);
+      const client = await selectRecentExportClient(selector);
       assertNoRunningBrowserExportJob(client);
-      await ensureTabClaimForJob(client, selector, 'GME Export');
+      await ensureTabClaimForJob(client, selector, TAB_CLAIM_LABELS.export);
       sendAgentJson(
         res,
         202,
@@ -11123,6 +13044,7 @@ const bridgeServer = createServer(async (req, res) => {
           ...selector,
           outputDir: url.searchParams.get('outputDir'),
           resumeReportFile: url.searchParams.get('resumeReportFile') || url.searchParams.get('reportFile') || undefined,
+          ...dateImportArgsFromSearchParams(url.searchParams),
           startIndex: url.searchParams.get('startIndex'),
           maxChats: url.searchParams.get('maxChats') || url.searchParams.get('limit'),
           refresh: parseOptionalBoolean(url.searchParams.get('refresh')),
@@ -11148,9 +13070,9 @@ const bridgeServer = createServer(async (req, res) => {
   if (req.method === 'GET' && url.pathname === '/agent/export-missing-chats') {
     try {
       const selector = clientSelectorFromSearchParams(url.searchParams);
-      const client = requireClient(selector);
+      const client = await selectRecentExportClient(selector);
       assertNoRunningBrowserExportJob(client);
-      await ensureTabClaimForJob(client, selector, 'GME Missing');
+      await ensureTabClaimForJob(client, selector, TAB_CLAIM_LABELS.export);
       sendAgentJson(
         res,
         202,
@@ -11164,6 +13086,7 @@ const bridgeServer = createServer(async (req, res) => {
             url.searchParams.get('existingScanDir') ||
             undefined,
           resumeReportFile: url.searchParams.get('resumeReportFile') || url.searchParams.get('reportFile') || undefined,
+          ...dateImportArgsFromSearchParams(url.searchParams),
           exportMissingOnly: true,
           refresh: parseOptionalBoolean(url.searchParams.get('refresh')),
           batchSize: url.searchParams.get('batchSize') || undefined,
@@ -11188,9 +13111,9 @@ const bridgeServer = createServer(async (req, res) => {
   if (req.method === 'GET' && url.pathname === '/agent/sync-vault') {
     try {
       const selector = clientSelectorFromSearchParams(url.searchParams);
-      const client = requireClient(selector);
+      const client = await selectRecentExportClient(selector);
       assertNoRunningBrowserExportJob(client);
-      await ensureTabClaimForJob(client, selector, 'GME Sync');
+      await ensureTabClaimForJob(client, selector, TAB_CLAIM_LABELS.sync);
       sendAgentJson(
         res,
         202,
@@ -11199,6 +13122,7 @@ const bridgeServer = createServer(async (req, res) => {
           vaultDir: url.searchParams.get('vaultDir'),
           existingScanDir: url.searchParams.get('vaultDir'),
           outputDir: url.searchParams.get('outputDir') || url.searchParams.get('vaultDir') || undefined,
+          ...dateImportArgsFromSearchParams(url.searchParams),
           syncStateFile: url.searchParams.get('syncStateFile') || undefined,
           resumeReportFile: url.searchParams.get('resumeReportFile') || url.searchParams.get('reportFile') || undefined,
           exportMissingOnly: true,
@@ -11241,9 +13165,9 @@ const bridgeServer = createServer(async (req, res) => {
         ...clientSelectorFromSearchParams(url.searchParams),
         ...bodySelector,
       };
-      const client = requireClient(selector);
+      const client = await selectRecentExportClient(selector);
       assertNoRunningBrowserExportJob(client);
-      await ensureTabClaimForJob(client, selector, 'GME Reexport');
+      await ensureTabClaimForJob(client, selector, TAB_CLAIM_LABELS.export);
       sendAgentJson(
         res,
         202,
@@ -11251,6 +13175,7 @@ const bridgeServer = createServer(async (req, res) => {
           ...selector,
           ...bodySelector,
           outputDir: body.outputDir || url.searchParams.get('outputDir') || undefined,
+          ...dateImportArgsFromSearchParams(url.searchParams, body),
           chatIds,
           items,
           expectedCount: body.expectedCount || url.searchParams.get('expectedCount') || undefined,
@@ -11332,12 +13257,7 @@ const bridgeServer = createServer(async (req, res) => {
       sendAgentJson(res, 404, { error: `Job não encontrado: ${jobId}` });
       return;
     }
-    if (!isTerminalExportJobStatus(job.status)) {
-      job.cancelRequested = true;
-      job.cancelledAt = job.cancelledAt || new Date().toISOString();
-      job.status = 'cancel_requested';
-      touchExportJob(job);
-    }
+    requestExportJobCancel(job, 'agent-cancel');
     maybeFinalizeStaleCancelRequestedJob(job, clients.get(job.clientId), 'cancel-stale-cancel');
     sendAgentJson(res, 200, summarizeExportJob(job));
     return;
@@ -11390,6 +13310,7 @@ const bridgeServer = createServer(async (req, res) => {
         index: url.searchParams.has('index') ? Number(url.searchParams.get('index')) : undefined,
         chatId: url.searchParams.get('chatId') || undefined,
         outputDir: url.searchParams.get('outputDir') || undefined,
+        ...dateImportArgsFromSearchParams(url.searchParams),
         returnToOriginal: url.searchParams.get('returnToOriginal') !== 'false',
         ...exportBrowserArgsFromSearchParams(url.searchParams),
       };
@@ -11410,6 +13331,7 @@ const bridgeServer = createServer(async (req, res) => {
         chatId: url.searchParams.get('chatId') || undefined,
         title: url.searchParams.get('title') || undefined,
         outputDir: url.searchParams.get('outputDir') || undefined,
+        ...dateImportArgsFromSearchParams(url.searchParams),
         returnToOriginal: url.searchParams.get('returnToOriginal') !== 'false',
         ...exportBrowserArgsFromSearchParams(url.searchParams),
       };
@@ -11427,6 +13349,7 @@ const bridgeServer = createServer(async (req, res) => {
       const args = {
         ...clientSelectorFromSearchParams(url.searchParams),
         outputDir: url.searchParams.get('outputDir') || undefined,
+        ...dateImportArgsFromSearchParams(url.searchParams),
         startIndex: url.searchParams.has('startIndex')
           ? Number(url.searchParams.get('startIndex'))
           : undefined,
@@ -11435,7 +13358,7 @@ const bridgeServer = createServer(async (req, res) => {
         autoReleaseClaim: parseOptionalBoolean(url.searchParams.get('autoReleaseClaim')),
       };
       const client = requireNotebookClient(args);
-      const claim = await ensureTabClaimForJob(client, args, 'GME Notebook');
+      const claim = await ensureTabClaimForJob(client, args, TAB_CLAIM_LABELS.export);
       let result = null;
       try {
         result = await exportNotebookForClient(client, args);
@@ -11496,7 +13419,9 @@ const bridgeServer = createServer(async (req, res) => {
         notebook: url.searchParams.get('notebook') === 'true',
       };
       const client = args.notebook ? requireNotebookClient(args) : requireClient(args);
-      const result = await enqueueCommand(client.clientId, 'open-chat', args);
+      const result = await enqueueCommand(client.clientId, 'open-chat', args, {
+        browserSideEffectExplicit: true,
+      });
       sendAgentJson(res, result?.ok ? 200 : 503, {
         client: summarizeClient(client),
         ...result,
@@ -11581,7 +13506,7 @@ const bridgeServer = createServer(async (req, res) => {
 
   if (req.method === 'POST' && url.pathname === '/bridge/pick-directory') {
     try {
-      requireAllowedBridgeOrigin(req);
+      requireGeminiBridgeOrigin(req);
       await readJsonBody(req);
       const picked = await chooseExportDirectory();
       sendBridgeJson(req, res, 200, {
@@ -11600,7 +13525,7 @@ const bridgeServer = createServer(async (req, res) => {
 
   if (req.method === 'POST' && url.pathname === '/bridge/save-files') {
     try {
-      requireAllowedBridgeOrigin(req);
+      requireGeminiBridgeOrigin(req);
       const payload = await readJsonBody(req);
       const files = writeExportFiles(payload);
       sendBridgeJson(req, res, 200, {
@@ -11619,7 +13544,7 @@ const bridgeServer = createServer(async (req, res) => {
 
   if (req.method === 'POST' && url.pathname === '/bridge/fetch-asset') {
     try {
-      requireAllowedBridgeOrigin(req);
+      requireGeminiBridgeOrigin(req);
       const payload = await readJsonBody(req);
       sendBridgeJson(req, res, 200, await fetchAssetForBridge(payload.source));
     } catch (err) {
@@ -11640,7 +13565,30 @@ const bridgeServer = createServer(async (req, res) => {
         return;
       }
 
-      const client = clients.get(clientId) || upsertClient({ clientId });
+      const tabClaim =
+        url.searchParams.get('claimId') || url.searchParams.get('claimSessionId')
+          ? {
+              claimId: url.searchParams.get('claimId') || null,
+              sessionId: url.searchParams.get('claimSessionId') || null,
+            }
+          : null;
+      const protocolVersion = url.searchParams.has('protocolVersion')
+        ? Number(url.searchParams.get('protocolVersion'))
+        : undefined;
+      const client = upsertClient({
+        clientId,
+        tabId: url.searchParams.has('tabId') ? Number(url.searchParams.get('tabId')) : undefined,
+        windowId: url.searchParams.has('windowId')
+          ? Number(url.searchParams.get('windowId'))
+          : undefined,
+        isActiveTab: url.searchParams.has('isActiveTab')
+          ? url.searchParams.get('isActiveTab') === '1'
+          : undefined,
+        extensionVersion: url.searchParams.get('extensionVersion') || undefined,
+        protocolVersion: Number.isFinite(protocolVersion) ? protocolVersion : undefined,
+        buildStamp: url.searchParams.get('buildStamp') || undefined,
+        tabClaim,
+      });
       closeEventStream(client);
       res.writeHead(200, sseHeaders(req));
       res.write(': connected\n\n');
@@ -11722,28 +13670,30 @@ const bridgeServer = createServer(async (req, res) => {
         heartbeat: true,
       });
       const commandDelivery = flushQueuedCommand(client);
-      const heartbeatCommand = commandDelivery ? null : takeQueuedCommand(client);
-      const eventStreamConnected = !!client.eventStream?.res && !client.eventStream.res.destroyed;
+      const eventStreamUsable = clientEventStreamUsable(client);
+      const commandStreamUsable = clientCommandEventStreamUsable(client);
       const snapshotRequested =
         payload.snapshotDirty === true ||
         !client.lastSnapshotAt ||
         (!!payload.snapshotHash && payload.snapshotHash !== client.snapshotHash);
-      const jobProgress = eventStreamConnected ? null : buildJobProgressBroadcast(client);
+      const heartbeatJobProgress = buildJobProgressBroadcast(client);
+      const jobProgress = shouldIncludeHeartbeatJobProgress({
+        hasJobProgress: !!heartbeatJobProgress,
+        status: heartbeatJobProgress?.status || null,
+        eventStreamUsable,
+      })
+        ? heartbeatJobProgress
+        : null;
       sendBridgeJson(req, res, 200, {
         ok: true,
         clientId: client.clientId,
         serverTime: new Date().toISOString(),
-        command: heartbeatCommand,
-        commandDelivery: heartbeatCommand
-          ? 'heartbeat'
-          : commandDelivery
-            ? commandDelivery
-            : null,
+        commandDelivery: commandDelivery || null,
         transport: {
-          eventsConnected: eventStreamConnected,
+          eventsConnected: eventStreamUsable,
           longPollConnected: !!client.pendingPoll,
         },
-        commandPollRequired: !client.pendingPoll && !eventStreamConnected,
+        commandPollRequired: !client.pendingPoll && !commandStreamUsable,
         queuedCommands: client.queue?.length || 0,
         snapshotRequested,
         bridgeHealth: buildBridgeHealth(client),
@@ -11822,20 +13772,35 @@ const bridgeServer = createServer(async (req, res) => {
   sendJson(res, 404, { error: 'not found' });
 });
 
-bridgeServer.listen(cli.port, cli.host, () => {
-  bridgeListening = true;
-  settleBridgeStartup('primary');
-  log(`bridge HTTP escutando em http://${cli.host}:${cli.port}`);
-  recordFlightEvent('bridge_started', {
+const startBridgeHttpServer = () => {
+  bridgeServer.listen(cli.port, cli.host, () => {
+    bridgeListening = true;
+    settleBridgeStartup('primary');
+    log(`bridge HTTP escutando em http://${cli.host}:${cli.port}`);
+    recordFlightEvent('bridge_started', {
+      role: bridgeRole,
+      host: cli.host,
+      port: cli.port,
+      version: SERVER_VERSION,
+      protocolVersion: EXTENSION_PROTOCOL_VERSION,
+      browserControl: BROWSER_CONTROL_RUNTIME,
+      idleLifecycle: bridgeIdleLifecycleSnapshot(),
+    });
+    scheduleIdleShutdownCheck();
+  });
+};
+
+if (BRIDGE_HTTP_ENABLED) {
+  startBridgeHttpServer();
+} else {
+  settleBridgeStartup('stdio-only');
+  recordFlightEvent('bridge_http_disabled', {
     role: bridgeRole,
     host: cli.host,
     port: cli.port,
-    version: SERVER_VERSION,
-    protocolVersion: EXTENSION_PROTOCOL_VERSION,
-    idleLifecycle: bridgeIdleLifecycleSnapshot(),
+    browserControl: BROWSER_CONTROL_RUNTIME,
   });
-  scheduleIdleShutdownCheck();
-});
+}
 
 const shutdown = (reason, exitCode = 0) => {
   if (shuttingDown) return;

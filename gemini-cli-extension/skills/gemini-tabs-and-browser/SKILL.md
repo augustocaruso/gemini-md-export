@@ -32,7 +32,7 @@ Claim one tab:
     "action": "claim",
     "intent": "tab_management",
     "index": 1,
-    "label": "GME",
+    "label": "✨ Em uso",
     "force": true
   }
 }

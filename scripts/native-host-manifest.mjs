@@ -38,12 +38,17 @@ if (hasFlag('--help') || !extensionId) {
   process.exit(extensionId ? 0 : 64);
 }
 
-const nativeHostPath = resolve(ROOT, 'bin', 'gemini-md-export-native-host.mjs');
-const manifest = JSON.parse(
-  readFileSync(TEMPLATE_PATH, 'utf-8')
-    .replace(/__ABSOLUTE_PATH_TO_GEMINI_MD_EXPORT_NATIVE_HOST__/g, nativeHostPath)
-    .replace(/__EXTENSION_ID__/g, extensionId),
-);
+const nativeHostPath =
+  process.env.GEMINI_MD_EXPORT_NATIVE_HOST_PATH ||
+  resolve(ROOT, 'bin', 'gemini-md-export-native-host.mjs');
+const manifestTemplate = JSON.parse(readFileSync(TEMPLATE_PATH, 'utf-8'));
+const manifest = {
+  ...manifestTemplate,
+  path: nativeHostPath,
+  allowed_origins: (manifestTemplate.allowed_origins || []).map((origin) =>
+    String(origin).replace(/__EXTENSION_ID__/g, extensionId),
+  ),
+};
 
 const macNativeHostDir = () => {
   const appName =
