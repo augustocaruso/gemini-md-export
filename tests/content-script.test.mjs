@@ -1729,3 +1729,21 @@ test('content script active tab operation owns an AbortController', () => {
   assert.match(cancelBlock, /abortController\.abort/);
   assert.match(cancelBlock, /operationId/);
 });
+
+test('content script cancel-active-operation treats supplied operationId as exact filter', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'userscript-shell.ts'), 'utf-8');
+  const cancelBlock = source.match(
+    /if \(command\.type === 'cancel-active-operation'\) \{[\s\S]*?\n    \}/,
+  )?.[0] || '';
+
+  assert.match(cancelBlock, /hasRequestedOperationId/);
+  assert.match(cancelBlock, /Object\.prototype\.hasOwnProperty\.call/);
+  assert.match(cancelBlock, /command\.args\.operationId/);
+  assert.match(cancelBlock, /operation-id-mismatch/);
+
+  const mismatchIndex = cancelBlock.indexOf('operation-id-mismatch');
+  const abortIndex = cancelBlock.indexOf('abortController.abort');
+  assert.ok(mismatchIndex >= 0, 'mismatch branch must be present');
+  assert.ok(abortIndex >= 0, 'abort call must be present');
+  assert.ok(mismatchIndex < abortIndex, 'operationId mismatch must return before aborting');
+});

@@ -5153,11 +5153,13 @@
           reason: 'no-active-operation',
         };
       }
-      const requestedOperationId = command.args?.operationId || null;
+      const hasRequestedOperationId =
+        Object.prototype.hasOwnProperty.call(command.args || {}, 'operationId') &&
+        command.args?.operationId !== null;
+      const requestedOperationId = hasRequestedOperationId ? String(command.args.operationId) : null;
       if (
-        requestedOperationId &&
-        state.activeTabOperation.operationId &&
-        requestedOperationId !== state.activeTabOperation.operationId
+        hasRequestedOperationId &&
+        requestedOperationId !== String(state.activeTabOperation.operationId || '')
       ) {
         return {
           ok: true,
