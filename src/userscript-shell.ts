@@ -7597,10 +7597,11 @@
     }
 
     if (jobProgress.source && jobProgress.source !== 'mcp') return;
+    const terminalJobId = jobProgress.jobId || state.mcpProgressJobId || null;
     if (
       jobProgress.status &&
       TERMINAL_MCP_STATUSES.has(jobProgress.status) &&
-      state.mcpTerminalProgressJobId === jobProgress.jobId &&
+      state.mcpTerminalProgressJobId === terminalJobId &&
       Date.now() - (state.mcpTerminalProgressSeenAt || 0) < PROGRESS_MIN_VISIBLE_MS + 1500
     ) {
       return;
@@ -7659,7 +7660,7 @@
       // de "concluído" antes de esconder.
       stopMcpProgressWatchdog();
       state.mcpTerminalProgressSeenAt = Date.now();
-      state.mcpTerminalProgressJobId = jobProgress.jobId || state.mcpProgressJobId || null;
+      state.mcpTerminalProgressJobId = terminalJobId;
       state.mcpProgressActive = false;
       state.mcpProgressJobId = null;
       state.mcpProgressLastSeenAt = 0;

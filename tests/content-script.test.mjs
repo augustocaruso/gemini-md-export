@@ -1178,7 +1178,11 @@ test('MCP terminal progress clears snapshot before finishing dock', async () => 
 
   assert.match(source, /mcpTerminalProgressSeenAt/);
   assert.match(source, /mcpTerminalProgressJobId/);
+  assert.match(source, /const terminalJobId = jobProgress\.jobId \|\| state\.mcpProgressJobId \|\| null/);
+  assert.match(source, /state\.mcpTerminalProgressJobId === terminalJobId/);
+  assert.match(source, /PROGRESS_MIN_VISIBLE_MS \+ 1500/);
   assert.match(terminalBlock, /state\.mcpTerminalProgressSeenAt/);
+  assert.match(terminalBlock, /state\.mcpTerminalProgressJobId = terminalJobId/);
   assert.match(terminalBlock, /clearMcpProgressSnapshot\(\)/);
   assert.match(terminalBlock, /stopProgressCreep\(\)/);
   assert.match(terminalBlock, /finishExportProgress/);
