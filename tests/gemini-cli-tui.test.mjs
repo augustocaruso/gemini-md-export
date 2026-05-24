@@ -2752,7 +2752,7 @@ test('CLI plain progress não duplica contador no texto', async () => {
     current: { title: 'DAS vs. DARF', chatId: 'abc123abc123' },
   };
 
-  await withServer((req, res, url) => {
+  const run = await withServer((req, res, url) => {
     if (url.pathname === '/healthz') {
       sendJson(res, 200, { ok: true, version: PACKAGE_VERSION, protocolVersion: 2 });
       return;
@@ -2771,7 +2771,7 @@ test('CLI plain progress não duplica contador no texto', async () => {
     }
     sendJson(res, 404, { error: 'unexpected ' + url.pathname });
   }, async (bridgeUrl) => {
-    await main(
+    return main(
       [
         'export',
         'recent',
@@ -2786,7 +2786,12 @@ test('CLI plain progress não duplica contador no texto', async () => {
     );
   });
 
-  assert.match(stdout.text(), /25 de 30|30 de 30/);
+  if (run && typeof run === 'object' && 'exitCode' in run) {
+    assert.equal(run.exitCode, 0);
+  }
+  assert.match(stdout.text(), /running\/exporting: 25 de 30/);
+  assert.doesNotMatch(stdout.text(), /completed\/done: 25 de 30/);
+  assert.match(stdout.text(), /completed\/done: 30 de 30/);
   assert.doesNotMatch(stdout.text(), /25\/30.*25\/30/);
 });
 

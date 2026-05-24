@@ -112,8 +112,10 @@ const safeDeterminateTotal = (value: unknown): number => Math.max(1, finiteNumbe
 const stripLegacyProgressCount = (value: unknown): string => {
   const text = String(value || '').trim();
   return text
-    .replace(/\s+\(\d+\s*\/\s*\d+\)(?=:)/, '')
-    .replace(/\s+\(\d+\s+de\s+\d+\)(?=:)/i, '')
+    .replace(
+      /^(Baixando conversa(?:s)?(?: do Gemini| novas)?|Baixando somente o que falta no vault)\s+\(\d+\s*(?:\/|de)\s*\d+\)(?=:)/i,
+      '$1',
+    )
     .trim();
 };
 
@@ -276,6 +278,7 @@ export const buildExportJobProgressViewModel = (job: Record<string, any>): Progr
   const status = normalizeStatus(job.status);
   const phase = typeof job.phase === 'string' ? job.phase : null;
   const terminal = isTerminal(status);
+  const successfulTerminal = status === 'completed' || status === 'completed_with_errors';
   const completed = Math.max(0, finiteNumber(job.completed, 0));
   const currentIndex = Math.max(0, finiteNumber(job.current?.index ?? job.position, 0));
   const mode =
@@ -285,9 +288,9 @@ export const buildExportJobProgressViewModel = (job: Record<string, any>): Progr
     )
       ? 'determinate'
       : 'indeterminate';
-  const current = total > 0 ? Math.min(completed, total) : completed;
+  const current = total > 0 ? (successfulTerminal ? total : Math.min(completed, total)) : completed;
   const displayCurrent =
-    batchPosition !== null
+    batchPosition !== null && !successfulTerminal
       ? Math.min(total || batchPosition, batchPosition)
       : total > 0 && !terminal && phase === 'exporting'
         ? Math.min(total, Math.max(completed + 1, currentIndex, 1))
