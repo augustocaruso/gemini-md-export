@@ -127,6 +127,9 @@ const {
   evaluateConversationOperationWatchdog,
 } = await import(compiledTsModuleUrl('mcp', 'export-operation-watchdog.js'));
 const {
+  runConversationOperation,
+} = await import(compiledTsModuleUrl('mcp', 'conversation-operation-runner.js'));
+const {
   assertActiveClaimableGeminiClient,
   explainActiveClaimableGeminiClientRejection,
   getActiveClaimableGeminiClients,
@@ -9253,8 +9256,6 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
     broadcastRecentChatsJobProgress(job, client);
 
     const exportingStartedAt = Date.now();
-    const deferDateImportSave = hasDateImportSource(args);
-    const deferredSaves = [];
     const noProgressMs = conversationNoProgressMs(args);
     for (let i = 0; i < operationTargets.length; i += 1) {
       if (job.cancelRequested) {
@@ -9329,22 +9330,193 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
         }
 
         let operationLastProgressAt = Date.now();
-        const markOperationProgress = () => {
-          operationLastProgressAt = Date.now();
-        };
         const operationAbortController = new AbortController();
-        const downloadPromise = downloadConversationItemWithRetry(job, client, conversation, {
-          ...args,
-          outputDir: job.outputDir,
-          collectOnly: deferDateImportSave,
-          returnToOriginal: false,
-          operationId,
+        let operationCollected = null;
+        let operationDateImportReceipt = null;
+        let operationSavedResult = null;
+        const markOperationProgress = (snapshot = {}) => {
+          operationLastProgressAt = Number(snapshot.lastProgressAt || Date.now());
+          job.current = {
+            ...(job.current || {}),
+            index,
+            batchPosition: snapshot.batchPosition ?? target.batchPosition,
+            batchTotal: snapshot.batchTotal ?? target.batchTotal,
+            historyIndex: snapshot.historyIndex ?? target.historyIndex,
+            operationId: snapshot.operationId || operationId,
+            title: snapshot.title || target.title || conversation.title || null,
+            chatId: snapshot.currentChatId || snapshot.targetChatId || target.targetChatId,
+            operationPhase: snapshot.phase || null,
+            operationMessage: snapshot.message || null,
+          };
+          job.batchPosition = job.current.batchPosition;
+          job.batchTotal = job.current.batchTotal;
+          job.historyIndex = job.current.historyIndex;
+          job.operationId = job.current.operationId;
+          touchExportJob(job);
+          broadcastRecentChatsJobProgress(job, client, {
+            phase: job.phase,
+            total: job.batchTotal,
+            position: job.batchPosition,
+            current: job.completed,
+            label: snapshot.message || undefined,
+            errorCount: snapshot.errorCount ?? undefined,
+          });
+        };
+        const operationPromise = runConversationOperation({
           jobId: job.jobId,
-          targetChatId: target.targetChatId,
+          operationId,
+          target,
           abortSignal: operationAbortController.signal,
-          onOperationProgress: markOperationProgress,
+          progressSink: markOperationProgress,
+          deps: {
+            download: async () => {
+              const collected = await downloadConversationItemWithRetry(job, client, conversation, {
+                ...args,
+                outputDir: job.outputDir,
+                collectOnly: true,
+                returnToOriginal: false,
+                operationId,
+                jobId: job.jobId,
+                targetChatId: target.targetChatId,
+                abortSignal: operationAbortController.signal,
+                onOperationProgress: markOperationProgress,
+              });
+              operationCollected = collected;
+              return {
+                payload: collected.result?.payload || {},
+                activeClient: collected.activeClient || null,
+                receipts: {
+                  integrity: collected.integrity || null,
+                  browserCommandMs: collected.browserCommandMs ?? null,
+                  recovered: collected.recovered ?? null,
+                },
+              };
+            },
+            resolveDates: async ({ payload }) => {
+              const integrity = await validateMcpExportPayload(payload, {
+                expectedChatId: target.targetChatId,
+                requestedChatId: conversation.chatId || conversation.id || conversation.url || null,
+              });
+              if (!integrity.ok) {
+                const error = new Error(integrity.message);
+                error.code = integrity.code;
+                error.data = integrity;
+                throw error;
+              }
+              const dateImportContext = await createExportDateImportContextForArgs(args);
+              const dateImport = await enrichExportPayloadWithDates({
+                payload,
+                integrity,
+                args: {
+                  ...args,
+                  _exportDateImportContext: dateImportContext,
+                },
+              });
+              operationDateImportReceipt = dateImport.receipt;
+              if (!dateImport.ok) {
+                appendExportJobTrace(job, 'date_import_unresolved_saved_without_abort', {
+                  index,
+                  chatId: target.targetChatId,
+                  operationId,
+                  code: dateImport.code || null,
+                  dateImport: dateImport.receipt || null,
+                  evidenceCount: Array.isArray(dateImport.evidence) ? dateImport.evidence.length : null,
+                });
+                return {
+                  payload,
+                  receipt: dateImport.receipt || { enabled: false, status: 'unresolved' },
+                };
+              }
+              return {
+                payload: dateImport.payload,
+                receipt: dateImport.receipt,
+              };
+            },
+            save: async ({ payload }) => {
+              const integrity = await validateMcpExportPayload(payload, {
+                expectedChatId: target.targetChatId,
+                requestedChatId: conversation.chatId || conversation.id || conversation.url || null,
+              });
+              if (!integrity.ok) {
+                const error = new Error(integrity.message);
+                error.code = integrity.code;
+                error.data = integrity;
+                throw error;
+              }
+
+              const saveStartedAt = Date.now();
+              const saved = writeExportPayloadBundle(payload, { outputDir: job.outputDir });
+              const saveFilesMs = Date.now() - saveStartedAt;
+              const savedMediaBytes = Array.isArray(saved.mediaFiles)
+                ? saved.mediaFiles.reduce((sum, file) => sum + Number(file.bytes || 0), 0)
+                : 0;
+              const payloadMetrics = payload?.metrics || {};
+              const metrics = {
+                version: 1,
+                timings: {
+                  browserCommandMs: operationCollected?.browserCommandMs ?? null,
+                  saveFilesMs,
+                  ...(payloadMetrics.timings || {}),
+                },
+                counters: {
+                  ...(payloadMetrics.counters || {}),
+                  mediaFileCount: saved.mediaFileCount || 0,
+                  mediaFailureCount: saved.mediaFailureCount || 0,
+                  savedBytes: saved.bytes || 0,
+                  savedMediaBytes,
+                },
+                hydration: payload?.hydration || null,
+                navigation: payload?.hydration?.navigation || null,
+                media: payloadMetrics.media || null,
+              };
+              operationSavedResult = {
+                client: operationCollected?.activeClient ? summarizeClient(operationCollected.activeClient) : null,
+                conversation: operationCollected?.result?.conversation || conversation,
+                chatId: integrity.snapshot.chatId || payload?.chatId || target.targetChatId,
+                title: integrity.snapshot.title || payload?.title || conversation.title || null,
+                turns: integrity.assistantTurnCount,
+                hydration: payload?.hydration || null,
+                returnedToOriginal: operationCollected?.result?.returnedToOriginal ?? null,
+                returnError: operationCollected?.result?.returnError || null,
+                integrity: {
+                  markdownHash: integrity.markdownHash,
+                  assistantTurnCount: integrity.assistantTurnCount,
+                  evidence: integrity.evidence,
+                  warnings: integrity.warnings,
+                },
+                dateImport: operationDateImportReceipt || null,
+                metrics,
+                receipts: {
+                  download: {
+                    integrity: operationCollected?.integrity || null,
+                    browserCommandMs: operationCollected?.browserCommandMs ?? null,
+                  },
+                  dateImport: operationDateImportReceipt || null,
+                  save: {
+                    filePath: saved.filePath,
+                    filename: saved.filename,
+                    bytes: saved.bytes,
+                    mediaFileCount: saved.mediaFileCount || 0,
+                    mediaFailureCount: saved.mediaFailureCount || 0,
+                    overwritten: saved.overwritten,
+                    integrity: {
+                      markdownHash: integrity.markdownHash,
+                      assistantTurnCount: integrity.assistantTurnCount,
+                      warnings: integrity.warnings,
+                    },
+                  },
+                },
+                ...saved,
+              };
+              return {
+                filePath: saved.filePath,
+                bytes: saved.bytes,
+                receipt: operationSavedResult.receipts.save,
+              };
+            },
+          },
         });
-        const downloadSettlementPromise = downloadPromise.then(
+        const operationSettlementPromise = operationPromise.then(
           (value) => ({ status: 'fulfilled', value }),
           (reason) => ({ status: 'rejected', reason }),
         );
@@ -9368,7 +9540,7 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
           }, watchdogIntervalMs);
         });
         const downloadSettlement = await Promise.race([
-          downloadSettlementPromise,
+          operationSettlementPromise,
           watchdogSignalPromise,
         ]).finally(() => {
           if (watchdogTimer) clearInterval(watchdogTimer);
@@ -9389,7 +9561,7 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
             noProgressMs,
           });
           const cancelResult = await requestActiveBrowserOperationCancelForJob(job, decision.code);
-          const drainResult = await drainTimedOutConversationDownload(downloadSettlementPromise);
+          const drainResult = await drainTimedOutConversationDownload(operationSettlementPromise);
           if (drainResult.status === 'timeout') {
             const error = new Error(
               'Operação do navegador ainda ativa depois do watchdog; interrompi o lote para evitar conflito entre conversas.',
@@ -9405,16 +9577,41 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
           throw watchdogError;
         }
         if (downloadSettlement.status === 'rejected') throw downloadSettlement.reason;
-        const result = downloadSettlement.value;
-        if (deferDateImportSave) {
-          const resultClient = result.activeClient?.clientId ? clients.get(result.activeClient.clientId) : null;
-          if (resultClient) client = rebindExportJobToClient(job, resultClient, 'conversation-download');
-          deferredSaves.push({ index, conversation, itemMetric, collected: result });
-          continue;
+        const operationResult = downloadSettlement.value;
+        if (operationResult.status === 'failed') {
+          const error = new Error(operationResult.error || 'Falha ao exportar conversa.');
+          error.code = operationResult.code || 'conversation_operation_failed';
+          error.data = { receipts: operationResult.receipts || null };
+          throw error;
         }
+        if (operationResult.status === 'cancelled') {
+          const error = new Error(operationResult.reason || 'Operação cancelada.');
+          error.code = 'operation_cancelled';
+          error.data = { receipts: operationResult.receipts || null };
+          throw error;
+        }
+        if (operationResult.status !== 'saved' || !operationSavedResult) {
+          const error = new Error('Operação de exportação terminou sem arquivo salvo.');
+          error.code = 'conversation_operation_not_saved';
+          error.data = { receipts: operationResult.receipts || null };
+          throw error;
+        }
+        const result = {
+          ...operationSavedResult,
+          operationId,
+          batchPosition: target.batchPosition,
+          historyIndex: target.historyIndex,
+          receipts: operationResult.receipts || operationSavedResult.receipts || null,
+        };
         const resultClient = result.client?.clientId ? clients.get(result.client.clientId) : null;
         if (resultClient) client = rebindExportJobToClient(job, resultClient, 'conversation-download');
-        const success = buildConversationExportSuccess({ index, conversation, result });
+        const success = {
+          ...buildConversationExportSuccess({ index, conversation, result }),
+          operationId,
+          batchPosition: target.batchPosition,
+          historyIndex: target.historyIndex,
+          receipts: result.receipts || null,
+        };
         recordConversationExportSuccess(
           { job, successes, itemMetric, success, result },
           exportJobRecordingDeps,
@@ -9439,16 +9636,6 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
       }
     }
 
-    client = await saveDeferredDateImportExports({
-      job,
-      client,
-      successes,
-      failures,
-      deferredSaves,
-      args,
-      persist: persistRecentChatsExportReport,
-      broadcast: broadcastRecentChatsJobProgress,
-    }, exportJobRecordingDeps);
     recordJobTimingFrom(job, 'exportConversationsMs', exportingStartedAt);
 
     if (!job.cancelRequested) {

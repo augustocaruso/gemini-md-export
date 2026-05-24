@@ -656,6 +656,19 @@ test('export recente faz retry para aba ocupada antes de registrar falha', () =>
   );
 });
 
+test('recent export loop delegates one item to conversation operation runner', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const jobBlock = source.match(
+    /const runRecentChatsExportJob = async[\s\S]*?\nconst startRecentChatsExportJob/,
+  )?.[0];
+  assert.ok(jobBlock, 'runRecentChatsExportJob deve existir');
+  assert.match(source, /conversation-operation-runner\.js/);
+  assert.match(source, /runConversationOperation/);
+  assert.match(jobBlock, /runConversationOperation\(\{/);
+  assert.match(jobBlock, /resolveDates:/);
+  assert.match(jobBlock, /save:/);
+});
+
 test('reexport de chatIds conhecidos roda como job em background', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const jobBlock = source.match(
