@@ -5613,6 +5613,7 @@
           ok: false,
           conversation: targetItem,
           error: err?.message || String(err),
+          code: err?.code || null,
         };
       }
 
@@ -6622,11 +6623,20 @@
   };
 
   const collectExportForConversation = async (item, options = {}) => {
+    options.setOperationPhase?.('navigating');
+    throwIfOperationAborted(
+      options.abortSignal,
+      'Exportação cancelada antes de navegar para a conversa.',
+    );
     const navigationStartedAt = Date.now();
     const navigation = await openChatWithNavigationEngine(item, {
       ...options,
       ignoreBusy: true,
     });
+    throwIfOperationAborted(
+      options.abortSignal,
+      'Exportação cancelada antes de coletar a conversa.',
+    );
     const openConversationMs = Date.now() - navigationStartedAt;
     return collectExportForCurrentConversation({
       expectedChatId: normalizeExpectedChatId(item),

@@ -1698,12 +1698,34 @@ test('content script passes operation abort signal into hydration and export col
     source.match(
       /const collectExportForCurrentConversation = async[\s\S]*?\n  \};\n\n  const collectExportForConversation/,
     )?.[0] || '';
+  const conversationBlock =
+    source.match(
+      /const collectExportForConversation = async[\s\S]*?\n  \};\n\n  const downloadBlob/,
+    )?.[0] || '';
+  const getCurrentChatBlock =
+    source.match(
+      /if \(command\.type === 'get-current-chat'\) \{[\s\S]*?\n    \}\n\n    if \(command\.type === 'open-chat'\)/,
+    )?.[0] || '';
+  const getChatByIdBlock =
+    source.match(
+      /if \(command\.type === 'get-chat-by-id'\) \{[\s\S]*?\n    \}\n\n    return \{\n      ok: false,\n      error: `Comando desconhecido:/,
+    )?.[0] || '';
 
+  assert.match(source, /const executeBridgeCommand = async \(command, operationContext = \{\}\) =>/);
   assert.match(hydrateBlock, /options\.abortSignal\?\.aborted/);
   assert.match(hydrateBlock, /options\.onProgress/);
   assert.match(hydrateBlock, /throwIfOperationAborted/);
   assert.match(collectBlock, /abortSignal:\s*options\.abortSignal/);
   assert.match(collectBlock, /setOperationPhase/);
+  assert.match(getCurrentChatBlock, /abortSignal:\s*operationContext\.abortSignal/);
+  assert.match(getCurrentChatBlock, /setOperationPhase:\s*operationContext\.setOperationPhase/);
+  assert.match(getCurrentChatBlock, /operationId:\s*operationContext\.operationId/);
+  assert.match(getChatByIdBlock, /collectExportForConversation\(targetItem,\s*\{/);
+  assert.match(getChatByIdBlock, /abortSignal:\s*operationContext\.abortSignal/);
+  assert.match(getChatByIdBlock, /setOperationPhase:\s*operationContext\.setOperationPhase/);
+  assert.match(getChatByIdBlock, /operationId:\s*operationContext\.operationId/);
+  assert.match(conversationBlock, /setOperationPhase\?\.\('navigating'\)/);
+  assert.match(getChatByIdBlock, /code:\s*err\?\.code \|\| null/);
 });
 
 test('exportPayload ignora chat antigo escondido no DOM da rota anterior', async () => {
