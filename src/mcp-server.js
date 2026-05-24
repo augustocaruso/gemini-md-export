@@ -124,6 +124,9 @@ const {
   buildOperationId,
 } = await import(compiledTsModuleUrl('mcp', 'export-operation-contracts.js'));
 const {
+  evaluateConversationOperationWatchdog,
+} = await import(compiledTsModuleUrl('mcp', 'export-operation-watchdog.js'));
+const {
   assertActiveClaimableGeminiClient,
   explainActiveClaimableGeminiClientRejection,
   getActiveClaimableGeminiClients,
@@ -268,6 +271,16 @@ const EXPORT_COMMAND_TIMEOUT_MS = Number(
 const EXPORT_COMMAND_STALE_ABORT_MS = Math.max(
   CLIENT_STALE_MS + 15_000,
   Math.min(10 * 60_000, Number(process.env.GEMINI_MCP_EXPORT_COMMAND_STALE_ABORT_MS || 90_000)),
+);
+const parsedConversationNoProgressMs = Number(
+  process.env.GEMINI_MCP_CONVERSATION_NO_PROGRESS_MS || 45_000,
+);
+const DEFAULT_CONVERSATION_NO_PROGRESS_MS = Math.max(
+  5000,
+  Math.min(
+    5 * 60_000,
+    Number.isFinite(parsedConversationNoProgressMs) ? parsedConversationNoProgressMs : 45_000,
+  ),
 );
 const EXPORT_TAB_ACTIVATION_TIMEOUT_MS = Math.max(
   3000,
@@ -3457,6 +3470,14 @@ const exportCommandStaleAbortMs = (args = {}) =>
     10 * 60_000,
   );
 
+const conversationNoProgressMs = (args = {}) =>
+  normalizeExportWaitMs(
+    args.conversationNoProgressMs ?? args.noProgressMs,
+    DEFAULT_CONVERSATION_NO_PROGRESS_MS,
+    5000,
+    10 * 60_000,
+  );
+
 const normalizeReloadWaitMs = (value, fallback, max = 120_000) => {
   const parsed = Number(value ?? fallback);
   const safe = Number.isFinite(parsed) ? parsed : fallback;
@@ -6447,6 +6468,7 @@ const collectConversationItemPayloadForClient = async (client, conversation, arg
   const hydrationArgs = exportHydrationArgs(args);
   const commandTimeoutMs = exportCommandTimeoutMs(args);
   const prepared = await ensureClientActiveForExport(client, args);
+  args.onOperationProgress?.({ phase: 'browser-command-started' });
   const command = await enqueueCommandWithClientRecovery(
     prepared.client,
     'get-chat-by-id',
@@ -6462,6 +6484,7 @@ const collectConversationItemPayloadForClient = async (client, conversation, arg
     { timeoutMs: commandTimeoutMs, staleAbortMs: exportCommandStaleAbortMs(args) },
     args,
   );
+  args.onOperationProgress?.({ phase: 'browser-command-finished' });
   const activeClient = command.client;
   const { result } = command;
   const browserCommandMs = Date.now() - commandStartedAt;
@@ -6828,9 +6851,12 @@ const downloadConversationItemWithRetry = async (job, client, conversation, args
       : broadcastRecentChatsJobProgress;
   for (let attempt = 1; attempt <= retryLimit; attempt += 1) {
     try {
-      return args.collectOnly === true
+      args.onOperationProgress?.({ phase: 'browser-command-started', attempt });
+      const result = args.collectOnly === true
         ? await collectConversationItemPayloadForClient(client, conversation, args)
         : await downloadConversationItemForClient(client, conversation, args);
+      args.onOperationProgress?.({ phase: 'browser-command-finished', attempt });
+      return result;
     } catch (err) {
       lastError = err;
       const retryReason = retryableConversationExportReason(err);
@@ -6863,7 +6889,19 @@ const downloadConversationItemWithRetry = async (job, client, conversation, args
       });
       touchExportJob(job);
       broadcastProgress(job, client);
-      await sleep(retryDelayMs);
+      args.onOperationProgress?.({ phase: 'retry-delay-started', attempt, retryDelayMs, retryReason });
+      const retryProgressTimer =
+        retryDelayMs > 0
+          ? setInterval(() => {
+              args.onOperationProgress?.({ phase: 'retry-delay-waiting', attempt, retryDelayMs, retryReason });
+            }, Math.min(1000, retryDelayMs))
+          : null;
+      try {
+        await sleep(retryDelayMs);
+      } finally {
+        if (retryProgressTimer) clearInterval(retryProgressTimer);
+        args.onOperationProgress?.({ phase: 'retry-delay-finished', attempt, retryDelayMs, retryReason });
+      }
     }
   }
   throw lastError || new Error('Falha ao exportar conversa no browser.');
@@ -8804,6 +8842,7 @@ const requestActiveBrowserOperationCancelForJob = (job, reason = 'job-cancel') =
     'cancel-active-operation',
     {
       jobId: job.jobId,
+      operationId: job.operationId || job.current?.operationId || null,
       reason,
     },
     {
@@ -9173,6 +9212,7 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
     const exportingStartedAt = Date.now();
     const deferDateImportSave = hasDateImportSource(args);
     const deferredSaves = [];
+    const noProgressMs = conversationNoProgressMs(args);
     for (let i = 0; i < operationTargets.length; i += 1) {
       if (job.cancelRequested) {
         job.status = 'cancelled';
@@ -9245,7 +9285,11 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
           }
         }
 
-        const result = await downloadConversationItemWithRetry(job, client, conversation, {
+        let operationLastProgressAt = Date.now();
+        const markOperationProgress = () => {
+          operationLastProgressAt = Date.now();
+        };
+        const downloadPromise = downloadConversationItemWithRetry(job, client, conversation, {
           ...args,
           outputDir: job.outputDir,
           collectOnly: deferDateImportSave,
@@ -9253,6 +9297,39 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
           operationId,
           jobId: job.jobId,
           targetChatId: target.targetChatId,
+          onOperationProgress: markOperationProgress,
+        });
+        let watchdogTimer = null;
+        const watchdogPromise = new Promise((_, reject) => {
+          const watchdogIntervalMs = Math.max(500, Math.min(2000, Math.floor(noProgressMs / 4)));
+          watchdogTimer = setInterval(() => {
+            const decision = evaluateConversationOperationWatchdog({
+              operationId,
+              now: Date.now(),
+              lastProgressAt: operationLastProgressAt,
+              noProgressMs,
+              cancelRequested: job.cancelRequested === true,
+            });
+            if (decision.action === 'continue') return;
+            clearInterval(watchdogTimer);
+            const error = new Error(decision.message);
+            error.code = decision.code;
+            error.operationId = operationId;
+            error.targetChatId = target.targetChatId;
+            appendExportJobTrace(job, 'conversation_no_progress_watchdog', {
+              code: decision.code,
+              timeoutCode: 'conversation_no_progress_timeout',
+              operationId,
+              targetChatId: target.targetChatId,
+              elapsedMs: decision.elapsedMs,
+              noProgressMs,
+            });
+            void requestActiveBrowserOperationCancelForJob(job, decision.code);
+            reject(error);
+          }, watchdogIntervalMs);
+        });
+        const result = await Promise.race([downloadPromise, watchdogPromise]).finally(() => {
+          if (watchdogTimer) clearInterval(watchdogTimer);
         });
         if (deferDateImportSave) {
           const resultClient = result.activeClient?.clientId ? clients.get(result.activeClient.clientId) : null;

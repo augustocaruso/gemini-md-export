@@ -90,6 +90,26 @@ test('MCP propaga cancelamento de job para operação ativa no navegador', () =>
   assert.match(contentSource, /operation_cancelled/);
 });
 
+test('recent export has per-conversation no-progress watchdog', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const runRecentBlock = source.match(
+    /const runRecentChatsExportJob = async \(job, client, args = \{\}\) => \{[\s\S]*?\n\};\n\nconst startRecentChatsExportJob/,
+  )?.[0] || '';
+
+  assert.match(source, /export-operation-watchdog\.js/);
+  assert.match(source, /evaluateConversationOperationWatchdog/);
+  assert.match(source, /DEFAULT_CONVERSATION_NO_PROGRESS_MS/);
+  assert.match(source, /const conversationNoProgressMs = \(args = \{\}\) =>/);
+  assert.match(runRecentBlock, /const noProgressMs = conversationNoProgressMs\(args\)/);
+  assert.match(runRecentBlock, /let operationLastProgressAt = Date\.now\(\)/);
+  assert.match(runRecentBlock, /const markOperationProgress = \([^)]*\) => \{/);
+  assert.match(runRecentBlock, /Promise\.race/);
+  assert.match(runRecentBlock, /evaluateConversationOperationWatchdog/);
+  assert.match(runRecentBlock, /conversation_no_progress_timeout/);
+  assert.match(runRecentBlock, /requestActiveBrowserOperationCancelForJob\(job, decision\.code\)/);
+  assert.match(runRecentBlock, /onOperationProgress: markOperationProgress/);
+});
+
 test('MCP usa SSE para progresso, mas exige long-poll para comandos por padrão', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const contentSource = readFileSync(resolve(ROOT, 'src', 'userscript-shell.ts'), 'utf-8');
