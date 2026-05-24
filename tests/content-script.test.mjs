@@ -1739,7 +1739,9 @@ test('content script cancel-active-operation treats supplied operationId as exac
   assert.match(cancelBlock, /hasRequestedOperationId/);
   assert.match(cancelBlock, /Object\.prototype\.hasOwnProperty\.call/);
   assert.match(cancelBlock, /command\.args\.operationId/);
+  assert.match(cancelBlock, /typeof state\.activeTabOperation\.operationId !== 'string'/);
   assert.match(cancelBlock, /operation-id-mismatch/);
+  assert.doesNotMatch(cancelBlock, /String\(state\.activeTabOperation\.operationId \|\| ''\)/);
 
   const mismatchIndex = cancelBlock.indexOf('operation-id-mismatch');
   const abortIndex = cancelBlock.indexOf('abortController.abort');

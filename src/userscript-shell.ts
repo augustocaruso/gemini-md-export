@@ -5159,7 +5159,8 @@
       const requestedOperationId = hasRequestedOperationId ? String(command.args.operationId) : null;
       if (
         hasRequestedOperationId &&
-        requestedOperationId !== String(state.activeTabOperation.operationId || '')
+        (typeof state.activeTabOperation.operationId !== 'string' ||
+          requestedOperationId !== state.activeTabOperation.operationId)
       ) {
         return {
           ok: true,
