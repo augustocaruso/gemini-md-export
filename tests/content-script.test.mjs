@@ -1688,6 +1688,24 @@ test('hidratação não trata crescimento de layout como progresso real', async 
   assert.match(contentSource, /isCancelled:\s*activeTabOperationCancelRequested/);
 });
 
+test('content script passes operation abort signal into hydration and export collection', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'userscript-shell.ts'), 'utf-8');
+  const hydrateBlock =
+    source.match(
+      /const hydrateConversationToTop = async[\s\S]*?\n  \};\n\n  const waitForChatToLoad/,
+    )?.[0] || '';
+  const collectBlock =
+    source.match(
+      /const collectExportForCurrentConversation = async[\s\S]*?\n  \};\n\n  const collectExportForConversation/,
+    )?.[0] || '';
+
+  assert.match(hydrateBlock, /options\.abortSignal\?\.aborted/);
+  assert.match(hydrateBlock, /options\.onProgress/);
+  assert.match(hydrateBlock, /throwIfOperationAborted/);
+  assert.match(collectBlock, /abortSignal:\s*options\.abortSignal/);
+  assert.match(collectBlock, /setOperationPhase/);
+});
+
 test('exportPayload ignora chat antigo escondido no DOM da rota anterior', async () => {
   const currentChatId = 'b8e7c075effe9457';
   const { dom, runtimeErrors } = createGeminiMediaDom(`

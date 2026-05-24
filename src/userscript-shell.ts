@@ -4561,6 +4561,13 @@
         state.activeTabOperation?.abortController?.signal?.aborted,
     );
 
+  const throwIfOperationAborted = (signal, message) => {
+    if (!signal?.aborted) return;
+    const error = new Error(message || 'Operação cancelada.');
+    error.code = 'operation_cancelled';
+    throw error;
+  };
+
   const maybeReleaseClaimAfterTabOperation = async (command, result, startedAt) => {
     const args = command?.args || {};
     const claimId = args.releaseClaimOnOperationEnd ? String(args.claimId || '').trim() : '';
@@ -5113,7 +5120,7 @@
     };
   };
 
-  const executeBridgeCommand = async (command) => {
+  const executeBridgeCommand = async (command, operationContext = {}) => {
     if (!command?.type) {
       return {
         ok: false,
@@ -5544,6 +5551,9 @@
         ok: true,
         payload: await collectExportForCurrentConversation({
           hydration: normalizeHydrationOptions(command.args || {}),
+          abortSignal: operationContext.abortSignal,
+          setOperationPhase: operationContext.setOperationPhase,
+          operationId: operationContext.operationId,
         }),
       };
     }
@@ -5594,6 +5604,9 @@
           preferDirectNotebookReturn: command.args?.notebookReturnMode === 'direct',
           preserveNotebookContext: true,
           hydration: normalizeHydrationOptions(command.args || {}),
+          abortSignal: operationContext.abortSignal,
+          setOperationPhase: operationContext.setOperationPhase,
+          operationId: operationContext.operationId,
         });
       } catch (err) {
         return {
@@ -5863,9 +5876,27 @@
     let finalReason = null;
     let lastContainerCount = countConversationContainers(scroller, doc);
     let lastTurnDomCount = conversationDomTurnCount(doc);
+    const hydrationAbortMessage =
+      'Exportação cancelada antes de terminar a hidratação da conversa.';
+
+    const throwIfHydrationCancelled = () => {
+      if (options.isCancelled?.() || options.abortSignal?.aborted) {
+        throwIfOperationAborted(options.abortSignal, hydrationAbortMessage);
+        const error = new Error(hydrationAbortMessage);
+        error.code = 'operation_cancelled';
+        throw error;
+      }
+    };
+
+    throwIfOperationAborted(options.abortSignal, hydrationAbortMessage);
 
     if (!scrollElement || scrollElement.scrollHeight <= scrollElement.clientHeight + 4) {
       const turns = scrapeTurns(doc);
+      options.onProgress?.({
+        attempts,
+        elapsedMs: Date.now() - startedAt,
+        state: conversationHydrationState(scroller, doc, scrollTarget, win),
+      });
       return {
         turns,
         stats: {
@@ -5893,11 +5924,7 @@
       const waitStartedAt = Date.now();
       let state = beforeState;
       while (Date.now() - waitStartedAt < waitMs) {
-        if (options.isCancelled?.()) {
-          const error = new Error('Exportação cancelada antes de terminar a hidratação da conversa.');
-          error.code = 'operation_cancelled';
-          throw error;
-        }
+        throwIfHydrationCancelled();
         await sleep(100);
         state = conversationHydrationState(scroller, doc, scrollTarget, win);
         if (conversationHydrationChanged(beforeState, state)) {
@@ -5911,11 +5938,7 @@
     };
 
     while (attempts < maxAttempts) {
-      if (options.isCancelled?.()) {
-        const error = new Error('Exportação cancelada antes de terminar a hidratação da conversa.');
-        error.code = 'operation_cancelled';
-        throw error;
-      }
+      throwIfHydrationCancelled();
       if (Date.now() - startedAt > maxTotalMs) {
         timedOut = true;
         finalReason = 'max-total-time';
@@ -5995,6 +6018,11 @@
     }
 
     const turns = scrapeTurns(doc);
+    options.onProgress?.({
+      attempts,
+      elapsedMs: Date.now() - startedAt,
+      state: conversationHydrationState(scroller, doc, scrollTarget, win),
+    });
     return {
       turns,
       stats: {
@@ -6523,10 +6551,12 @@
   };
 
   const collectExportForCurrentConversation = async (options = {}) => {
+    options.setOperationPhase?.('hydrating');
     const hydrationStartedAt = Date.now();
     const hydrated = await hydrateConversationToTop(document, window, {
       ...(options.hydration || {}),
       isCancelled: activeTabOperationCancelRequested,
+      abortSignal: options.abortSignal,
       onProgress: ({ state: hydrationState, elapsedMs }) => {
         if (state.progress && state.exportSource === 'gui') {
           updateExportProgress({
@@ -6552,6 +6582,8 @@
         `Nao consegui carregar o inicio da conversa com seguranca antes de baixar (${reason}; scroller: ${hydrated.stats.matchedBy}; tentativas: ${hydrated.stats.attempts}; turnos vistos: ${hydrated.stats.turnDomCount || hydrated.stats.turnsAfterHydration || 0}). Recarregue a aba e tente novamente.`,
       );
     }
+    options.setOperationPhase?.('extracting');
+    throwIfOperationAborted(options.abortSignal, 'Exportação cancelada antes de extrair Markdown.');
     const payload = await buildExportPayload(document, location.href, {
       turns: hydrated.turns,
       metrics: {
@@ -6602,6 +6634,9 @@
       previousSignature: navigation?.previousSignature || '',
       navigation: navigation || null,
       hydration: options.hydration || null,
+      abortSignal: options.abortSignal,
+      setOperationPhase: options.setOperationPhase,
+      operationId: options.operationId,
       metrics: {
         timings: {
           openConversationMs,
