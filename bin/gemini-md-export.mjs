@@ -30,6 +30,10 @@ import {
 } from '../src/telemetry.mjs';
 import { browserControlParamsFromFlags } from '../build/ts/cdp/runtime-options.js';
 import { runFixVaultCommand } from '../build/ts/cli/fix-vault-runner.js';
+import {
+  buildExportJobProgressViewModel,
+  buildProgressViewModel,
+} from '../build/ts/core/progress-view-model.js';
 import { buildBridgeOnlyChildEnv } from '../build/ts/mcp/browser-runtime-env.js';
 
 const DEFAULT_BRIDGE_URL = 'http://127.0.0.1:47283';
@@ -1951,22 +1955,6 @@ const spinnerFrame = (tick = 0) => SPINNER_FRAMES[Math.abs(Number(tick) || 0) % 
 const pluralizePt = (count, singular, plural = `${singular}s`) =>
   `${count} ${Number(count) === 1 ? singular : plural}`;
 
-const loadedConversationCount = (job = {}, totals = jobTotals(job)) =>
-  firstFiniteNumber(
-    job.knownLoadedCount,
-    job.minimumKnownCount,
-    job.loadedCount,
-    job.webConversationCount,
-    totals.webSeen,
-  );
-
-const indeterminateCountText = (job = {}, totals = jobTotals(job)) => {
-  const loaded = loadedConversationCount(job, totals);
-  if (loaded !== null && loaded > 0) return `${loaded} encontradas`;
-  if (job.tuiKind === 'count') return 'procurando conversas';
-  return 'trabalhando';
-};
-
 const terminalColorForStatus = (status) => {
   if (status === 'completed') return 'green';
   if (status === 'completed_with_errors') return 'yellow';
@@ -1985,41 +1973,6 @@ const jobTotals = (job = {}) => {
   const existing = totals.existingInVault ?? job.existingVaultCount ?? null;
   const missing = totals.missingInVault ?? job.missingCount ?? null;
   return { downloaded, failed, skipped, warnings, webSeen, existing, missing };
-};
-
-const displayProgressPosition = (job = {}, total = 0) => {
-  const requested = Math.max(0, Number(total || job.requested || 0));
-  const completed = Math.max(0, Number(job.completed || 0));
-  const currentIndex = Math.max(0, Number(job.current?.index || job.position || 0));
-  if (requested > 0 && !TERMINAL_STATUSES.has(job.status) && job.phase === 'exporting') {
-    return Math.min(requested, Math.max(completed + 1, currentIndex, 1));
-  }
-  return requested > 0 ? Math.min(completed, requested) : completed;
-};
-
-const barProgressPosition = (job = {}, total = 0) => {
-  const requested = Math.max(0, Number(total || job.requested || 0));
-  const completed = Math.max(0, Number(job.completed || 0));
-  if (requested <= 0) return completed;
-  if (TERMINAL_STATUSES.has(job.status)) return Math.min(completed, requested);
-  if (job.phase === 'exporting') {
-    return Math.min(requested - 0.02, completed + 0.62);
-  }
-  return Math.min(completed, requested);
-};
-
-const humanStatusLabel = (job = {}) => {
-  if (job.status === 'completed') return 'Concluido';
-  if (job.status === 'completed_with_errors') return 'Concluido com avisos';
-  if (job.status === 'failed') return 'Falhou';
-  if (job.status === 'cancelled') return 'Cancelado';
-  if (job.phase === 'loading-history') return 'Carregando historico';
-  if (job.phase === 'scanning-vault') return 'Comparando vault';
-  if (job.phase === 'loading-metadata') return 'Indexando datas';
-  if (job.phase === 'resolving-metadata') return 'Conferindo datas';
-  if (job.phase === 'exporting') return 'Exportando';
-  if (job.phase === 'writing-report') return 'Finalizando';
-  return 'Preparando';
 };
 
 const fitTerminalLine = (ui, text, reserved = 0) => {
@@ -2099,10 +2052,18 @@ const summarizeForResultJson = (job = {}) => {
 
 const renderLinesForCountWait = (ui, job = {}, tick = 0) => {
   const loaded = firstFiniteNumber(job.knownLoadedCount, job.minimumKnownCount, job.loadedCount);
+  const view = buildProgressViewModel({
+    sourceKind: 'count',
+    status: job.status || 'running',
+    phase: job.phase || 'loading-history',
+    title: 'Gemini Markdown Export · contagem',
+    label: 'Procurando conversas no historico',
+    counts: { webSeen: loaded },
+  });
   const foundText =
     loaded !== null && loaded > 0
       ? `${pluralizePt(loaded, 'conversa')} encontrada${loaded === 1 ? '' : 's'} ate agora`
-      : 'Procurando conversas no historico';
+      : view.label;
   const elapsedText = job.elapsedMs ? `tempo ${formatDuration(job.elapsedMs)}` : null;
   const roundsText =
     firstFiniteNumber(job.loadMoreRoundsCompleted) !== null
@@ -2128,7 +2089,14 @@ const renderLinesForCountWait = (ui, job = {}, tick = 0) => {
 };
 
 const renderLinesForReadyWait = (ui, job = {}, tick = 0) => {
-  const note = job.waitNote || job.progressMessage || 'Verificando Gemini Web';
+  const view = buildProgressViewModel({
+    sourceKind: 'ready',
+    status: job.status || 'running',
+    phase: job.phase || 'preparing',
+    title: 'Gemini Markdown Export · preparando',
+    label: job.waitNote || job.progressMessage || 'Verificando Gemini Web',
+  });
+  const note = view.label;
   const details = [
     job.elapsedMs ? `tempo ${formatDuration(job.elapsedMs)}` : null,
     job.waitDetail || null,
@@ -2154,22 +2122,18 @@ const renderLinesForReadyWait = (ui, job = {}, tick = 0) => {
 const renderLinesForJob = (ui, job = {}, tick = 0) => {
   if (job.tuiKind === 'count') return renderLinesForCountWait(ui, job, tick);
   if (job.tuiKind === 'ready') return renderLinesForReadyWait(ui, job, tick);
-  const width = terminalWidth(ui);
+  const view = buildExportJobProgressViewModel(job);
   const totals = jobTotals(job);
-  const total = Number(job.requested || job.missingCount || job.webConversationCount || 0);
-  const current = displayProgressPosition(job, total);
-  const barCurrent = barProgressPosition(job, total);
-  const indeterminate = !total || ['queued', 'loading-history', 'scanning-vault', 'loading-metadata', 'resolving-metadata'].includes(job.phase);
-  const status = colorize(ui, terminalColorForStatus(job.status), humanStatusLabel(job));
-  const headline = fitTerminalLine(ui, job.progressMessage || job.decisionSummary?.headline || 'Sincronizando...');
-  const currentLabel = job.current?.title || job.current?.chatId || null;
-  const countText = total > 0 ? `${Math.min(current, total)}/${total}` : indeterminateCountText(job, totals);
-  const statusPrefix = TERMINAL_STATUSES.has(job.status) ? '' : `${colorize(ui, 'cyan', spinnerFrame(tick))} `;
-  const progress = bar(ui, barCurrent, total, {
+  const status = colorize(ui, terminalColorForStatus(view.status), view.statusLabel);
+  const headline = fitTerminalLine(ui, view.label || 'Sincronizando...');
+  const currentLabel = view.currentItem?.title || view.currentItem?.chatId || null;
+  const countText = view.countLabel;
+  const statusPrefix = view.terminal ? '' : `${colorize(ui, 'cyan', spinnerFrame(tick))} `;
+  const progress = bar(ui, view.barCurrent, view.total, {
     width: progressBarWidth(ui, 34, { min: 26, max: 54 }),
-    indeterminate,
+    indeterminate: view.mode === 'indeterminate',
     seed: tick,
-    status: job.status,
+    status: view.status,
   });
   const summaryParts = [
     `Salvas ${totals.downloaded}`,
@@ -2182,16 +2146,16 @@ const renderLinesForJob = (ui, job = {}, tick = 0) => {
     totals.missing != null ? `faltando ${totals.missing}` : null,
   ].filter(Boolean);
   const lines = [
-    `${progress}  ${bold(ui, countText)}`,
+    `${progress}  ${bold(ui, countText || 'trabalhando')}`,
     `${statusPrefix}${status} · ${headline}`,
-    currentLabel && !TERMINAL_STATUSES.has(job.status) ? `Agora: ${fitTerminalLine(ui, currentLabel, 7)}` : null,
+    currentLabel && !view.terminal ? `Agora: ${fitTerminalLine(ui, currentLabel, 7)}` : null,
     job.jobId && summaryParts.length ? summaryParts.join(' | ') : null,
     job.jobId && inventoryParts.length ? dim(ui, inventoryParts.join(' | ')) : null,
-    job.reportFile && TERMINAL_STATUSES.has(job.status)
+    job.reportFile && view.terminal
       ? dim(ui, `Relatorio: ${fitTerminalLine(ui, job.reportFile, 11)}`)
       : null,
   ].filter(Boolean);
-  return panelLines(ui, `Gemini Markdown Export · ${stripAnsi(humanStatusLabel(job)).toLowerCase()}`, lines);
+  return panelLines(ui, `Gemini Markdown Export · ${stripAnsi(view.statusLabel).toLowerCase()}`, lines);
 };
 
 const renderLinesForJobTrace = (traceResult = {}) => {
@@ -2287,6 +2251,7 @@ const closeTui = (ui, { resetFrame = false } = {}) => {
 };
 
 const renderPlainProgress = (ui, job, previous = {}) => {
+  const view = buildExportJobProgressViewModel(job);
   const key = [
     job.status,
     job.jobId,
@@ -2300,10 +2265,7 @@ const renderPlainProgress = (ui, job, previous = {}) => {
     job.current?.chatId,
   ].join('|');
   if (previous.key === key) return previous;
-  const total = Number(job.requested || job.missingCount || job.webConversationCount || 0);
-  const current = displayProgressPosition(job, total);
-  const count = total > 0 ? `${Math.min(current, total)}/${total}` : indeterminateCountText(job);
-  ui.stdout.write(`[${new Date().toLocaleTimeString()}] ${job.status}/${job.phase}: ${count} - ${job.progressMessage || 'sincronizando'}\n`);
+  ui.stdout.write(`[${new Date().toLocaleTimeString()}] ${view.status}/${view.phase}: ${view.countLabel || 'trabalhando'} - ${view.label || 'sincronizando'}\n`);
   return { key };
 };
 
@@ -2314,25 +2276,22 @@ const renderTuiStreamProgress = (ui, job, previous = {}, tick = 0) => {
     ui.stdout.write(`${bold(ui, 'Gemini Markdown Export')} ${dim(ui, 'sync')}\n`);
     ui.streamHeaderPrinted = true;
   }
-  const total = Number(job.requested || job.missingCount || job.webConversationCount || 0);
-  const current = displayProgressPosition(job, total);
-  const barCurrent = barProgressPosition(job, total);
-  const indeterminate = !total || ['queued', 'loading-history', 'scanning-vault', 'loading-metadata', 'resolving-metadata'].includes(job.phase);
-  const count = total > 0 ? `${Math.min(current, total)}/${total}` : indeterminateCountText(job);
-  const progress = bar(ui, barCurrent, total, {
+  const view = buildExportJobProgressViewModel(job);
+  const progress = bar(ui, view.barCurrent, view.total, {
     width: Math.max(18, Math.min(30, Math.floor((Number(ui.stdout.columns) || 88) / 3))),
-    indeterminate,
+    indeterminate: view.mode === 'indeterminate',
     seed: tick,
+    status: view.status,
   });
-  const status = `${job.status || 'running'}${job.phase ? `/${job.phase}` : ''}`;
-  const headline = job.progressMessage || job.decisionSummary?.headline || 'sincronizando';
-  const currentLabel = job.current?.title || job.current?.chatId || null;
+  const status = `${view.status}${view.phase ? `/${view.phase}` : ''}`;
+  const headline = view.label || 'sincronizando';
+  const currentLabel = view.currentItem?.title || view.currentItem?.chatId || null;
   const key = [
     job.status,
     job.jobId,
     job.phase,
-    current,
-    total,
+    view.displayCurrent,
+    view.total,
     job.loadedCount,
     job.failureCount,
     headline,
@@ -2342,7 +2301,7 @@ const renderTuiStreamProgress = (ui, job, previous = {}, tick = 0) => {
   if (previous.key === key && now - (previous.lastWriteAt || 0) < STREAM_TUI_REPEAT_MS) return previous;
   const jobPart = job.jobId ? ` ${dim(ui, 'job')} ${job.jobId}` : '';
   const currentPart = currentLabel ? ` ${dim(ui, 'agora')} ${currentLabel}` : '';
-  ui.stdout.write(`${progress} ${count} ${colorize(ui, terminalColorForStatus(job.status), status)}${jobPart} - ${headline}${currentPart}\n`);
+  ui.stdout.write(`${progress} ${view.countLabel || 'trabalhando'} ${colorize(ui, terminalColorForStatus(view.status), status)}${jobPart} - ${headline}${currentPart}\n`);
   return { key, lastWriteAt: now };
 };
 

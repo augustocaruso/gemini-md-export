@@ -40,6 +40,7 @@ const hostPaletteSrc = readUtf8('build', 'ts', 'browser', 'shared', 'host-palett
 const nativeStyleProfileSrc = readUtf8('build', 'ts', 'browser', 'shared', 'native-style-profile.js');
 const modalVirtualListSrc = readUtf8('build', 'ts', 'browser', 'shared', 'modal-virtual-list.js');
 const progressDockUiSrc = readUtf8('build', 'ts', 'browser', 'shared', 'progress-dock-ui.js');
+const progressViewModelSrc = readUtf8('build', 'ts', 'core', 'progress-view-model.js');
 const progressStateSrc = readUtf8('build', 'ts', 'browser', 'shared', 'progress-state.js');
 const progressPortSrc = readUtf8('build', 'ts', 'browser', 'shared', 'progress-port.js');
 const tabCommandsSrc = readUtf8('build', 'ts', 'browser', 'shared', 'tab-commands.js');
@@ -87,6 +88,7 @@ const inlineableHostPalette = stripModuleSyntax(hostPaletteSrc);
 const inlineableNativeStyleProfile = stripModuleSyntax(nativeStyleProfileSrc);
 const inlineableModalVirtualList = stripModuleSyntax(modalVirtualListSrc);
 const inlineableProgressDockUi = stripModuleSyntax(progressDockUiSrc);
+const inlineableProgressViewModel = stripModuleSyntax(progressViewModelSrc);
 const inlineableProgressState = stripModuleSyntax(progressStateSrc);
 const inlineableProgressPort = stripModuleSyntax(progressPortSrc);
 const inlineableTabCommands = stripModuleSyntax(tabCommandsSrc);
@@ -189,11 +191,13 @@ if (!googleBlockerContentScriptGeneratedSrc.includes(pageBlockerMarker)) {
 
 const banner = (source) =>
   `  // ============================================================\n  // Inlined from ${source} (auto-generated — do not edit)\n  // ============================================================\n`;
+const indent = (source) => source.split('\n').map((l) => (l ? '  ' + l : l)).join('\n');
 const extractBanner = banner('src/extract.mjs');
 const notebookReturnPlanBanner = banner('src/notebook-return-plan.mjs');
 const batchSessionBanner = banner('src/batch-session.mjs');
 const domRunnerBanner = banner('src/dom-runner.mjs');
 const progressDockUiBanner = banner('src/browser/shared/progress-dock-ui.ts');
+const progressViewModelBanner = banner('src/core/progress-view-model.ts');
 const progressStateBanner = banner('src/browser/shared/progress-state.ts');
 const hostPaletteBanner = banner('src/browser/shared/host-palette.ts');
 const nativeStyleProfileBanner = banner('src/browser/shared/native-style-profile.ts');
@@ -203,57 +207,41 @@ const tabCommandsBanner = banner('src/browser/shared/tab-commands.ts');
 const bridgeClientBanner = banner('src/browser/shared/bridge-client.ts');
 const pageBlockerBanner = banner('src/browser/shared/page-blocker.ts');
 const browserNavigationStackBanner = banner('src/core/chat-id.ts + browser DOM/navigation modules');
-const inlinedExtract =
-  extractBanner + inlineable.split('\n').map((l) => (l ? '  ' + l : l)).join('\n');
-const inlinedNotebookReturnPlan =
-  notebookReturnPlanBanner +
-  inlineableNotebookReturnPlan.split('\n').map((l) => (l ? '  ' + l : l)).join('\n');
-const inlinedBatchSession =
-  batchSessionBanner +
-  inlineableBatchSession.split('\n').map((l) => (l ? '  ' + l : l)).join('\n');
-const inlinedDomRunner =
-  domRunnerBanner +
-  inlineableDomRunner.split('\n').map((l) => (l ? '  ' + l : l)).join('\n');
+const inlinedExtract = extractBanner + indent(inlineable);
+const inlinedNotebookReturnPlan = notebookReturnPlanBanner + indent(inlineableNotebookReturnPlan);
+const inlinedBatchSession = batchSessionBanner + indent(inlineableBatchSession);
+const inlinedDomRunner = domRunnerBanner + indent(inlineableDomRunner);
 const inlinedProgressDockUi =
   hostPaletteBanner +
-  inlineableHostPalette.split('\n').map((l) => (l ? '  ' + l : l)).join('\n') +
+  indent(inlineableHostPalette) +
   '\n' +
   nativeStyleProfileBanner +
-  inlineableNativeStyleProfile.split('\n').map((l) => (l ? '  ' + l : l)).join('\n') +
+  indent(inlineableNativeStyleProfile) +
   '\n' +
   modalVirtualListBanner +
-  inlineableModalVirtualList.split('\n').map((l) => (l ? '  ' + l : l)).join('\n') +
+  indent(inlineableModalVirtualList) +
+  '\n' +
+  progressViewModelBanner +
+  indent(inlineableProgressViewModel) +
   '\n' +
   progressStateBanner +
-  inlineableProgressState.split('\n').map((l) => (l ? '  ' + l : l)).join('\n') +
+  indent(inlineableProgressState) +
   '\n' +
   progressDockUiBanner +
-  inlineableProgressDockUi.split('\n').map((l) => (l ? '  ' + l : l)).join('\n');
-const inlinedProgressPort =
-  progressPortBanner +
-  inlineableProgressPort.split('\n').map((l) => (l ? '  ' + l : l)).join('\n');
-const inlinedTabCommands =
-  tabCommandsBanner +
-  inlineableTabCommands.split('\n').map((l) => (l ? '  ' + l : l)).join('\n');
-const inlinedBridgeClient =
-  bridgeClientBanner +
-  inlineableBridgeClient.split('\n').map((l) => (l ? '  ' + l : l)).join('\n');
+  indent(inlineableProgressDockUi);
+const inlinedProgressPort = progressPortBanner + indent(inlineableProgressPort);
+const inlinedTabCommands = tabCommandsBanner + indent(inlineableTabCommands);
+const inlinedBridgeClient = bridgeClientBanner + indent(inlineableBridgeClient);
 const inlineablePageBlocker = stripModuleSyntax(pageBlockerSrc);
-const inlinedPageBlocker =
-  pageBlockerBanner +
-  inlineablePageBlocker.split('\n').map((l) => (l ? '  ' + l : l)).join('\n');
+const inlinedPageBlocker = pageBlockerBanner + indent(inlineablePageBlocker);
 const inlinedBrowserNavigationStack =
   browserNavigationStackBanner +
-  [
+  indent([
     inlineableCoreChatId,
     inlineableGeminiDomAdapter,
     inlineableNavigationEngine,
     inlineableHydrationProgress,
-  ]
-    .join('\n')
-    .split('\n')
-    .map((l) => (l ? '  ' + l : l))
-    .join('\n');
+  ].join('\n'));
 
 // Carimbo de build curto (YYYYMMDD-HHMM) — ajuda a confirmar visualmente
 // se a extensão/userscript carregado é a versão recém-compilada (útil quando

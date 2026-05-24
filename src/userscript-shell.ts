@@ -6984,6 +6984,9 @@
   };
 
   const progressDisplayCurrent = (progress) => {
+    if (progress?.displayCurrent != null && Number.isFinite(Number(progress.displayCurrent))) {
+      return Number(progress.displayCurrent);
+    }
     const total = Math.max(progress?.total || 1, 1);
     const status = progress?.status || '';
     if (status === 'completed' || status === 'completed_with_errors') return total;
@@ -6992,10 +6995,14 @@
   };
 
   const progressBarCurrent = (progress) => {
+    if (progress?.barCurrent != null && Number.isFinite(Number(progress.barCurrent))) {
+      return Number(progress.barCurrent);
+    }
     return sharedProgressBarCurrent(progress);
   };
 
   const progressTitleFor = (progress) => {
+    if (progress?.sourceKind && progress?.title) return progress.title;
     const flow = progress?.workflow || progress?.kind || '';
     if (flow === 'vault-incremental-sync') return 'Sincronizando vault';
     if (flow === 'vault-reconciliation' || flow === 'full-history-export') {
@@ -7006,6 +7013,7 @@
   };
 
   const humanProgressLabelFor = (progress) => {
+    if (progress?.sourceKind && progress?.label) return progress.label;
     const total = Math.max(progress?.total || 1, 1);
     const current = progressDisplayCurrent(progress);
     const count = current > 0 && total > 1 ? ` (${current} de ${total})` : '';
@@ -7043,12 +7051,64 @@
   };
 
   const humanCountFor = (progress) => {
+    if (progress?.sourceKind && progress?.countLabel) return progress.countLabel;
     const total = Math.max(progress?.total || 1, 1);
     const current = progressDisplayCurrent(progress);
     const errors = Math.max(0, Number(progress?.errorCount || 0));
     const parts = total > 1 ? [`${current} de ${total}`] : [];
     if (errors > 0) parts.push(`${errors} erro${errors === 1 ? '' : 's'}`);
     return parts.join(' · ');
+  };
+
+  const buildBrowserProgressView = (progress, sourceKind = 'gui-export') => {
+    const raw = { ...(progress || {}) };
+    const textSource = {
+      ...raw,
+      sourceKind: null,
+      countLabel: null,
+      displayCurrent: null,
+      barCurrent: null,
+    };
+    const total = Math.max(Number(raw.total || 1) || 1, 1);
+    const current = Number(raw.current ?? raw.completed ?? 0);
+    const currentItem =
+      raw.title || raw.currentChatId || raw.chatId
+        ? {
+            title: raw.title || null,
+            chatId: raw.currentChatId || raw.chatId || null,
+          }
+        : null;
+    const view = buildProgressViewModel({
+      sourceKind,
+      status: raw.status || 'running',
+      phase: raw.phase || null,
+      title: progressTitleFor(textSource),
+      label: humanProgressLabelFor(textSource),
+      current: Number.isFinite(current) ? current : 0,
+      completed: raw.completed ?? null,
+      total,
+      position: raw.position ?? null,
+      displayPercent: raw.displayPercent ?? null,
+      currentItem,
+      counts: {
+        failed: raw.errorCount ?? 0,
+      },
+      countLabel: humanCountFor(textSource),
+    });
+    return {
+      ...raw,
+      ...view,
+      sourceKind,
+      source: raw.source || null,
+      jobId: raw.jobId || null,
+      kind: raw.kind || null,
+      workflow: raw.workflow || raw.kind || null,
+      currentChatId: raw.currentChatId || raw.chatId || null,
+      chatId: raw.chatId || null,
+      errorCount: Math.max(0, Number(raw.errorCount || 0)),
+      startedAt: raw.startedAt || Date.now(),
+      updatedAt: raw.updatedAt || Date.now(),
+    };
   };
 
   const stopProgressCreep = () => {
@@ -7154,7 +7214,7 @@
     state.isExporting = true;
     state.exportSource = 'gui';
     state.browserDownloadFallbackNotified = false;
-    state.progress = {
+    state.progress = buildBrowserProgressView({
       total,
       current: 0,
       label,
@@ -7165,7 +7225,7 @@
       errorCount: 0,
       startedAt: Date.now(),
       displayPercent: 0,
-    };
+    }, 'gui-export');
     state.previousProgressForDisplay = null;
     hideExportModal();
     updateProgressDock();
@@ -7176,12 +7236,23 @@
   const updateExportProgress = (patch = {}) => {
     if (!state.progress) return;
     const previousProgress = { ...state.progress };
-    Object.assign(state.progress, patch);
-    state.progress.displayPercent = sharedNormalizeProgressDisplayPercent({
+    const normalizedPatch = {
+      ...patch,
+      errorCount:
+        state.exportSource === 'mcp'
+          ? Math.max(Number(previousProgress.errorCount || 0), Number(patch.errorCount || 0))
+          : patch.errorCount,
+    };
+    const nextProgress = buildBrowserProgressView({
+      ...state.progress,
+      ...normalizedPatch,
+    }, state.exportSource === 'mcp' ? 'export-job' : 'gui-export');
+    state.progress = mergeProgressViewModel(previousProgress, nextProgress);
+    state.progress.displayPercent = normalizeProgressDisplayPercent(
       previousProgress,
-      nextProgress: state.progress,
-      previousDisplayPercent: previousProgress.displayPercent ?? state.progress.displayPercent ?? 0,
-    });
+      state.progress,
+      previousProgress.displayPercent ?? state.progress.displayPercent ?? 0,
+    );
     state.previousProgressForDisplay = previousProgress;
     updateProgressDock();
   };
@@ -7307,62 +7378,6 @@
     };
   };
 
-  const mcpProgressOrdinal = (progress) => {
-    const total = Math.max(progress?.total || 1, 1);
-    const values = [progress?.position, progress?.current, progress?.completed]
-      .map((value) => Number(value))
-      .filter((value) => Number.isFinite(value));
-    return Math.max(0, Math.min(values.length ? Math.max(...values) : 0, total));
-  };
-
-  const mergeMcpProgressForCurrentJob = (jobProgress) => {
-    const existing = state.progress || {};
-    const incomingTotal = Math.max(jobProgress.total || 1, 1);
-    const existingTotal = Math.max(existing.total || 1, 1);
-    const total = Math.max(incomingTotal, existingTotal);
-    const incomingOrdinal = mcpProgressOrdinal({ ...jobProgress, total });
-    const existingOrdinal = mcpProgressOrdinal({ ...existing, total });
-    const terminal =
-      jobProgress.status && TERMINAL_MCP_STATUSES.has(jobProgress.status);
-    const regressing = !terminal && incomingOrdinal < existingOrdinal;
-    const keepProgressField = (field, fallback = null) =>
-      regressing
-        ? existing[field] ?? jobProgress[field] ?? fallback
-        : jobProgress[field] ?? existing[field] ?? fallback;
-    const keepItemField = (field) =>
-      regressing
-        ? existing[field] || jobProgress[field] || null
-        : jobProgress[field] || existing[field] || null;
-
-    return {
-      total,
-      current: keepProgressField('current', 0),
-      position: keepProgressField('position', null),
-      completed: keepProgressField('completed', 0),
-      label: regressing
-        ? existing.label || jobProgress.label || 'Preparando...'
-        : jobProgress.label || existing.label || 'Preparando...',
-      kind: jobProgress.kind || existing.kind || null,
-      workflow: jobProgress.workflow || existing.workflow || jobProgress.kind || null,
-      status: jobProgress.status || existing.status || 'running',
-      phase: jobProgress.phase || existing.phase || 'preparing',
-      title: keepItemField('title'),
-      chatId: keepItemField('chatId'),
-      currentChatId:
-        regressing
-          ? existing.currentChatId ||
-            existing.chatId ||
-            jobProgress.currentChatId ||
-            jobProgress.chatId ||
-            null
-          : jobProgress.currentChatId || jobProgress.chatId || existing.currentChatId || null,
-      errorCount: Math.max(
-        Number(jobProgress.errorCount ?? 0) || 0,
-        Number(existing.errorCount ?? 0) || 0,
-      ),
-    };
-  };
-
   const saveMcpProgressSnapshot = (jobProgress) => {
     const snapshot = serializeMcpProgress(jobProgress);
     if (!snapshot) return;
@@ -7419,7 +7434,7 @@
     noteMcpProgressStatus(snapshot.status);
     state.isExporting = true;
     state.exportSource = 'mcp';
-    state.progress = {
+    state.progress = buildBrowserProgressView({
       total: snapshot.total,
       current: snapshot.current || 0,
       label: snapshot.label || 'Preparando...',
@@ -7435,7 +7450,7 @@
       errorCount: snapshot.errorCount || 0,
       startedAt: Date.now(),
       displayPercent: 0,
-    };
+    }, 'export-job');
     state.previousProgressForDisplay = null;
     saveMcpProgressSnapshot(snapshot);
     updateProgressDock();
@@ -7499,7 +7514,7 @@
         // Novo job começou — reinicia o dock para refletir totais novos.
         state.mcpProgressJobId = snapshot.jobId;
         noteMcpProgressStatus(snapshot.status);
-        state.progress = {
+        state.progress = buildBrowserProgressView({
           total: snapshot.total,
           current: snapshot.current || 0,
           label: snapshot.label || 'Preparando...',
@@ -7515,7 +7530,7 @@
           errorCount: snapshot.errorCount || 0,
           startedAt: Date.now(),
           displayPercent: 0,
-        };
+        }, 'export-job');
         state.previousProgressForDisplay = null;
         saveMcpProgressSnapshot({
           source: 'mcp',
@@ -7525,7 +7540,7 @@
       } else {
         const snapshot = serializeMcpProgress(jobProgress);
         if (!snapshot) return;
-        updateExportProgress(mergeMcpProgressForCurrentJob(snapshot));
+        updateExportProgress(snapshot);
         saveMcpProgressSnapshot({
           source: 'mcp',
           jobId: state.mcpProgressJobId,
