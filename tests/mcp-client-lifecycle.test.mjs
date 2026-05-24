@@ -151,7 +151,7 @@ test('prioritizes terminal Google blockers over extension mismatch diagnostics',
   assert.equal(state.code, 'google_verification_required');
 });
 
-test('rejects inactive, non-Gemini, unhydrated, command-unready and busy clients', () => {
+test('rejects inactive, non-Gemini, missing current chat, command-unready and busy clients', () => {
   assert.equal(
     getGeminiClientLifecycle({ ...baseClient, isActiveTab: false }, options).code,
     'inactive_tab',
@@ -174,7 +174,7 @@ test('rejects inactive, non-Gemini, unhydrated, command-unready and busy clients
       },
       options,
     ).code,
-    'page_not_hydrated',
+    'current_chat_required',
   );
   assert.equal(
     getGeminiClientLifecycle(
@@ -202,6 +202,53 @@ test('rejects inactive, non-Gemini, unhydrated, command-unready and busy clients
     getGeminiClientLifecycle({ ...baseClient, tabOperationInProgress: true }, options).code,
     'tab_operation_in_progress',
   );
+});
+
+test('/app home is claimable for recent export but not current chat', () => {
+  const homeClient = {
+    ...baseClient,
+    page: {
+      url: 'https://gemini.google.com/app',
+      pathname: '/app',
+      chatId: null,
+      listedConversationCount: 12,
+      sidebarConversationCount: 12,
+      buildStamp: '20260520-0238',
+    },
+  };
+
+  assert.equal(
+    getGeminiClientLifecycle(homeClient, {
+      ...options,
+      capability: 'current-chat',
+    }).code,
+    'current_chat_required',
+  );
+
+  const recent = getGeminiClientLifecycle(homeClient, {
+    ...options,
+    capability: 'recent-export',
+  });
+  assert.equal(recent.state, 'claimable');
+  assert.equal(recent.code, null);
+});
+
+test('/app home without sidebar evidence can warm for recent export when command is ready', () => {
+  const homeClient = {
+    ...baseClient,
+    page: {
+      url: 'https://gemini.google.com/app',
+      pathname: '/app',
+      chatId: null,
+      buildStamp: '20260520-0238',
+    },
+  };
+
+  const recent = getGeminiClientLifecycle(homeClient, {
+    ...options,
+    capability: 'recent-export',
+  });
+  assert.equal(recent.state, 'claimable');
 });
 
 test('creates branded claimable and claimed-ready capabilities only after validation', () => {

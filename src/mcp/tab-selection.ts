@@ -30,6 +30,11 @@ export const explainActiveClaimableGeminiClientRejection = explainGeminiClientLi
 
 export const toActiveClaimableGeminiClient = toClaimableGeminiTab;
 
+export const toRecentExportClaimableGeminiClient = (
+  client: Parameters<typeof toClaimableGeminiTab>[0],
+  options: Parameters<typeof toClaimableGeminiTab>[1],
+) => toClaimableGeminiTab(client, { ...options, capability: 'recent-export' });
+
 export const assertActiveClaimableGeminiClient = assertClaimableGeminiTab;
 
 export const getActiveClaimableGeminiClients = getClaimableGeminiTabs;
