@@ -1170,6 +1170,20 @@ test('content script mantém dock MCP durante navegação e sem prefixo de fase'
   assert.doesNotMatch(source, /MCP reexportando/);
 });
 
+test('MCP terminal progress clears snapshot before finishing dock', async () => {
+  const source = await readFile(new URL('../src/userscript-shell.ts', import.meta.url), 'utf8');
+  const terminalBlock = source.match(
+    /if \(jobProgress\.status && TERMINAL_MCP_STATUSES\.has\(jobProgress\.status\)\) \{[\s\S]*?\n    \}/,
+  )?.[0] || '';
+
+  assert.match(source, /mcpTerminalProgressSeenAt/);
+  assert.match(source, /mcpTerminalProgressJobId/);
+  assert.match(terminalBlock, /state\.mcpTerminalProgressSeenAt/);
+  assert.match(terminalBlock, /clearMcpProgressSnapshot\(\)/);
+  assert.match(terminalBlock, /stopProgressCreep\(\)/);
+  assert.match(terminalBlock, /finishExportProgress/);
+});
+
 test('content script acompanha redesign lr26 sem voltar para fonte JS', async () => {
   const source = await readFile(new URL('../src/userscript-shell.ts', import.meta.url), 'utf8');
   assert.match(source, /width="20" height="20"/);

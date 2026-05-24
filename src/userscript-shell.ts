@@ -603,6 +603,8 @@
     mcpProgressJobId: null,
     mcpProgressLastSeenAt: 0,
     mcpProgressCancelSinceAt: 0,
+    mcpTerminalProgressSeenAt: 0,
+    mcpTerminalProgressJobId: null,
     mcpProgressWatchdogTimer: 0,
     isLoadingMore: false,
     loadMoreFailures: 0,
@@ -7595,6 +7597,14 @@
     }
 
     if (jobProgress.source && jobProgress.source !== 'mcp') return;
+    if (
+      jobProgress.status &&
+      TERMINAL_MCP_STATUSES.has(jobProgress.status) &&
+      state.mcpTerminalProgressJobId === jobProgress.jobId &&
+      Date.now() - (state.mcpTerminalProgressSeenAt || 0) < PROGRESS_MIN_VISIBLE_MS + 1500
+    ) {
+      return;
+    }
     state.mcpProgressLastSeenAt = Date.now();
     noteMcpProgressStatus(jobProgress.status);
     startMcpProgressWatchdog();
@@ -7648,11 +7658,14 @@
       // Terminal: anima 100% + shimmer off + fade-out, mantendo a sensação
       // de "concluído" antes de esconder.
       stopMcpProgressWatchdog();
+      state.mcpTerminalProgressSeenAt = Date.now();
+      state.mcpTerminalProgressJobId = jobProgress.jobId || state.mcpProgressJobId || null;
       state.mcpProgressActive = false;
       state.mcpProgressJobId = null;
       state.mcpProgressLastSeenAt = 0;
       state.mcpProgressCancelSinceAt = 0;
       clearMcpProgressSnapshot();
+      stopProgressCreep();
       void finishExportProgress();
     }
   };
