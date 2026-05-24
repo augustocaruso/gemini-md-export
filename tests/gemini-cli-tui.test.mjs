@@ -709,6 +709,26 @@ test('CLI expõe ajuda contextual para comandos e subcomandos', async () => {
   assert.match(chatsStdout.text(), /Total confirmado/);
 });
 
+test('CLI deixa My Activity no default do runtime para export e sync', () => {
+  const source = readFileSync(resolve(ROOT, 'bin', 'gemini-md-export.mjs'), 'utf-8');
+  const parseDefaults = source.match(/flags:\s*\{[\s\S]*?version: firstArgIsVersion,[\s\S]*?\}/)?.[0] || '';
+  const startSyncStart = source.indexOf('const startSyncJob = async');
+  const startExportStart = source.indexOf('const startExportJob = async');
+  const fetchJobStatusStart = source.indexOf('const fetchJobStatus');
+  const startSyncBlock =
+    startSyncStart >= 0 && startExportStart > startSyncStart
+      ? source.slice(startSyncStart, startExportStart)
+      : '';
+  const startExportBlock =
+    startExportStart >= 0 && fetchJobStatusStart > startExportStart
+      ? source.slice(startExportStart, fetchJobStatusStart)
+      : '';
+
+  assert.doesNotMatch(parseDefaults, /useMyActivity:\s*false/);
+  assert.match(startSyncBlock, /useMyActivity:\s*flags\.noMyActivity \? false : flags\.useMyActivity/);
+  assert.match(startExportBlock, /useMyActivity:\s*flags\.noMyActivity \? false : flags\.useMyActivity/);
+});
+
 test('CLI doctor --plain nao imprime RESULT_JSON sem pedido explicito', async () => {
   const port = await getFreePort();
   const stdout = captureStream();
