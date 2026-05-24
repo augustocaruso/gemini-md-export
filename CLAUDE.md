@@ -13,6 +13,7 @@ Projeto: extensão MV3 + servidor MCP que exporta conversas do Gemini web (https
 - Chat ID é extraído da URL (`/app/<hex>`, hoje aceito com pelo menos 12 caracteres hexadecimais; normal aparece com 16+) e vira o nome do arquivo (`<chatId>.md`).
 - Download cai em `~/Downloads`/pasta padrão do navegador por fallback. Na extensão com MCP local rodando, botão **Alterar** do modal abre seletor nativo de pasta no macOS (`osascript`) e Windows (`powershell.exe` + `IFileOpenDialog` estilo Explorer com owner topmost) via bridge local, e o servidor grava arquivos no diretório escolhido. Na extensão MV3, se MCP não responder, mostrar erro em português simples e manter Downloads como fallback; não reintroduzir a janelinha antiga de `showDirectoryPicker()` no fluxo principal.
 - Baseline de teste manual: Chrome/Edge/Chromium com extensão MV3 unpacked e MCP local rodando. Browsers com UI/arquitetura de extensões customizada podem falhar mesmo se o scraper está correto.
+- **Protocolo obrigatório para teste local com extensão unpacked:** antes de testar export no navegador, rode build, descubra pelo diagnóstico qual pasta unpacked o browser está usando, sincronize `dist/extension/` para essa pasta, recarregue a extensão/abas e confirme versão/build stamp. Self-reload não atualiza arquivos se a pasta carregada está velha. Detalhes em `docs/reference/local-unpacked-extension-testing.md`.
 - Há um probe legado em `debug/tampermonkey-probe.user.js` só para debug de injeção antiga; não documentar como instalação recomendada.
 
 ## Formato de saída
