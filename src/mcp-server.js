@@ -9350,9 +9350,9 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
         );
         let watchdogTimer = null;
         let watchdogTriggered = false;
-        const watchdogPromise = new Promise((_, reject) => {
+        const watchdogSignalPromise = new Promise((resolveWatchdog) => {
           const watchdogIntervalMs = Math.max(500, Math.min(2000, Math.floor(noProgressMs / 4)));
-          watchdogTimer = setInterval(async () => {
+          watchdogTimer = setInterval(() => {
             if (watchdogTriggered) return;
             const decision = evaluateConversationOperationWatchdog({
               operationId,
@@ -9364,43 +9364,46 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
             if (decision.action === 'continue') return;
             watchdogTriggered = true;
             clearInterval(watchdogTimer);
-            const watchdogError = new Error(decision.message);
-            watchdogError.code = decision.code;
-            watchdogError.operationId = operationId;
-            watchdogError.targetChatId = target.targetChatId;
-            operationAbortController.abort(watchdogError);
-            appendExportJobTrace(job, 'conversation_no_progress_watchdog', {
-              code: decision.code,
-              timeoutCode: 'conversation_no_progress_timeout',
-              operationId,
-              targetChatId: target.targetChatId,
-              elapsedMs: decision.elapsedMs,
-              noProgressMs,
-            });
-            const cancelResult = await requestActiveBrowserOperationCancelForJob(job, decision.code);
-            const drainResult = await drainTimedOutConversationDownload(downloadSettlementPromise);
-            if (drainResult.status === 'timeout') {
-              const error = new Error(
-                'Operação do navegador ainda ativa depois do watchdog; interrompi o lote para evitar conflito entre conversas.',
-              );
-              error.code =
-                cancelResult?.ok === true || cancelResult?.cancelled === true
-                  ? 'operation_still_active_after_watchdog'
-                  : 'operation_cancel_failed_after_watchdog';
-              error.operationId = operationId;
-              error.targetChatId = target.targetChatId;
-              reject(error);
-              return;
-            }
-            reject(watchdogError);
+            resolveWatchdog({ status: 'watchdog', decision });
           }, watchdogIntervalMs);
         });
         const downloadSettlement = await Promise.race([
           downloadSettlementPromise,
-          watchdogPromise,
+          watchdogSignalPromise,
         ]).finally(() => {
           if (watchdogTimer) clearInterval(watchdogTimer);
         });
+        if (downloadSettlement.status === 'watchdog') {
+          const { decision } = downloadSettlement;
+          const watchdogError = new Error(decision.message);
+          watchdogError.code = decision.code;
+          watchdogError.operationId = operationId;
+          watchdogError.targetChatId = target.targetChatId;
+          operationAbortController.abort(watchdogError);
+          appendExportJobTrace(job, 'conversation_no_progress_watchdog', {
+            code: decision.code,
+            timeoutCode: 'conversation_no_progress_timeout',
+            operationId,
+            targetChatId: target.targetChatId,
+            elapsedMs: decision.elapsedMs,
+            noProgressMs,
+          });
+          const cancelResult = await requestActiveBrowserOperationCancelForJob(job, decision.code);
+          const drainResult = await drainTimedOutConversationDownload(downloadSettlementPromise);
+          if (drainResult.status === 'timeout') {
+            const error = new Error(
+              'Operação do navegador ainda ativa depois do watchdog; interrompi o lote para evitar conflito entre conversas.',
+            );
+            error.code =
+              cancelResult?.ok === true || cancelResult?.cancelled === true
+                ? 'operation_still_active_after_watchdog'
+                : 'operation_cancel_failed_after_watchdog';
+            error.operationId = operationId;
+            error.targetChatId = target.targetChatId;
+            throw error;
+          }
+          throw watchdogError;
+        }
         if (downloadSettlement.status === 'rejected') throw downloadSettlement.reason;
         const result = downloadSettlement.value;
         if (deferDateImportSave) {

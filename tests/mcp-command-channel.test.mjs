@@ -109,8 +109,12 @@ test('recent export has per-conversation no-progress watchdog', () => {
   assert.match(runRecentBlock, /const operationAbortController = new AbortController\(\)/);
   assert.match(runRecentBlock, /abortSignal: operationAbortController\.signal/);
   assert.match(runRecentBlock, /operationAbortController\.abort\(watchdogError\)/);
+  assert.match(runRecentBlock, /status: 'watchdog'/);
+  assert.match(runRecentBlock, /if \(downloadSettlement\.status === 'watchdog'\) \{/);
   assert.match(runRecentBlock, /await requestActiveBrowserOperationCancelForJob\(job, decision\.code\)/);
   assert.match(runRecentBlock, /await drainTimedOutConversationDownload/);
+  assert.doesNotMatch(runRecentBlock, /setInterval\(async \(\) =>/);
+  assert.doesNotMatch(runRecentBlock, /const watchdogPromise = new Promise\(\(_, reject\)/);
   assert.doesNotMatch(runRecentBlock, /void requestActiveBrowserOperationCancelForJob\(job, decision\.code\)/);
   assert.match(runRecentBlock, /onOperationProgress: markOperationProgress/);
   assert.match(source, /const assertConversationOperationNotAborted = \(args = \{\}\) =>/);
