@@ -120,6 +120,10 @@ const {
   saveDeferredDateImportExports,
 } = await import(compiledTsModuleUrl('mcp', 'export-job-recording.js'));
 const {
+  buildExportBatchTargets,
+  buildOperationId,
+} = await import(compiledTsModuleUrl('mcp', 'export-operation-contracts.js'));
+const {
   assertActiveClaimableGeminiClient,
   explainActiveClaimableGeminiClientRejection,
   getActiveClaimableGeminiClients,
@@ -9136,9 +9140,13 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
       job.remainingAfterResume = selected.length;
     }
 
-    job.requested = resumedCompletedCount + selected.length;
+    const operationTargets = buildExportBatchTargets(selected, {
+      batchTotal: selected.length,
+      source: 'sidebar',
+    });
+    job.requested = resumedCompletedCount + operationTargets.length;
     job.completed = resumedCompletedCount;
-    if (selected.length === 0) {
+    if (operationTargets.length === 0) {
       job.status =
         job.truncated || job.loadMoreTimedOut || job.vaultScan?.truncated
           ? 'completed_with_errors'
@@ -9155,19 +9163,34 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
     const exportingStartedAt = Date.now();
     const deferDateImportSave = hasDateImportSource(args);
     const deferredSaves = [];
-    for (let i = 0; i < selected.length; i += 1) {
+    for (let i = 0; i < operationTargets.length; i += 1) {
       if (job.cancelRequested) {
         job.status = 'cancelled';
         job.phase = 'cancelled';
         break;
       }
 
-      const { conversation, index } = selected[i];
+      const target = operationTargets[i];
+      const selectedItem = selected[i];
+      const { conversation, index } = selectedItem;
+      const operationId = buildOperationId({
+        jobId: job.jobId,
+        batchPosition: target.batchPosition,
+        targetChatId: target.targetChatId,
+      });
       job.current = {
         index,
-        title: conversation.title || null,
-        chatId: conversation.chatId || conversation.id || null,
+        batchPosition: target.batchPosition,
+        batchTotal: target.batchTotal,
+        historyIndex: target.historyIndex,
+        operationId,
+        title: target.title || conversation.title || null,
+        chatId: target.targetChatId,
       };
+      job.batchPosition = target.batchPosition;
+      job.batchTotal = target.batchTotal;
+      job.historyIndex = target.historyIndex;
+      job.operationId = operationId;
       const itemMetric = startConversationMetric(job, {
         index,
         chatId: job.current.chatId,
@@ -9217,6 +9240,9 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
           outputDir: job.outputDir,
           collectOnly: deferDateImportSave,
           returnToOriginal: false,
+          operationId,
+          jobId: job.jobId,
+          targetChatId: target.targetChatId,
         });
         if (deferDateImportSave) {
           const resultClient = result.activeClient?.clientId ? clients.get(result.activeClient.clientId) : null;
@@ -9285,6 +9311,10 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
     }
   } finally {
     job.current = null;
+    job.batchPosition = null;
+    job.batchTotal = null;
+    job.historyIndex = null;
+    job.operationId = null;
     job.finishedAt = new Date().toISOString();
     touchExportJob(job);
     try {

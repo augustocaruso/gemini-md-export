@@ -260,6 +260,33 @@ test('export parcial carrega mais historico ate maxChats antes de fatiar', () =>
   assert.match(block, /job\.loadMoreTimedOut = loadMore\.timedOut === true && !loadMoreResolved/);
 });
 
+test('recent export builds operation targets with batch and history positions', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const importBlock = source.match(
+    /const \{[\s\S]*?buildExportBatchTargets[\s\S]*?buildOperationId[\s\S]*?\} = await import\(compiledTsModuleUrl\('mcp', 'export-operation-contracts\.js'\)\)/,
+  )?.[0];
+  const block = source.match(
+    /const runRecentChatsExportJob = async[\s\S]*?\nconst startRecentChatsExportJob/,
+  )?.[0];
+
+  assert.ok(importBlock, 'mcp-server deve importar o contrato compilado de operacoes de export');
+  assert.ok(block, 'runRecentChatsExportJob deve existir');
+  assert.match(block, /const operationTargets = buildExportBatchTargets\(selected, \{\s*batchTotal: selected\.length,\s*source: 'sidebar',\s*\}\)/);
+  assert.match(block, /job\.requested = resumedCompletedCount \+ operationTargets\.length/);
+  assert.match(block, /for \(let i = 0; i < operationTargets\.length; i \+= 1\)/);
+  assert.match(block, /const target = operationTargets\[i\]/);
+  assert.match(block, /const selectedItem = selected\[i\]/);
+  assert.match(block, /const \{ conversation, index \} = selectedItem/);
+  assert.match(block, /const operationId = buildOperationId\(\{\s*jobId: job\.jobId,\s*batchPosition: target\.batchPosition,\s*targetChatId: target\.targetChatId,\s*\}\)/);
+  assert.match(block, /job\.current = \{\s*index,\s*batchPosition: target\.batchPosition,\s*batchTotal: target\.batchTotal,\s*historyIndex: target\.historyIndex,\s*operationId,\s*title: target\.title \|\| conversation\.title \|\| null,\s*chatId: target\.targetChatId,\s*\}/);
+  assert.match(block, /job\.batchPosition = target\.batchPosition/);
+  assert.match(block, /job\.batchTotal = target\.batchTotal/);
+  assert.match(block, /job\.historyIndex = target\.historyIndex/);
+  assert.match(block, /job\.operationId = operationId/);
+  assert.match(block, /operationId,\s*jobId: job\.jobId,\s*targetChatId: target\.targetChatId,/);
+  assert.match(block, /job\.current = null;\s*job\.batchPosition = null;\s*job\.batchTotal = null;\s*job\.historyIndex = null;\s*job\.operationId = null;/);
+});
+
 test('start de export tem budget para preparar aba automaticamente', () => {
   const cliSource = readFileSync(resolve(ROOT, 'bin', 'gemini-md-export.mjs'), 'utf-8');
   const startExportBlock = cliSource.match(
