@@ -410,32 +410,6 @@
     return activityProgressPort;
   };
 
-  const activityProgressSnapshot = (progress) => {
-    const candidateTotal = Math.max(0, Number(progress.candidateTotal || 0));
-    const resolved = Math.max(0, Number(progress.resolvedCount || 0));
-    const scanned = Math.max(0, Number(progress.scannedCardCount || 0));
-    const loaded = Math.max(scanned, Number(progress.loadedCardCount || 0));
-    const maxCards = Math.max(1, Number(progress.maxCards || loaded || 1));
-    const rawStatus = progress.status || 'running';
-    const pending = Math.max(0, candidateTotal - Math.min(resolved, candidateTotal));
-    const status = rawStatus === 'completed' && pending > 0 ? 'failed' : rawStatus;
-    let label = `${scanned} itens lidos`;
-    if (status === 'completed') label = 'Todas as datas encontradas';
-    else if (rawStatus === 'completed' && pending > 0) label = `${pending} pendente(s)`;
-    else if (status === 'failed') label = 'Falhou';
-    else if (loaded > scanned) label = `${scanned} itens lidos · ${loaded} carregados`;
-    const total = candidateTotal > 0 ? candidateTotal : maxCards;
-    const current = candidateTotal > 0 ? Math.min(resolved, candidateTotal) : scanned;
-    return {
-      title: 'Identificando chats',
-      label,
-      current,
-      total,
-      status,
-      countLabel: candidateTotal > 0 ? `${Math.min(resolved, candidateTotal)} de ${candidateTotal}` : '',
-    };
-  };
-
   const updateActivityProgressDock = () => {
     const port = ensureActivityProgressPort();
     const progress = state.activityProgress;
@@ -443,7 +417,7 @@
       port.hide();
       return;
     }
-    const snapshot = activityProgressSnapshot(progress);
+    const snapshot = buildActivityProgressViewModel(progress);
     port.update(snapshot);
     const { countEl } = getSharedProgressDockElements({
       dockId: PROGRESS_DOCK_ID,

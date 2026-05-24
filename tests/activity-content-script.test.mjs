@@ -21,6 +21,14 @@ const inlineForHarness = (source) => {
     .replace(/^export\s+const\s+/gm, 'const ')
     .replace(/^export\s+function\s+/gm, 'function ')
     .replace(/^export\s+\{[^}]*\};?\s*$/gm, '');
+  const progressViewModelSource = readFileSync(
+    resolve('build', 'ts', 'core', 'progress-view-model.js'),
+    'utf-8',
+  )
+    .replace(/^import\s+[^;]+;\s*$/gm, '')
+    .replace(/^export\s+const\s+/gm, 'const ')
+    .replace(/^export\s+function\s+/gm, 'function ')
+    .replace(/^export\s+\{[^}]*\};?\s*$/gm, '');
   const progressPortSource = readFileSync(
     resolve('build', 'ts', 'browser', 'shared', 'progress-port.js'),
     'utf-8',
@@ -43,7 +51,10 @@ const inlineForHarness = (source) => {
     .replace(/^export\s+function\s+/gm, 'function ')
     .replace(/^export\s+\{[^}]*\};?\s*$/gm, '');
   return source
-    .replace('/* __INLINE_PROGRESS_DOCK_UI__ */', `${hostPaletteSource}\n${progressDockSource}`)
+    .replace(
+      '/* __INLINE_PROGRESS_DOCK_UI__ */',
+      `${hostPaletteSource}\n${progressViewModelSource}\n${progressDockSource}`,
+    )
     .replace('/* __INLINE_PROGRESS_PORT__ */', progressPortSource)
     .replace('/* __INLINE_TAB_COMMANDS__ */', tabCommandsSource)
     .replace('/* __INLINE_BRIDGE_CLIENT__ */', bridgeClientSource);

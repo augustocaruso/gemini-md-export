@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { FixVaultReport } from './fix-vault-contract.js';
+import { buildFixVaultProgressViewModel } from './progress-view-model.js';
 
 export type FixVaultFlowFlags = {
   bridgeUrl: string;
@@ -108,12 +109,11 @@ export const formatFixVaultProgressLine = ({
   total: number;
   message: string;
 }): string => {
+  const view = buildFixVaultProgressViewModel({ current, total, message });
   if (format !== 'tui' && format !== 'tui-stream') return `Fix vault: ${message}...\n`;
   const width = 28;
-  const safeTotal = Math.max(1, Number(total) || 1);
-  const safeCurrent = Math.max(0, Math.min(safeTotal, Number(current) || 0));
-  const filled = Math.round((safeCurrent / safeTotal) * width);
-  return `▕${'█'.repeat(filled)}${'░'.repeat(width - filled)}▏ ${current}/${total} ${message}\n`;
+  const filled = Math.round((view.barCurrent / Math.max(1, view.total)) * width);
+  return `▕${'█'.repeat(filled)}${'░'.repeat(width - filled)}▏ ${view.countLabel} ${view.label}\n`;
 };
 
 export const buildFixVaultCombinedReport = ({
