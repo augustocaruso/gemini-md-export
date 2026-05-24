@@ -8191,11 +8191,7 @@ const exportJobProgressMessage = (job) => {
         ? 'Baixando conversas novas'
         : 'Baixando somente o que falta no vault'
       : 'Baixando conversas do Gemini';
-    const count =
-      job.requested > 0
-        ? ` (${Math.min(job.completed + 1, job.requested)}/${job.requested})`
-        : '';
-    return `${prefix}${count}${title ? `: ${title}` : '...'}`;
+    return `${prefix}${title ? `: ${title}` : '...'}`;
   }
   if (job.phase === 'writing-report') {
     return 'Gravando relatório final...';

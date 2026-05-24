@@ -75,6 +75,49 @@ test('progress view model normalizes terminal export status to one hundred perce
   assert.equal(view.failed, false);
 });
 
+test('export progress separates batch position from history index', () => {
+  const view = buildExportJobProgressViewModel({
+    status: 'running',
+    phase: 'exporting',
+    requested: 30,
+    completed: 24,
+    batchPosition: 25,
+    batchTotal: 30,
+    historyIndex: 30,
+    current: {
+      index: 30,
+      title: 'DAS vs. DARF',
+      chatId: 'abc123abc123',
+      batchPosition: 25,
+      batchTotal: 30,
+      historyIndex: 30,
+    },
+    progressMessage: 'Baixando conversas do Gemini: DAS vs. DARF',
+  });
+
+  assert.equal(view.countLabel, '25 de 30');
+  assert.equal(view.displayCurrent, 25);
+  assert.equal(view.total, 30);
+  assert.equal(view.label, 'Baixando conversas do Gemini: DAS vs. DARF');
+  assert.equal(view.currentItem.title, 'DAS vs. DARF');
+});
+
+test('export progress strips legacy duplicated count from label', () => {
+  const view = buildExportJobProgressViewModel({
+    status: 'running',
+    phase: 'exporting',
+    requested: 30,
+    completed: 24,
+    batchPosition: 25,
+    batchTotal: 30,
+    current: { title: 'DAS vs. DARF', chatId: 'abc123abc123' },
+    progressMessage: 'Baixando conversas do Gemini (25/30): DAS vs. DARF',
+  });
+
+  assert.equal(view.countLabel, '25 de 30');
+  assert.equal(view.label, 'Baixando conversas do Gemini: DAS vs. DARF');
+});
+
 test('progress view model represents ready and count waits as indeterminate', () => {
   const ready = buildProgressViewModel({
     sourceKind: 'ready',

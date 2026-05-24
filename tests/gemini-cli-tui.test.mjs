@@ -2738,6 +2738,58 @@ test('CLI export missing inicia job com vaultDir e segue ate resultado final', a
   });
 });
 
+test('CLI plain progress não duplica contador no texto', async () => {
+  const stdout = captureStream();
+  const job = {
+    jobId: 'job-progress',
+    status: 'running',
+    phase: 'exporting',
+    requested: 30,
+    completed: 24,
+    batchPosition: 25,
+    batchTotal: 30,
+    progressMessage: 'Baixando conversas do Gemini (25/30): DAS vs. DARF',
+    current: { title: 'DAS vs. DARF', chatId: 'abc123abc123' },
+  };
+
+  await withServer((req, res, url) => {
+    if (url.pathname === '/healthz') {
+      sendJson(res, 200, { ok: true, version: PACKAGE_VERSION, protocolVersion: 2 });
+      return;
+    }
+    if (url.pathname === '/agent/ready') {
+      sendJson(res, 200, { ready: true, ok: true });
+      return;
+    }
+    if (url.pathname === '/agent/export-recent-chats') {
+      sendJson(res, 200, job);
+      return;
+    }
+    if (url.pathname === '/agent/export-job-status') {
+      sendJson(res, 200, { ...job, status: 'completed', phase: 'done', completed: 30 });
+      return;
+    }
+    sendJson(res, 404, { error: 'unexpected ' + url.pathname });
+  }, async (bridgeUrl) => {
+    await main(
+      [
+        'export',
+        'recent',
+        '--bridge-url',
+        bridgeUrl,
+        '--no-start-bridge',
+        '--plain',
+        '--poll-ms',
+        '10',
+      ],
+      { stdout },
+    );
+  });
+
+  assert.match(stdout.text(), /25 de 30|30 de 30/);
+  assert.doesNotMatch(stdout.text(), /25\/30.*25\/30/);
+});
+
 test('CLI export selected e notebook usam endpoints diretos da bridge', async () => {
   await withServer(mockSyncServer({ completedImmediately: true }), async (bridgeUrl, requests) => {
     const selectedStdout = captureStream();
