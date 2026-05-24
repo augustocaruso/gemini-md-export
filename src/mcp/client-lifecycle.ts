@@ -197,7 +197,6 @@ const NEXT_ACTIONS: Record<GeminiClientLifecycleCode, string> = {
 const RETRYABLE_CODES = new Set<GeminiClientLifecycleCode>([
   'warming_up',
   'page_not_hydrated',
-  'current_chat_required',
   'command_channel_unready',
   'tab_operation_in_progress',
 ]);
@@ -340,9 +339,13 @@ const pageIsGeminiAppHome = (page: GeminiPageSnapshot): boolean => {
   return pathname === '/app' || pathname === '/app/';
 };
 
-const pageHasRecentExportContext = (page: GeminiPageSnapshot): boolean => {
+const pageIsGeminiAppRoute = (page: GeminiPageSnapshot): boolean => {
   const pathname = pagePathname(page);
-  if (!pathname.startsWith('/app')) return false;
+  return pathname === '/app' || pathname === '/app/' || pathname.startsWith('/app/');
+};
+
+const pageHasRecentExportContext = (page: GeminiPageSnapshot): boolean => {
+  if (!pageIsGeminiAppRoute(page)) return false;
   if (pageHasHydratedGeminiContext(page)) return true;
   if (pageIsGeminiAppHome(page)) return true;
   return false;
@@ -456,12 +459,16 @@ export const getGeminiClientLifecycle = (
     return result('page_unready', 'page_not_gemini', client);
   }
 
-  const capability = options.capability || 'current-chat';
+  const capability = options.capability || null;
   if (capability === 'current-chat') {
     if (!pageHasCurrentChatContext(client.page)) {
       return result('page_unready', 'current_chat_required', client);
     }
-  } else if (!pageHasRecentExportContext(client.page)) {
+  } else if (capability === 'recent-export') {
+    if (!pageHasRecentExportContext(client.page)) {
+      return result('page_unready', 'page_not_hydrated', client);
+    }
+  } else if (!pageHasHydratedGeminiContext(client.page)) {
     return result('page_unready', 'page_not_hydrated', client);
   }
 

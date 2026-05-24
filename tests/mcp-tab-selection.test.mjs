@@ -58,6 +58,39 @@ test('recent export claimable helper accepts Gemini app home', () => {
   assert.equal(claimable.page.url, 'https://gemini.google.com/app');
 });
 
+test('legacy active claimable helper accepts app home with sidebar evidence', () => {
+  const claimable = toActiveClaimableGeminiClient(
+    {
+      ...baseClient,
+      page: {
+        url: 'https://gemini.google.com/app',
+        pathname: '/app',
+        chatId: null,
+        listedConversationCount: 12,
+        sidebarConversationCount: 12,
+      },
+    },
+    options,
+  );
+
+  assert.ok(claimable);
+  assert.equal(claimable.page.url, 'https://gemini.google.com/app');
+});
+
+test('app home without sidebar evidence needs recent-export helper', () => {
+  const homeClient = {
+    ...baseClient,
+    page: {
+      url: 'https://gemini.google.com/app',
+      pathname: '/app',
+      chatId: null,
+    },
+  };
+
+  assert.equal(toActiveClaimableGeminiClient(homeClient, options), null);
+  assert.ok(toRecentExportClaimableGeminiClient(homeClient, options));
+});
+
 test('inactive Gemini tab snapshot is rejected before claim/export', () => {
   const claimable = toActiveClaimableGeminiClient(
     {
