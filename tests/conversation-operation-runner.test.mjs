@@ -13,6 +13,34 @@ const target = {
   url: 'https://gemini.google.com/app/aaa111aaa111',
 };
 
+const createDeps = (overrides = {}) => ({
+  download: async () => ({
+    payload: { chatId: target.targetChatId, content: '# ok' },
+    receipts: { navigation: { ok: true } },
+  }),
+  resolveDates: async ({ payload }) => ({
+    payload: { ...payload, dateCreated: '2026-05-01T00:00:00Z' },
+    receipt: { status: 'matched', source: 'takeout' },
+  }),
+  save: async ({ payload }) => ({
+    filePath: `/tmp/${payload.chatId}.md`,
+    bytes: 12,
+    receipt: { status: 'saved' },
+  }),
+  ...overrides,
+});
+
+const runOperation = (overrides = {}) =>
+  runConversationOperation({
+    jobId: 'job-1',
+    operationId: 'op-1',
+    target,
+    progressSink: () => {},
+    abortSignal: new AbortController().signal,
+    deps: createDeps(),
+    ...overrides,
+  });
+
 test('conversation operation saves after download, date resolution and writer', async () => {
   const progress = [];
   const result = await runConversationOperation({
@@ -43,13 +71,57 @@ test('conversation operation saves after download, date resolution and writer', 
   assert.equal(result.status, 'saved');
   assert.equal(result.chatId, 'aaa111aaa111');
   assert.equal(result.filePath, '/tmp/aaa111aaa111.md');
-  assert.deepEqual(
-    progress.map((item) => item.phase),
-    ['opening', 'resolving_dates', 'saving'],
-  );
+  assert.deepEqual(progress, [
+    {
+      jobId: 'job-1',
+      operationId: 'job-1:001:aaa111aaa111',
+      status: 'running',
+      phase: 'opening',
+      batchPosition: 1,
+      batchTotal: 2,
+      historyIndex: 6,
+      title: 'Caso CPRE',
+      targetChatId: 'aaa111aaa111',
+      currentChatId: null,
+      message: 'Abrindo conversa',
+      lastProgressAt: 1000,
+      errorCount: null,
+    },
+    {
+      jobId: 'job-1',
+      operationId: 'job-1:001:aaa111aaa111',
+      status: 'running',
+      phase: 'resolving_dates',
+      batchPosition: 1,
+      batchTotal: 2,
+      historyIndex: 6,
+      title: 'Caso CPRE',
+      targetChatId: 'aaa111aaa111',
+      currentChatId: null,
+      message: 'Conferindo datas da conversa',
+      lastProgressAt: 1001,
+      errorCount: null,
+    },
+    {
+      jobId: 'job-1',
+      operationId: 'job-1:001:aaa111aaa111',
+      status: 'running',
+      phase: 'saving',
+      batchPosition: 1,
+      batchTotal: 2,
+      historyIndex: 6,
+      title: 'Caso CPRE',
+      targetChatId: 'aaa111aaa111',
+      currentChatId: null,
+      message: 'Salvando Markdown',
+      lastProgressAt: 1002,
+      errorCount: null,
+    },
+  ]);
 });
 
 test('conversation operation fails before save when payload chat id does not match target', async () => {
+  const calls = [];
   const result = await runConversationOperation({
     jobId: 'job-1',
     operationId: 'op-1',
@@ -61,8 +133,12 @@ test('conversation operation fails before save when payload chat id does not mat
         payload: { chatId: 'bbb222bbb222', content: '# wrong' },
         receipts: { navigation: { ok: true } },
       }),
-      resolveDates: async ({ payload }) => ({ payload, receipt: { status: 'unmatched' } }),
+      resolveDates: async ({ payload }) => {
+        calls.push('resolveDates');
+        return { payload, receipt: { status: 'unmatched' } };
+      },
       save: async () => {
+        calls.push('save');
         throw new Error('save should not run');
       },
     },
@@ -70,6 +146,7 @@ test('conversation operation fails before save when payload chat id does not mat
 
   assert.equal(result.status, 'failed');
   assert.equal(result.code, 'payload_chat_id_mismatch');
+  assert.deepEqual(calls, []);
 });
 
 test('conversation operation returns cancelled when abort signal is already aborted', async () => {
@@ -92,4 +169,117 @@ test('conversation operation returns cancelled when abort signal is already abor
 
   assert.equal(result.status, 'cancelled');
   assert.equal(result.reason, 'test-cancel');
+});
+
+test('conversation operation returns string fallback for non-string abort reason', async () => {
+  const controller = new AbortController();
+  controller.abort({ message: { nested: true } });
+  const progress = [];
+  const result = await runOperation({
+    progressSink: (snapshot) => progress.push(snapshot),
+    abortSignal: controller.signal,
+  });
+
+  assert.equal(result.status, 'cancelled');
+  assert.equal(result.reason, 'operation_cancelled');
+  assert.deepEqual(progress, []);
+});
+
+test('conversation operation cancels after download and skips date resolution and save', async () => {
+  const controller = new AbortController();
+  const calls = [];
+  const result = await runOperation({
+    abortSignal: controller.signal,
+    deps: createDeps({
+      download: async () => {
+        calls.push('download');
+        controller.abort('after-download');
+        return {
+          payload: { chatId: target.targetChatId, content: '# ok' },
+          receipts: { navigation: { ok: true } },
+        };
+      },
+      resolveDates: async ({ payload }) => {
+        calls.push('resolveDates');
+        return { payload, receipt: { status: 'matched' } };
+      },
+      save: async () => {
+        calls.push('save');
+        return { filePath: '/tmp/nope.md', receipt: {} };
+      },
+    }),
+  });
+
+  assert.equal(result.status, 'cancelled');
+  assert.equal(result.reason, 'after-download');
+  assert.deepEqual(result.receipts, { download: { navigation: { ok: true } } });
+  assert.deepEqual(calls, ['download']);
+});
+
+test('conversation operation cancels after date resolution and skips save', async () => {
+  const controller = new AbortController();
+  const calls = [];
+  const result = await runOperation({
+    abortSignal: controller.signal,
+    deps: createDeps({
+      download: async () => {
+        calls.push('download');
+        return {
+          payload: { chatId: target.targetChatId, content: '# ok' },
+          receipts: { navigation: { ok: true } },
+        };
+      },
+      resolveDates: async ({ payload }) => {
+        calls.push('resolveDates');
+        controller.abort('after-dates');
+        return { payload, receipt: { status: 'matched', source: 'takeout' } };
+      },
+      save: async () => {
+        calls.push('save');
+        return { filePath: '/tmp/nope.md', receipt: {} };
+      },
+    }),
+  });
+
+  assert.equal(result.status, 'cancelled');
+  assert.equal(result.reason, 'after-dates');
+  assert.deepEqual(result.receipts, {
+    download: { navigation: { ok: true } },
+    dateImport: { status: 'matched', source: 'takeout' },
+  });
+  assert.deepEqual(calls, ['download', 'resolveDates']);
+});
+
+test('conversation operation cancels after save and preserves save receipt', async () => {
+  const controller = new AbortController();
+  const result = await runOperation({
+    abortSignal: controller.signal,
+    deps: createDeps({
+      save: async ({ payload }) => {
+        controller.abort('after-save');
+        return {
+          filePath: `/tmp/${payload.chatId}.md`,
+          receipt: { status: 'saved', mode: 'bridge' },
+        };
+      },
+    }),
+  });
+
+  assert.equal(result.status, 'cancelled');
+  assert.equal(result.reason, 'after-save');
+  assert.deepEqual(result.receipts.save, { status: 'saved', mode: 'bridge' });
+});
+
+test('conversation operation maps non-string dependency error fields to string failure', async () => {
+  const result = await runOperation({
+    deps: createDeps({
+      download: async () => {
+        throw { code: 42, message: { nested: true } };
+      },
+    }),
+  });
+
+  assert.equal(result.status, 'failed');
+  assert.equal(result.code, 'conversation_operation_failed');
+  assert.equal(typeof result.error, 'string');
 });

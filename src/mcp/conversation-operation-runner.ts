@@ -55,10 +55,11 @@ export type RunConversationOperationArgs = {
   deps: OperationDeps;
 };
 
-const abortReason = (signal: AbortSignal): string =>
-  typeof signal.reason === 'string'
-    ? signal.reason
-    : signal.reason?.message || 'operation_cancelled';
+const abortReason = (signal: AbortSignal): string => {
+  if (typeof signal.reason === 'string') return signal.reason;
+  const message = (signal.reason as { message?: unknown } | null | undefined)?.message;
+  return typeof message === 'string' ? message : 'operation_cancelled';
+};
 
 const cancelled = (
   operationId: string,
