@@ -89,6 +89,24 @@ test('watchdog fails a silent operation and preserves code', () => {
   );
 });
 
+test('watchdog reports positive subsecond terminal elapsed time in milliseconds', () => {
+  assert.deepEqual(
+    evaluateConversationOperationWatchdog({
+      operationId: 'op-1',
+      now: 1002,
+      lastProgressAt: 1000,
+      noProgressMs: 1,
+      cancelRequested: false,
+    }),
+    {
+      action: 'fail',
+      elapsedMs: 2,
+      code: 'conversation_no_progress_timeout',
+      message: 'Conversa sem progresso por 2ms.',
+    },
+  );
+});
+
 test('watchdog cancels silently stuck operation after job cancel', () => {
   assert.deepEqual(
     evaluateConversationOperationWatchdog({

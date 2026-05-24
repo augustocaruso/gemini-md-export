@@ -57,6 +57,22 @@ test('cancel only affects matching operation when operationId is supplied', () =
   assert.equal(result.active.abortReason, 'tool-cancel');
 });
 
+test('cancel treats empty operationId as a supplied mismatching filter', () => {
+  const active = startActiveTabOperation({
+    operationId: 'op-1',
+    jobId: 'job-1',
+    targetChatId: 'aaa111aaa111',
+    phase: 'hydrating',
+    now: 1000,
+  });
+
+  assert.deepEqual(requestActiveTabOperationCancel(active, { operationId: '', now: 1200 }), {
+    active,
+    cancelled: false,
+    reason: 'operation-id-mismatch',
+  });
+});
+
 test('terminal operation clears lock and stale operation is reaped with receipt', () => {
   const active = startActiveTabOperation({
     operationId: 'op-1',
@@ -75,6 +91,17 @@ test('terminal operation clears lock and stale operation is reaped with receipt'
   assert.equal(reaped.reaped, true);
   assert.equal(reaped.active, null);
   assert.equal(reaped.receipt.code, 'operation_lock_reaped');
+});
+
+test('finish treats empty operationId as a supplied mismatching filter', () => {
+  const active = startActiveTabOperation({
+    operationId: 'op-1',
+    jobId: 'job-1',
+    phase: 'hydrating',
+    now: 1000,
+  });
+
+  assert.equal(finishActiveTabOperation(active, { operationId: '' }), active);
 });
 
 test('active tab operation stores only finite non-negative timestamps', () => {
@@ -153,6 +180,33 @@ test('stale reaping treats clock skew as non-negative elapsed time', () => {
   const result = reapStaleActiveTabOperation(active, {
     now: 500,
     staleAfterMs: 1,
+  });
+  assert.equal(result.reaped, false);
+  assert.equal(result.active.operationId, 'op-1');
+  assert.equal(result.receipt, null);
+});
+
+test('progress timestamps are monotonic across clock skew', () => {
+  const active = startActiveTabOperation({
+    operationId: 'op-1',
+    jobId: 'job-1',
+    phase: 'opening',
+    now: 1000,
+  });
+  const progressed = updateActiveTabOperationProgress(active, {
+    phase: 'hydrating',
+    now: 10_000,
+  });
+  const skewed = updateActiveTabOperationProgress(progressed, {
+    phase: 'extracting',
+    now: 5000,
+  });
+
+  assert.equal(skewed.lastProgressAt, 10_000);
+
+  const result = reapStaleActiveTabOperation(skewed, {
+    now: 14_001,
+    staleAfterMs: 8000,
   });
   assert.equal(result.reaped, false);
   assert.equal(result.active.operationId, 'op-1');

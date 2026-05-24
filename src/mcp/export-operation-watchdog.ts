@@ -1,4 +1,8 @@
-const seconds = (ms: number): number => Math.max(0, Math.round(ms / 1000));
+const elapsedLabel = (ms: number): string => {
+  const safeMs = Math.max(0, ms);
+  if (safeMs > 0 && safeMs < 1000) return `${safeMs}ms`;
+  return `${Math.round(safeMs / 1000)}s`;
+};
 
 const isFiniteNonNegativeMs = (value: number): boolean => Number.isFinite(value) && value >= 0;
 
@@ -45,13 +49,13 @@ export const evaluateConversationOperationWatchdog = ({
       action: 'cancel',
       elapsedMs,
       code: 'conversation_cancelled_after_no_progress',
-      message: `Cancelamento solicitado; operação sem progresso por ${seconds(elapsedMs)}s.`,
+      message: `Cancelamento solicitado; operação sem progresso por ${elapsedLabel(elapsedMs)}.`,
     };
   }
   return {
     action: 'fail',
     elapsedMs,
     code: 'conversation_no_progress_timeout',
-    message: `Conversa sem progresso por ${seconds(elapsedMs)}s.`,
+    message: `Conversa sem progresso por ${elapsedLabel(elapsedMs)}.`,
   };
 };

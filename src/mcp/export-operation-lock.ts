@@ -17,6 +17,9 @@ const finiteNonNegativeMs = (value: number, fallback = 0): number => {
   return 0;
 };
 
+const hasOperationIdFilter = (operationId: string | null | undefined): operationId is string =>
+  operationId !== null && operationId !== undefined;
+
 const sanitizeActiveTabOperationState = (
   active: ActiveTabOperationState,
 ): ActiveTabOperationState => {
@@ -63,10 +66,15 @@ export const updateActiveTabOperationProgress = (
   { phase = active.phase, now = Date.now() }: { phase?: string; now?: number } = {},
 ): ActiveTabOperationState => {
   const safeActive = sanitizeActiveTabOperationState(active);
+  const lastProgressAt = Math.max(
+    safeActive.startedAt,
+    safeActive.lastProgressAt,
+    finiteNonNegativeMs(now, safeActive.lastProgressAt),
+  );
   return {
     ...safeActive,
     phase,
-    lastProgressAt: finiteNonNegativeMs(now, safeActive.lastProgressAt),
+    lastProgressAt,
   };
 };
 
@@ -80,7 +88,7 @@ export const requestActiveTabOperationCancel = (
 ) => {
   if (!active) return { active: null, cancelled: false, reason: 'no-active-operation' };
   const safeActive = sanitizeActiveTabOperationState(active);
-  if (operationId && safeActive.operationId !== operationId) {
+  if (hasOperationIdFilter(operationId) && safeActive.operationId !== operationId) {
     return { active: safeActive, cancelled: false, reason: 'operation-id-mismatch' };
   }
   return {
@@ -99,7 +107,7 @@ export const finishActiveTabOperation = (
   { operationId = null }: { operationId?: string | null } = {},
 ): ActiveTabOperationState | null => {
   if (!active) return null;
-  if (operationId && active.operationId !== operationId) return active;
+  if (hasOperationIdFilter(operationId) && active.operationId !== operationId) return active;
   return null;
 };
 
