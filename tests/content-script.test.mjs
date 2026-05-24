@@ -1,8 +1,13 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { JSDOM, VirtualConsole } from 'jsdom';
 
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const ROOT = resolve(__dirname, '..');
 const contentScriptUrl = new URL('../dist/extension/content.js', import.meta.url);
 
 const rectFromAttribute = (value) => {
@@ -1707,4 +1712,20 @@ test('exportPayload ignora chat antigo escondido no DOM da rota anterior', async
   assert.deepEqual(runtimeErrors, []);
 
   window.close();
+});
+
+test('content script active tab operation owns an AbortController', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'userscript-shell.ts'), 'utf-8');
+  const operationBlock = source.match(
+    /const runWithTabOperationBackpressure = async[\s\S]*?\n  \};\n\n  const findConversationForBridgeCommand/,
+  )?.[0] || '';
+  const cancelBlock = source.match(
+    /if \(command\.type === 'cancel-active-operation'\) \{[\s\S]*?\n    \}/,
+  )?.[0] || '';
+
+  assert.match(operationBlock, /new AbortController\(\)/);
+  assert.match(operationBlock, /abortController/);
+  assert.match(operationBlock, /abortSignal/);
+  assert.match(cancelBlock, /abortController\.abort/);
+  assert.match(cancelBlock, /operationId/);
 });

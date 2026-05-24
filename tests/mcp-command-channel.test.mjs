@@ -85,6 +85,8 @@ test('MCP propaga cancelamento de job para operação ativa no navegador', () =>
   assert.match(source, /requestExportJobCancel\(job, 'agent-cancel'\)/);
   assert.match(contentSource, /command\.type === 'cancel-active-operation'/);
   assert.match(contentSource, /activeTabOperationCancelRequested/);
+  assert.match(contentSource, /abortController\.abort/);
+  assert.match(contentSource, /operationId/);
   assert.match(contentSource, /operation_cancelled/);
 });
 

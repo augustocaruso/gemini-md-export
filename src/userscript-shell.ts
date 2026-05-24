@@ -4542,6 +4542,10 @@
       type: active.type,
       label: active.label,
       commandId: active.commandId || null,
+      operationId: active.operationId || null,
+      jobId: active.jobId || null,
+      targetChatId: active.targetChatId || null,
+      phase: active.phase || null,
       startedAt: new Date(active.startedAt).toISOString(),
       elapsedMs: Date.now() - active.startedAt,
       cancelRequestedAt: active.cancelRequestedAt
@@ -4552,7 +4556,10 @@
   };
 
   const activeTabOperationCancelRequested = () =>
-    Boolean(state.activeTabOperation?.cancelRequestedAt);
+    Boolean(
+      state.activeTabOperation?.cancelRequestedAt ||
+        state.activeTabOperation?.abortController?.signal?.aborted,
+    );
 
   const maybeReleaseClaimAfterTabOperation = async (command, result, startedAt) => {
     const args = command?.args || {};
@@ -4662,17 +4669,38 @@
       };
     }
 
+    const abortController = new AbortController();
+    const operationId =
+      command.args?.operationId ||
+      `${command.type}:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`;
+    const now = Date.now();
     state.activeTabOperation = {
       type: command.type,
       label: tabOperationLabel(command),
       commandId: command.id || null,
-      startedAt: Date.now(),
+      operationId,
+      jobId: command.args?.jobId || null,
+      targetChatId: command.args?.targetChatId || command.args?.chatId || command.args?.item?.chatId || null,
+      phase: command.args?.phase || 'queued',
+      startedAt: now,
+      lastProgressAt: now,
+      abortController,
     };
     const operationStartedAt = state.activeTabOperation.startedAt;
     reportTabBrokerState('operation-start', { force: true });
 
     try {
-      const result = await fn();
+      const result = await fn({
+        operationId,
+        abortSignal: abortController.signal,
+        setOperationPhase: (phase) => {
+          if (state.activeTabOperation?.operationId === operationId) {
+            state.activeTabOperation.phase = phase;
+            state.activeTabOperation.lastProgressAt = Date.now();
+            reportTabBrokerStateSoon('operation-progress', { force: true });
+          }
+        },
+      });
       return await maybeReleaseClaimAfterTabOperation(command, result, operationStartedAt);
     } catch (err) {
       await maybeReleaseClaimAfterTabOperation(
@@ -5125,8 +5153,26 @@
           reason: 'no-active-operation',
         };
       }
+      const requestedOperationId = command.args?.operationId || null;
+      if (
+        requestedOperationId &&
+        state.activeTabOperation.operationId &&
+        requestedOperationId !== state.activeTabOperation.operationId
+      ) {
+        return {
+          ok: true,
+          cancelled: false,
+          reason: 'operation-id-mismatch',
+          activeOperation: activeTabOperationSummary(),
+        };
+      }
       state.activeTabOperation.cancelRequestedAt = Date.now();
       state.activeTabOperation.cancelReason = command.args?.reason || 'bridge-command';
+      if (state.activeTabOperation.abortController) {
+        state.activeTabOperation.abortController.abort(
+          state.activeTabOperation.cancelReason || 'bridge-command',
+        );
+      }
       reportTabBrokerState('operation-cancel-requested', { force: true });
       return {
         ok: true,
@@ -8715,7 +8761,9 @@
         reportTabBrokerStateSoon('heartbeat');
       },
       executeCommand: (command) =>
-        runWithTabOperationBackpressure(command, () => executeBridgeCommand(command)),
+        runWithTabOperationBackpressure(command, (operationContext) =>
+          executeBridgeCommand(command, operationContext),
+        ),
       postCommandResult: postBridgeCommandResult,
       bridgeRequest,
       onCommandReceived: () => {
