@@ -106,8 +106,16 @@ test('recent export has per-conversation no-progress watchdog', () => {
   assert.match(runRecentBlock, /Promise\.race/);
   assert.match(runRecentBlock, /evaluateConversationOperationWatchdog/);
   assert.match(runRecentBlock, /conversation_no_progress_timeout/);
-  assert.match(runRecentBlock, /requestActiveBrowserOperationCancelForJob\(job, decision\.code\)/);
+  assert.match(runRecentBlock, /const operationAbortController = new AbortController\(\)/);
+  assert.match(runRecentBlock, /abortSignal: operationAbortController\.signal/);
+  assert.match(runRecentBlock, /operationAbortController\.abort\(watchdogError\)/);
+  assert.match(runRecentBlock, /await requestActiveBrowserOperationCancelForJob\(job, decision\.code\)/);
+  assert.match(runRecentBlock, /await drainTimedOutConversationDownload/);
+  assert.doesNotMatch(runRecentBlock, /void requestActiveBrowserOperationCancelForJob\(job, decision\.code\)/);
   assert.match(runRecentBlock, /onOperationProgress: markOperationProgress/);
+  assert.match(source, /const assertConversationOperationNotAborted = \(args = \{\}\) =>/);
+  assert.match(source, /operation_cancelled/);
+  assert.match(source, /operation_still_active_after_watchdog/);
 });
 
 test('MCP usa SSE para progresso, mas exige long-poll para comandos por padrão', () => {
