@@ -9403,15 +9403,39 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
                 error.data = integrity;
                 throw error;
               }
-              const dateImportContext = await createExportDateImportContextForArgs(args);
-              const dateImport = await enrichExportPayloadWithDates({
-                payload,
-                integrity,
-                args: {
-                  ...args,
-                  _exportDateImportContext: dateImportContext,
-                },
-              });
+              let batchEvidence = null;
+              let dateImport = null;
+              try {
+                if (hasDateImportSource(args)) {
+                  batchEvidence = await buildExportDateImportBatchEvidenceForPayloads(
+                    [
+                      {
+                        key: String(integrity.snapshot?.chatId || target.targetChatId).toLowerCase(),
+                        payload,
+                        integrity,
+                      },
+                    ],
+                    args,
+                  );
+                  job.dateImport = {
+                    ...(job.dateImport || {}),
+                    batchCandidates: batchEvidence.candidates,
+                    ...(args._exportDateImportActivitySummary
+                      ? { myActivity: args._exportDateImportActivitySummary }
+                      : {}),
+                  };
+                }
+                dateImport = await enrichExportPayloadWithDates({
+                  payload,
+                  integrity,
+                  args: {
+                    ...args,
+                    _exportDateImportGroupedEvidence: batchEvidence?.groupedByKey,
+                  },
+                });
+              } finally {
+                delete args._exportDateImportActivitySummary;
+              }
               operationDateImportReceipt = dateImport.receipt;
               if (!dateImport.ok) {
                 appendExportJobTrace(job, 'date_import_unresolved_saved_without_abort', {
@@ -9617,7 +9641,13 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
           exportJobRecordingDeps,
         );
       } catch (err) {
-        const failure = buildConversationExportFailure({ index, conversation, err });
+        const failure = {
+          ...buildConversationExportFailure({ index, conversation, err }),
+          operationId,
+          batchPosition: target.batchPosition,
+          historyIndex: target.historyIndex,
+          receipts: err?.data?.receipts || err?.receipts || null,
+        };
         recordConversationExportFailure(
           { job, failures, itemMetric, failure, err },
           exportJobRecordingDeps,

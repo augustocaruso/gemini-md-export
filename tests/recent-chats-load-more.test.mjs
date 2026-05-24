@@ -667,6 +667,15 @@ test('recent export loop delegates one item to conversation operation runner', (
   assert.match(jobBlock, /runConversationOperation\(\{/);
   assert.match(jobBlock, /resolveDates:/);
   assert.match(jobBlock, /save:/);
+  assert.match(jobBlock, /buildExportDateImportBatchEvidenceForPayloads\(/);
+  assert.match(jobBlock, /_exportDateImportGroupedEvidence: batchEvidence\?\.groupedByKey/);
+  assert.match(jobBlock, /job\.dateImport = \{/);
+  assert.match(jobBlock, /myActivity: args\._exportDateImportActivitySummary/);
+  assert.match(jobBlock, /const failure = \{\s*\.\.\.buildConversationExportFailure/);
+  assert.match(jobBlock, /operationId,/);
+  assert.match(jobBlock, /batchPosition: target\.batchPosition/);
+  assert.match(jobBlock, /historyIndex: target\.historyIndex/);
+  assert.match(jobBlock, /receipts: err\?\.data\?\.receipts \|\| err\?\.receipts \|\| null/);
 });
 
 test('reexport de chatIds conhecidos roda como job em background', () => {
