@@ -6452,6 +6452,9 @@ const collectConversationItemPayloadForClient = async (client, conversation, arg
     'get-chat-by-id',
     {
       item: conversation,
+      operationId: args.operationId || null,
+      jobId: args.jobId || null,
+      targetChatId: args.targetChatId || normalizeConversationChatId(conversation) || null,
       returnToOriginal: args.returnToOriginal !== false,
       notebookReturnMode: args.notebookReturnMode || null,
       ...hydrationArgs,
@@ -9144,6 +9147,13 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
       batchTotal: selected.length,
       source: 'sidebar',
     });
+    if (operationTargets.length !== selected.length) {
+      const error = new Error(
+        `Seleção de exportação inconsistente: ${selected.length} conversa(s) selecionada(s), mas ${operationTargets.length} alvo(s) válido(s).`,
+      );
+      error.code = 'operation_target_selection_mismatch';
+      throw error;
+    }
     job.requested = resumedCompletedCount + operationTargets.length;
     job.completed = resumedCompletedCount;
     if (operationTargets.length === 0) {

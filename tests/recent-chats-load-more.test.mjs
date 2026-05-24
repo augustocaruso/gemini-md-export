@@ -268,10 +268,16 @@ test('recent export builds operation targets with batch and history positions', 
   const block = source.match(
     /const runRecentChatsExportJob = async[\s\S]*?\nconst startRecentChatsExportJob/,
   )?.[0];
+  const collectBlock = source.match(
+    /const collectConversationItemPayloadForClient = async[\s\S]*?\nconst saveCollectedConversationPayload/,
+  )?.[0];
 
   assert.ok(importBlock, 'mcp-server deve importar o contrato compilado de operacoes de export');
   assert.ok(block, 'runRecentChatsExportJob deve existir');
+  assert.ok(collectBlock, 'collectConversationItemPayloadForClient deve existir');
   assert.match(block, /const operationTargets = buildExportBatchTargets\(selected, \{\s*batchTotal: selected\.length,\s*source: 'sidebar',\s*\}\)/);
+  assert.match(block, /if \(operationTargets\.length !== selected\.length\) \{/);
+  assert.match(block, /operation_target_selection_mismatch/);
   assert.match(block, /job\.requested = resumedCompletedCount \+ operationTargets\.length/);
   assert.match(block, /for \(let i = 0; i < operationTargets\.length; i \+= 1\)/);
   assert.match(block, /const target = operationTargets\[i\]/);
@@ -285,6 +291,9 @@ test('recent export builds operation targets with batch and history positions', 
   assert.match(block, /job\.operationId = operationId/);
   assert.match(block, /operationId,\s*jobId: job\.jobId,\s*targetChatId: target\.targetChatId,/);
   assert.match(block, /job\.current = null;\s*job\.batchPosition = null;\s*job\.batchTotal = null;\s*job\.historyIndex = null;\s*job\.operationId = null;/);
+  assert.match(collectBlock, /operationId: args\.operationId \|\| null/);
+  assert.match(collectBlock, /jobId: args\.jobId \|\| null/);
+  assert.match(collectBlock, /targetChatId: args\.targetChatId \|\| normalizeConversationChatId\(conversation\) \|\| null/);
 });
 
 test('start de export tem budget para preparar aba automaticamente', () => {
