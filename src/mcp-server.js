@@ -108,6 +108,7 @@ const {
   defaultDateImportSummary,
   enrichExportPayloadWithDates,
   hasDateImportSource,
+  saveCollectedConversationPayloadRuntime,
   saveCollectedConversationPayloadViaDateImportBatch,
   summarizeExportDateImportContextForJob,
 } = await import(compiledTsModuleUrl('mcp', 'export-date-import-runtime.js'));
@@ -119,6 +120,13 @@ const {
   recordConversationExportSuccess,
   saveDeferredDateImportExports,
 } = await import(compiledTsModuleUrl('mcp', 'export-job-recording.js'));
+const {
+  buildExportBatchTargets,
+  buildOperationId,
+} = await import(compiledTsModuleUrl('mcp', 'export-operation-contracts.js'));
+const {
+  runRecentExportConversationOperation,
+} = await import(compiledTsModuleUrl('mcp', 'recent-export-operation-runtime.js'));
 const {
   assertActiveClaimableGeminiClient,
   explainActiveClaimableGeminiClientRejection,
@@ -264,6 +272,20 @@ const EXPORT_COMMAND_TIMEOUT_MS = Number(
 const EXPORT_COMMAND_STALE_ABORT_MS = Math.max(
   CLIENT_STALE_MS + 15_000,
   Math.min(10 * 60_000, Number(process.env.GEMINI_MCP_EXPORT_COMMAND_STALE_ABORT_MS || 90_000)),
+);
+const parsedConversationNoProgressMs = Number(
+  process.env.GEMINI_MCP_CONVERSATION_NO_PROGRESS_MS || 45_000,
+);
+const DEFAULT_CONVERSATION_NO_PROGRESS_MS = Math.max(
+  5000,
+  Math.min(
+    5 * 60_000,
+    Number.isFinite(parsedConversationNoProgressMs) ? parsedConversationNoProgressMs : 45_000,
+  ),
+);
+const WATCHDOG_OPERATION_DRAIN_MS = Math.max(
+  1000,
+  Math.min(30_000, Number(process.env.GEMINI_MCP_WATCHDOG_OPERATION_DRAIN_MS || 5000)),
 );
 const EXPORT_TAB_ACTIVATION_TIMEOUT_MS = Math.max(
   3000,
@@ -3388,6 +3410,17 @@ const launchChromeForGemini = async ({ profileDirectory, targetUrl, explicit = f
 
 const sleep = (ms) => new Promise((resolveSleep) => setTimeout(resolveSleep, ms));
 
+const assertConversationOperationNotAborted = (args = {}) => {
+  if (!args.abortSignal?.aborted) return;
+  const reason = args.abortSignal.reason;
+  if (reason instanceof Error) throw reason;
+  const error = new Error(reason?.message || 'Operação de exportação cancelada.');
+  error.code = reason?.code || 'operation_cancelled';
+  error.operationId = args.operationId || null;
+  error.targetChatId = args.targetChatId || null;
+  throw error;
+};
+
 const normalizeWaitMs = (value, fallback, max = 30_000) => {
   const parsed = Number(value ?? fallback);
   const safe = Number.isFinite(parsed) ? parsed : fallback;
@@ -3450,6 +3483,14 @@ const exportCommandStaleAbortMs = (args = {}) =>
     args.exportStaleAbortMs ?? args.browserStaleAbortMs,
     EXPORT_COMMAND_STALE_ABORT_MS,
     CLIENT_STALE_MS + 1000,
+    10 * 60_000,
+  );
+
+const conversationNoProgressMs = (args = {}) =>
+  normalizeExportWaitMs(
+    args.conversationNoProgressMs ?? args.noProgressMs,
+    DEFAULT_CONVERSATION_NO_PROGRESS_MS,
+    5000,
     10 * 60_000,
   );
 
@@ -6439,15 +6480,21 @@ const selectRecentExportClient = async (selector = {}) => {
 };
 
 const collectConversationItemPayloadForClient = async (client, conversation, args = {}) => {
+  assertConversationOperationNotAborted(args);
   const commandStartedAt = Date.now();
   const hydrationArgs = exportHydrationArgs(args);
   const commandTimeoutMs = exportCommandTimeoutMs(args);
   const prepared = await ensureClientActiveForExport(client, args);
+  args.onOperationProgress?.({ phase: 'browser-command-started' });
+  assertConversationOperationNotAborted(args);
   const command = await enqueueCommandWithClientRecovery(
     prepared.client,
     'get-chat-by-id',
     {
       item: conversation,
+      operationId: args.operationId || null,
+      jobId: args.jobId || null,
+      targetChatId: args.targetChatId || normalizeConversationChatId(conversation) || null,
       returnToOriginal: args.returnToOriginal !== false,
       notebookReturnMode: args.notebookReturnMode || null,
       ...hydrationArgs,
@@ -6455,6 +6502,8 @@ const collectConversationItemPayloadForClient = async (client, conversation, arg
     { timeoutMs: commandTimeoutMs, staleAbortMs: exportCommandStaleAbortMs(args) },
     args,
   );
+  args.onOperationProgress?.({ phase: 'browser-command-finished' });
+  assertConversationOperationNotAborted(args);
   const activeClient = command.client;
   const { result } = command;
   const browserCommandMs = Date.now() - commandStartedAt;
@@ -6490,77 +6539,11 @@ const collectConversationItemPayloadForClient = async (client, conversation, arg
 };
 
 const saveCollectedConversationPayload = async (collected, args = {}) => {
-  let { integrity } = collected;
-  const dateImport = await enrichExportPayloadWithDates({
-    payload: collected.result.payload,
-    integrity,
-    args,
+  return saveCollectedConversationPayloadRuntime(collected, args, {
+    summarizeClient,
+    validateMcpExportPayload,
+    writeExportPayloadBundle,
   });
-  if (!dateImport.ok) {
-    const error = new Error(dateImport.message);
-    error.code = dateImport.code;
-    error.data = {
-      code: dateImport.code,
-      dateImport: dateImport.receipt,
-      evidence: dateImport.evidence,
-    };
-    throw error;
-  }
-  integrity = await validateMcpExportPayload(dateImport.payload, {
-    expectedChatId: collected.expectedChatId,
-    requestedChatId: collected.requestedChatId,
-  });
-  if (!integrity.ok) {
-    const error = new Error(integrity.message);
-    error.code = integrity.code;
-    error.data = integrity;
-    throw error;
-  }
-
-  const saveStartedAt = Date.now();
-  const saved = writeExportPayloadBundle(dateImport.payload, { outputDir: args.outputDir });
-  const saveFilesMs = Date.now() - saveStartedAt;
-  const savedMediaBytes = Array.isArray(saved.mediaFiles)
-    ? saved.mediaFiles.reduce((sum, file) => sum + Number(file.bytes || 0), 0)
-    : 0;
-  const payloadMetrics = collected.result.payload?.metrics || {};
-  const metrics = {
-    version: 1,
-    timings: {
-      browserCommandMs: collected.browserCommandMs,
-      saveFilesMs,
-      ...(payloadMetrics.timings || {}),
-    },
-    counters: {
-      ...(payloadMetrics.counters || {}),
-      mediaFileCount: saved.mediaFileCount || 0,
-      mediaFailureCount: saved.mediaFailureCount || 0,
-      savedBytes: saved.bytes || 0,
-      savedMediaBytes,
-    },
-    hydration: collected.result.payload?.hydration || null,
-    navigation: collected.result.payload?.hydration?.navigation || null,
-    media: payloadMetrics.media || null,
-  };
-  return {
-    client: summarizeClient(collected.activeClient),
-    conversation: collected.result.conversation || collected.conversation,
-    chatId: integrity.snapshot.chatId || collected.result.payload?.chatId || collected.conversation.chatId || null,
-    title: integrity.snapshot.title || collected.result.payload?.title || collected.conversation.title || null,
-    turns: integrity.assistantTurnCount,
-    hydration: collected.result.payload?.hydration || null,
-    returnedToOriginal: collected.result.returnedToOriginal ?? null,
-    returnError: collected.result.returnError || null,
-    integrity: {
-      markdownHash: integrity.markdownHash,
-      assistantTurnCount: integrity.assistantTurnCount,
-      evidence: integrity.evidence,
-      warnings: integrity.warnings,
-    },
-    dateImport: dateImport.receipt,
-    metrics,
-    ...saved,
-  };
 };
 
 const saveCollectedConversationPayloadWithDateImportBatch = (collected, args = {}) =>
@@ -6569,11 +6552,14 @@ const saveCollectedConversationPayloadWithDateImportBatch = (collected, args = {
     saveCollectedConversationPayload,
   });
 
-const downloadConversationItemForClient = async (client, conversation, args = {}) =>
-  saveCollectedConversationPayloadWithDateImportBatch(
-    await collectConversationItemPayloadForClient(client, conversation, args),
-    args,
-  );
+const downloadConversationItemForClient = async (client, conversation, args = {}) => {
+  assertConversationOperationNotAborted(args);
+  const collected = await collectConversationItemPayloadForClient(client, conversation, args);
+  assertConversationOperationNotAborted(args);
+  const saved = await saveCollectedConversationPayloadWithDateImportBatch(collected, args);
+  assertConversationOperationNotAborted(args);
+  return saved;
+};
 
 const isTransientTabBusyError = (err) =>
   err?.code === 'tab_operation_in_progress' ||
@@ -6821,9 +6807,15 @@ const downloadConversationItemWithRetry = async (job, client, conversation, args
       : broadcastRecentChatsJobProgress;
   for (let attempt = 1; attempt <= retryLimit; attempt += 1) {
     try {
-      return args.collectOnly === true
+      assertConversationOperationNotAborted(args);
+      args.onOperationProgress?.({ phase: 'browser-command-started', attempt });
+      assertConversationOperationNotAborted(args);
+      const result = args.collectOnly === true
         ? await collectConversationItemPayloadForClient(client, conversation, args)
         : await downloadConversationItemForClient(client, conversation, args);
+      args.onOperationProgress?.({ phase: 'browser-command-finished', attempt });
+      assertConversationOperationNotAborted(args);
+      return result;
     } catch (err) {
       lastError = err;
       const retryReason = retryableConversationExportReason(err);
@@ -6856,7 +6848,21 @@ const downloadConversationItemWithRetry = async (job, client, conversation, args
       });
       touchExportJob(job);
       broadcastProgress(job, client);
-      await sleep(retryDelayMs);
+      args.onOperationProgress?.({ phase: 'retry-delay-started', attempt, retryDelayMs, retryReason });
+      assertConversationOperationNotAborted(args);
+      const retryProgressTimer =
+        retryDelayMs > 0
+          ? setInterval(() => {
+              args.onOperationProgress?.({ phase: 'retry-delay-waiting', attempt, retryDelayMs, retryReason });
+            }, Math.min(1000, retryDelayMs))
+          : null;
+      try {
+        await sleep(retryDelayMs);
+      } finally {
+        if (retryProgressTimer) clearInterval(retryProgressTimer);
+        args.onOperationProgress?.({ phase: 'retry-delay-finished', attempt, retryDelayMs, retryReason });
+      }
+      assertConversationOperationNotAborted(args);
     }
   }
   throw lastError || new Error('Falha ao exportar conversa no browser.');
@@ -8191,11 +8197,7 @@ const exportJobProgressMessage = (job) => {
         ? 'Baixando conversas novas'
         : 'Baixando somente o que falta no vault'
       : 'Baixando conversas do Gemini';
-    const count =
-      job.requested > 0
-        ? ` (${Math.min(job.completed + 1, job.requested)}/${job.requested})`
-        : '';
-    return `${prefix}${count}${title ? `: ${title}` : '...'}`;
+    return `${prefix}${title ? `: ${title}` : '...'}`;
   }
   if (job.phase === 'writing-report') {
     return 'Gravando relatório final...';
@@ -8801,6 +8803,7 @@ const requestActiveBrowserOperationCancelForJob = (job, reason = 'job-cancel') =
     'cancel-active-operation',
     {
       jobId: job.jobId,
+      operationId: job.operationId || job.current?.operationId || null,
       reason,
     },
     {
@@ -8827,6 +8830,28 @@ const requestActiveBrowserOperationCancelForJob = (job, reason = 'job-cancel') =
       touchExportJob(job);
       return null;
     });
+};
+
+const recentExportOperationDeps = {
+  appendExportJobTrace,
+  broadcastRecentChatsJobProgress,
+  buildConversationExportFailure,
+  buildConversationExportSuccess,
+  buildExportDateImportBatchEvidenceForPayloads,
+  downloadConversationItemWithRetry,
+  drainTimeoutMs: WATCHDOG_OPERATION_DRAIN_MS,
+  enrichExportPayloadWithDates,
+  exportJobRecordingDeps,
+  getClientById: (clientId) => clients.get(clientId) || null,
+  hasDateImportSource,
+  rebindExportJobToClient,
+  recordConversationExportFailure,
+  recordConversationExportSuccess,
+  requestActiveBrowserOperationCancelForJob,
+  summarizeClient,
+  touchExportJob,
+  validateMcpExportPayload,
+  writeExportPayloadBundle,
 };
 
 const requestExportJobCancel = (job, reason = 'job-cancel') => {
@@ -9140,9 +9165,20 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
       job.remainingAfterResume = selected.length;
     }
 
-    job.requested = resumedCompletedCount + selected.length;
+    const operationTargets = buildExportBatchTargets(selected, {
+      batchTotal: selected.length,
+      source: 'sidebar',
+    });
+    if (operationTargets.length !== selected.length) {
+      const error = new Error(
+        `Seleção de exportação inconsistente: ${selected.length} conversa(s) selecionada(s), mas ${operationTargets.length} alvo(s) válido(s).`,
+      );
+      error.code = 'operation_target_selection_mismatch';
+      throw error;
+    }
+    job.requested = resumedCompletedCount + operationTargets.length;
     job.completed = resumedCompletedCount;
-    if (selected.length === 0) {
+    if (operationTargets.length === 0) {
       job.status =
         job.truncated || job.loadMoreTimedOut || job.vaultScan?.truncated
           ? 'completed_with_errors'
@@ -9157,21 +9193,35 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
     broadcastRecentChatsJobProgress(job, client);
 
     const exportingStartedAt = Date.now();
-    const deferDateImportSave = hasDateImportSource(args);
-    const deferredSaves = [];
-    for (let i = 0; i < selected.length; i += 1) {
+    const noProgressMs = conversationNoProgressMs(args);
+    for (let i = 0; i < operationTargets.length; i += 1) {
       if (job.cancelRequested) {
         job.status = 'cancelled';
         job.phase = 'cancelled';
         break;
       }
 
-      const { conversation, index } = selected[i];
+      const target = operationTargets[i];
+      const selectedItem = selected[i];
+      const { conversation, index } = selectedItem;
+      const operationId = buildOperationId({
+        jobId: job.jobId,
+        batchPosition: target.batchPosition,
+        targetChatId: target.targetChatId,
+      });
       job.current = {
         index,
-        title: conversation.title || null,
-        chatId: conversation.chatId || conversation.id || null,
+        batchPosition: target.batchPosition,
+        batchTotal: target.batchTotal,
+        historyIndex: target.historyIndex,
+        operationId,
+        title: target.title || conversation.title || null,
+        chatId: target.targetChatId,
       };
+      job.batchPosition = target.batchPosition;
+      job.batchTotal = target.batchTotal;
+      job.historyIndex = target.historyIndex;
+      job.operationId = operationId;
       const itemMetric = startConversationMetric(job, {
         index,
         chatId: job.current.chatId,
@@ -9216,31 +9266,30 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
           }
         }
 
-        const result = await downloadConversationItemWithRetry(job, client, conversation, {
-          ...args,
-          outputDir: job.outputDir,
-          collectOnly: deferDateImportSave,
-          returnToOriginal: false,
-        });
-        if (deferDateImportSave) {
-          const resultClient = result.activeClient?.clientId ? clients.get(result.activeClient.clientId) : null;
-          if (resultClient) client = rebindExportJobToClient(job, resultClient, 'conversation-download');
-          deferredSaves.push({ index, conversation, itemMetric, collected: result });
-          continue;
-        }
-        const resultClient = result.client?.clientId ? clients.get(result.client.clientId) : null;
-        if (resultClient) client = rebindExportJobToClient(job, resultClient, 'conversation-download');
-        const success = buildConversationExportSuccess({ index, conversation, result });
-        recordConversationExportSuccess(
-          { job, successes, itemMetric, success, result },
-          exportJobRecordingDeps,
+        const operationOutcome = await runRecentExportConversationOperation(
+          {
+            args,
+            client,
+            conversation,
+            failures,
+            index,
+            itemMetric,
+            job,
+            noProgressMs,
+            operationId,
+            successes,
+            target,
+          },
+          recentExportOperationDeps,
         );
+        client = operationOutcome.client || client;
       } catch (err) {
-        const failure = buildConversationExportFailure({ index, conversation, err });
-        recordConversationExportFailure(
-          { job, failures, itemMetric, failure, err },
-          exportJobRecordingDeps,
-        );
+        if (
+          err?.code === 'operation_still_active_after_watchdog' ||
+          err?.code === 'operation_cancel_failed_after_watchdog'
+        ) {
+          throw err;
+        }
       } finally {
         job.completed = resumedCompletedCount + i + 1;
         touchExportJob(job);
@@ -9249,16 +9298,6 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
       }
     }
 
-    client = await saveDeferredDateImportExports({
-      job,
-      client,
-      successes,
-      failures,
-      deferredSaves,
-      args,
-      persist: persistRecentChatsExportReport,
-      broadcast: broadcastRecentChatsJobProgress,
-    }, exportJobRecordingDeps);
     recordJobTimingFrom(job, 'exportConversationsMs', exportingStartedAt);
 
     if (!job.cancelRequested) {
@@ -9289,6 +9328,10 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
     }
   } finally {
     job.current = null;
+    job.batchPosition = null;
+    job.batchTotal = null;
+    job.historyIndex = null;
+    job.operationId = null;
     job.finishedAt = new Date().toISOString();
     touchExportJob(job);
     try {

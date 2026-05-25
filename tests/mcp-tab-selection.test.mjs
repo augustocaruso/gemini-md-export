@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   assertActiveClaimableGeminiClient,
   getActiveClaimableGeminiClients,
+  toRecentExportClaimableGeminiClient,
   toActiveClaimableGeminiClient,
 } from '../build/ts/mcp/tab-selection.js';
 import { getGeminiClientLifecycle } from '../build/ts/mcp/client-lifecycle.js';
@@ -38,6 +39,56 @@ test('active Gemini tab snapshot becomes a claimable client only after validatio
   assert.equal(claimable.clientId, 'chat-active');
   assert.equal(claimable.tabId, 123);
   assert.equal(claimable.isActiveTab, true);
+});
+
+test('recent export claimable helper accepts Gemini app home', () => {
+  const claimable = toRecentExportClaimableGeminiClient(
+    {
+      ...baseClient,
+      page: {
+        url: 'https://gemini.google.com/app',
+        pathname: '/app',
+        chatId: null,
+      },
+    },
+    options,
+  );
+
+  assert.ok(claimable);
+  assert.equal(claimable.page.url, 'https://gemini.google.com/app');
+});
+
+test('legacy active claimable helper accepts app home with sidebar evidence', () => {
+  const claimable = toActiveClaimableGeminiClient(
+    {
+      ...baseClient,
+      page: {
+        url: 'https://gemini.google.com/app',
+        pathname: '/app',
+        chatId: null,
+        listedConversationCount: 12,
+        sidebarConversationCount: 12,
+      },
+    },
+    options,
+  );
+
+  assert.ok(claimable);
+  assert.equal(claimable.page.url, 'https://gemini.google.com/app');
+});
+
+test('app home without sidebar evidence needs recent-export helper', () => {
+  const homeClient = {
+    ...baseClient,
+    page: {
+      url: 'https://gemini.google.com/app',
+      pathname: '/app',
+      chatId: null,
+    },
+  };
+
+  assert.equal(toActiveClaimableGeminiClient(homeClient, options), null);
+  assert.ok(toRecentExportClaimableGeminiClient(homeClient, options));
 });
 
 test('inactive Gemini tab snapshot is rejected before claim/export', () => {

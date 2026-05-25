@@ -603,6 +603,8 @@
     mcpProgressJobId: null,
     mcpProgressLastSeenAt: 0,
     mcpProgressCancelSinceAt: 0,
+    mcpTerminalProgressSeenAt: 0,
+    mcpTerminalProgressJobId: null,
     mcpProgressWatchdogTimer: 0,
     isLoadingMore: false,
     loadMoreFailures: 0,
@@ -4542,6 +4544,10 @@
       type: active.type,
       label: active.label,
       commandId: active.commandId || null,
+      operationId: active.operationId || null,
+      jobId: active.jobId || null,
+      targetChatId: active.targetChatId || null,
+      phase: active.phase || null,
       startedAt: new Date(active.startedAt).toISOString(),
       elapsedMs: Date.now() - active.startedAt,
       cancelRequestedAt: active.cancelRequestedAt
@@ -4552,7 +4558,17 @@
   };
 
   const activeTabOperationCancelRequested = () =>
-    Boolean(state.activeTabOperation?.cancelRequestedAt);
+    Boolean(
+      state.activeTabOperation?.cancelRequestedAt ||
+        state.activeTabOperation?.abortController?.signal?.aborted,
+    );
+
+  const throwIfOperationAborted = (signal, message) => {
+    if (!signal?.aborted) return;
+    const error = new Error(message || 'Operação cancelada.');
+    error.code = 'operation_cancelled';
+    throw error;
+  };
 
   const maybeReleaseClaimAfterTabOperation = async (command, result, startedAt) => {
     const args = command?.args || {};
@@ -4662,17 +4678,38 @@
       };
     }
 
+    const abortController = new AbortController();
+    const operationId =
+      command.args?.operationId ||
+      `${command.type}:${Date.now().toString(36)}:${Math.random().toString(36).slice(2, 8)}`;
+    const now = Date.now();
     state.activeTabOperation = {
       type: command.type,
       label: tabOperationLabel(command),
       commandId: command.id || null,
-      startedAt: Date.now(),
+      operationId,
+      jobId: command.args?.jobId || null,
+      targetChatId: command.args?.targetChatId || command.args?.chatId || command.args?.item?.chatId || null,
+      phase: command.args?.phase || 'queued',
+      startedAt: now,
+      lastProgressAt: now,
+      abortController,
     };
     const operationStartedAt = state.activeTabOperation.startedAt;
     reportTabBrokerState('operation-start', { force: true });
 
     try {
-      const result = await fn();
+      const result = await fn({
+        operationId,
+        abortSignal: abortController.signal,
+        setOperationPhase: (phase) => {
+          if (state.activeTabOperation?.operationId === operationId) {
+            state.activeTabOperation.phase = phase;
+            state.activeTabOperation.lastProgressAt = Date.now();
+            reportTabBrokerStateSoon('operation-progress', { force: true });
+          }
+        },
+      });
       return await maybeReleaseClaimAfterTabOperation(command, result, operationStartedAt);
     } catch (err) {
       await maybeReleaseClaimAfterTabOperation(
@@ -5085,7 +5122,7 @@
     };
   };
 
-  const executeBridgeCommand = async (command) => {
+  const executeBridgeCommand = async (command, operationContext = {}) => {
     if (!command?.type) {
       return {
         ok: false,
@@ -5125,8 +5162,29 @@
           reason: 'no-active-operation',
         };
       }
+      const hasRequestedOperationId =
+        Object.prototype.hasOwnProperty.call(command.args || {}, 'operationId') &&
+        command.args?.operationId !== null;
+      const requestedOperationId = hasRequestedOperationId ? String(command.args.operationId) : null;
+      if (
+        hasRequestedOperationId &&
+        (typeof state.activeTabOperation.operationId !== 'string' ||
+          requestedOperationId !== state.activeTabOperation.operationId)
+      ) {
+        return {
+          ok: true,
+          cancelled: false,
+          reason: 'operation-id-mismatch',
+          activeOperation: activeTabOperationSummary(),
+        };
+      }
       state.activeTabOperation.cancelRequestedAt = Date.now();
       state.activeTabOperation.cancelReason = command.args?.reason || 'bridge-command';
+      if (state.activeTabOperation.abortController) {
+        state.activeTabOperation.abortController.abort(
+          state.activeTabOperation.cancelReason || 'bridge-command',
+        );
+      }
       reportTabBrokerState('operation-cancel-requested', { force: true });
       return {
         ok: true,
@@ -5495,6 +5553,9 @@
         ok: true,
         payload: await collectExportForCurrentConversation({
           hydration: normalizeHydrationOptions(command.args || {}),
+          abortSignal: operationContext.abortSignal,
+          setOperationPhase: operationContext.setOperationPhase,
+          operationId: operationContext.operationId,
         }),
       };
     }
@@ -5545,12 +5606,16 @@
           preferDirectNotebookReturn: command.args?.notebookReturnMode === 'direct',
           preserveNotebookContext: true,
           hydration: normalizeHydrationOptions(command.args || {}),
+          abortSignal: operationContext.abortSignal,
+          setOperationPhase: operationContext.setOperationPhase,
+          operationId: operationContext.operationId,
         });
       } catch (err) {
         return {
           ok: false,
           conversation: targetItem,
           error: err?.message || String(err),
+          code: err?.code || null,
         };
       }
 
@@ -5814,9 +5879,27 @@
     let finalReason = null;
     let lastContainerCount = countConversationContainers(scroller, doc);
     let lastTurnDomCount = conversationDomTurnCount(doc);
+    const hydrationAbortMessage =
+      'Exportação cancelada antes de terminar a hidratação da conversa.';
+
+    const throwIfHydrationCancelled = () => {
+      if (options.isCancelled?.() || options.abortSignal?.aborted) {
+        throwIfOperationAborted(options.abortSignal, hydrationAbortMessage);
+        const error = new Error(hydrationAbortMessage);
+        error.code = 'operation_cancelled';
+        throw error;
+      }
+    };
+
+    throwIfOperationAborted(options.abortSignal, hydrationAbortMessage);
 
     if (!scrollElement || scrollElement.scrollHeight <= scrollElement.clientHeight + 4) {
       const turns = scrapeTurns(doc);
+      options.onProgress?.({
+        attempts,
+        elapsedMs: Date.now() - startedAt,
+        state: conversationHydrationState(scroller, doc, scrollTarget, win),
+      });
       return {
         turns,
         stats: {
@@ -5844,11 +5927,7 @@
       const waitStartedAt = Date.now();
       let state = beforeState;
       while (Date.now() - waitStartedAt < waitMs) {
-        if (options.isCancelled?.()) {
-          const error = new Error('Exportação cancelada antes de terminar a hidratação da conversa.');
-          error.code = 'operation_cancelled';
-          throw error;
-        }
+        throwIfHydrationCancelled();
         await sleep(100);
         state = conversationHydrationState(scroller, doc, scrollTarget, win);
         if (conversationHydrationChanged(beforeState, state)) {
@@ -5862,11 +5941,7 @@
     };
 
     while (attempts < maxAttempts) {
-      if (options.isCancelled?.()) {
-        const error = new Error('Exportação cancelada antes de terminar a hidratação da conversa.');
-        error.code = 'operation_cancelled';
-        throw error;
-      }
+      throwIfHydrationCancelled();
       if (Date.now() - startedAt > maxTotalMs) {
         timedOut = true;
         finalReason = 'max-total-time';
@@ -5946,6 +6021,11 @@
     }
 
     const turns = scrapeTurns(doc);
+    options.onProgress?.({
+      attempts,
+      elapsedMs: Date.now() - startedAt,
+      state: conversationHydrationState(scroller, doc, scrollTarget, win),
+    });
     return {
       turns,
       stats: {
@@ -6474,10 +6554,12 @@
   };
 
   const collectExportForCurrentConversation = async (options = {}) => {
+    options.setOperationPhase?.('hydrating');
     const hydrationStartedAt = Date.now();
     const hydrated = await hydrateConversationToTop(document, window, {
       ...(options.hydration || {}),
       isCancelled: activeTabOperationCancelRequested,
+      abortSignal: options.abortSignal,
       onProgress: ({ state: hydrationState, elapsedMs }) => {
         if (state.progress && state.exportSource === 'gui') {
           updateExportProgress({
@@ -6503,6 +6585,8 @@
         `Nao consegui carregar o inicio da conversa com seguranca antes de baixar (${reason}; scroller: ${hydrated.stats.matchedBy}; tentativas: ${hydrated.stats.attempts}; turnos vistos: ${hydrated.stats.turnDomCount || hydrated.stats.turnsAfterHydration || 0}). Recarregue a aba e tente novamente.`,
       );
     }
+    options.setOperationPhase?.('extracting');
+    throwIfOperationAborted(options.abortSignal, 'Exportação cancelada antes de extrair Markdown.');
     const payload = await buildExportPayload(document, location.href, {
       turns: hydrated.turns,
       metrics: {
@@ -6541,11 +6625,20 @@
   };
 
   const collectExportForConversation = async (item, options = {}) => {
+    options.setOperationPhase?.('navigating');
+    throwIfOperationAborted(
+      options.abortSignal,
+      'Exportação cancelada antes de navegar para a conversa.',
+    );
     const navigationStartedAt = Date.now();
     const navigation = await openChatWithNavigationEngine(item, {
       ...options,
       ignoreBusy: true,
     });
+    throwIfOperationAborted(
+      options.abortSignal,
+      'Exportação cancelada antes de coletar a conversa.',
+    );
     const openConversationMs = Date.now() - navigationStartedAt;
     return collectExportForCurrentConversation({
       expectedChatId: normalizeExpectedChatId(item),
@@ -6553,6 +6646,9 @@
       previousSignature: navigation?.previousSignature || '',
       navigation: navigation || null,
       hydration: options.hydration || null,
+      abortSignal: options.abortSignal,
+      setOperationPhase: options.setOperationPhase,
+      operationId: options.operationId,
       metrics: {
         timings: {
           openConversationMs,
@@ -7501,6 +7597,15 @@
     }
 
     if (jobProgress.source && jobProgress.source !== 'mcp') return;
+    const terminalJobId = jobProgress.jobId || state.mcpProgressJobId || null;
+    if (
+      jobProgress.status &&
+      TERMINAL_MCP_STATUSES.has(jobProgress.status) &&
+      state.mcpTerminalProgressJobId === terminalJobId &&
+      Date.now() - (state.mcpTerminalProgressSeenAt || 0) < PROGRESS_MIN_VISIBLE_MS + 1500
+    ) {
+      return;
+    }
     state.mcpProgressLastSeenAt = Date.now();
     noteMcpProgressStatus(jobProgress.status);
     startMcpProgressWatchdog();
@@ -7554,11 +7659,14 @@
       // Terminal: anima 100% + shimmer off + fade-out, mantendo a sensação
       // de "concluído" antes de esconder.
       stopMcpProgressWatchdog();
+      state.mcpTerminalProgressSeenAt = Date.now();
+      state.mcpTerminalProgressJobId = terminalJobId;
       state.mcpProgressActive = false;
       state.mcpProgressJobId = null;
       state.mcpProgressLastSeenAt = 0;
       state.mcpProgressCancelSinceAt = 0;
       clearMcpProgressSnapshot();
+      stopProgressCreep();
       void finishExportProgress();
     }
   };
@@ -8715,7 +8823,9 @@
         reportTabBrokerStateSoon('heartbeat');
       },
       executeCommand: (command) =>
-        runWithTabOperationBackpressure(command, () => executeBridgeCommand(command)),
+        runWithTabOperationBackpressure(command, (operationContext) =>
+          executeBridgeCommand(command, operationContext),
+        ),
       postCommandResult: postBridgeCommandResult,
       bridgeRequest,
       onCommandReceived: () => {

@@ -89,6 +89,10 @@ test('export workflow rejects unclaimed native broker tabs', async () => {
 
 test('MCP validates export payload before writing files', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const dateImportRuntimeSource = readFileSync(
+    resolve(ROOT, 'src', 'mcp', 'export-date-import-runtime.ts'),
+    'utf-8',
+  );
   const collectBlock = source.match(
     /const collectConversationItemPayloadForClient = async[\s\S]*?\nconst saveCollectedConversationPayload/,
   )?.[0];
@@ -99,14 +103,14 @@ test('MCP validates export payload before writing files', () => {
   assert.ok(saveBlock, 'saveCollectedConversationPayload deve existir');
 
   const validateIndex = collectBlock.indexOf('validateMcpExportPayload(result.payload');
-  const enrichIndex = saveBlock.indexOf('enrichExportPayloadWithDates');
-  const writeIndex = saveBlock.indexOf('writeExportPayloadBundle(dateImport.payload');
+  const enrichIndex = dateImportRuntimeSource.indexOf('enrichExportPayloadWithDates');
+  const writeIndex = dateImportRuntimeSource.indexOf('writeExportPayloadBundle(dateImport.payload');
   assert.ok(validateIndex > -1, 'MCP deve validar payload antes de gravar');
   assert.ok(enrichIndex > -1, 'MCP deve enriquecer metadata antes de gravar');
   assert.ok(writeIndex > -1, 'MCP deve gravar payload depois de validar');
   assert.ok(validateIndex > -1 && writeIndex > -1, 'validacao e escrita precisam existir');
   assert.ok(enrichIndex < writeIndex, 'datas precisam ser resolvidas antes de writeExportPayloadBundle');
-  assert.match(saveBlock, /integrity: \{/);
+  assert.match(dateImportRuntimeSource, /integrity: \{/);
   assert.match(source, /validateExportTabLeaseForJob/);
   assert.match(source, /validateNativeExportTabLeaseForJob/);
   assert.match(source, /shouldRequireNativeExportTabLease/);

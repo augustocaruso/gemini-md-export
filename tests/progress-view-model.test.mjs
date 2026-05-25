@@ -75,6 +75,113 @@ test('progress view model normalizes terminal export status to one hundred perce
   assert.equal(view.failed, false);
 });
 
+test('export progress separates batch position from history index', () => {
+  const view = buildExportJobProgressViewModel({
+    status: 'running',
+    phase: 'exporting',
+    requested: 30,
+    completed: 24,
+    batchPosition: 25,
+    batchTotal: 30,
+    historyIndex: 30,
+    current: {
+      index: 30,
+      title: 'DAS vs. DARF',
+      chatId: 'abc123abc123',
+      batchPosition: 25,
+      batchTotal: 30,
+      historyIndex: 30,
+    },
+    progressMessage: 'Baixando conversas do Gemini: DAS vs. DARF',
+  });
+
+  assert.equal(view.countLabel, '25 de 30');
+  assert.equal(view.displayCurrent, 25);
+  assert.equal(view.total, 30);
+  assert.equal(view.label, 'Baixando conversas do Gemini: DAS vs. DARF');
+  assert.equal(view.currentItem.title, 'DAS vs. DARF');
+});
+
+test('export progress strips legacy duplicated count from label', () => {
+  const view = buildExportJobProgressViewModel({
+    status: 'running',
+    phase: 'exporting',
+    requested: 30,
+    completed: 24,
+    batchPosition: 25,
+    batchTotal: 30,
+    current: { title: 'DAS vs. DARF', chatId: 'abc123abc123' },
+    progressMessage: 'Baixando conversas do Gemini (25/30): DAS vs. DARF',
+  });
+
+  assert.equal(view.countLabel, '25 de 30');
+  assert.equal(view.label, 'Baixando conversas do Gemini: DAS vs. DARF');
+});
+
+test('export progress completed state ignores stale batch position', () => {
+  const view = buildExportJobProgressViewModel({
+    status: 'completed',
+    phase: 'done',
+    requested: 30,
+    completed: 30,
+    batchPosition: 25,
+    batchTotal: 30,
+    current: {
+      title: 'DAS vs. DARF',
+      chatId: 'abc123abc123',
+      batchPosition: 25,
+      batchTotal: 30,
+    },
+    progressMessage: 'Baixando conversas do Gemini: DAS vs. DARF',
+  });
+
+  assert.equal(view.countLabel, '30 de 30');
+  assert.equal(view.current, 30);
+  assert.equal(view.displayCurrent, 30);
+  assert.equal(view.barCurrent, 30);
+  assert.equal(view.percent, 100);
+});
+
+test('export progress completed_with_errors state ignores stale batch position', () => {
+  const view = buildExportJobProgressViewModel({
+    status: 'completed_with_errors',
+    phase: 'done',
+    requested: 30,
+    completed: 30,
+    batchPosition: 25,
+    batchTotal: 30,
+    current: {
+      title: 'DAS vs. DARF',
+      chatId: 'abc123abc123',
+      batchPosition: 25,
+      batchTotal: 30,
+    },
+    progressMessage: 'Baixando conversas do Gemini: DAS vs. DARF',
+  });
+
+  assert.equal(view.countLabel, '30 de 30');
+  assert.equal(view.current, 30);
+  assert.equal(view.displayCurrent, 30);
+  assert.equal(view.barCurrent, 30);
+  assert.equal(view.percent, 100);
+});
+
+test('export progress preserves count-like fragments in titles', () => {
+  const view = buildExportJobProgressViewModel({
+    status: 'running',
+    phase: 'exporting',
+    requested: 30,
+    completed: 24,
+    batchPosition: 25,
+    batchTotal: 30,
+    current: { title: 'DAS vs. DARF (2024/2025): guia', chatId: 'abc123abc123' },
+    progressMessage: 'Baixando conversas do Gemini: DAS vs. DARF (2024/2025): guia',
+  });
+
+  assert.equal(view.countLabel, '25 de 30');
+  assert.equal(view.label, 'Baixando conversas do Gemini: DAS vs. DARF (2024/2025): guia');
+});
+
 test('progress view model represents ready and count waits as indeterminate', () => {
   const ready = buildProgressViewModel({
     sourceKind: 'ready',

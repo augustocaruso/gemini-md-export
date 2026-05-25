@@ -85,7 +85,46 @@ test('MCP propaga cancelamento de job para operação ativa no navegador', () =>
   assert.match(source, /requestExportJobCancel\(job, 'agent-cancel'\)/);
   assert.match(contentSource, /command\.type === 'cancel-active-operation'/);
   assert.match(contentSource, /activeTabOperationCancelRequested/);
+  assert.match(contentSource, /abortController\.abort/);
+  assert.match(contentSource, /operationId/);
   assert.match(contentSource, /operation_cancelled/);
+});
+
+test('recent export has per-conversation no-progress watchdog', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const operationSource = readFileSync(
+    resolve(ROOT, 'src', 'mcp', 'recent-export-operation-runtime.ts'),
+    'utf-8',
+  );
+  const runRecentBlock = source.match(
+    /const runRecentChatsExportJob = async \(job, client, args = \{\}\) => \{[\s\S]*?\n\};\n\nconst startRecentChatsExportJob/,
+  )?.[0] || '';
+
+  assert.match(operationSource, /export-operation-watchdog\.js/);
+  assert.match(operationSource, /evaluateConversationOperationWatchdog/);
+  assert.match(source, /DEFAULT_CONVERSATION_NO_PROGRESS_MS/);
+  assert.match(source, /const conversationNoProgressMs = \(args = \{\}\) =>/);
+  assert.match(runRecentBlock, /const noProgressMs = conversationNoProgressMs\(args\)/);
+  assert.match(runRecentBlock, /runRecentExportConversationOperation/);
+  assert.match(operationSource, /let operationLastProgressAt = Date\.now\(\)/);
+  assert.match(operationSource, /const markOperationProgress = \([^)]*\) => \{/);
+  assert.match(operationSource, /Promise\.race/);
+  assert.match(operationSource, /evaluateConversationOperationWatchdog/);
+  assert.match(operationSource, /conversation_no_progress_timeout/);
+  assert.match(operationSource, /const operationAbortController = new AbortController\(\)/);
+  assert.match(operationSource, /abortSignal: operationAbortController\.signal/);
+  assert.match(operationSource, /operationAbortController\.abort\(watchdogError\)/);
+  assert.match(operationSource, /status: 'watchdog'/);
+  assert.match(operationSource, /if \(downloadSettlement\.status === 'watchdog'\) \{/);
+  assert.match(operationSource, /requestActiveBrowserOperationCancelForJob\(job, decision\.code\)/);
+  assert.match(operationSource, /await drainTimedOutConversationOperation/);
+  assert.doesNotMatch(operationSource, /setInterval\(async \(\) =>/);
+  assert.doesNotMatch(operationSource, /const watchdogPromise = new Promise\(\(_, reject\)/);
+  assert.doesNotMatch(operationSource, /void deps\.requestActiveBrowserOperationCancelForJob\(job, decision\.code\)/);
+  assert.match(operationSource, /onOperationProgress: markOperationProgress/);
+  assert.match(source, /const assertConversationOperationNotAborted = \(args = \{\}\) =>/);
+  assert.match(source, /operation_cancelled/);
+  assert.match(operationSource, /operation_still_active_after_watchdog/);
 });
 
 test('MCP usa SSE para progresso, mas exige long-poll para comandos por padrão', () => {

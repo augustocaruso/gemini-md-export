@@ -109,6 +109,28 @@ const progressTotal = (value: unknown): number => Math.max(0, finiteNumber(value
 
 const safeDeterminateTotal = (value: unknown): number => Math.max(1, finiteNumber(value, 1));
 
+const stripLegacyProgressCount = (value: unknown): string => {
+  const text = String(value || '').trim();
+  return text
+    .replace(
+      /^(Baixando conversa(?:s)?(?: do Gemini| novas)?|Baixando somente o que falta no vault)\s+\(\d+\s*(?:\/|de)\s*\d+\)(?=:)/i,
+      '$1',
+    )
+    .trim();
+};
+
+const operationBatchPosition = (job: Record<string, any>): number | null => {
+  const value = job.batchPosition ?? job.current?.batchPosition ?? job.operation?.batchPosition;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : null;
+};
+
+const operationBatchTotal = (job: Record<string, any>, fallback = 0): number => {
+  const value = job.batchTotal ?? job.current?.batchTotal ?? job.operation?.batchTotal ?? fallback;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : fallback;
+};
+
 const statusLabelFor = (status: ProgressStatus, phase: string | null): string => {
   if (status === 'completed') return 'Concluido';
   if (status === 'completed_with_errors') return 'Concluido com avisos';
@@ -250,10 +272,13 @@ const indeterminateCountLabel = (job: Record<string, any>, counts: Required<Prog
 
 export const buildExportJobProgressViewModel = (job: Record<string, any>): ProgressViewModel => {
   const counts = jobTotals(job);
-  const total = finiteNumber(job.requested ?? job.missingCount ?? job.webConversationCount, 0);
+  const fallbackTotal = finiteNumber(job.requested ?? job.missingCount ?? job.webConversationCount, 0);
+  const batchPosition = operationBatchPosition(job);
+  const total = operationBatchTotal(job, fallbackTotal);
   const status = normalizeStatus(job.status);
   const phase = typeof job.phase === 'string' ? job.phase : null;
   const terminal = isTerminal(status);
+  const successfulTerminal = status === 'completed' || status === 'completed_with_errors';
   const completed = Math.max(0, finiteNumber(job.completed, 0));
   const currentIndex = Math.max(0, finiteNumber(job.current?.index ?? job.position, 0));
   const mode =
@@ -263,19 +288,26 @@ export const buildExportJobProgressViewModel = (job: Record<string, any>): Progr
     )
       ? 'determinate'
       : 'indeterminate';
-  const current = total > 0 ? (terminal ? Math.min(completed, total) : Math.min(completed, total)) : completed;
+  const current = total > 0 ? (successfulTerminal ? total : Math.min(completed, total)) : completed;
   const displayCurrent =
-    total > 0 && !terminal && phase === 'exporting'
-      ? Math.min(total, Math.max(completed + 1, currentIndex, 1))
-      : current;
+    batchPosition !== null && !successfulTerminal
+      ? Math.min(total || batchPosition, batchPosition)
+      : total > 0 && !terminal && phase === 'exporting'
+        ? Math.min(total, Math.max(completed + 1, currentIndex, 1))
+        : current;
   const barCurrent =
-    total > 0 && !terminal && phase === 'exporting'
-      ? Math.min(total - 0.02, completed + 0.62)
-      : current;
+    batchPosition !== null && total > 0 && !terminal
+      ? Math.min(total - 0.02, Math.max(0, batchPosition - 0.38))
+      : total > 0 && !terminal && phase === 'exporting'
+        ? Math.min(total - 0.02, completed + 0.62)
+        : current;
   const currentItem =
     job.current?.title || job.current?.chatId
       ? { title: job.current.title || null, chatId: job.current.chatId || null }
       : null;
+  const label = stripLegacyProgressCount(
+    job.operationMessage || job.progressMessage || job.decisionSummary?.headline || 'Sincronizando...',
+  );
 
   return buildProgressViewModel({
     sourceKind: job.sourceKind || 'export-job',
@@ -283,12 +315,17 @@ export const buildExportJobProgressViewModel = (job: Record<string, any>): Progr
     phase,
     mode,
     title: 'Gemini Markdown Export',
-    label: job.progressMessage || job.decisionSummary?.headline || 'Sincronizando...',
+    label,
     current,
     total,
     displayCurrent,
     barCurrent,
-    countLabel: total > 0 ? `${Math.min(displayCurrent, total)}/${total}` : indeterminateCountLabel(job, counts),
+    countLabel:
+      total > 0
+        ? batchPosition !== null
+          ? `${Math.min(displayCurrent, total)} de ${total}`
+          : `${Math.min(displayCurrent, total)}/${total}`
+        : indeterminateCountLabel(job, counts),
     currentItem,
     counts,
   });

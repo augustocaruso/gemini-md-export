@@ -25,6 +25,7 @@ export type GeminiClientLifecycleCode =
   | 'inactive_tab'
   | 'page_not_gemini'
   | 'page_not_hydrated'
+  | 'current_chat_required'
   | 'google_verification_required'
   | 'google_login_required'
   | 'google_page_blocked'
@@ -104,6 +105,7 @@ export type GeminiClientLifecycleOptions = Readonly<{
   expectedBuildStamp?: string | null;
   requireCommandReady?: boolean;
   requireClaimed?: boolean;
+  capability?: 'current-chat' | 'recent-export';
   sessionId?: string | null;
   claimId?: string | null;
   claims?: readonly GeminiTabClaimSnapshot[];
@@ -159,6 +161,7 @@ const LIFECYCLE_MESSAGES: Record<GeminiClientLifecycleCode, string> = {
   inactive_tab: 'Aba Gemini inativa nao pode ser reivindicada para exportacao.',
   page_not_gemini: 'A aba ativa nao aponta para o Gemini Web.',
   page_not_hydrated: 'A pagina do Gemini ainda nao hidratou uma conversa exportavel.',
+  current_chat_required: 'Abra uma conversa específica para exportar o chat atual.',
   google_verification_required: 'O Google abriu uma tela de verificacao antes do Gemini.',
   google_login_required: 'O navegador esta no login do Google.',
   google_page_blocked: 'O Google bloqueou a pagina antes de liberar o Gemini.',
@@ -180,6 +183,7 @@ const NEXT_ACTIONS: Record<GeminiClientLifecycleCode, string> = {
   inactive_tab: 'Ative a aba Gemini desejada antes de reivindicar ou exportar.',
   page_not_gemini: 'Abra https://gemini.google.com/app na aba ativa.',
   page_not_hydrated: 'Aguarde o Gemini renderizar a conversa ou a lista lateral.',
+  current_chat_required: 'Abra uma conversa específica para exportar o chat atual.',
   google_verification_required: 'Resolva a verificacao no navegador e tente novamente.',
   google_login_required: 'Conclua o login no navegador e tente novamente.',
   google_page_blocked: 'Resolva o bloqueio no navegador e tente novamente.',
@@ -330,6 +334,30 @@ const pageHasHydratedGeminiContext = (page: GeminiPageSnapshot) => {
   return false;
 };
 
+const pageIsGeminiAppHome = (page: GeminiPageSnapshot): boolean => {
+  const pathname = pagePathname(page);
+  return pathname === '/app' || pathname === '/app/';
+};
+
+const pageIsGeminiAppRoute = (page: GeminiPageSnapshot): boolean => {
+  const pathname = pagePathname(page);
+  return pathname === '/app' || pathname === '/app/' || pathname.startsWith('/app/');
+};
+
+const pageHasRecentExportContext = (page: GeminiPageSnapshot): boolean => {
+  if (!pageIsGeminiAppRoute(page)) return false;
+  if (pageHasHydratedGeminiContext(page)) return true;
+  if (pageIsGeminiAppHome(page)) return true;
+  return false;
+};
+
+const pageHasCurrentChatContext = (page: GeminiPageSnapshot): boolean => {
+  const pathname = pagePathname(page);
+  if (normalizeString(page.chatId)) return true;
+  if (/^\/app\/[a-f0-9]{12,}/i.test(pathname)) return true;
+  return false;
+};
+
 const pageBlockerCode = (
   page: GeminiPageSnapshot | null | undefined,
 ): GeminiClientLifecycleCode | null => {
@@ -431,7 +459,16 @@ export const getGeminiClientLifecycle = (
     return result('page_unready', 'page_not_gemini', client);
   }
 
-  if (!pageHasHydratedGeminiContext(client.page)) {
+  const capability = options.capability || null;
+  if (capability === 'current-chat') {
+    if (!pageHasCurrentChatContext(client.page)) {
+      return result('page_unready', 'current_chat_required', client);
+    }
+  } else if (capability === 'recent-export') {
+    if (!pageHasRecentExportContext(client.page)) {
+      return result('page_unready', 'page_not_hydrated', client);
+    }
+  } else if (!pageHasHydratedGeminiContext(client.page)) {
     return result('page_unready', 'page_not_hydrated', client);
   }
 

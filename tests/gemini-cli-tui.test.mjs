@@ -616,7 +616,16 @@ else if (diagnoseOnly) process.exitCode = 2;
       async () => {
         const stdout = captureStream({ isTTY: true });
         const run = await main(
-          ['fix-vault', vault, '--takeout', takeoutPath, '--report', reportPath, '--no-open-if-missing'],
+          [
+            'fix-vault',
+            vault,
+            '--takeout',
+            takeoutPath,
+            '--report',
+            reportPath,
+            '--no-open-if-missing',
+            '--tui',
+          ],
           { stdout, stderr: captureStream() },
         );
         assert.equal(run.exitCode, 0);
@@ -707,6 +716,26 @@ test('CLI expõe ajuda contextual para comandos e subcomandos', async () => {
   assert.match(chatsStdout.text(), /chats list/);
   assert.match(chatsStdout.text(), /--save-selection/);
   assert.match(chatsStdout.text(), /Total confirmado/);
+});
+
+test('CLI deixa My Activity no default do runtime para export e sync', () => {
+  const source = readFileSync(resolve(ROOT, 'bin', 'gemini-md-export.mjs'), 'utf-8');
+  const parseDefaults = source.match(/flags:\s*\{[\s\S]*?version: firstArgIsVersion,[\s\S]*?\}/)?.[0] || '';
+  const startSyncStart = source.indexOf('const startSyncJob = async');
+  const startExportStart = source.indexOf('const startExportJob = async');
+  const fetchJobStatusStart = source.indexOf('const fetchJobStatus');
+  const startSyncBlock =
+    startSyncStart >= 0 && startExportStart > startSyncStart
+      ? source.slice(startSyncStart, startExportStart)
+      : '';
+  const startExportBlock =
+    startExportStart >= 0 && fetchJobStatusStart > startExportStart
+      ? source.slice(startExportStart, fetchJobStatusStart)
+      : '';
+
+  assert.doesNotMatch(parseDefaults, /useMyActivity:\s*false/);
+  assert.match(startSyncBlock, /useMyActivity:\s*flags\.noMyActivity \? false : flags\.useMyActivity/);
+  assert.match(startExportBlock, /useMyActivity:\s*flags\.noMyActivity \? false : flags\.useMyActivity/);
 });
 
 test('CLI doctor --plain nao imprime RESULT_JSON sem pedido explicito', async () => {
@@ -2716,6 +2745,63 @@ test('CLI export missing inicia job com vaultDir e segue ate resultado final', a
     assert.equal(exportRequest.searchParams.get('vaultDir'), '/vault/Gemini');
     assert.equal(exportRequest.searchParams.get('outputDir'), '/vault/Gemini');
   });
+});
+
+test('CLI plain progress não duplica contador no texto', async () => {
+  const stdout = captureStream();
+  const job = {
+    jobId: 'job-progress',
+    status: 'running',
+    phase: 'exporting',
+    requested: 30,
+    completed: 24,
+    batchPosition: 25,
+    batchTotal: 30,
+    progressMessage: 'Baixando conversas do Gemini (25/30): DAS vs. DARF',
+    current: { title: 'DAS vs. DARF', chatId: 'abc123abc123' },
+  };
+
+  const run = await withServer((req, res, url) => {
+    if (url.pathname === '/healthz') {
+      sendJson(res, 200, { ok: true, version: PACKAGE_VERSION, protocolVersion: 2 });
+      return;
+    }
+    if (url.pathname === '/agent/ready') {
+      sendJson(res, 200, { ready: true, ok: true });
+      return;
+    }
+    if (url.pathname === '/agent/export-recent-chats') {
+      sendJson(res, 200, job);
+      return;
+    }
+    if (url.pathname === '/agent/export-job-status') {
+      sendJson(res, 200, { ...job, status: 'completed', phase: 'done', completed: 30 });
+      return;
+    }
+    sendJson(res, 404, { error: 'unexpected ' + url.pathname });
+  }, async (bridgeUrl) => {
+    return main(
+      [
+        'export',
+        'recent',
+        '--bridge-url',
+        bridgeUrl,
+        '--no-start-bridge',
+        '--plain',
+        '--poll-ms',
+        '10',
+      ],
+      { stdout },
+    );
+  });
+
+  if (run && typeof run === 'object' && 'exitCode' in run) {
+    assert.equal(run.exitCode, 0);
+  }
+  assert.match(stdout.text(), /running\/exporting: 25 de 30/);
+  assert.doesNotMatch(stdout.text(), /completed\/done: 25 de 30/);
+  assert.match(stdout.text(), /completed\/done: 30 de 30/);
+  assert.doesNotMatch(stdout.text(), /25\/30.*25\/30/);
 });
 
 test('CLI export selected e notebook usam endpoints diretos da bridge', async () => {

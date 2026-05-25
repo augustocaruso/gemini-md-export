@@ -852,7 +852,6 @@ const parseArgs = (argv) => {
       bridgeExitWhenIdle: true,
       startBridge: true,
       extraRepairArgs: [],
-      useMyActivity: false,
       chatIds: [],
       browser:
         process.env.GEMINI_MCP_BROWSER || process.env.GME_BROWSER

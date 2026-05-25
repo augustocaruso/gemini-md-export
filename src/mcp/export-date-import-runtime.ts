@@ -112,6 +112,88 @@ export const enrichExportPayloadWithDates = async ({
   return enrichExportPayloadWithMetadataDates({ payload, integrity, context, groupedEvidence });
 };
 
+export const saveCollectedConversationPayloadRuntime = async (
+  collected: RuntimeArgs,
+  args: RuntimeArgs = {},
+  deps: {
+    summarizeClient(client: RuntimeArgs): RuntimeArgs;
+    validateMcpExportPayload(payload: RuntimeArgs, input?: RuntimeArgs): Promise<RuntimeArgs>;
+    writeExportPayloadBundle(payload: RuntimeArgs, options: RuntimeArgs): RuntimeArgs;
+  },
+): Promise<RuntimeArgs> => {
+  let { integrity } = collected;
+  const dateImport = await enrichExportPayloadWithDates({
+    payload: collected.result.payload,
+    integrity,
+    args,
+  });
+  if (!dateImport.ok) {
+    const error = new Error(dateImport.message);
+    (error as RuntimeArgs).code = dateImport.code;
+    (error as RuntimeArgs).data = {
+      code: dateImport.code,
+      dateImport: dateImport.receipt,
+      evidence: dateImport.evidence,
+    };
+    throw error;
+  }
+  integrity = await deps.validateMcpExportPayload(dateImport.payload, {
+    expectedChatId: collected.expectedChatId,
+    requestedChatId: collected.requestedChatId,
+  });
+  if (!integrity.ok) {
+    const error = new Error(integrity.message);
+    (error as RuntimeArgs).code = integrity.code;
+    (error as RuntimeArgs).data = integrity;
+    throw error;
+  }
+
+  const saveStartedAt = Date.now();
+  const saved = deps.writeExportPayloadBundle(dateImport.payload, { outputDir: args.outputDir });
+  const saveFilesMs = Date.now() - saveStartedAt;
+  const savedMediaBytes = Array.isArray(saved.mediaFiles)
+    ? saved.mediaFiles.reduce((sum: number, file: RuntimeArgs) => sum + Number(file.bytes || 0), 0)
+    : 0;
+  const payloadMetrics = collected.result.payload?.metrics || {};
+  const metrics = {
+    version: 1,
+    timings: {
+      browserCommandMs: collected.browserCommandMs,
+      saveFilesMs,
+      ...(payloadMetrics.timings || {}),
+    },
+    counters: {
+      ...(payloadMetrics.counters || {}),
+      mediaFileCount: saved.mediaFileCount || 0,
+      mediaFailureCount: saved.mediaFailureCount || 0,
+      savedBytes: saved.bytes || 0,
+      savedMediaBytes,
+    },
+    hydration: collected.result.payload?.hydration || null,
+    navigation: collected.result.payload?.hydration?.navigation || null,
+    media: payloadMetrics.media || null,
+  };
+  return {
+    client: deps.summarizeClient(collected.activeClient),
+    conversation: collected.result.conversation || collected.conversation,
+    chatId: integrity.snapshot.chatId || collected.result.payload?.chatId || collected.conversation.chatId || null,
+    title: integrity.snapshot.title || collected.result.payload?.title || collected.conversation.title || null,
+    turns: integrity.assistantTurnCount,
+    hydration: collected.result.payload?.hydration || null,
+    returnedToOriginal: collected.result.returnedToOriginal ?? null,
+    returnError: collected.result.returnError || null,
+    integrity: {
+      markdownHash: integrity.markdownHash,
+      assistantTurnCount: integrity.assistantTurnCount,
+      evidence: integrity.evidence,
+      warnings: integrity.warnings,
+    },
+    dateImport: dateImport.receipt,
+    metrics,
+    ...saved,
+  };
+};
+
 export const buildExportDateImportBatchEvidenceForPayloads = async (
   entries: ExportDateImportBatchEntry[],
   args: RuntimeArgs = {},

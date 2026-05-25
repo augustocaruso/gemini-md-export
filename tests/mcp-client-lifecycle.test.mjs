@@ -151,7 +151,7 @@ test('prioritizes terminal Google blockers over extension mismatch diagnostics',
   assert.equal(state.code, 'google_verification_required');
 });
 
-test('rejects inactive, non-Gemini, unhydrated, command-unready and busy clients', () => {
+test('rejects inactive, non-Gemini, missing current chat, command-unready and busy clients', () => {
   assert.equal(
     getGeminiClientLifecycle({ ...baseClient, isActiveTab: false }, options).code,
     'inactive_tab',
@@ -172,9 +172,12 @@ test('rejects inactive, non-Gemini, unhydrated, command-unready and busy clients
         ...baseClient,
         page: { url: 'https://gemini.google.com/app', pathname: '/app' },
       },
-      options,
+      {
+        ...options,
+        capability: 'current-chat',
+      },
     ).code,
-    'page_not_hydrated',
+    'current_chat_required',
   );
   assert.equal(
     getGeminiClientLifecycle(
@@ -202,6 +205,121 @@ test('rejects inactive, non-Gemini, unhydrated, command-unready and busy clients
     getGeminiClientLifecycle({ ...baseClient, tabOperationInProgress: true }, options).code,
     'tab_operation_in_progress',
   );
+});
+
+test('/app home is claimable for recent export but not current chat', () => {
+  const homeClient = {
+    ...baseClient,
+    page: {
+      url: 'https://gemini.google.com/app',
+      pathname: '/app',
+      chatId: null,
+      listedConversationCount: 12,
+      sidebarConversationCount: 12,
+      buildStamp: '20260520-0238',
+    },
+  };
+
+  assert.equal(
+    getGeminiClientLifecycle(homeClient, {
+      ...options,
+      capability: 'current-chat',
+    }).code,
+    'current_chat_required',
+  );
+
+  const recent = getGeminiClientLifecycle(homeClient, {
+    ...options,
+    capability: 'recent-export',
+  });
+  assert.equal(recent.state, 'claimable');
+  assert.equal(recent.code, null);
+});
+
+test('/app home with sidebar evidence keeps legacy default claimability', () => {
+  const homeClient = {
+    ...baseClient,
+    page: {
+      url: 'https://gemini.google.com/app',
+      pathname: '/app',
+      chatId: null,
+      listedConversationCount: 12,
+      sidebarConversationCount: 12,
+      buildStamp: '20260520-0238',
+    },
+  };
+
+  const lifecycle = getGeminiClientLifecycle(homeClient, options);
+
+  assert.equal(lifecycle.state, 'claimable');
+  assert.equal(lifecycle.code, null);
+});
+
+test('/app home without sidebar evidence can warm for recent export when command is ready', () => {
+  const homeClient = {
+    ...baseClient,
+    page: {
+      url: 'https://gemini.google.com/app',
+      pathname: '/app',
+      chatId: null,
+      buildStamp: '20260520-0238',
+    },
+  };
+
+  const recent = getGeminiClientLifecycle(homeClient, {
+    ...options,
+    capability: 'recent-export',
+  });
+  assert.equal(recent.state, 'claimable');
+});
+
+test('recent export only accepts exact Gemini app routes', () => {
+  for (const pathname of ['/application', '/appfoo']) {
+    const lifecycle = getGeminiClientLifecycle(
+      {
+        ...baseClient,
+        page: {
+          url: `https://gemini.google.com${pathname}`,
+          pathname,
+          chatId: null,
+          listedConversationCount: 12,
+          sidebarConversationCount: 12,
+          buildStamp: '20260520-0238',
+        },
+      },
+      {
+        ...options,
+        capability: 'recent-export',
+      },
+    );
+
+    assert.equal(lifecycle.state, 'page_unready');
+    assert.equal(lifecycle.code, 'page_not_hydrated');
+  }
+});
+
+test('explicit current-chat app home rejection is not retryable', () => {
+  const lifecycle = getGeminiClientLifecycle(
+    {
+      ...baseClient,
+      page: {
+        url: 'https://gemini.google.com/app',
+        pathname: '/app',
+        chatId: null,
+        listedConversationCount: 12,
+        sidebarConversationCount: 12,
+        buildStamp: '20260520-0238',
+      },
+    },
+    {
+      ...options,
+      capability: 'current-chat',
+    },
+  );
+
+  assert.equal(lifecycle.state, 'page_unready');
+  assert.equal(lifecycle.code, 'current_chat_required');
+  assert.equal(lifecycle.retryable, false);
 });
 
 test('creates branded claimable and claimed-ready capabilities only after validation', () => {

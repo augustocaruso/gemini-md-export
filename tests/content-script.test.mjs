@@ -1,8 +1,13 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 import { JSDOM, VirtualConsole } from 'jsdom';
 
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const ROOT = resolve(__dirname, '..');
 const contentScriptUrl = new URL('../dist/extension/content.js', import.meta.url);
 
 const rectFromAttribute = (value) => {
@@ -1165,6 +1170,24 @@ test('content script mantém dock MCP durante navegação e sem prefixo de fase'
   assert.doesNotMatch(source, /MCP reexportando/);
 });
 
+test('MCP terminal progress clears snapshot before finishing dock', async () => {
+  const source = await readFile(new URL('../src/userscript-shell.ts', import.meta.url), 'utf8');
+  const terminalBlock = source.match(
+    /if \(jobProgress\.status && TERMINAL_MCP_STATUSES\.has\(jobProgress\.status\)\) \{[\s\S]*?\n    \}/,
+  )?.[0] || '';
+
+  assert.match(source, /mcpTerminalProgressSeenAt/);
+  assert.match(source, /mcpTerminalProgressJobId/);
+  assert.match(source, /const terminalJobId = jobProgress\.jobId \|\| state\.mcpProgressJobId \|\| null/);
+  assert.match(source, /state\.mcpTerminalProgressJobId === terminalJobId/);
+  assert.match(source, /PROGRESS_MIN_VISIBLE_MS \+ 1500/);
+  assert.match(terminalBlock, /state\.mcpTerminalProgressSeenAt/);
+  assert.match(terminalBlock, /state\.mcpTerminalProgressJobId = terminalJobId/);
+  assert.match(terminalBlock, /clearMcpProgressSnapshot\(\)/);
+  assert.match(terminalBlock, /stopProgressCreep\(\)/);
+  assert.match(terminalBlock, /finishExportProgress/);
+});
+
 test('content script acompanha redesign lr26 sem voltar para fonte JS', async () => {
   const source = await readFile(new URL('../src/userscript-shell.ts', import.meta.url), 'utf8');
   assert.match(source, /width="20" height="20"/);
@@ -1683,6 +1706,46 @@ test('hidratação não trata crescimento de layout como progresso real', async 
   assert.match(contentSource, /isCancelled:\s*activeTabOperationCancelRequested/);
 });
 
+test('content script passes operation abort signal into hydration and export collection', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'userscript-shell.ts'), 'utf-8');
+  const hydrateBlock =
+    source.match(
+      /const hydrateConversationToTop = async[\s\S]*?\n  \};\n\n  const waitForChatToLoad/,
+    )?.[0] || '';
+  const collectBlock =
+    source.match(
+      /const collectExportForCurrentConversation = async[\s\S]*?\n  \};\n\n  const collectExportForConversation/,
+    )?.[0] || '';
+  const conversationBlock =
+    source.match(
+      /const collectExportForConversation = async[\s\S]*?\n  \};\n\n  const downloadBlob/,
+    )?.[0] || '';
+  const getCurrentChatBlock =
+    source.match(
+      /if \(command\.type === 'get-current-chat'\) \{[\s\S]*?\n    \}\n\n    if \(command\.type === 'open-chat'\)/,
+    )?.[0] || '';
+  const getChatByIdBlock =
+    source.match(
+      /if \(command\.type === 'get-chat-by-id'\) \{[\s\S]*?\n    \}\n\n    return \{\n      ok: false,\n      error: `Comando desconhecido:/,
+    )?.[0] || '';
+
+  assert.match(source, /const executeBridgeCommand = async \(command, operationContext = \{\}\) =>/);
+  assert.match(hydrateBlock, /options\.abortSignal\?\.aborted/);
+  assert.match(hydrateBlock, /options\.onProgress/);
+  assert.match(hydrateBlock, /throwIfOperationAborted/);
+  assert.match(collectBlock, /abortSignal:\s*options\.abortSignal/);
+  assert.match(collectBlock, /setOperationPhase/);
+  assert.match(getCurrentChatBlock, /abortSignal:\s*operationContext\.abortSignal/);
+  assert.match(getCurrentChatBlock, /setOperationPhase:\s*operationContext\.setOperationPhase/);
+  assert.match(getCurrentChatBlock, /operationId:\s*operationContext\.operationId/);
+  assert.match(getChatByIdBlock, /collectExportForConversation\(targetItem,\s*\{/);
+  assert.match(getChatByIdBlock, /abortSignal:\s*operationContext\.abortSignal/);
+  assert.match(getChatByIdBlock, /setOperationPhase:\s*operationContext\.setOperationPhase/);
+  assert.match(getChatByIdBlock, /operationId:\s*operationContext\.operationId/);
+  assert.match(conversationBlock, /setOperationPhase\?\.\('navigating'\)/);
+  assert.match(getChatByIdBlock, /code:\s*err\?\.code \|\| null/);
+});
+
 test('exportPayload ignora chat antigo escondido no DOM da rota anterior', async () => {
   const currentChatId = 'b8e7c075effe9457';
   const { dom, runtimeErrors } = createGeminiMediaDom(`
@@ -1707,4 +1770,40 @@ test('exportPayload ignora chat antigo escondido no DOM da rota anterior', async
   assert.deepEqual(runtimeErrors, []);
 
   window.close();
+});
+
+test('content script active tab operation owns an AbortController', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'userscript-shell.ts'), 'utf-8');
+  const operationBlock = source.match(
+    /const runWithTabOperationBackpressure = async[\s\S]*?\n  \};\n\n  const findConversationForBridgeCommand/,
+  )?.[0] || '';
+  const cancelBlock = source.match(
+    /if \(command\.type === 'cancel-active-operation'\) \{[\s\S]*?\n    \}/,
+  )?.[0] || '';
+
+  assert.match(operationBlock, /new AbortController\(\)/);
+  assert.match(operationBlock, /abortController/);
+  assert.match(operationBlock, /abortSignal/);
+  assert.match(cancelBlock, /abortController\.abort/);
+  assert.match(cancelBlock, /operationId/);
+});
+
+test('content script cancel-active-operation treats supplied operationId as exact filter', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'userscript-shell.ts'), 'utf-8');
+  const cancelBlock = source.match(
+    /if \(command\.type === 'cancel-active-operation'\) \{[\s\S]*?\n    \}/,
+  )?.[0] || '';
+
+  assert.match(cancelBlock, /hasRequestedOperationId/);
+  assert.match(cancelBlock, /Object\.prototype\.hasOwnProperty\.call/);
+  assert.match(cancelBlock, /command\.args\.operationId/);
+  assert.match(cancelBlock, /typeof state\.activeTabOperation\.operationId !== 'string'/);
+  assert.match(cancelBlock, /operation-id-mismatch/);
+  assert.doesNotMatch(cancelBlock, /String\(state\.activeTabOperation\.operationId \|\| ''\)/);
+
+  const mismatchIndex = cancelBlock.indexOf('operation-id-mismatch');
+  const abortIndex = cancelBlock.indexOf('abortController.abort');
+  assert.ok(mismatchIndex >= 0, 'mismatch branch must be present');
+  assert.ok(abortIndex >= 0, 'abort call must be present');
+  assert.ok(mismatchIndex < abortIndex, 'operationId mismatch must return before aborting');
 });
