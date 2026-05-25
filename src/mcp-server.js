@@ -108,6 +108,7 @@ const {
   defaultDateImportSummary,
   enrichExportPayloadWithDates,
   hasDateImportSource,
+  saveCollectedConversationPayloadRuntime,
   saveCollectedConversationPayloadViaDateImportBatch,
   summarizeExportDateImportContextForJob,
 } = await import(compiledTsModuleUrl('mcp', 'export-date-import-runtime.js'));
@@ -124,11 +125,8 @@ const {
   buildOperationId,
 } = await import(compiledTsModuleUrl('mcp', 'export-operation-contracts.js'));
 const {
-  evaluateConversationOperationWatchdog,
-} = await import(compiledTsModuleUrl('mcp', 'export-operation-watchdog.js'));
-const {
-  runConversationOperation,
-} = await import(compiledTsModuleUrl('mcp', 'conversation-operation-runner.js'));
+  runRecentExportConversationOperation,
+} = await import(compiledTsModuleUrl('mcp', 'recent-export-operation-runtime.js'));
 const {
   assertActiveClaimableGeminiClient,
   explainActiveClaimableGeminiClientRejection,
@@ -3423,23 +3421,6 @@ const assertConversationOperationNotAborted = (args = {}) => {
   throw error;
 };
 
-const drainTimedOutConversationDownload = async (
-  downloadSettlementPromise,
-  timeoutMs = WATCHDOG_OPERATION_DRAIN_MS,
-) => {
-  let timer = null;
-  try {
-    return await Promise.race([
-      downloadSettlementPromise,
-      new Promise((resolveDrain) => {
-        timer = setTimeout(() => resolveDrain({ status: 'timeout' }), timeoutMs);
-      }),
-    ]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-};
-
 const normalizeWaitMs = (value, fallback, max = 30_000) => {
   const parsed = Number(value ?? fallback);
   const safe = Number.isFinite(parsed) ? parsed : fallback;
@@ -6558,77 +6539,11 @@ const collectConversationItemPayloadForClient = async (client, conversation, arg
 };
 
 const saveCollectedConversationPayload = async (collected, args = {}) => {
-  let { integrity } = collected;
-  const dateImport = await enrichExportPayloadWithDates({
-    payload: collected.result.payload,
-    integrity,
-    args,
+  return saveCollectedConversationPayloadRuntime(collected, args, {
+    summarizeClient,
+    validateMcpExportPayload,
+    writeExportPayloadBundle,
   });
-  if (!dateImport.ok) {
-    const error = new Error(dateImport.message);
-    error.code = dateImport.code;
-    error.data = {
-      code: dateImport.code,
-      dateImport: dateImport.receipt,
-      evidence: dateImport.evidence,
-    };
-    throw error;
-  }
-  integrity = await validateMcpExportPayload(dateImport.payload, {
-    expectedChatId: collected.expectedChatId,
-    requestedChatId: collected.requestedChatId,
-  });
-  if (!integrity.ok) {
-    const error = new Error(integrity.message);
-    error.code = integrity.code;
-    error.data = integrity;
-    throw error;
-  }
-
-  const saveStartedAt = Date.now();
-  const saved = writeExportPayloadBundle(dateImport.payload, { outputDir: args.outputDir });
-  const saveFilesMs = Date.now() - saveStartedAt;
-  const savedMediaBytes = Array.isArray(saved.mediaFiles)
-    ? saved.mediaFiles.reduce((sum, file) => sum + Number(file.bytes || 0), 0)
-    : 0;
-  const payloadMetrics = collected.result.payload?.metrics || {};
-  const metrics = {
-    version: 1,
-    timings: {
-      browserCommandMs: collected.browserCommandMs,
-      saveFilesMs,
-      ...(payloadMetrics.timings || {}),
-    },
-    counters: {
-      ...(payloadMetrics.counters || {}),
-      mediaFileCount: saved.mediaFileCount || 0,
-      mediaFailureCount: saved.mediaFailureCount || 0,
-      savedBytes: saved.bytes || 0,
-      savedMediaBytes,
-    },
-    hydration: collected.result.payload?.hydration || null,
-    navigation: collected.result.payload?.hydration?.navigation || null,
-    media: payloadMetrics.media || null,
-  };
-  return {
-    client: summarizeClient(collected.activeClient),
-    conversation: collected.result.conversation || collected.conversation,
-    chatId: integrity.snapshot.chatId || collected.result.payload?.chatId || collected.conversation.chatId || null,
-    title: integrity.snapshot.title || collected.result.payload?.title || collected.conversation.title || null,
-    turns: integrity.assistantTurnCount,
-    hydration: collected.result.payload?.hydration || null,
-    returnedToOriginal: collected.result.returnedToOriginal ?? null,
-    returnError: collected.result.returnError || null,
-    integrity: {
-      markdownHash: integrity.markdownHash,
-      assistantTurnCount: integrity.assistantTurnCount,
-      evidence: integrity.evidence,
-      warnings: integrity.warnings,
-    },
-    dateImport: dateImport.receipt,
-    metrics,
-    ...saved,
-  };
 };
 
 const saveCollectedConversationPayloadWithDateImportBatch = (collected, args = {}) =>
@@ -8917,6 +8832,28 @@ const requestActiveBrowserOperationCancelForJob = (job, reason = 'job-cancel') =
     });
 };
 
+const recentExportOperationDeps = {
+  appendExportJobTrace,
+  broadcastRecentChatsJobProgress,
+  buildConversationExportFailure,
+  buildConversationExportSuccess,
+  buildExportDateImportBatchEvidenceForPayloads,
+  downloadConversationItemWithRetry,
+  drainTimeoutMs: WATCHDOG_OPERATION_DRAIN_MS,
+  enrichExportPayloadWithDates,
+  exportJobRecordingDeps,
+  getClientById: (clientId) => clients.get(clientId) || null,
+  hasDateImportSource,
+  rebindExportJobToClient,
+  recordConversationExportFailure,
+  recordConversationExportSuccess,
+  requestActiveBrowserOperationCancelForJob,
+  summarizeClient,
+  touchExportJob,
+  validateMcpExportPayload,
+  writeExportPayloadBundle,
+};
+
 const requestExportJobCancel = (job, reason = 'job-cancel') => {
   if (!job || isTerminalExportJobStatus(job.status)) return;
   job.cancelRequested = true;
@@ -9329,329 +9266,24 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
           }
         }
 
-        let operationLastProgressAt = Date.now();
-        const operationAbortController = new AbortController();
-        let operationCollected = null;
-        let operationDateImportReceipt = null;
-        let operationSavedResult = null;
-        const markOperationProgress = (snapshot = {}) => {
-          operationLastProgressAt = Number(snapshot.lastProgressAt || Date.now());
-          job.current = {
-            ...(job.current || {}),
+        const operationOutcome = await runRecentExportConversationOperation(
+          {
+            args,
+            client,
+            conversation,
+            failures,
             index,
-            batchPosition: snapshot.batchPosition ?? target.batchPosition,
-            batchTotal: snapshot.batchTotal ?? target.batchTotal,
-            historyIndex: snapshot.historyIndex ?? target.historyIndex,
-            operationId: snapshot.operationId || operationId,
-            title: snapshot.title || target.title || conversation.title || null,
-            chatId: snapshot.currentChatId || snapshot.targetChatId || target.targetChatId,
-            operationPhase: snapshot.phase || null,
-            operationMessage: snapshot.message || null,
-          };
-          job.batchPosition = job.current.batchPosition;
-          job.batchTotal = job.current.batchTotal;
-          job.historyIndex = job.current.historyIndex;
-          job.operationId = job.current.operationId;
-          touchExportJob(job);
-          broadcastRecentChatsJobProgress(job, client, {
-            phase: job.phase,
-            total: job.batchTotal,
-            position: job.batchPosition,
-            current: job.completed,
-            label: snapshot.message || undefined,
-            errorCount: snapshot.errorCount ?? undefined,
-          });
-        };
-        const operationPromise = runConversationOperation({
-          jobId: job.jobId,
-          operationId,
-          target,
-          abortSignal: operationAbortController.signal,
-          progressSink: markOperationProgress,
-          deps: {
-            download: async () => {
-              const collected = await downloadConversationItemWithRetry(job, client, conversation, {
-                ...args,
-                outputDir: job.outputDir,
-                collectOnly: true,
-                returnToOriginal: false,
-                operationId,
-                jobId: job.jobId,
-                targetChatId: target.targetChatId,
-                abortSignal: operationAbortController.signal,
-                onOperationProgress: markOperationProgress,
-              });
-              operationCollected = collected;
-              return {
-                payload: collected.result?.payload || {},
-                activeClient: collected.activeClient || null,
-                receipts: {
-                  integrity: collected.integrity || null,
-                  browserCommandMs: collected.browserCommandMs ?? null,
-                  recovered: collected.recovered ?? null,
-                },
-              };
-            },
-            resolveDates: async ({ payload }) => {
-              const integrity = await validateMcpExportPayload(payload, {
-                expectedChatId: target.targetChatId,
-                requestedChatId: conversation.chatId || conversation.id || conversation.url || null,
-              });
-              if (!integrity.ok) {
-                const error = new Error(integrity.message);
-                error.code = integrity.code;
-                error.data = integrity;
-                throw error;
-              }
-              let batchEvidence = null;
-              let dateImport = null;
-              try {
-                if (hasDateImportSource(args)) {
-                  batchEvidence = await buildExportDateImportBatchEvidenceForPayloads(
-                    [
-                      {
-                        key: String(integrity.snapshot?.chatId || target.targetChatId).toLowerCase(),
-                        payload,
-                        integrity,
-                      },
-                    ],
-                    args,
-                  );
-                  job.dateImport = {
-                    ...(job.dateImport || {}),
-                    batchCandidates: batchEvidence.candidates,
-                    ...(args._exportDateImportActivitySummary
-                      ? { myActivity: args._exportDateImportActivitySummary }
-                      : {}),
-                  };
-                }
-                dateImport = await enrichExportPayloadWithDates({
-                  payload,
-                  integrity,
-                  args: {
-                    ...args,
-                    _exportDateImportGroupedEvidence: batchEvidence?.groupedByKey,
-                  },
-                });
-              } finally {
-                delete args._exportDateImportActivitySummary;
-              }
-              operationDateImportReceipt = dateImport.receipt;
-              if (!dateImport.ok) {
-                appendExportJobTrace(job, 'date_import_unresolved_saved_without_abort', {
-                  index,
-                  chatId: target.targetChatId,
-                  operationId,
-                  code: dateImport.code || null,
-                  dateImport: dateImport.receipt || null,
-                  evidenceCount: Array.isArray(dateImport.evidence) ? dateImport.evidence.length : null,
-                });
-                return {
-                  payload,
-                  receipt: dateImport.receipt || { enabled: false, status: 'unresolved' },
-                };
-              }
-              return {
-                payload: dateImport.payload,
-                receipt: dateImport.receipt,
-              };
-            },
-            save: async ({ payload }) => {
-              const integrity = await validateMcpExportPayload(payload, {
-                expectedChatId: target.targetChatId,
-                requestedChatId: conversation.chatId || conversation.id || conversation.url || null,
-              });
-              if (!integrity.ok) {
-                const error = new Error(integrity.message);
-                error.code = integrity.code;
-                error.data = integrity;
-                throw error;
-              }
-
-              const saveStartedAt = Date.now();
-              const saved = writeExportPayloadBundle(payload, { outputDir: job.outputDir });
-              const saveFilesMs = Date.now() - saveStartedAt;
-              const savedMediaBytes = Array.isArray(saved.mediaFiles)
-                ? saved.mediaFiles.reduce((sum, file) => sum + Number(file.bytes || 0), 0)
-                : 0;
-              const payloadMetrics = payload?.metrics || {};
-              const metrics = {
-                version: 1,
-                timings: {
-                  browserCommandMs: operationCollected?.browserCommandMs ?? null,
-                  saveFilesMs,
-                  ...(payloadMetrics.timings || {}),
-                },
-                counters: {
-                  ...(payloadMetrics.counters || {}),
-                  mediaFileCount: saved.mediaFileCount || 0,
-                  mediaFailureCount: saved.mediaFailureCount || 0,
-                  savedBytes: saved.bytes || 0,
-                  savedMediaBytes,
-                },
-                hydration: payload?.hydration || null,
-                navigation: payload?.hydration?.navigation || null,
-                media: payloadMetrics.media || null,
-              };
-              operationSavedResult = {
-                client: operationCollected?.activeClient ? summarizeClient(operationCollected.activeClient) : null,
-                conversation: operationCollected?.result?.conversation || conversation,
-                chatId: integrity.snapshot.chatId || payload?.chatId || target.targetChatId,
-                title: integrity.snapshot.title || payload?.title || conversation.title || null,
-                turns: integrity.assistantTurnCount,
-                hydration: payload?.hydration || null,
-                returnedToOriginal: operationCollected?.result?.returnedToOriginal ?? null,
-                returnError: operationCollected?.result?.returnError || null,
-                integrity: {
-                  markdownHash: integrity.markdownHash,
-                  assistantTurnCount: integrity.assistantTurnCount,
-                  evidence: integrity.evidence,
-                  warnings: integrity.warnings,
-                },
-                dateImport: operationDateImportReceipt || null,
-                metrics,
-                receipts: {
-                  download: {
-                    integrity: operationCollected?.integrity || null,
-                    browserCommandMs: operationCollected?.browserCommandMs ?? null,
-                  },
-                  dateImport: operationDateImportReceipt || null,
-                  save: {
-                    filePath: saved.filePath,
-                    filename: saved.filename,
-                    bytes: saved.bytes,
-                    mediaFileCount: saved.mediaFileCount || 0,
-                    mediaFailureCount: saved.mediaFailureCount || 0,
-                    overwritten: saved.overwritten,
-                    integrity: {
-                      markdownHash: integrity.markdownHash,
-                      assistantTurnCount: integrity.assistantTurnCount,
-                      warnings: integrity.warnings,
-                    },
-                  },
-                },
-                ...saved,
-              };
-              return {
-                filePath: saved.filePath,
-                bytes: saved.bytes,
-                receipt: operationSavedResult.receipts.save,
-              };
-            },
-          },
-        });
-        const operationSettlementPromise = operationPromise.then(
-          (value) => ({ status: 'fulfilled', value }),
-          (reason) => ({ status: 'rejected', reason }),
-        );
-        let watchdogTimer = null;
-        let watchdogTriggered = false;
-        const watchdogSignalPromise = new Promise((resolveWatchdog) => {
-          const watchdogIntervalMs = Math.max(500, Math.min(2000, Math.floor(noProgressMs / 4)));
-          watchdogTimer = setInterval(() => {
-            if (watchdogTriggered) return;
-            const decision = evaluateConversationOperationWatchdog({
-              operationId,
-              now: Date.now(),
-              lastProgressAt: operationLastProgressAt,
-              noProgressMs,
-              cancelRequested: job.cancelRequested === true,
-            });
-            if (decision.action === 'continue') return;
-            watchdogTriggered = true;
-            clearInterval(watchdogTimer);
-            resolveWatchdog({ status: 'watchdog', decision });
-          }, watchdogIntervalMs);
-        });
-        const downloadSettlement = await Promise.race([
-          operationSettlementPromise,
-          watchdogSignalPromise,
-        ]).finally(() => {
-          if (watchdogTimer) clearInterval(watchdogTimer);
-        });
-        if (downloadSettlement.status === 'watchdog') {
-          const { decision } = downloadSettlement;
-          const watchdogError = new Error(decision.message);
-          watchdogError.code = decision.code;
-          watchdogError.operationId = operationId;
-          watchdogError.targetChatId = target.targetChatId;
-          operationAbortController.abort(watchdogError);
-          appendExportJobTrace(job, 'conversation_no_progress_watchdog', {
-            code: decision.code,
-            timeoutCode: 'conversation_no_progress_timeout',
-            operationId,
-            targetChatId: target.targetChatId,
-            elapsedMs: decision.elapsedMs,
+            itemMetric,
+            job,
             noProgressMs,
-          });
-          const cancelResult = await requestActiveBrowserOperationCancelForJob(job, decision.code);
-          const drainResult = await drainTimedOutConversationDownload(operationSettlementPromise);
-          if (drainResult.status === 'timeout') {
-            const error = new Error(
-              'Operação do navegador ainda ativa depois do watchdog; interrompi o lote para evitar conflito entre conversas.',
-            );
-            error.code =
-              cancelResult?.ok === true || cancelResult?.cancelled === true
-                ? 'operation_still_active_after_watchdog'
-                : 'operation_cancel_failed_after_watchdog';
-            error.operationId = operationId;
-            error.targetChatId = target.targetChatId;
-            throw error;
-          }
-          throw watchdogError;
-        }
-        if (downloadSettlement.status === 'rejected') throw downloadSettlement.reason;
-        const operationResult = downloadSettlement.value;
-        if (operationResult.status === 'failed') {
-          const error = new Error(operationResult.error || 'Falha ao exportar conversa.');
-          error.code = operationResult.code || 'conversation_operation_failed';
-          error.data = { receipts: operationResult.receipts || null };
-          throw error;
-        }
-        if (operationResult.status === 'cancelled') {
-          const error = new Error(operationResult.reason || 'Operação cancelada.');
-          error.code = 'operation_cancelled';
-          error.data = { receipts: operationResult.receipts || null };
-          throw error;
-        }
-        if (operationResult.status !== 'saved' || !operationSavedResult) {
-          const error = new Error('Operação de exportação terminou sem arquivo salvo.');
-          error.code = 'conversation_operation_not_saved';
-          error.data = { receipts: operationResult.receipts || null };
-          throw error;
-        }
-        const result = {
-          ...operationSavedResult,
-          operationId,
-          batchPosition: target.batchPosition,
-          historyIndex: target.historyIndex,
-          receipts: operationResult.receipts || operationSavedResult.receipts || null,
-        };
-        const resultClient = result.client?.clientId ? clients.get(result.client.clientId) : null;
-        if (resultClient) client = rebindExportJobToClient(job, resultClient, 'conversation-download');
-        const success = {
-          ...buildConversationExportSuccess({ index, conversation, result }),
-          operationId,
-          batchPosition: target.batchPosition,
-          historyIndex: target.historyIndex,
-          receipts: result.receipts || null,
-        };
-        recordConversationExportSuccess(
-          { job, successes, itemMetric, success, result },
-          exportJobRecordingDeps,
+            operationId,
+            successes,
+            target,
+          },
+          recentExportOperationDeps,
         );
+        client = operationOutcome.client || client;
       } catch (err) {
-        const failure = {
-          ...buildConversationExportFailure({ index, conversation, err }),
-          operationId,
-          batchPosition: target.batchPosition,
-          historyIndex: target.historyIndex,
-          receipts: err?.data?.receipts || err?.receipts || null,
-        };
-        recordConversationExportFailure(
-          { job, failures, itemMetric, failure, err },
-          exportJobRecordingDeps,
-        );
         if (
           err?.code === 'operation_still_active_after_watchdog' ||
           err?.code === 'operation_cancel_failed_after_watchdog'

@@ -616,7 +616,16 @@ else if (diagnoseOnly) process.exitCode = 2;
       async () => {
         const stdout = captureStream({ isTTY: true });
         const run = await main(
-          ['fix-vault', vault, '--takeout', takeoutPath, '--report', reportPath, '--no-open-if-missing'],
+          [
+            'fix-vault',
+            vault,
+            '--takeout',
+            takeoutPath,
+            '--report',
+            reportPath,
+            '--no-open-if-missing',
+            '--tui',
+          ],
           { stdout, stderr: captureStream() },
         );
         assert.equal(run.exitCode, 0);

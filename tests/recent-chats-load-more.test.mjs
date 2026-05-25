@@ -262,6 +262,10 @@ test('export parcial carrega mais historico ate maxChats antes de fatiar', () =>
 
 test('recent export builds operation targets with batch and history positions', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const operationSource = readFileSync(
+    resolve(ROOT, 'src', 'mcp', 'recent-export-operation-runtime.ts'),
+    'utf-8',
+  );
   const importBlock = source.match(
     /const \{[\s\S]*?buildExportBatchTargets[\s\S]*?buildOperationId[\s\S]*?\} = await import\(compiledTsModuleUrl\('mcp', 'export-operation-contracts\.js'\)\)/,
   )?.[0];
@@ -289,7 +293,7 @@ test('recent export builds operation targets with batch and history positions', 
   assert.match(block, /job\.batchTotal = target\.batchTotal/);
   assert.match(block, /job\.historyIndex = target\.historyIndex/);
   assert.match(block, /job\.operationId = operationId/);
-  assert.match(block, /operationId,\s*jobId: job\.jobId,\s*targetChatId: target\.targetChatId,/);
+  assert.match(operationSource, /operationId,\s*jobId: job\.jobId,\s*targetChatId: target\.targetChatId,/);
   assert.match(block, /job\.current = null;\s*job\.batchPosition = null;\s*job\.batchTotal = null;\s*job\.historyIndex = null;\s*job\.operationId = null;/);
   assert.match(collectBlock, /operationId: args\.operationId \|\| null/);
   assert.match(collectBlock, /jobId: args\.jobId \|\| null/);
@@ -394,6 +398,10 @@ test('listagem de chats expõe contagem parcial sem fingir total', () => {
 test('export total registra métricas de performance no status e relatório', () => {
   const serverSource = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const contentSource = readFileSync(resolve(ROOT, 'src', 'userscript-shell.ts'), 'utf-8');
+  const operationSource = readFileSync(
+    resolve(ROOT, 'src', 'mcp', 'recent-export-operation-runtime.ts'),
+    'utf-8',
+  );
   const recordingSource = readFileSync(
     resolve(ROOT, 'src', 'mcp', 'export-job-recording.ts'),
     'utf-8',
@@ -414,7 +422,7 @@ test('export total registra métricas de performance no status e relatório', ()
   assert.match(serverSource, /lazyLoad:\s*summarizeLoadMoreMetrics/);
   assert.match(serverSource, /assets:\s*\{/);
   assert.match(jobBlock, /startConversationMetric/);
-  assert.match(jobBlock, /recordConversationExportSuccess/);
+  assert.match(operationSource, /recordConversationExportSuccess/);
   assert.match(recordingSource, /finishConversationMetric/);
   assert.match(recordingSource, /mediaWarnings/);
   assert.match(recordingSource, /assetTimeouts/);
@@ -636,6 +644,10 @@ test('sync incremental do vault usa fronteira conhecida e estado local', () => {
 
 test('export recente faz retry para aba ocupada antes de registrar falha', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const operationSource = readFileSync(
+    resolve(ROOT, 'src', 'mcp', 'recent-export-operation-runtime.ts'),
+    'utf-8',
+  );
   const jobBlock = source.match(
     /const runRecentChatsExportJob = async[\s\S]*?\nconst startRecentChatsExportJob/,
   )?.[0];
@@ -647,7 +659,7 @@ test('export recente faz retry para aba ocupada antes de registrar falha', () =>
   assert.match(source, /conversation_not_ready/);
   assert.match(source, /const downloadConversationItemWithRetry = async/);
   assert.match(source, /RECENT_CHATS_TRANSIENT_BUSY_RETRY_LIMIT/);
-  assert.match(jobBlock, /downloadConversationItemWithRetry\(job, client, conversation/);
+  assert.match(operationSource, /downloadConversationItemWithRetry\(job, client, conversation/);
   assert.match(jobBlock, /const key = normalizeConversationChatId\(conversation\);/);
   assert.doesNotMatch(
     jobBlock,
@@ -658,24 +670,28 @@ test('export recente faz retry para aba ocupada antes de registrar falha', () =>
 
 test('recent export loop delegates one item to conversation operation runner', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const operationSource = readFileSync(
+    resolve(ROOT, 'src', 'mcp', 'recent-export-operation-runtime.ts'),
+    'utf-8',
+  );
   const jobBlock = source.match(
     /const runRecentChatsExportJob = async[\s\S]*?\nconst startRecentChatsExportJob/,
   )?.[0];
   assert.ok(jobBlock, 'runRecentChatsExportJob deve existir');
-  assert.match(source, /conversation-operation-runner\.js/);
-  assert.match(source, /runConversationOperation/);
-  assert.match(jobBlock, /runConversationOperation\(\{/);
-  assert.match(jobBlock, /resolveDates:/);
-  assert.match(jobBlock, /save:/);
-  assert.match(jobBlock, /buildExportDateImportBatchEvidenceForPayloads\(/);
-  assert.match(jobBlock, /_exportDateImportGroupedEvidence: batchEvidence\?\.groupedByKey/);
-  assert.match(jobBlock, /job\.dateImport = \{/);
-  assert.match(jobBlock, /myActivity: args\._exportDateImportActivitySummary/);
-  assert.match(jobBlock, /const failure = \{\s*\.\.\.buildConversationExportFailure/);
-  assert.match(jobBlock, /operationId,/);
-  assert.match(jobBlock, /batchPosition: target\.batchPosition/);
-  assert.match(jobBlock, /historyIndex: target\.historyIndex/);
-  assert.match(jobBlock, /receipts: err\?\.data\?\.receipts \|\| err\?\.receipts \|\| null/);
+  assert.match(operationSource, /conversation-operation-runner\.js/);
+  assert.match(operationSource, /runConversationOperation/);
+  assert.match(operationSource, /runConversationOperation\(\{/);
+  assert.match(operationSource, /resolveDates:/);
+  assert.match(operationSource, /save:/);
+  assert.match(operationSource, /buildExportDateImportBatchEvidenceForPayloads\(/);
+  assert.match(operationSource, /_exportDateImportGroupedEvidence: batchEvidence\?\.groupedByKey/);
+  assert.match(operationSource, /job\.dateImport = \{/);
+  assert.match(operationSource, /myActivity: args\._exportDateImportActivitySummary/);
+  assert.match(operationSource, /const failure = \{\s*\.\.\.deps\.buildConversationExportFailure/);
+  assert.match(operationSource, /operationId,/);
+  assert.match(operationSource, /batchPosition: target\.batchPosition/);
+  assert.match(operationSource, /historyIndex: target\.historyIndex/);
+  assert.match(operationSource, /receipts: err\?\.data\?\.receipts \|\| err\?\.receipts \|\| null/);
 });
 
 test('reexport de chatIds conhecidos roda como job em background', () => {

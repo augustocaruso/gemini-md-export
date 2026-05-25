@@ -11,7 +11,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { dirname, relative, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
@@ -181,9 +181,10 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.equal(existsSync(telemetryDocPath), true);
   assert.equal(existsSync(superpowersDocsPath), false);
   assert.deepEqual(
-    listFilesRecursive(docsDir).filter((filePath) =>
-      filePath.split('/').includes('superpowers') || filePath.split('/').includes('plans'),
-    ),
+    listFilesRecursive(docsDir).filter((filePath) => {
+      const segments = relative(docsDir, filePath).split('/');
+      return segments.includes('superpowers') || segments.includes('plans');
+    }),
     [],
   );
   assert.equal(existsSync(repairAuditScriptPath), true);
