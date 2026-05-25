@@ -226,7 +226,7 @@ test('export recente prepara automaticamente uma aba hidratada antes da claim', 
   assert.match(recentEndpointBlock, /const client = await selectRecentExportClient\(selector\)/);
   assert.ok(
     recentEndpointBlock.indexOf('selectRecentExportClient') <
-      recentEndpointBlock.indexOf('ensureTabClaimForJob'),
+      recentEndpointBlock.indexOf('claimNativeExportLeaseForJob'),
     'export recent precisa ativar/validar a aba antes de criar claim visual',
   );
   assert.match(cliSource, /const ensureReadyForExport = async/);
@@ -262,6 +262,7 @@ test('export parcial carrega mais historico ate maxChats antes de fatiar', () =>
 
 test('export recente passa claim visual Gemini para fallback My Activity de datas', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const nativeGateSource = readFileSync(resolve(ROOT, 'src', 'mcp', 'native-release-gate.ts'), 'utf-8');
   const runtimeSource = readFileSync(
     resolve(ROOT, 'src', 'mcp', 'export-date-import-runtime.ts'),
     'utf-8',
@@ -271,8 +272,8 @@ test('export recente passa claim visual Gemini para fallback My Activity de data
   )?.[0];
   assert.ok(startBlock, 'startRecentChatsExportJob deve existir');
   assert.match(startBlock, /const activeClaim = claimForClient\(client\)/);
-  assert.match(startBlock, /const exportDateImportVisualGroupTabId = normalizeTabId\(activeClaim\?\.tabId \?\? client\.tabId\)/);
-  assert.match(startBlock, /args\._exportDateImportVisualGroupTabId = exportDateImportVisualGroupTabId/);
+  assert.match(startBlock, /assignExportDateImportVisualGroupTabId\(args, normalizeTabId\(activeClaim\?\.tabId \?\? client\.tabId\)\)/);
+  assert.match(nativeGateSource, /args\._exportDateImportVisualGroupTabId = tabId/);
   assert.match(runtimeSource, /DEFAULT_EXPORT_DATE_IMPORT_ACTIVITY_WAIT_MS = 45_000/);
   assert.match(runtimeSource, /DEFAULT_EXPORT_DATE_IMPORT_ACTIVITY_PRE_LAUNCH_WAIT_MS = 8_000/);
   assert.match(runtimeSource, /visualGroupTabId:[\s\S]*args\._exportDateImportVisualGroupTabId/);
@@ -527,7 +528,7 @@ test('export jobs bloqueiam novo export ativo antes de tentar claim-tab', () => 
     const escaped = route.replaceAll('/', '\\/');
     const block = source.match(new RegExp(`url\\.pathname === '${escaped}'[\\s\\S]*?catch \\(err\\)`))?.[0];
     assert.ok(block, `${route} deve existir`);
-    assert.match(block, /const client = (?:await selectRecentExportClient\(selector\)|requireClient\(selector\));[\s\S]*?assertNoRunningBrowserExportJob\(client\);[\s\S]*?ensureTabClaimForJob[\s\S]*?start(?:Recent|Direct)ChatsExportJob/);
+    assert.match(block, /const client = (?:await selectRecentExportClient\(selector\)|requireClient\(selector\));[\s\S]*?assertNoRunningBrowserExportJob\(client\);[\s\S]*?claimNativeExportLeaseForJob[\s\S]*?start(?:Recent|Direct)ChatsExportJob/);
   }
   assert.match(source, /const assertClientClaimedReadyForSession = \(client, args = \{\}\) =>/);
   assert.match(source, /const startRecentChatsExportJob = \(client, args = \{\}\) => \{[\s\S]*?assertClientClaimedReadyForSession\(client, args\)/);

@@ -3376,8 +3376,10 @@ test('CLI doctor consegue iniciar bridge-only local quando a bridge esta fora', 
 });
 
 test('release gate smoke script documents native broker command sequence', () => {
-  const scriptPath = resolve(ROOT, 'scripts', 'native-broker-release-gate-smoke.mjs');
-  const source = readFileSync(scriptPath, 'utf-8');
+  const sourcePath = resolve(ROOT, 'src', 'cli', 'native-broker-release-gate-smoke.ts');
+  const wrapperPath = resolve(ROOT, 'scripts', 'native-broker-release-gate-smoke');
+  const source = readFileSync(sourcePath, 'utf-8');
+  const wrapper = readFileSync(wrapperPath, 'utf-8');
 
   assert.match(source, /tabs reload/);
   assert.match(source, /tabs list/);
@@ -3387,6 +3389,7 @@ test('release gate smoke script documents native broker command sequence', () =>
   assert.match(source, /--no-wake/);
   assert.match(source, /--no-focus-window/);
   assert.match(source, /--takeout/);
+  assert.match(wrapper, /build\/ts\/cli\/native-broker-release-gate-smoke\.js/);
 });
 
 test('build publica binario CLI no bundle da extensao Gemini CLI', () => {

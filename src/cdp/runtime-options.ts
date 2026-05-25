@@ -80,8 +80,8 @@ export const browserControlParamsFromFlags = (
   const cdpUrl = String(flags.cdpUrl || '').trim();
   const params: BrowserControlParams = {
     activateTab: flags.activateTab === true,
-    allowHttpBrowserFallback: flags.allowHttpBrowserFallback === true,
     focusWindow: flags.focusWindow === true,
+    ...(flags.allowHttpBrowserFallback === true ? { allowHttpBrowserFallback: true } : {}),
   };
   return cdpUrl ? { ...params, cdpUrl, controlPlane: 'cdp' } : params;
 };

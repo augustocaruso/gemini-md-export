@@ -148,6 +148,21 @@ const {
   shouldUseNativeBrowserBroker,
 } = await import(compiledTsModuleUrl('mcp', 'native-browser-broker.js'));
 const {
+  assignExportDateImportVisualGroupTabId,
+  clientSelectorFromUrlSearchParams: clientSelectorFromSearchParams,
+  createNativeBrokerTabsActionRunner,
+  createNativeExportLeaseTools,
+  createTargetTabClientMissingAfterActivationError,
+  isNativeExportLeaseStrict,
+  nativeBrokerAvailabilityFromStatus,
+  nativeBrokerBlockingIssueForReady,
+  nativeBrokerStatusFromProbe,
+  nativeExportLeaseArgsForClaim,
+  noConnectedClientsForReloadResult,
+  shouldReturnNativeBrokerReloadResult,
+  withNativeExportLease,
+} = await import(compiledTsModuleUrl('mcp', 'native-release-gate.js'));
+const {
   assertClaimedReadyGeminiTab,
   classifyGeminiClientLifecycle,
   getGeminiClientLifecycle,
@@ -544,59 +559,23 @@ const withSoftTimeout = (promise, timeoutMs, fallback) =>
   ]);
 
 const probeNativeBrowserBrokerStatus = async () => {
-  if (!shouldUseNativeBrowserBroker()) {
-    return {
-      configured: false,
-      available: false,
-      code: 'native_broker_disabled',
-      message: 'Native broker desativado por configuracao.',
-    };
-  }
+  if (!shouldUseNativeBrowserBroker()) return nativeBrokerStatusFromProbe({ enabled: false });
   const response = await withSoftTimeout(
     nativeBrowserBroker.status({ allowFallback: true }),
     750,
     { ok: false, code: 'native_broker_probe_timeout' },
   );
-  if (response?.ok === true) {
-    return {
-      configured: true,
-      available: true,
-      code: null,
-      message: 'Native broker conectado.',
-      response,
-    };
-  }
-  const code = response?.error?.code || response?.code || 'native_broker_unavailable';
-  const message =
-    response?.error?.message ||
-    response?.error ||
-    'Não consegui falar com o broker nativo.';
-  return {
-    configured: true,
-    available: false,
-    code,
-    message,
-    response,
-  };
+  return nativeBrokerStatusFromProbe({ enabled: true, response });
 };
 
-const probeNativeBrowserBrokerAvailability = async () => {
-  const status = await probeNativeBrowserBrokerStatus();
-  if (status.available === true) return true;
-  if (status.configured === false || status.code === 'native_broker_unavailable') return false;
-  return null;
-};
-
-const browserTransportStatus = async () => {
-  const nativeBrokerAvailable = await probeNativeBrowserBrokerAvailability();
-  return browserTransportMode({
+const browserTransportStatus = async () =>
+  browserTransportMode({
     bridgeHttpEnabled: BRIDGE_HTTP_ENABLED,
     nativeMessagingConfigured: shouldUseNativeBrowserBroker(),
-    nativeBrokerAvailable,
+    nativeBrokerAvailable: nativeBrokerAvailabilityFromStatus(await probeNativeBrowserBrokerStatus()),
     contentScriptTransport:
       BRIDGE_HTTP_ENABLED && shouldUseNativeBrowserBroker() ? 'native-proxy-http' : 'unknown',
   });
-};
 
 const assertBrowserSideEffect = (kind, { explicit = false } = {}) =>
   assertBrowserSideEffectAllowed({
@@ -2248,22 +2227,6 @@ const readJsonBody = async (req) => {
   return JSON.parse(body || '{}');
 };
 
-const clientSelectorFromSearchParams = (searchParams) => ({
-  clientId: searchParams.get('clientId') || undefined,
-  tabId: searchParams.get('tabId') || undefined,
-  claimId: searchParams.get('claimId') || undefined,
-  sessionId: searchParams.get('sessionId') || undefined,
-  cdpUrl: searchParams.get('cdpUrl') || undefined,
-  controlPlane: searchParams.get('controlPlane') || undefined,
-  wakeBrowser: parseOptionalBoolean(searchParams.get('wakeBrowser')),
-  openIfMissing: parseOptionalBoolean(searchParams.get('openIfMissing')),
-  activateTab: parseOptionalBoolean(searchParams.get('activateTab')),
-  focusWindow: parseOptionalBoolean(searchParams.get('focusWindow')),
-  allowHttpBrowserFallback: parseOptionalBoolean(searchParams.get('allowHttpBrowserFallback')),
-  preferActive: parseOptionalBoolean(searchParams.get('preferActive')),
-  preferRecent: parseOptionalBoolean(searchParams.get('preferRecent')),
-});
-
 const clientHasLiveRuntimeEvidenceForServer = (client, now = Date.now()) =>
   clientHasLiveRuntimeEvidence(client, {
     now,
@@ -3179,59 +3142,11 @@ const nativeBrowserBrokerToolResult = (response, action) => {
   };
 };
 
-const tryNativeBrowserBrokerTabsAction = async (action, args = {}) => {
-  if (!shouldUseNativeBrowserBroker()) return null;
-  if (action === 'list') {
-    return nativeBrowserBrokerToolResult(
-      await nativeBrowserBroker.listTabs({ allowFallback: true }),
-      action,
-    );
-  }
-  if (action === 'status') {
-    return nativeBrowserBrokerToolResult(
-      await nativeBrowserBroker.status({ allowFallback: true }),
-      action,
-    );
-  }
-  if (action === 'claim') {
-    if (args.clientId || args.index || args.chatId) return null;
-    return nativeBrowserBrokerToolResult(
-      await nativeBrowserBroker.claim(
-        {
-          tabId: args.tabId ?? null,
-          claimId: args.claimId || null,
-        },
-        { allowFallback: true },
-      ),
-      action,
-    );
-  }
-  if (action === 'release') {
-    return nativeBrowserBrokerToolResult(
-      await nativeBrowserBroker.release(
-        {
-          tabId: args.tabId ?? null,
-          claimId: args.claimId || null,
-        },
-        { allowFallback: true },
-      ),
-      action,
-    );
-  }
-  if (action === 'reload') {
-    return nativeBrowserBrokerToolResult(
-      await nativeBrowserBroker.reload(
-        {
-          tabId: args.tabId ?? null,
-          claimId: args.claimId || null,
-        },
-        { allowFallback: args.allowHttpBrowserFallback === true },
-      ),
-      action,
-    );
-  }
-  return null;
-};
+const tryNativeBrowserBrokerTabsAction = createNativeBrokerTabsActionRunner({
+  shouldUseNativeBrowserBroker,
+  nativeBrowserBroker,
+  nativeBrowserBrokerToolResult,
+});
 
 const shouldRequireNativeExportTabLease = (label, args = {}) =>
   shouldUseNativeBrowserBroker() &&
@@ -3258,7 +3173,7 @@ const validateNativeExportTabLeaseForJob = async (args = {}, localClaim = null, 
     if (
       localClaim &&
       canFallbackFromNativeBrowserBrokerFailure(nativeClaim, {
-        strict: args.requireNativeExportLease === true || args.allowHttpBrowserFallback !== true,
+        strict: isNativeExportLeaseStrict(args),
       })
     ) {
       return validateLocalExportTabLeaseForJob(localClaim, client);
@@ -3277,7 +3192,7 @@ const validateNativeExportTabLeaseForJob = async (args = {}, localClaim = null, 
     if (
       localClaim &&
       canFallbackFromNativeBrowserBrokerFailure(result, {
-        strict: args.requireNativeExportLease === true || args.allowHttpBrowserFallback !== true,
+        strict: isNativeExportLeaseStrict(args),
       })
     ) {
       return validateLocalExportTabLeaseForJob(localClaim, client);
@@ -3289,17 +3204,6 @@ const validateNativeExportTabLeaseForJob = async (args = {}, localClaim = null, 
   }
   return validateExportTabLeaseForJob(result.tab || result);
 };
-
-const validateNativeExportLeaseForClaim = async (client, args = {}, claim = null) =>
-  validateNativeExportTabLeaseForJob(
-    {
-      ...args,
-      claimId: claim?.claimId || args.claimId,
-      tabId: claim?.tabId ?? args.tabId,
-    },
-    claim,
-    client,
-  );
 
 const requireClient = (selector = {}) => {
   cleanupStaleClients();
@@ -4248,6 +4152,14 @@ const ensureTabClaimForJob = async (client, args = {}, label = TAB_CLAIM_LABELS.
   }
 };
 
+const {
+  claimNativeExportLeaseForJob,
+  validateNativeExportLeaseForClaim,
+} = createNativeExportLeaseTools({
+  ensureTabClaimForJob,
+  validateNativeExportTabLeaseForJob,
+});
+
 const assertClientClaimedReadyForSession = (client, args = {}) => {
   const sessionId = normalizeSessionId(args.sessionId || args._proxySessionId);
   const sessionClaim = claimForSession(sessionId);
@@ -4467,14 +4379,13 @@ const buildLightweightBrowserReady = async (args = {}) => {
     claimableClients,
   });
   const ready = readiness.ready;
-  let blockingIssue = readiness.blockingIssue || (!ready ? cdp.blocker?.code || null : null);
-  if (
-    nativeBrokerStatus.configured === true &&
-    nativeBrokerStatus.available !== true &&
-    claimableClients.length === 0
-  ) {
-    blockingIssue = nativeBrokerStatus.code || blockingIssue;
-  }
+  const blockingIssue = nativeBrokerBlockingIssueForReady({
+    readinessBlockingIssue: readiness.blockingIssue,
+    ready,
+    cdpBlockerCode: cdp.blocker?.code,
+    nativeBrokerStatus,
+    claimableClientCount: claimableClients.length,
+  });
   const summarizedClients = selectableClients.map(summarizeClient);
   const summarizedMatchingClients = matchingClients.map(summarizeClient);
   return {
@@ -6449,15 +6360,11 @@ const activateBrowserTabById = async (rawTabId, args = {}, preferredClient = nul
           preferredClient,
         });
         if (!targetClient) {
-          lastError = new Error(
-            'A aba do navegador foi ativada, mas o cliente alvo do Gemini ainda não reconectou.',
-          );
-          lastError.code = 'target_tab_client_missing_after_activation';
-          lastError.data = {
+          lastError = createTargetTabClientMissingAfterActivationError({
             tabId,
             broker: summarizeClient(command.client || broker),
             result,
-          };
+          });
           continue;
         }
         targetClient.isActiveTab = true;
@@ -6593,11 +6500,7 @@ const collectConversationItemPayloadForClient = async (client, conversation, arg
   const prepared = await ensureClientActiveForExport(client, args);
   if (args._nativeExportLease || args.claimId || args.requireNativeExportLease === true) {
     await validateNativeExportTabLeaseForJob(
-      {
-        ...args,
-        claimId: args._nativeExportLease?.claimId || args.claimId,
-        tabId: args._nativeExportLease?.tabId ?? prepared.client?.tabId ?? args.tabId,
-      },
+      nativeExportLeaseArgsForClaim(args, args._nativeExportLease || null, prepared.client?.tabId),
       args._nativeExportLease || null,
       prepared.client,
     );
@@ -9520,13 +9423,7 @@ const startRecentChatsExportJob = (client, args = {}) => {
   const skipExisting =
     typeof args.skipExisting === 'boolean' ? args.skipExisting : !effectiveHasMaxChats;
   const activeClaim = claimForClient(client);
-  const exportDateImportVisualGroupTabId = normalizeTabId(activeClaim?.tabId ?? client.tabId);
-  if (
-    exportDateImportVisualGroupTabId !== null &&
-    args._exportDateImportVisualGroupTabId === undefined
-  ) {
-    args._exportDateImportVisualGroupTabId = exportDateImportVisualGroupTabId;
-  }
+  assignExportDateImportVisualGroupTabId(args, normalizeTabId(activeClaim?.tabId ?? client.tabId));
   const job = {
     jobId: randomUUID(),
     type: 'recent-chats-export',
@@ -9945,9 +9842,7 @@ const reloadGeminiTabs = async (args = {}) => {
   });
   const delayMs = Math.max(0, Math.min(10_000, Number(args.delayMs || 500)));
   const nativeReload = await tryNativeBrowserBrokerTabsAction('reload', args);
-  if (nativeReload && (nativeReload.ok !== false || args.allowHttpBrowserFallback !== true)) {
-    return nativeReload;
-  }
+  if (shouldReturnNativeBrokerReloadResult(nativeReload, args)) return nativeReload;
   await reloadExtensionForExistingTabs(
     args,
     ensureBrowserExtensionReady,
@@ -9958,14 +9853,7 @@ const reloadGeminiTabs = async (args = {}) => {
   );
   const liveClients = getLiveClients();
   if (liveClients.length === 0) {
-    return {
-      ok: false,
-      code: 'no_connected_clients_for_reload',
-      reloaded: 0,
-      error: 'Nenhuma aba viva do Gemini conectada à extensão.',
-      nextAction:
-        'Sem aba conectada, a CLI nao consegue recarregar abas existentes por comando. Use um cliente conectado, CDP ou native broker antes do reload.',
-    };
+    return noConnectedClientsForReloadResult();
   }
 
   const selector = normalizeClientSelector(args);
@@ -10905,14 +10793,8 @@ const legacyRawTools = [
     call: async (args = {}) => {
       const client = requireClient(args);
       assertNoRunningBrowserExportJob(client);
-      const claim = await ensureTabClaimForJob(client, args, TAB_CLAIM_LABELS.export);
-      const nativeLease = await validateNativeExportLeaseForClaim(client, args, claim);
-      return toolTextResult(
-        startRecentChatsExportJob(client, {
-          ...args,
-          _nativeExportLease: nativeLease,
-        }),
-      );
+      const nativeLease = await claimNativeExportLeaseForJob(client, args, TAB_CLAIM_LABELS.export);
+      return toolTextResult(startRecentChatsExportJob(client, withNativeExportLease(args, nativeLease)));
     },
   },
   {
@@ -11007,17 +10889,15 @@ const legacyRawTools = [
     call: async (args = {}) => {
       const client = requireClient(args);
       assertNoRunningBrowserExportJob(client);
-      const claim = await ensureTabClaimForJob(client, args, TAB_CLAIM_LABELS.export);
-      const nativeLease = await validateNativeExportLeaseForClaim(client, args, claim);
+      const nativeLease = await claimNativeExportLeaseForJob(client, args, TAB_CLAIM_LABELS.export);
       return toolTextResult(
-        startRecentChatsExportJob(client, {
+        startRecentChatsExportJob(client, withNativeExportLease({
           ...args,
-          _nativeExportLease: nativeLease,
           outputDir: args.outputDir || args.vaultDir,
           existingScanDir: args.vaultDir,
           exportMissingOnly: true,
           skipExisting: true,
-        }),
+        }, nativeLease)),
       );
     },
   },
@@ -11104,18 +10984,16 @@ const legacyRawTools = [
     call: async (args = {}) => {
       const client = requireClient(args);
       assertNoRunningBrowserExportJob(client);
-      const claim = await ensureTabClaimForJob(client, args, TAB_CLAIM_LABELS.sync);
-      const nativeLease = await validateNativeExportLeaseForClaim(client, args, claim);
+      const nativeLease = await claimNativeExportLeaseForJob(client, args, TAB_CLAIM_LABELS.sync);
       return toolTextResult(
-        startRecentChatsExportJob(client, {
+        startRecentChatsExportJob(client, withNativeExportLease({
           ...args,
-          _nativeExportLease: nativeLease,
           outputDir: args.outputDir || args.vaultDir,
           existingScanDir: args.vaultDir,
           exportMissingOnly: true,
           syncMode: true,
           skipExisting: true,
-        }),
+        }, nativeLease)),
       );
     },
   },
@@ -11184,14 +11062,8 @@ const legacyRawTools = [
     call: async (args = {}) => {
       const client = requireClient(args);
       assertNoRunningBrowserExportJob(client);
-      const claim = await ensureTabClaimForJob(client, args, TAB_CLAIM_LABELS.export);
-      const nativeLease = await validateNativeExportLeaseForClaim(client, args, claim);
-      return toolTextResult(
-        startDirectChatsExportJob(client, {
-          ...args,
-          _nativeExportLease: nativeLease,
-        }),
-      );
+      const nativeLease = await claimNativeExportLeaseForJob(client, args, TAB_CLAIM_LABELS.export);
+      return toolTextResult(startDirectChatsExportJob(client, withNativeExportLease(args, nativeLease)));
     },
   },
   {
@@ -13236,22 +13108,12 @@ const bridgeServer = createServer(async (req, res) => {
       const selector = clientSelectorFromSearchParams(url.searchParams);
       const client = await selectRecentExportClient(selector);
       assertNoRunningBrowserExportJob(client);
-      const claim = await ensureTabClaimForJob(client, selector, TAB_CLAIM_LABELS.export);
-      const nativeLease = await validateNativeExportTabLeaseForJob(
-        {
-          ...selector,
-          claimId: claim?.claimId || selector.claimId,
-          tabId: claim?.tabId ?? selector.tabId,
-        },
-        claim,
-        client,
-      );
+      const nativeLease = await claimNativeExportLeaseForJob(client, selector, TAB_CLAIM_LABELS.export);
       sendAgentJson(
         res,
         202,
-        startRecentChatsExportJob(client, {
+        startRecentChatsExportJob(client, withNativeExportLease({
           ...selector,
-          _nativeExportLease: nativeLease,
           outputDir: url.searchParams.get('outputDir'),
           resumeReportFile: url.searchParams.get('resumeReportFile') || url.searchParams.get('reportFile') || undefined,
           ...dateImportArgsFromSearchParams(url.searchParams),
@@ -13269,7 +13131,7 @@ const bridgeServer = createServer(async (req, res) => {
           ...exportBrowserArgsFromSearchParams(url.searchParams),
           skipExisting: parseOptionalBoolean(url.searchParams.get('skipExisting')),
           autoReleaseClaim: parseOptionalBoolean(url.searchParams.get('autoReleaseClaim')),
-        }),
+        }, nativeLease)),
       );
     } catch (err) {
       sendAgentError(res, 503, err);
@@ -13282,22 +13144,12 @@ const bridgeServer = createServer(async (req, res) => {
       const selector = clientSelectorFromSearchParams(url.searchParams);
       const client = await selectRecentExportClient(selector);
       assertNoRunningBrowserExportJob(client);
-      const claim = await ensureTabClaimForJob(client, selector, TAB_CLAIM_LABELS.export);
-      const nativeLease = await validateNativeExportTabLeaseForJob(
-        {
-          ...selector,
-          claimId: claim?.claimId || selector.claimId,
-          tabId: claim?.tabId ?? selector.tabId,
-        },
-        claim,
-        client,
-      );
+      const nativeLease = await claimNativeExportLeaseForJob(client, selector, TAB_CLAIM_LABELS.export);
       sendAgentJson(
         res,
         202,
-        startRecentChatsExportJob(client, {
+        startRecentChatsExportJob(client, withNativeExportLease({
           ...selector,
-          _nativeExportLease: nativeLease,
           vaultDir: url.searchParams.get('vaultDir') || url.searchParams.get('existingScanDir'),
           existingScanDir: url.searchParams.get('existingScanDir') || url.searchParams.get('vaultDir'),
           outputDir:
@@ -13320,7 +13172,7 @@ const bridgeServer = createServer(async (req, res) => {
           ...exportBrowserArgsFromSearchParams(url.searchParams),
           skipExisting: true,
           autoReleaseClaim: parseOptionalBoolean(url.searchParams.get('autoReleaseClaim')),
-        }),
+        }, nativeLease)),
       );
     } catch (err) {
       sendAgentError(res, 503, err);
@@ -13333,22 +13185,12 @@ const bridgeServer = createServer(async (req, res) => {
       const selector = clientSelectorFromSearchParams(url.searchParams);
       const client = await selectRecentExportClient(selector);
       assertNoRunningBrowserExportJob(client);
-      const claim = await ensureTabClaimForJob(client, selector, TAB_CLAIM_LABELS.sync);
-      const nativeLease = await validateNativeExportTabLeaseForJob(
-        {
-          ...selector,
-          claimId: claim?.claimId || selector.claimId,
-          tabId: claim?.tabId ?? selector.tabId,
-        },
-        claim,
-        client,
-      );
+      const nativeLease = await claimNativeExportLeaseForJob(client, selector, TAB_CLAIM_LABELS.sync);
       sendAgentJson(
         res,
         202,
-        startRecentChatsExportJob(client, {
+        startRecentChatsExportJob(client, withNativeExportLease({
           ...selector,
-          _nativeExportLease: nativeLease,
           vaultDir: url.searchParams.get('vaultDir'),
           existingScanDir: url.searchParams.get('vaultDir'),
           outputDir: url.searchParams.get('outputDir') || url.searchParams.get('vaultDir') || undefined,
@@ -13369,7 +13211,7 @@ const bridgeServer = createServer(async (req, res) => {
           ...exportBrowserArgsFromSearchParams(url.searchParams),
           skipExisting: true,
           autoReleaseClaim: parseOptionalBoolean(url.searchParams.get('autoReleaseClaim')),
-        }),
+        }, nativeLease)),
       );
     } catch (err) {
       sendAgentError(res, 503, err);
@@ -13397,23 +13239,13 @@ const bridgeServer = createServer(async (req, res) => {
       };
       const client = await selectRecentExportClient(selector);
       assertNoRunningBrowserExportJob(client);
-      const claim = await ensureTabClaimForJob(client, selector, TAB_CLAIM_LABELS.export);
-      const nativeLease = await validateNativeExportTabLeaseForJob(
-        {
-          ...selector,
-          claimId: claim?.claimId || selector.claimId,
-          tabId: claim?.tabId ?? selector.tabId,
-        },
-        claim,
-        client,
-      );
+      const nativeLease = await claimNativeExportLeaseForJob(client, selector, TAB_CLAIM_LABELS.export);
       sendAgentJson(
         res,
         202,
-        startDirectChatsExportJob(client, {
+        startDirectChatsExportJob(client, withNativeExportLease({
           ...selector,
           ...bodySelector,
-          _nativeExportLease: nativeLease,
           outputDir: body.outputDir || url.searchParams.get('outputDir') || undefined,
           ...dateImportArgsFromSearchParams(url.searchParams, body),
           chatIds,
@@ -13425,7 +13257,7 @@ const bridgeServer = createServer(async (req, res) => {
           autoReleaseClaim: parseOptionalBoolean(
             body.autoReleaseClaim ?? url.searchParams.get('autoReleaseClaim'),
           ),
-        }),
+        }, nativeLease)),
       );
     } catch (err) {
       sendAgentError(res, 503, err);

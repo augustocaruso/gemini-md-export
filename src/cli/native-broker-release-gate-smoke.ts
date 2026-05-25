@@ -1,14 +1,15 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const repoRoot = resolve(new URL('..', import.meta.url).pathname);
+const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', '..');
 const args = process.argv.slice(2);
 
-const valueOf = (name) => {
+const valueOf = (name: string): string | null => {
   const index = args.indexOf(name);
-  return index >= 0 ? args[index + 1] : null;
+  return index >= 0 ? args[index + 1] || null : null;
 };
 
 const takeout = valueOf('--takeout');
@@ -19,34 +20,38 @@ const maxChats = valueOf('--max-chats') || '30';
 
 if (!takeout) {
   console.error(
-    'Uso: node scripts/native-broker-release-gate-smoke.mjs --takeout <takeout.zip> [--output-dir <dir>] [--max-chats 30]',
+    'Uso: node build/ts/cli/native-broker-release-gate-smoke.js --takeout <takeout.zip> [--output-dir <dir>] [--max-chats 30]',
   );
   process.exit(64);
 }
 
 mkdirSync(outputDir, { recursive: true });
 
-const extractResultJson = (stdout) => {
-  const lines = String(stdout || '').trimEnd().split(/\r?\n/).reverse();
+const extractResultJson = (stdout: string): Record<string, unknown> | null => {
+  const lines = stdout.trimEnd().split(/\r?\n/).reverse();
   const marker = lines.find((line) => line.startsWith('RESULT_JSON '));
   if (!marker) return null;
-  return JSON.parse(marker.slice('RESULT_JSON '.length));
+  return JSON.parse(marker.slice('RESULT_JSON '.length)) as Record<string, unknown>;
 };
 
-const run = (label, commandArgs, { capture = false } = {}) => {
+const run = (
+  label: string,
+  commandArgs: string[],
+  options: Readonly<{ capture?: boolean }> = {},
+): Record<string, unknown> | null => {
   console.log(`\n## ${label}`);
   console.log(`node bin/gemini-md-export.mjs ${commandArgs.join(' ')}`);
   const result = spawnSync(process.execPath, ['bin/gemini-md-export.mjs', ...commandArgs], {
     cwd: repoRoot,
     encoding: 'utf-8',
-    stdio: capture ? 'pipe' : 'inherit',
+    stdio: options.capture ? 'pipe' : 'inherit',
   });
-  if (capture) {
+  if (options.capture) {
     if (result.stdout) process.stdout.write(result.stdout);
     if (result.stderr) process.stderr.write(result.stderr);
   }
   if (result.status !== 0) process.exit(result.status || 1);
-  return capture ? extractResultJson(result.stdout) : null;
+  return options.capture ? extractResultJson(result.stdout || '') : null;
 };
 
 // tabs reload
@@ -88,7 +93,8 @@ const claimResult = run(
   { capture: true },
 );
 
-const claimId = claimResult?.claim?.claimId;
+const claim = claimResult?.claim as Record<string, unknown> | undefined;
+const claimId = typeof claim?.claimId === 'string' ? claim.claimId : '';
 if (!claimId) {
   console.error('Nao recebi claimId do comando tabs claim.');
   process.exit(1);

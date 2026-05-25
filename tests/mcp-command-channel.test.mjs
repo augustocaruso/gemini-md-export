@@ -590,12 +590,13 @@ test('MCP implementa afinidade confiável por claim de aba', () => {
 
 test('MCP prefere native browser broker antes de fallback por heartbeat', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const nativeGateSource = readFileSync(resolve(ROOT, 'src', 'mcp', 'native-release-gate.ts'), 'utf-8');
 
   assert.match(source, /createNativeBrowserBrokerClient/);
   assert.match(source, /shouldUseNativeBrowserBroker/);
   assert.match(source, /tryNativeBrowserBrokerTabsAction/);
-  assert.match(source, /nativeBrowserBroker\.listTabs/);
-  assert.match(source, /nativeBrowserBroker\.claim/);
+  assert.match(nativeGateSource, /nativeBrowserBroker\.listTabs/);
+  assert.match(nativeGateSource, /nativeBrowserBroker\.claim/);
   assert.doesNotMatch(source, /lastHeartbeatAt[^\n]+claimGeminiTabForClient/);
 });
 
@@ -626,6 +627,7 @@ test('browser_status diagnostica e tenta self-heal sem depender do guard wrapper
 
 test('browser readiness expõe status estruturado do native broker', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const nativeGateSource = readFileSync(resolve(ROOT, 'src', 'mcp', 'native-release-gate.ts'), 'utf-8');
   const readyBlock = source.match(
     /const buildLightweightBrowserReady = async \(args = \{\}\) => \{[\s\S]*?\n\};\n\nconst normalizeLimit/,
   )?.[0];
@@ -634,7 +636,8 @@ test('browser readiness expõe status estruturado do native broker', () => {
   assert.match(source, /const probeNativeBrowserBrokerStatus = async/);
   assert.match(readyBlock, /const nativeBrokerStatus = await probeNativeBrowserBrokerStatus\(\)/);
   assert.match(readyBlock, /nativeBroker:\s*nativeBrokerStatus/);
-  assert.match(readyBlock, /nativeBrokerStatus\.available !== true/);
+  assert.match(readyBlock, /nativeBrokerBlockingIssueForReady/);
+  assert.match(nativeGateSource, /nativeBrokerStatus\.available !== true/);
 });
 
 test('reload de abas existentes pode atualizar extensao sem abrir navegador', () => {
@@ -666,6 +669,7 @@ test('reload de abas existentes pode atualizar extensao sem abrir navegador', ()
 
 test('reload de abas usa native broker antes de depender de clientes vivos', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const nativeGateSource = readFileSync(resolve(ROOT, 'src', 'mcp', 'native-release-gate.ts'), 'utf-8');
   const reloadBlock = source.match(
     /const reloadGeminiTabs = async \(args = \{\}\) => \{[\s\S]*?\n\};\n\nconst legacyRawTools/,
   )?.[0];
@@ -677,7 +681,7 @@ test('reload de abas usa native broker antes de depender de clientes vivos', () 
       reloadBlock.indexOf('const liveClients = getLiveClients()'),
     'native broker precisa rodar antes de getLiveClients',
   );
-  assert.match(source, /nativeBrowserBroker\.reload/);
+  assert.match(nativeGateSource, /nativeBrowserBroker\.reload/);
 });
 
 test('self-reload trata Extension context invalidated como reload em andamento', () => {
