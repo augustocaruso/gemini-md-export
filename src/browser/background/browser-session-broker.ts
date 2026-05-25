@@ -110,6 +110,24 @@ export const getDebuggableGeminiTabs = async (
   return { ok: true, tabs: debuggable, classified };
 };
 
+export const visualCompanionTabIdsForClaim = (
+  claimedTab: DebuggableGeminiTab,
+  classified: readonly BrowserTabClassification[],
+): readonly number[] =>
+  classified
+    .filter((item) => item.inspection?.pageKind === 'my_activity')
+    .filter((item) => {
+      const companionWindowId = Number(item.tab.windowId);
+      const claimedWindowId = Number(claimedTab.windowId);
+      return (
+        !Number.isInteger(companionWindowId) ||
+        !Number.isInteger(claimedWindowId) ||
+        companionWindowId === claimedWindowId
+      );
+    })
+    .map((item) => Number(item.tab.id))
+    .filter((tabId) => Number.isInteger(tabId) && tabId !== claimedTab.tabId);
+
 export const claimDebuggableGeminiTab = async (
   tabs: readonly RawBrowserTab[],
   options: BrowserSessionBrokerOptions = {},
@@ -127,5 +145,6 @@ export const claimDebuggableGeminiTab = async (
   return {
     ok: true as const,
     tab: toClaimedDebuggableGeminiTab(candidates[0], options.claimId || randomClaimId()),
+    visualCompanionTabIds: visualCompanionTabIdsForClaim(candidates[0], listed.classified),
   };
 };

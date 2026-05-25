@@ -81,3 +81,40 @@ test('native broker reports no_existing_gemini_tabs without opening a tab', asyn
   assert.equal(result.reloaded, 0);
   assert.deepEqual(reloaded, []);
 });
+
+test('native broker claim groups Gemini and My Activity in the same visual rectangle', async () => {
+  const grouped = [];
+  const updatedGroups = [];
+  const { api } = chromeApiForTabs({
+    tabs: [
+      { id: 42, windowId: 7, active: true, url: 'https://gemini.google.com/app/abc123456789' },
+      { id: 99, windowId: 7, active: false, url: 'https://myactivity.google.com/product/gemini' },
+    ],
+    hrefByTabId: {
+      42: 'https://gemini.google.com/app/abc123456789',
+      99: 'https://myactivity.google.com/product/gemini',
+    },
+  });
+  api.tabs.group = (createProperties, callback) => {
+    grouped.push(createProperties.tabIds);
+    callback(777);
+  };
+  api.tabGroups = {
+    update(groupId, updateProperties, callback) {
+      updatedGroups.push({ groupId, updateProperties });
+      callback({ id: groupId, ...updateProperties });
+    },
+  };
+
+  const result = await handleNativeBrowserBrokerCommand(
+    { command: 'tabs.claim', payload: { claimId: 'claim-42', label: 'Gemini Export' } },
+    api,
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.tab.tabId, 42);
+  assert.equal(result.visual.mode, 'tab-group');
+  assert.deepEqual(result.visual.tabIds, [42, 99]);
+  assert.deepEqual(grouped, [[42, 99]]);
+  assert.equal(updatedGroups[0].groupId, 777);
+});

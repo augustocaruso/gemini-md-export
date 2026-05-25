@@ -21,6 +21,20 @@ test('tab claim receipt accepts tab-group and action-badge visuals', () => {
     }),
     true,
   );
+  assert.equal(
+    isTabClaimReceipt({
+      ok: true,
+      visual: {
+        mode: 'tab-group',
+        tabId: 42,
+        tabIds: [42, 99],
+        groupId: 100,
+        label: 'Gemini Export',
+        color: 'blue',
+      },
+    }),
+    true,
+  );
 
   assert.equal(isTabClaimReceipt({ ok: true, visual: { mode: 'action-badge', tabId: 42 } }), true);
   assert.equal(

@@ -11,6 +11,17 @@ const visual = {
   groupId: 99,
 } satisfies TabGroupClaimVisual;
 
+const visualWithActivity = {
+  mode: 'tab-group',
+  tabId: 42,
+  tabIds: [42, 99] as const,
+  groupId: 100,
+  label: 'Gemini Export',
+  color: 'blue',
+} satisfies TabGroupClaimVisual;
+
+void visualWithActivity;
+
 const receipt = {
   ok: true,
   visual,

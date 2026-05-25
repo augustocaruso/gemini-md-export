@@ -60,3 +60,36 @@ test('google blocker returns typed blocker code', async () => {
   assert.equal(classified[0].state, 'blocked');
   assert.equal(classified[0].code, 'google_verification_required');
 });
+
+test('My Activity entra no alvo visual da claim sem virar aba exportavel', async () => {
+  const activityTab = {
+    id: 99,
+    windowId: 7,
+    active: false,
+    url: 'https://myactivity.google.com/product/gemini',
+    title: 'My Activity',
+  };
+  const inspectTab = async (tabId) =>
+    tabId === 42
+      ? {
+          ok: true,
+          tabId,
+          url: tab.url,
+          pageKind: 'gemini',
+          blockerCode: null,
+        }
+      : {
+          ok: true,
+          tabId,
+          url: activityTab.url,
+          pageKind: 'my_activity',
+          blockerCode: null,
+        };
+  const result = await claimDebuggableGeminiTab([tab, activityTab], { inspectTab });
+  const listed = await getDebuggableGeminiTabs([tab, activityTab], { inspectTab });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.tab.tabId, 42);
+  assert.deepEqual(result.visualCompanionTabIds, [99]);
+  assert.deepEqual(listed.tabs.map((item) => item.tabId), [42]);
+});

@@ -26,6 +26,17 @@ type ChromeNativeBrokerApi = Readonly<{
       reloadProperties: { bypassCache?: boolean },
       callback?: () => void,
     ): void;
+    group?(
+      createProperties: { tabIds: number[]; groupId?: number },
+      callback?: (groupId?: number) => void,
+    ): void;
+  };
+  tabGroups?: {
+    update?(
+      groupId: number,
+      updateProperties: { title?: string; color?: string },
+      callback?: (group?: unknown) => void,
+    ): void;
   };
   debugger?: {
     attach(target: { tabId: number }, protocolVersion: string, callback: () => void): void;
@@ -42,11 +53,17 @@ type ChromeNativeBrokerApi = Readonly<{
 export type NativeBrowserBrokerCommand = Readonly<{
   id?: string;
   command: 'tabs.list' | 'tabs.status' | 'tabs.claim' | 'tabs.release' | 'tabs.reload';
-  payload?: { tabId?: number | null; claimId?: string | null };
+  payload?: {
+    tabId?: number | null;
+    claimId?: string | null;
+    label?: string | null;
+    color?: string | null;
+  };
 }>;
 
 const managedTabQueryUrls = [
   'https://gemini.google.com/*',
+  'https://myactivity.google.com/*',
   'https://accounts.google.com/*',
   'https://www.google.com/sorry/*',
 ];
@@ -82,6 +99,80 @@ const chromeReloadTab = (
     });
   });
 
+const chromeGroupTabs = (
+  chromeApi: ChromeNativeBrokerApi,
+  tabIds: number[],
+): Promise<number | null> =>
+  new Promise((resolve) => {
+    if (!chromeApi.tabs || !chromeApi.tabs.group || tabIds.length === 0) {
+      resolve(null);
+      return;
+    }
+    chromeApi.tabs.group({ tabIds }, (groupId) => {
+      const message = chromeApi.runtime?.lastError?.message;
+      if (message || !Number.isInteger(groupId)) {
+        resolve(null);
+        return;
+      }
+      resolve(Number(groupId));
+    });
+  });
+
+const chromeUpdateTabGroup = (
+  chromeApi: ChromeNativeBrokerApi,
+  groupId: number,
+  updateProperties: { title?: string; color?: string },
+): Promise<boolean> =>
+  new Promise((resolve) => {
+    if (!chromeApi.tabGroups?.update || !Number.isInteger(groupId)) {
+      resolve(false);
+      return;
+    }
+    chromeApi.tabGroups.update(groupId, updateProperties, () => {
+      const message = chromeApi.runtime?.lastError?.message;
+      resolve(!message);
+    });
+  });
+
+const nonEmptyIntegerArray = (
+  values: readonly number[],
+  fallback: number,
+): [number, ...number[]] => {
+  const clean = Array.from(new Set(values)).filter(Number.isInteger);
+  if (clean.length === 0) return [fallback];
+  return clean as [number, ...number[]];
+};
+
+const applyNativeClaimVisual = async (
+  chromeApi: ChromeNativeBrokerApi,
+  tabId: number,
+  relatedTabIds: readonly number[],
+  payload: { label?: string | null; color?: string | null } = {},
+) => {
+  const tabIds = Array.from(new Set([tabId, ...relatedTabIds])).filter(Number.isInteger);
+  if (!chromeApi.tabs || !chromeApi.tabs.group || !chromeApi.tabGroups?.update) {
+    return { mode: 'action-badge' as const, tabId, reason: 'tab-groups-api-unavailable' };
+  }
+  const groupId = Number(await chromeGroupTabs(chromeApi, tabIds));
+  if (!Number.isInteger(groupId)) {
+    return { mode: 'action-badge' as const, tabId, reason: 'tab-group-create-failed' };
+  }
+  const label = payload.label || 'Gemini Export';
+  const color = payload.color || 'blue';
+  const updated = await chromeUpdateTabGroup(chromeApi, groupId, { title: label, color });
+  if (!updated) {
+    return { mode: 'action-badge' as const, tabId, groupId, reason: 'tab-group-update-failed' };
+  }
+  return {
+    mode: 'tab-group' as const,
+    tabId,
+    tabIds: nonEmptyIntegerArray(tabIds, tabId),
+    groupId,
+    label,
+    color,
+  };
+};
+
 export const handleNativeBrowserBrokerCommand = async (
   request: NativeBrowserBrokerCommand,
   chromeApi: ChromeNativeBrokerApi = globalChrome() || {},
@@ -94,11 +185,21 @@ export const handleNativeBrowserBrokerCommand = async (
   }
 
   if (request.command === 'tabs.claim') {
-    return claimDebuggableGeminiTab(tabs, {
+    const claim = await claimDebuggableGeminiTab(tabs, {
       requestedTabId: request.payload?.tabId || null,
       claimId: request.payload?.claimId || null,
       inspectTab,
     });
+    if (claim.ok !== true) return claim;
+    return {
+      ...claim,
+      visual: await applyNativeClaimVisual(
+        chromeApi,
+        claim.tab.tabId,
+        claim.visualCompanionTabIds,
+        request.payload,
+      ),
+    };
   }
 
   if (request.command === 'tabs.reload') {

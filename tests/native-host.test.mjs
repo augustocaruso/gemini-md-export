@@ -129,8 +129,12 @@ test('service worker opens persistent native broker port and exposes tab command
   assert.match(backgroundSource, /createNativeBrokerPort/);
   assert.match(brokerSource, /tabs\.list/);
   assert.match(brokerSource, /tabs\.claim/);
+  assert.match(brokerSource, /tabs\.group/);
+  assert.match(brokerSource, /tabGroups\.update/);
   assert.match(brokerSource, /claimDebuggableGeminiTab/);
   assert.match(brokerSource, /classifyBrowserTabs/);
+  assert.match(brokerSource, /visualCompanionTabIds/);
+  assert.match(brokerSource, /applyNativeClaimVisual/);
 });
 
 test('service worker abre native broker no startup antes do self-heal de abas', () => {
