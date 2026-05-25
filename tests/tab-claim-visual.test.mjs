@@ -13,6 +13,7 @@ test('tab claim receipt accepts tab-group and action-badge visuals', () => {
       visual: {
         mode: 'tab-group',
         tabId: 42,
+        tabIds: [42, 43],
         groupId: 99,
         label: 'Exportando',
         color: 'green',
@@ -22,8 +23,25 @@ test('tab claim receipt accepts tab-group and action-badge visuals', () => {
   );
 
   assert.equal(isTabClaimReceipt({ ok: true, visual: { mode: 'action-badge', tabId: 42 } }), true);
+  assert.equal(
+    isTabClaimReceipt({ ok: true, visual: { mode: 'tab-group', tabId: 42, groupId: 99 } }),
+    false,
+  );
+  assert.equal(
+    isTabClaimReceipt({
+      ok: true,
+      visual: { mode: 'tab-group', tabId: 42, tabIds: [43], groupId: 99 },
+    }),
+    false,
+  );
   assert.equal(isTabClaimReceipt({ ok: true }), false);
-  assert.equal(isTabClaimReceipt({ ok: false, visual: { mode: 'tab-group', tabId: 42, groupId: 99 } }), false);
+  assert.equal(
+    isTabClaimReceipt({
+      ok: false,
+      visual: { mode: 'tab-group', tabId: 42, tabIds: [42], groupId: 99 },
+    }),
+    false,
+  );
 });
 
 test('tab claim failure reason names missing visual evidence', () => {

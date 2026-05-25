@@ -207,6 +207,23 @@ test('rejects inactive, non-Gemini, missing current chat, command-unready and bu
   );
 });
 
+test('accepts page-level active tab evidence when top-level tab state lags', () => {
+  const lifecycle = getGeminiClientLifecycle(
+    {
+      ...baseClient,
+      isActiveTab: false,
+      page: {
+        ...baseClient.page,
+        isActiveTab: true,
+      },
+    },
+    options,
+  );
+
+  assert.equal(lifecycle.state, 'claimable');
+  assert.equal(lifecycle.code, null);
+});
+
 test('/app home is claimable for recent export but not current chat', () => {
   const homeClient = {
     ...baseClient,

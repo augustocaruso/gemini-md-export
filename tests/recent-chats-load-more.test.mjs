@@ -260,6 +260,34 @@ test('export parcial carrega mais historico ate maxChats antes de fatiar', () =>
   assert.match(block, /job\.loadMoreTimedOut = loadMore\.timedOut === true && !loadMoreResolved/);
 });
 
+test('resume de export parcial preserva limite original em relatorios encadeados', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const resumeScopeSource = readFileSync(
+    resolve(ROOT, 'src', 'mcp', 'existing-tabs-reload.ts'),
+    'utf-8',
+  );
+  const checkpointBlock = source.match(
+    /const loadRecentChatsResumeCheckpoint = \(filePath\) => \{[\s\S]*?\n\};\n\nconst loadDirectChatsResumeCheckpoint/,
+  )?.[0];
+  const startBlock = source.match(
+    /const startRecentChatsExportJob = \(client, args = \{\}\) => \{[\s\S]*?\n  exportJobs\.set/,
+  )?.[0];
+  const resumeCommandBlock = source.match(/const exportJobResumeCommand = \(job\) => \{[\s\S]*?\n\};/)?.[0];
+
+  assert.ok(checkpointBlock, 'loadRecentChatsResumeCheckpoint deve existir');
+  assert.ok(startBlock, 'startRecentChatsExportJob deve existir');
+  assert.ok(resumeCommandBlock, 'exportJobResumeCommand deve existir');
+  assert.match(checkpointBlock, /recentChatsResumeCounters/);
+  assert.match(resumeScopeSource, /report\?\.resume\?\.previousCounters\?\.webConversationCount/);
+  assert.match(resumeScopeSource, /webConversationCount: previousWebConversationCountForResumeReport/);
+  assert.match(startBlock, /recentExportResumeScope/);
+  assert.match(resumeScopeSource, /resume\?\.previousCounters\?\.webConversationCount/);
+  assert.match(resumeScopeSource, /effectiveHasMaxChats: hasExplicitMaxChats \|\| resumeMaxChats !== null/);
+  assert.match(startBlock, /exportAll: !effectiveHasMaxChats/);
+  assert.match(startBlock, /maxChats: hasExplicitMaxChats[\s\S]*: resumeMaxChats/);
+  assert.match(resumeCommandBlock, /\.\.\(!job\.exportAll && job\.maxChats \? \{ maxChats: job\.maxChats \} : \{\}\)/);
+});
+
 test('recent export builds operation targets with batch and history positions', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const operationSource = readFileSync(
@@ -551,7 +579,7 @@ test('export total pula arquivos existentes por padrão', () => {
   assert.match(block, /existingMarkdownExportForConversation\(conversation/);
   assert.match(block, /reason: 'existing-file'/);
   assert.match(block, /job\.skippedExisting\.push\(skipped\)/);
-  assert.match(source, /const skipExisting =[\s\S]*!hasExplicitMaxChats/);
+  assert.match(source, /const skipExisting =[\s\S]*!effectiveHasMaxChats/);
   assert.match(source, /skippedExisting:/);
   assert.match(source, /skippedCount:/);
 });

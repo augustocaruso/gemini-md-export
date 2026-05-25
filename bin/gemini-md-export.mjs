@@ -182,7 +182,7 @@ const commonOptionHelp = () => [
   '  --focus-window           Pode trazer a janela do navegador para frente.',
   '  --no-focus-window        Nao focar janela do navegador. Default.',
   '  --no-self-heal           Nao tentar auto-recuperacao da extensao.',
-  '  --allow-reload           Permite reload explicito da extensao quando diagnosticado.',
+  '  --allow-reload           Permite reload da extensao e abas ja existentes; nao abre abas novas.',
   '  --no-reload              Nao pedir reload da extensao. Default.',
   '  --no-color               Desliga ANSI.',
   '  --help, -h               Mostra ajuda.',
@@ -2437,11 +2437,24 @@ const exitCodeForJobCommand = (subcommand, job = {}) => {
 
 const shouldWakeBrowserForReady = (ready = {}) => {
   if (ready.ready === true) return false;
-  const issue = String(ready.blockingIssue || '');
-  if (issue === 'no_connected_clients' || issue === 'no_selectable_gemini_tab') return true;
   const connected = Number(ready.connectedClientCount ?? ready.connectedClients?.length ?? 0);
   const selectable = Number(ready.selectableTabCount ?? 0);
+  const issue = String(ready.blockingIssue || '');
+  if (issue === 'no_connected_clients') return true;
+  if (issue === 'no_selectable_gemini_tab') return connected <= 0 && selectable <= 0;
   return connected <= 0 && selectable <= 0;
+};
+
+const shouldWaitForExistingTabsForReady = (ready = {}) => {
+  if (ready.ready === true) return false;
+  const connected = connectedClientCountFromReady(ready);
+  if (connected <= 0) return false;
+  const issue = String(ready.blockingIssue || '');
+  return [
+    'no_selectable_gemini_tab',
+    'no_active_claimable_gemini_tab',
+    'command_channel_not_ready',
+  ].includes(issue);
 };
 
 const buildCliLaunchId = () =>
@@ -2684,14 +2697,54 @@ const wakeBrowserFromCli = async (flags, ui, ready) => {
   return launch;
 };
 
+const shouldReloadExistingTabsForReady = (ready = {}, flags = {}) => {
+  if (flags.allowReload !== true || ready.ready === true) return false;
+  const connected = connectedClientCountFromReady(ready);
+  if (connected <= 0) return false;
+  const issue = String(ready.blockingIssue || '');
+  return [
+    'no_selectable_gemini_tab',
+    'no_active_claimable_gemini_tab',
+    'command_channel_not_ready',
+  ].includes(issue);
+};
+
+const reloadExistingTabsFromCli = async (bridgeUrl, flags, ui, ready = {}) => {
+  setWaitNote(ui, 'Recarregando extensão e abas existentes', {
+    issue: ready.blockingIssue || null,
+  });
+  if (shouldWriteInlineStatus(ui)) {
+    ui.stdout.write('Recarregando extensão e abas existentes...\n');
+  }
+  try {
+    return await requestJson(
+      bridgeUrl,
+      appendParams('/agent/tabs', {
+        action: 'reload',
+        openIfMissing: false,
+        allowReload: true,
+        delayMs: flags.delayMs,
+      }),
+      { timeoutMs: 45_000 },
+    );
+  } catch (err) {
+    return {
+      ok: false,
+      error: err?.message || String(err),
+      code: err?.code || null,
+    };
+  }
+};
+
 const readyWithCliWake = async (bridgeUrl, flags, ui) => {
   let ready = await requestReadyStatus(bridgeUrl, flags, { waitMs: 0 });
   setWaitNote(ui, ready.ready === true ? 'Gemini Web pronto' : 'Verificando Gemini Web', {
     issue: ready.blockingIssue || null,
   });
   let cliBrowserWake = null;
+  let existingTabsReload = null;
   if (ready.ready !== true) {
-    if (shouldWakeBrowserForReady(ready)) {
+    if (shouldWaitForExistingTabsForReady(ready)) {
       const connectedClientCount = connectedClientCountFromReady(ready);
       const existingTabGraceMs = Math.min(
         Math.max(0, Number(flags.readyWaitMs || 0)),
@@ -2724,6 +2777,19 @@ const readyWithCliWake = async (bridgeUrl, flags, ui) => {
         }
       }
     }
+    if (ready.ready !== true && shouldReloadExistingTabsForReady(ready, flags)) {
+      existingTabsReload = await reloadExistingTabsFromCli(bridgeUrl, flags, ui, ready);
+      if (existingTabsReload?.ok && flags.readyWaitMs > 0) {
+        setWaitNote(ui, 'Aguardando abas existentes reconectarem', {
+          detail: `limite ${formatDuration(flags.readyWaitMs)}`,
+          issue: ready.blockingIssue || null,
+        });
+        ready = await requestReadyStatus(bridgeUrl, flags, { waitMs: flags.readyWaitMs });
+        setWaitNote(ui, ready.ready === true ? 'Gemini Web pronto' : 'Verificando Gemini Web', {
+          issue: ready.blockingIssue || null,
+        });
+      }
+    }
     if (ready.ready !== true) {
       cliBrowserWake = await wakeBrowserFromCli(flags, ui, ready);
       if (flags.readyWaitMs > 0) {
@@ -2753,6 +2819,7 @@ const readyWithCliWake = async (bridgeUrl, flags, ui) => {
   return {
     ...ready,
     cliBrowserWake,
+    existingTabsReload,
   };
 };
 
@@ -3473,6 +3540,7 @@ const runBrowser = async (parsed, streams = {}) => {
     commandReadyClientCount: ready.commandReadyClientCount ?? 0,
     bridgeRole: clients?.mcp?.bridgeRole || null,
     connectedClients: clients?.connectedClients || [],
+    existingTabsReload: ready.existingTabsReload || null,
     nextAction:
       ready.ready === true
         ? 'Bridge, extensao e aba Gemini parecem prontos.'

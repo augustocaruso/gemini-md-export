@@ -124,7 +124,8 @@ test('recent export has per-conversation no-progress watchdog', () => {
   assert.match(operationSource, /onOperationProgress: markOperationProgress/);
   assert.match(source, /const assertConversationOperationNotAborted = \(args = \{\}\) =>/);
   assert.match(source, /operation_cancelled/);
-  assert.match(operationSource, /operation_still_active_after_watchdog/);
+  assert.match(operationSource, /conversation_watchdog_drain_timeout/);
+  assert.match(operationSource, /operation_cancel_failed_after_watchdog/);
 });
 
 test('MCP usa SSE para progresso, mas exige long-poll para comandos por padrão', () => {
@@ -297,6 +298,10 @@ test('MCP nao conta event stream sem evidência de aba como cliente vivo', () =>
 test('MCP permite cliente My Activity sem liberar endpoints de escrita', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const bridgeOriginSource = readFileSync(resolve(ROOT, 'src', 'mcp', 'bridge-origin.ts'), 'utf-8');
+  const reloadContractsSource = readFileSync(
+    resolve(ROOT, 'src', 'mcp', 'existing-tabs-reload.ts'),
+    'utf-8',
+  );
 
   assert.match(source, /GEMINI_BRIDGE_PAGE_ORIGIN = 'https:\/\/gemini\.google\.com'/);
   assert.match(source, /ACTIVITY_BRIDGE_PAGE_ORIGIN = 'https:\/\/myactivity\.google\.com'/);
@@ -305,6 +310,9 @@ test('MCP permite cliente My Activity sem liberar endpoints de escrita', () => {
   assert.match(source, /url\.pathname === '\/agent\/activity-scan'/);
   assert.match(source, /'activity-scan-batch'/);
   assert.match(source, /claimTabForClient\(client,[\s\S]*TAB_CLAIM_LABELS\.count/);
+  assert.match(source, /buildActivityClaimAffinity/);
+  assert.match(reloadContractsSource, /existingGeminiSessionClaim\?\.claimId/);
+  assert.match(source, /visualGroupTabId: activityClaimAffinity\.visualGroupTabId/);
   assert.match(source, /releaseTabClaim\(\{[\s\S]*activity-scan-complete/);
   assert.match(source, /activity_client_missing/);
 
@@ -566,7 +574,11 @@ test('MCP implementa afinidade confiável por claim de aba', () => {
   assert.match(backgroundSource, /releaseTrackedTabClaimByTabId/);
   assert.match(backgroundSource, /chrome\.tabs\.group/);
   assert.match(backgroundSource, /chrome\.tabGroups\.update/);
+  assert.match(backgroundSource, /visualGroupTabId/);
+  assert.match(backgroundSource, /chromeGroupTabs\(tabIdsToGroup, targetGroupId\)/);
+  assert.match(backgroundSource, /tabIds: targetTabIds/);
   assert.match(backgroundSource, /tab-already-in-user-group/);
+  assert.match(backgroundSource, /related-tab-already-in-user-group/);
   assert.match(backgroundSource, /cleanupStaleTabClaimVisuals/);
   assert.match(backgroundSource, /stillOurGroup/);
   assert.match(backgroundSource, /chrome\.runtime\.onInstalled\.addListener/);
@@ -609,6 +621,33 @@ test('browser_status diagnostica e tenta self-heal sem depender do guard wrapper
   assert.match(statusBlock, /buildExtensionReadiness/);
   assert.match(statusBlock, /manualReloadRequired/);
   assert.doesNotMatch(guardedBlock, /gemini_browser_status/);
+});
+
+test('reload de abas existentes pode atualizar extensao sem abrir navegador', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const cliSource = readFileSync(resolve(ROOT, 'bin', 'gemini-md-export.mjs'), 'utf-8');
+  const runtimeSource = readFileSync(resolve(ROOT, 'src', 'mcp', 'existing-tabs-reload.ts'), 'utf-8');
+  const reloadBlock = source.match(
+    /const reloadGeminiTabs = async \(args = \{\}\) => \{[\s\S]*?\n\};\n\nconst legacyRawTools/,
+  )?.[0];
+  const cliReloadBlock = cliSource.match(
+    /const reloadExistingTabsFromCli = async[\s\S]*?\n\};\n\nconst readyWithCliWake/,
+  )?.[0];
+  const wakeDecisionBlock = cliSource.match(
+    /const shouldWakeBrowserForReady = \(ready = \{\}\) => \{[\s\S]*?\n\};/,
+  )?.[0];
+
+  assert.ok(reloadBlock, 'reloadGeminiTabs deve existir');
+  assert.ok(cliReloadBlock, 'reloadExistingTabsFromCli deve existir');
+  assert.ok(wakeDecisionBlock, 'shouldWakeBrowserForReady deve existir');
+  assert.match(reloadBlock, /reloadExtensionForExistingTabs/);
+  assert.doesNotMatch(reloadBlock, /launchChromeForGemini/);
+  assert.match(runtimeSource, /allowLaunchChrome:\s*false/);
+  assert.match(runtimeSource, /allowReload:\s*args\.allowReload === true/);
+  assert.match(cliReloadBlock, /action:\s*'reload'/);
+  assert.match(cliReloadBlock, /openIfMissing:\s*false/);
+  assert.match(cliReloadBlock, /allowReload:\s*true/);
+  assert.match(wakeDecisionBlock, /issue === 'no_selectable_gemini_tab'[\s\S]*connected <= 0/);
 });
 
 test('MCP expõe diagnóstico e cleanup controlado de processos sem guard de browser', () => {

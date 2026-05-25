@@ -369,13 +369,25 @@ export const runRecentExportConversationOperation = async (
         deps.drainTimeoutMs,
       );
       if (drainResult.status === 'timeout') {
+        deps.appendExportJobTrace(job, 'conversation_watchdog_drain_timeout', {
+          operationId,
+          targetChatId: target.targetChatId,
+          cancelOk: cancelResult?.ok === true,
+          cancelCancelled: cancelResult?.cancelled === true,
+          cancelReason: cancelResult?.reason || null,
+          cancelCode: cancelResult?.code || null,
+        });
+        if (cancelResult?.ok === true) {
+          (watchdogError as AnyRecord).data = {
+            drainTimedOut: true,
+            cancelResult,
+          };
+          throw watchdogError;
+        }
         const error = new Error(
-          'Operação do navegador ainda ativa depois do watchdog; interrompi o lote para evitar conflito entre conversas.',
+          'Não consegui confirmar o cancelamento da operação do navegador depois do watchdog; interrompi o lote para evitar conflito entre conversas.',
         );
-        (error as AnyRecord).code =
-          cancelResult?.ok === true || cancelResult?.cancelled === true
-            ? 'operation_still_active_after_watchdog'
-            : 'operation_cancel_failed_after_watchdog';
+        (error as AnyRecord).code = 'operation_cancel_failed_after_watchdog';
         (error as AnyRecord).operationId = operationId;
         (error as AnyRecord).targetChatId = target.targetChatId;
         throw error;
@@ -438,7 +450,6 @@ export const runRecentExportConversationOperation = async (
       deps.exportJobRecordingDeps,
     );
     if (
-      err?.code === 'operation_still_active_after_watchdog' ||
       err?.code === 'operation_cancel_failed_after_watchdog'
     ) {
       throw err;

@@ -128,6 +128,12 @@ const {
   runRecentExportConversationOperation,
 } = await import(compiledTsModuleUrl('mcp', 'recent-export-operation-runtime.js'));
 const {
+  buildActivityClaimAffinity,
+  recentChatsResumeCounters,
+  recentExportResumeScope,
+  reloadExtensionForExistingTabs,
+} = await import(compiledTsModuleUrl('mcp', 'existing-tabs-reload.js'));
+const {
   assertActiveClaimableGeminiClient,
   explainActiveClaimableGeminiClientRejection,
   getActiveClaimableGeminiClients,
@@ -3920,6 +3926,7 @@ const claimTabForClient = async (client, args = {}, options = {}) => {
       label,
       color,
       expiresAt: new Date(expiresAtMs).toISOString(),
+      visualGroupTabId: normalizeTabId(args.visualGroupTabId ?? args.groupWithTabId),
     },
     {
       timeoutMs: 10_000,
@@ -4709,6 +4716,13 @@ const ensureActivityClientForScan = async (args = {}) => {
 
 const scanActivityWithClient = async (args = {}) => {
   const { client, browserWake } = await ensureActivityClientForScan(args);
+  const baseSessionId = normalizeSessionId(args.sessionId || args._proxySessionId);
+  const activityClaimAffinity = buildActivityClaimAffinity(
+    baseSessionId,
+    client.clientId,
+    claimForSession(baseSessionId),
+    normalizeTabId(args.visualGroupTabId ?? args.groupWithTabId),
+  );
   let claim = null;
   let claimVisibleAtMs = null;
   let tabClaimWarning = null;
@@ -4717,9 +4731,11 @@ const scanActivityWithClient = async (args = {}) => {
     try {
       const claimed = await claimTabForClient(client, {
         ...args,
+        sessionId: activityClaimAffinity.sessionId,
         label: args.claimLabel || TAB_CLAIM_LABELS.count,
         color: args.claimColor || 'blue',
         force: args.forceClaim === true || args.force === true,
+        visualGroupTabId: activityClaimAffinity.visualGroupTabId,
       });
       claim = claimed.claim || null;
       claimVisibleAtMs = Date.now();
@@ -5328,7 +5344,6 @@ const loadRecentChatsResumeCheckpoint = (filePath) => {
   for (const item of [...previousSuccesses, ...previousSkipped]) {
     if (item.chatId) completedChatIds.add(item.chatId);
   }
-
   return {
     enabled: true,
     reportFile,
@@ -5347,14 +5362,7 @@ const loadRecentChatsResumeCheckpoint = (filePath) => {
     previousSuccessCount: previousSuccesses.length,
     previousSkippedCount: previousSkipped.length,
     previousFailureCount: previousFailures.length,
-    previousCounters: {
-      webConversationCount: report.webConversationCount ?? null,
-      existingVaultCount: report.existingVaultCount ?? 0,
-      missingCount: report.missingCount ?? null,
-      reachedEnd: report.reachedEnd ?? null,
-      truncated: report.truncated ?? null,
-      fullHistoryVerified: report.job?.fullHistoryVerified ?? null,
-    },
+    previousCounters: recentChatsResumeCounters(report, MAX_RECENT_CHATS_LOAD_TARGET),
   };
 };
 
@@ -8062,6 +8070,7 @@ const exportJobResumeCommand = (job) => {
       : {
           action: job.syncMode ? 'sync' : job.exportMissingOnly ? 'missing' : 'recent',
           resumeReportFile: job.reportFile,
+          ...(!job.exportAll && job.maxChats ? { maxChats: job.maxChats } : {}),
         };
   if (job.exportMissingOnly && job.existingScanDir) {
     args.vaultDir = job.existingScanDir;
@@ -9397,9 +9406,10 @@ const startRecentChatsExportJob = (client, args = {}) => {
   }
   const syncState =
     syncMode && existingScanDir ? readVaultSyncState(existingScanDir, args.syncStateFile) : null;
-  const hasExplicitMaxChats = args.maxChats !== undefined || args.limit !== undefined;
+  const { hasExplicitMaxChats, resumeMaxChats, effectiveHasMaxChats } =
+    recentExportResumeScope(args, resume, exportMissingOnly, syncMode, MAX_RECENT_CHATS_LOAD_TARGET);
   const skipExisting =
-    typeof args.skipExisting === 'boolean' ? args.skipExisting : !hasExplicitMaxChats;
+    typeof args.skipExisting === 'boolean' ? args.skipExisting : !effectiveHasMaxChats;
   const activeClaim = claimForClient(client);
   const job = {
     jobId: randomUUID(),
@@ -9416,10 +9426,10 @@ const startRecentChatsExportJob = (client, args = {}) => {
     updatedAt: new Date().toISOString(),
     finishedAt: null,
     startIndex: normalizeLimit(args.startIndex, 1, 20000),
-    exportAll: !hasExplicitMaxChats,
+    exportAll: !effectiveHasMaxChats,
     maxChats: hasExplicitMaxChats
       ? normalizeLimit(args.maxChats ?? args.limit, MAX_RECENT_CHATS_LOAD_TARGET, MAX_RECENT_CHATS_LOAD_TARGET)
-      : null,
+      : resumeMaxChats,
     loadedCount: 0,
     requested: 0,
     completed: 0,
@@ -9818,6 +9828,14 @@ const reloadGeminiTabs = async (args = {}) => {
     explicit: args.explicit === true || args.intent === 'tab_management' || args.diagnostic === true,
   });
   const delayMs = Math.max(0, Math.min(10_000, Number(args.delayMs || 500)));
+  await reloadExtensionForExistingTabs(
+    args,
+    ensureBrowserExtensionReady,
+    summarizeClient,
+    CHROME_GUARD_CONFIG.reloadTimeoutMs,
+    normalizeReloadWaitMs,
+    cleanupStaleClients,
+  );
   const liveClients = getLiveClients();
   if (liveClients.length === 0) {
     return {
@@ -9929,7 +9947,7 @@ const legacyRawTools = [
         allowReload: {
           type: 'boolean',
           description:
-            'Quando true, permite reload explícito da extensão Chrome se detectar versão/build antigos.',
+            'Quando true, permite reload explícito da extensão Chrome e das abas já existentes; não abre aba nova.',
         },
         reloadWaitMs: {
           type: 'number',
@@ -10111,7 +10129,7 @@ const legacyRawTools = [
         },
         allowReload: {
           type: 'boolean',
-          description: 'Permite reload automático quando selfHeal=true.',
+          description: 'Permite reload automático de extensão/abas existentes quando selfHeal=true; não abre aba nova.',
         },
       },
       additionalProperties: false,

@@ -167,6 +167,7 @@ export const createSharedTabCommandHandlers = (options: SharedTabCommandOptions)
         label: args.label || options.defaultClaimLabel,
         color: args.color || options.defaultClaimColor,
         expiresAt: args.expiresAt || null,
+        visualGroupTabId: numberOrNull(args.visualGroupTabId ?? args.groupWithTabId),
       };
       const response = await options.extensionSendMessage(
         {

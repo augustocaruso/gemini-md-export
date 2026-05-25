@@ -233,10 +233,9 @@ const syntheticCommandResult = (command, expectedChromeExtension, tabId) => {
       visual: {
         mode: 'tab-group',
         tabId,
+        tabIds: [tabId],
         groupId: 9001,
-        color: command.args?.color || 'blue',
         label: command.args?.label || '🧪 Teste',
-        reason: 'bridge-smoke-fixture',
       },
     };
   }

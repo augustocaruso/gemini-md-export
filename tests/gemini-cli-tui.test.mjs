@@ -2105,6 +2105,99 @@ test('CLI sync acorda Gemini Web pela propria CLI antes de exportar quando --wak
   }
 });
 
+test('CLI browser status recarrega abas existentes antes de abrir navegador durante reload', async () => {
+  let reloadRequested = false;
+  await withEnv(
+    {
+      GEMINI_MD_EXPORT_CLI_BROWSER_LAUNCH_DRY_RUN: 'true',
+      GEMINI_MD_EXPORT_EXISTING_TAB_GRACE_MS: '0',
+    },
+    async () => {
+      await withServer((req, res, url) => {
+        if (url.pathname === '/agent/ready') {
+          sendJson(
+            res,
+            200,
+            reloadRequested
+              ? {
+                  ready: true,
+                  mode: 'post-update',
+                  connectedClientCount: 1,
+                  selectableTabCount: 1,
+                  commandReadyClientCount: 1,
+                }
+              : {
+                  ready: false,
+                  blockingIssue: 'no_selectable_gemini_tab',
+                  mode: 'hot',
+                  connectedClientCount: 1,
+                  selectableTabCount: 0,
+                  commandReadyClientCount: 1,
+                },
+          );
+          return;
+        }
+        if (url.pathname === '/agent/tabs' && url.searchParams.get('action') === 'reload') {
+          reloadRequested = true;
+          sendJson(res, 200, {
+            ok: true,
+            action: 'reload',
+            reloaded: 1,
+            mode: 'extension-tabs-api',
+          });
+          return;
+        }
+        if (url.pathname === '/agent/clients') {
+          sendJson(res, 200, {
+            mcp: { bridgeRole: 'primary' },
+            connectedClients: [
+              {
+                clientId: 'client-1',
+                tabId: 101,
+                isActiveTab: true,
+                lastSeenAt: new Date().toISOString(),
+                page: { url: 'https://gemini.google.com/app', kind: 'chat' },
+              },
+            ],
+          });
+          return;
+        }
+        sendJson(res, 404, { error: `not found: ${url.pathname}` });
+      }, async (bridgeUrl, requests) => {
+        const stdout = captureStream();
+        const stderr = captureStream();
+        const run = await main(
+          [
+            'browser',
+            'status',
+            '--bridge-url',
+            bridgeUrl,
+            '--plain',
+            '--wake',
+            '--allow-reload',
+            '--ready-wait-ms',
+            '50',
+          ],
+          { stdout, stderr },
+        );
+
+        assert.equal(run.exitCode, 0);
+        assert.doesNotMatch(stdout.text(), /Abrindo Gemini Web em background/);
+        assert.equal(stderr.text(), '');
+        const reloadRequest = requests.find(
+          (item) => item.pathname === '/agent/tabs' && item.searchParams.get('action') === 'reload',
+        );
+        assert.ok(reloadRequest, 'CLI deve pedir reload de abas existentes');
+        assert.equal(reloadRequest.searchParams.get('openIfMissing'), 'false');
+        assert.equal(reloadRequest.searchParams.get('allowReload'), 'true');
+        const readyRequests = requests.filter((item) => item.pathname === '/agent/ready');
+        assert.equal(readyRequests.every((item) => item.searchParams.get('wakeBrowser') === 'false'), true);
+        assert.equal(run.result.existingTabsReload?.reloaded, 1);
+      });
+    },
+  );
+});
+
 test('CLI falha rapido quando navegador cai na verificacao do Google', async () => {
   const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-cli-google-sorry-'));
   try {

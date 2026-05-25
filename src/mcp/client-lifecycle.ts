@@ -49,6 +49,7 @@ export type GeminiPageSnapshot = Readonly<{
   bridgeConversationCount?: number | null;
   sidebarConversationCount?: number | null;
   notebookCacheCount?: number | null;
+  isActiveTab?: boolean | null;
   blocker?: {
     code?: string | null;
     kind?: string | null;
@@ -380,6 +381,9 @@ const activeTabOperation = (client: GeminiClientSnapshot) =>
   Boolean(client.metrics?.tabOperation?.active) ||
   Boolean(client.summary?.metrics?.tabOperation?.active);
 
+const effectiveIsActiveTab = (client: GeminiClientSnapshot): boolean =>
+  client.isActiveTab === true || client.page?.isActiveTab === true;
+
 const runtimeSignalAt = (client: GeminiClientSnapshot): number | null => {
   const lastHeartbeatAt = normalizeNumber(client.lastHeartbeatAt);
   const lastSnapshotAt = normalizeNumber(client.lastSnapshotAt);
@@ -445,7 +449,7 @@ export const getGeminiClientLifecycle = (
   const tabId = normalizeNumber(client.tabId);
   if (tabId === null) return result('page_unready', 'missing_tab_id', client);
 
-  if (client.isActiveTab !== true) return result('page_unready', 'inactive_tab', client);
+  if (!effectiveIsActiveTab(client)) return result('page_unready', 'inactive_tab', client);
 
   const hydrationGraceMs = Number(options.hydrationGraceMs ?? 4000);
   if (!client.page) {

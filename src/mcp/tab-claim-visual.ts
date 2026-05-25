@@ -1,6 +1,7 @@
 export type TabGroupClaimVisual = Readonly<{
   mode: 'tab-group';
   tabId: number;
+  tabIds: readonly [number, ...number[]];
   groupId: number;
   color?: string | null;
   label?: string | null;
@@ -22,10 +23,18 @@ export type TabClaimReceipt = Readonly<{
 }>;
 
 const integer = (value: unknown): value is number => Number.isInteger(value);
+const integerArray = (value: unknown): value is readonly [number, ...number[]] =>
+  Array.isArray(value) && value.length > 0 && value.every(integer);
 
 export const isTabGroupClaimVisual = (value: unknown): value is TabGroupClaimVisual => {
   const visual = value as Partial<TabGroupClaimVisual> | null | undefined;
-  return visual?.mode === 'tab-group' && integer(visual.tabId) && integer(visual.groupId);
+  return (
+    visual?.mode === 'tab-group' &&
+    integer(visual.tabId) &&
+    integer(visual.groupId) &&
+    integerArray(visual.tabIds) &&
+    visual.tabIds.includes(visual.tabId)
+  );
 };
 
 export const isActionBadgeClaimVisual = (value: unknown): value is ActionBadgeClaimVisual => {

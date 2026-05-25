@@ -704,6 +704,7 @@
         label: args.label || TAB_CLAIM_DEFAULT_LABEL,
         color: args.color || 'blue',
         expiresAt: args.expiresAt || null,
+        visualGroupTabId: numberOrNull(args.visualGroupTabId || args.groupWithTabId),
       };
       if (!claim.claimId) return { ok: false, reason: 'claim-id-required' };
       const response = await extensionSendMessage(

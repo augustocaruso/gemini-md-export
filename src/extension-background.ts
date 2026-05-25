@@ -1092,20 +1092,28 @@ const closeOffscreenDocument = async ({ reason = 'manual' } = {}) => {
   }
 };
 
-const chromeGroupTab = (tabId) =>
+const chromeGroupTabs = (tabIds, groupId = null) =>
   new Promise((resolve) => {
-    if (!chrome.tabs?.group || !Number.isInteger(tabId)) {
+    const cleanTabIds = Array.from(
+      new Set((Array.isArray(tabIds) ? tabIds : [tabIds]).map(Number).filter(Number.isInteger)),
+    );
+    if (!chrome.tabs?.group || cleanTabIds.length === 0) {
       resolve({ ok: false, reason: 'tabs-group-api-unavailable' });
       return;
     }
-    chrome.tabs.group({ tabIds: [tabId] }, (groupId) => {
+    const createProperties = Number.isInteger(groupId)
+      ? { tabIds: cleanTabIds, groupId }
+      : { tabIds: cleanTabIds };
+    chrome.tabs.group(createProperties, (createdGroupId) => {
       if (chrome.runtime.lastError) {
         resolve({ ok: false, reason: chrome.runtime.lastError.message });
         return;
       }
-      resolve({ ok: Number.isInteger(groupId), groupId });
+      resolve({ ok: Number.isInteger(createdGroupId), groupId: createdGroupId });
     });
   });
+
+const chromeGroupTab = (tabId) => chromeGroupTabs([tabId]);
 
 const chromeUpdateTabGroup = (groupId, updateProperties) =>
   new Promise((resolve) => {
@@ -1215,6 +1223,26 @@ const applyTabClaim = async (message, sender = {}) => {
   const tab = await chromeGetTab(tabId);
   const claims = await getTrackedTabClaims();
   const existing = claims[String(tabId)] || null;
+  const visualGroupTabId = Number(message.visualGroupTabId ?? message.groupWithTabId);
+  const requestedRelatedTabIds = [
+    ...(Array.isArray(message.relatedTabIds) ? message.relatedTabIds : []),
+    ...(Number.isInteger(visualGroupTabId) ? [visualGroupTabId] : []),
+  ];
+  const relatedTabs = [];
+  for (const relatedTabId of Array.from(new Set(requestedRelatedTabIds.map(Number)))) {
+    if (!Number.isInteger(relatedTabId) || relatedTabId === tabId) continue;
+    const relatedTab = await chromeGetTab(relatedTabId);
+    const relatedUrl = relatedTab?.url || relatedTab?.pendingUrl || '';
+    if (!relatedTab || !managedContentScriptFileForUrl(relatedUrl)) continue;
+    if (
+      Number.isInteger(tab?.windowId) &&
+      Number.isInteger(relatedTab.windowId) &&
+      tab.windowId !== relatedTab.windowId
+    ) {
+      continue;
+    }
+    relatedTabs.push(relatedTab);
+  }
   const currentGroupId = Number.isInteger(tab?.groupId)
     ? tab.groupId
     : (existing?.groupId ?? TAB_GROUP_NONE);
@@ -1222,6 +1250,29 @@ const applyTabClaim = async (message, sender = {}) => {
     Number.isInteger(currentGroupId) && currentGroupId !== TAB_GROUP_NONE
       ? await chromeGetTabGroup(currentGroupId)
       : null;
+  const relatedGroupStates = [];
+  for (const relatedTab of relatedTabs) {
+    const groupId = Number.isInteger(relatedTab.groupId) ? relatedTab.groupId : TAB_GROUP_NONE;
+    const group =
+      Number.isInteger(groupId) && groupId !== TAB_GROUP_NONE
+        ? await chromeGetTabGroup(groupId)
+        : null;
+    relatedGroupStates.push({
+      tabId: relatedTab.id,
+      groupId,
+      managed: looksLikeManagedClaimGroupTitle(group?.title),
+    });
+  }
+  const currentGroupIsManaged = looksLikeManagedClaimGroupTitle(currentGroup?.title);
+  const managedAnchorGroupId =
+    currentGroupIsManaged && currentGroupId !== TAB_GROUP_NONE
+      ? currentGroupId
+      : relatedGroupStates.find((item) => item.managed && item.groupId !== TAB_GROUP_NONE)
+          ?.groupId ?? null;
+  const targetTabIds = Array.from(
+    new Set([tabId, ...relatedTabs.map((relatedTab) => relatedTab.id)].filter(Number.isInteger)),
+  );
+  const groupedTabIds = [tabId];
 
   let visual = {
     mode: 'action-badge',
@@ -1240,32 +1291,57 @@ const applyTabClaim = async (message, sender = {}) => {
       Number.isInteger(currentGroupId) &&
       currentGroupId !== TAB_GROUP_NONE &&
       looksLikeManagedClaimGroupTitle(currentGroup?.title);
-    if (currentGroupId === TAB_GROUP_NONE || alreadyOurGroup || orphanedManagedGroup) {
+    const targetGroupId =
+      managedAnchorGroupId ?? (alreadyOurGroup || orphanedManagedGroup ? currentGroupId : null);
+    const blockedByUserGroup =
+      (currentGroupId !== TAB_GROUP_NONE && !alreadyOurGroup && !orphanedManagedGroup && !currentGroupIsManaged) ||
+      relatedGroupStates.some(
+        (item) =>
+          item.groupId !== TAB_GROUP_NONE &&
+          item.groupId !== targetGroupId &&
+          !item.managed,
+      );
+    if (!blockedByUserGroup) {
+      const tabIdsToGroup = targetGroupId
+        ? targetTabIds.filter((candidateTabId) => {
+            if (candidateTabId === tabId) return currentGroupId !== targetGroupId;
+            const relatedState = relatedGroupStates.find((item) => item.tabId === candidateTabId);
+            return relatedState?.groupId !== targetGroupId;
+          })
+        : targetTabIds;
       const grouped =
-        alreadyOurGroup || orphanedManagedGroup
-          ? { ok: true, groupId: currentGroupId }
-          : await chromeGroupTab(tabId);
+        targetGroupId && tabIdsToGroup.length === 0
+          ? { ok: true, groupId: targetGroupId }
+          : targetGroupId
+            ? await chromeGroupTabs(tabIdsToGroup, targetGroupId)
+            : await chromeGroupTabs(targetTabIds);
       if (grouped.ok) {
         const updated = await chromeUpdateTabGroup(grouped.groupId, {
           title: label,
           color,
         });
         if (updated.ok) {
+          groupedTabIds.splice(0, groupedTabIds.length, ...targetTabIds);
           visual = {
             mode: 'tab-group',
             tabId,
+            tabIds: targetTabIds,
             groupId: grouped.groupId,
             color,
             label,
-            reason: alreadyOurGroup
+            reason: targetGroupId
+              ? 'joined-existing-claim-group'
+              : alreadyOurGroup
               ? 'updated-existing-claim-group'
               : orphanedManagedGroup
                 ? 'reclaimed-managed-claim-group'
                 : 'created-tab-group',
           };
         } else {
-          if (!alreadyOurGroup && !orphanedManagedGroup) {
-            await chromeUngroupTab(tabId);
+          if (!targetGroupId && !alreadyOurGroup && !orphanedManagedGroup) {
+            for (const groupedTabId of targetTabIds) {
+              await chromeUngroupTab(groupedTabId);
+            }
           }
           visual = {
             mode: 'action-badge',
@@ -1287,7 +1363,9 @@ const applyTabClaim = async (message, sender = {}) => {
         mode: 'action-badge',
         tabId,
         groupId: currentGroupId,
-        reason: 'tab-already-in-user-group',
+        reason: relatedGroupStates.some((item) => item.groupId !== TAB_GROUP_NONE && !item.managed)
+          ? 'related-tab-already-in-user-group'
+          : 'tab-already-in-user-group',
       };
     }
   }
@@ -1301,6 +1379,7 @@ const applyTabClaim = async (message, sender = {}) => {
     color,
     mode: visual.mode,
     groupId: visual.mode === 'tab-group' ? visual.groupId : null,
+    tabIds: visual.mode === 'tab-group' ? groupedTabIds : [tabId],
     originalGroupId:
       visual.reason === 'reclaimed-managed-claim-group'
         ? TAB_GROUP_NONE

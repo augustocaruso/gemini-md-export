@@ -104,6 +104,25 @@ test('inactive Gemini tab snapshot is rejected before claim/export', () => {
   assert.equal(claimable, null);
 });
 
+test('page-level active tab evidence keeps export selection claimable', () => {
+  const claimable = toActiveClaimableGeminiClient(
+    {
+      ...baseClient,
+      clientId: 'chat-page-active',
+      isActiveTab: false,
+      page: {
+        ...baseClient.page,
+        isActiveTab: true,
+      },
+    },
+    options,
+  );
+
+  assert.ok(claimable);
+  assert.equal(claimable.clientId, 'chat-page-active');
+  assert.equal(claimable.isActiveTab, true);
+});
+
 test('stale heartbeat snapshot is rejected before claim/export', () => {
   const claimable = toActiveClaimableGeminiClient(
     {

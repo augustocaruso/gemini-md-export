@@ -7,6 +7,7 @@ import type {
 const visual = {
   mode: 'tab-group',
   tabId: 42,
+  tabIds: [42, 77],
   groupId: 99,
 } satisfies TabGroupClaimVisual;
 
@@ -47,8 +48,19 @@ void invalidBadge;
 const missingGroup = {
   mode: 'tab-group',
   tabId: 42,
+  tabIds: [42],
   // @ts-expect-error tab-group claim visual must include a concrete group id.
   groupId: null,
 } satisfies TabGroupClaimVisual;
 
 void missingGroup;
+
+const missingTabSet = {
+  mode: 'tab-group',
+  tabId: 42,
+  groupId: 99,
+  // @ts-expect-error tab-group claim visual must expose at least one grouped tab id.
+  tabIds: [],
+} satisfies TabGroupClaimVisual;
+
+void missingTabSet;

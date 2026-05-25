@@ -5362,6 +5362,7 @@
         label: args.label || TAB_CLAIM_DEFAULT_LABEL,
         color: args.color || 'green',
         expiresAt: args.expiresAt || null,
+        visualGroupTabId: numberOrNull(args.visualGroupTabId || args.groupWithTabId),
       };
       const response = await extensionSendMessage(
         {
