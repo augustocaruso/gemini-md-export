@@ -2,6 +2,7 @@ import type { NativeBrokerRequest, NativeBrokerResponse } from '../../native/pro
 import {
   claimDebuggableGeminiTab,
   classifyBrowserTabs,
+  getDebuggableGeminiTabs,
   type RawBrowserTab,
 } from './browser-session-broker.js';
 import { inspectTabWithDebugger } from './chrome-debugger-controller.js';
@@ -20,6 +21,11 @@ type ChromeNativeBrokerApi = Readonly<{
   };
   tabs?: {
     query(queryInfo: { url: string[] }, callback: (tabs?: RawBrowserTab[]) => void): void;
+    reload?(
+      tabId: number,
+      reloadProperties: { bypassCache?: boolean },
+      callback?: () => void,
+    ): void;
   };
   debugger?: {
     attach(target: { tabId: number }, protocolVersion: string, callback: () => void): void;
@@ -35,7 +41,7 @@ type ChromeNativeBrokerApi = Readonly<{
 
 export type NativeBrowserBrokerCommand = Readonly<{
   id?: string;
-  command: 'tabs.list' | 'tabs.status' | 'tabs.claim' | 'tabs.release';
+  command: 'tabs.list' | 'tabs.status' | 'tabs.claim' | 'tabs.release' | 'tabs.reload';
   payload?: { tabId?: number | null; claimId?: string | null };
 }>;
 
@@ -57,6 +63,25 @@ const queryManagedTabs = (chromeApi: ChromeNativeBrokerApi): Promise<RawBrowserT
 const inspectWith = (chromeApi: ChromeNativeBrokerApi) => (tabId: number) =>
   inspectTabWithDebugger(tabId, { chromeApi });
 
+const chromeReloadTab = (
+  chromeApi: ChromeNativeBrokerApi,
+  tabId: number,
+): Promise<{ ok: true } | { ok: false; error: string }> =>
+  new Promise((resolve) => {
+    if (!chromeApi.tabs?.reload) {
+      resolve({ ok: false, error: 'chrome_tabs_reload_unavailable' });
+      return;
+    }
+    chromeApi.tabs.reload(tabId, { bypassCache: false }, () => {
+      const message = chromeApi.runtime?.lastError?.message;
+      if (message) {
+        resolve({ ok: false, error: message });
+        return;
+      }
+      resolve({ ok: true });
+    });
+  });
+
 export const handleNativeBrowserBrokerCommand = async (
   request: NativeBrowserBrokerCommand,
   chromeApi: ChromeNativeBrokerApi = globalChrome() || {},
@@ -76,6 +101,47 @@ export const handleNativeBrowserBrokerCommand = async (
     });
   }
 
+  if (request.command === 'tabs.reload') {
+    const listed = await getDebuggableGeminiTabs(tabs, { inspectTab });
+    const requestedTabId = Number(request.payload?.tabId || 0);
+    const targets = requestedTabId
+      ? listed.tabs.filter((tab) => tab.tabId === requestedTabId)
+      : listed.tabs;
+
+    if (targets.length === 0) {
+      return {
+        ok: false as const,
+        code: 'no_existing_gemini_tabs',
+        reloaded: 0,
+        tabs: listed.tabs,
+        classified: listed.classified,
+      };
+    }
+
+    const results = await Promise.all(
+      targets.map(async (tab) => ({
+        tab,
+        reload: await chromeReloadTab(chromeApi, tab.tabId),
+      })),
+    );
+    const successes = results.filter((item) => item.reload.ok);
+    const failures = results.filter((item) => !item.reload.ok);
+
+    return {
+      ok: failures.length === 0,
+      code: failures.length === 0 ? null : 'native_tab_reload_failed',
+      requested: targets.length,
+      reloaded: successes.length,
+      reloadedTabIds: successes.map((item) => item.tab.tabId),
+      failures: failures.map((item) => ({
+        tabId: item.tab.tabId,
+        error: item.reload.ok ? null : item.reload.error,
+      })),
+      tabs: listed.tabs,
+      classified: listed.classified,
+    };
+  }
+
   return { ok: true as const, released: true, claimId: request.payload?.claimId || null };
 };
 
@@ -88,7 +154,8 @@ const isBrowserBrokerCommand = (
   command === 'tabs.list' ||
   command === 'tabs.status' ||
   command === 'tabs.claim' ||
-  command === 'tabs.release';
+  command === 'tabs.release' ||
+  command === 'tabs.reload';
 
 const unsupportedCommandResponse = (
   request: Pick<NativeBrokerRequest, 'id'>,
