@@ -75,3 +75,23 @@ test('native broker failure code prefers nested native-host error code', () => {
     'extension_request_timeout',
   );
 });
+
+test('native broker client sends tabs.reload with target payload', async () => {
+  const calls = [];
+  const client = createNativeBrowserBrokerClient({
+    request: async (request) => {
+      calls.push(request);
+      return { id: request.id, ok: true, result: { ok: true, reloaded: 1 } };
+    },
+  });
+
+  const response = await client.reload(
+    { tabId: 42, claimId: 'claim-42' },
+    { allowFallback: false },
+  );
+
+  assert.equal(response.ok, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, 'tabs.reload');
+  assert.deepEqual(calls[0].payload, { tabId: 42, claimId: 'claim-42' });
+});

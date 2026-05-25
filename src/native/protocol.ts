@@ -7,6 +7,7 @@ export type NativeBrokerCommand =
   | 'tabs.status'
   | 'tabs.claim'
   | 'tabs.release'
+  | 'tabs.reload'
   | 'export.start'
   | 'export.cancel'
   | 'job.progress'

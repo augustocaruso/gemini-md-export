@@ -7,7 +7,7 @@ import {
 
 type NativeBrowserBrokerCommand = Extract<
   NativeBrokerCommand,
-  'tabs.list' | 'tabs.status' | 'tabs.claim' | 'tabs.release'
+  'tabs.list' | 'tabs.status' | 'tabs.claim' | 'tabs.release' | 'tabs.reload'
 >;
 
 type NativeBrowserBrokerOptions = Readonly<{
@@ -93,5 +93,7 @@ export const createNativeBrowserBrokerClient = ({
       call('tabs.claim', payload, options),
     release: (payload: Record<string, unknown> = {}, options: NativeBrowserBrokerOptions = {}) =>
       call('tabs.release', payload, options),
+    reload: (payload: Record<string, unknown> = {}, options: NativeBrowserBrokerOptions = {}) =>
+      call('tabs.reload', payload, options),
   };
 };
