@@ -23,6 +23,7 @@ export type CdpRuntimeOptions = Readonly<{
 
 export type BrowserControlParams = Readonly<{
   activateTab?: boolean;
+  allowHttpBrowserFallback?: boolean;
   cdpUrl?: string;
   controlPlane?: 'cdp';
   focusWindow?: boolean;
@@ -71,6 +72,7 @@ export const activateRuntimeExtensionClientWithCdp = (
 export const browserControlParamsFromFlags = (
   flags: Readonly<{
     activateTab?: boolean | null;
+    allowHttpBrowserFallback?: boolean | null;
     cdpUrl?: string | null;
     focusWindow?: boolean | null;
   }> = {},
@@ -78,6 +80,7 @@ export const browserControlParamsFromFlags = (
   const cdpUrl = String(flags.cdpUrl || '').trim();
   const params: BrowserControlParams = {
     activateTab: flags.activateTab === true,
+    allowHttpBrowserFallback: flags.allowHttpBrowserFallback === true,
     focusWindow: flags.focusWindow === true,
   };
   return cdpUrl ? { ...params, cdpUrl, controlPlane: 'cdp' } : params;

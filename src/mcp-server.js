@@ -2259,6 +2259,7 @@ const clientSelectorFromSearchParams = (searchParams) => ({
   openIfMissing: parseOptionalBoolean(searchParams.get('openIfMissing')),
   activateTab: parseOptionalBoolean(searchParams.get('activateTab')),
   focusWindow: parseOptionalBoolean(searchParams.get('focusWindow')),
+  allowHttpBrowserFallback: parseOptionalBoolean(searchParams.get('allowHttpBrowserFallback')),
   preferActive: parseOptionalBoolean(searchParams.get('preferActive')),
   preferRecent: parseOptionalBoolean(searchParams.get('preferRecent')),
 });
@@ -3257,7 +3258,7 @@ const validateNativeExportTabLeaseForJob = async (args = {}, localClaim = null, 
     if (
       localClaim &&
       canFallbackFromNativeBrowserBrokerFailure(nativeClaim, {
-        strict: args.requireNativeExportLease === true,
+        strict: args.requireNativeExportLease === true || args.allowHttpBrowserFallback !== true,
       })
     ) {
       return validateLocalExportTabLeaseForJob(localClaim, client);
@@ -3276,7 +3277,7 @@ const validateNativeExportTabLeaseForJob = async (args = {}, localClaim = null, 
     if (
       localClaim &&
       canFallbackFromNativeBrowserBrokerFailure(result, {
-        strict: args.requireNativeExportLease === true,
+        strict: args.requireNativeExportLease === true || args.allowHttpBrowserFallback !== true,
       })
     ) {
       return validateLocalExportTabLeaseForJob(localClaim, client);

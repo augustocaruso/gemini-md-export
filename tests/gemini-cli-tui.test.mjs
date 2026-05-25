@@ -2352,6 +2352,69 @@ test('CLI browser status surfaces native broker blocker from readiness', async (
   });
 });
 
+test('CLI passes explicit HTTP browser fallback flag only when requested', async () => {
+  await withServer((req, res, url) => {
+    if (url.pathname === '/agent/tabs' && url.searchParams.get('action') === 'reload') {
+      sendJson(res, 200, {
+        ok: true,
+        allowHttpBrowserFallback: url.searchParams.get('allowHttpBrowserFallback'),
+        reloaded: 0,
+      });
+      return;
+    }
+    sendJson(res, 404, { error: `not found: ${url.pathname}` });
+  }, async (bridgeUrl) => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+    const run = await main(
+      [
+        'tabs',
+        'reload',
+        '--bridge-url',
+        bridgeUrl,
+        '--plain',
+        '--allow-http-browser-fallback',
+        '--result-json',
+      ],
+      { stdout, stderr },
+    );
+
+    assert.equal(run.exitCode, 0);
+    assert.equal(run.result.allowHttpBrowserFallback, 'true');
+    assert.equal(stderr.text(), '');
+  });
+});
+
+test('CLI prints native broker next action for strict release blocker', async () => {
+  await withServer((req, res, url) => {
+    if (url.pathname === '/agent/export-recent-chats') {
+      sendJson(res, 503, {
+        ok: false,
+        code: 'native_broker_extension_disconnected',
+        error: 'A extensão ainda não abriu a porta nativa do broker.',
+        nextAction: 'Recarregue a extensão ou rode doctor para ver o native broker.',
+      });
+      return;
+    }
+    if (url.pathname === '/agent/ready') {
+      sendJson(res, 200, { ready: true, connectedClientCount: 1, selectableTabCount: 1 });
+      return;
+    }
+    sendJson(res, 404, { error: `not found: ${url.pathname}` });
+  }, async (bridgeUrl) => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+    await assert.rejects(
+      () =>
+        main(
+          ['export', 'recent', '--bridge-url', bridgeUrl, '--plain', '--max-chats', '1'],
+          { stdout, stderr },
+        ),
+      /Recarregue a extensão ou rode doctor para ver o native broker/,
+    );
+  });
+});
+
 test('CLI falha rapido quando navegador cai na verificacao do Google', async () => {
   const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-cli-google-sorry-'));
   try {

@@ -183,6 +183,7 @@ const commonOptionHelp = () => [
   '  --no-focus-window        Nao focar janela do navegador. Default.',
   '  --no-self-heal           Nao tentar auto-recuperacao da extensao.',
   '  --allow-reload           Permite reload da extensao e abas ja existentes; nao abre abas novas.',
+  '  --allow-http-browser-fallback  Diagnostico: permite fallback legado por content script quando native broker falha.',
   '  --no-reload              Nao pedir reload da extensao. Default.',
   '  --no-color               Desliga ANSI.',
   '  --help, -h               Mostra ajuda.',
@@ -1014,6 +1015,7 @@ const parseArgs = (argv) => {
     else if (arg === '--no-focus-window') out.flags.focusWindow = false;
     else if (arg === '--no-self-heal') out.flags.selfHeal = false;
     else if (arg === '--allow-reload') out.flags.allowReload = true;
+    else if (arg === '--allow-http-browser-fallback') out.flags.allowHttpBrowserFallback = true;
     else if (arg === '--no-reload') out.flags.allowReload = false;
     else if (arg.startsWith('-')) throw new Error(`Opcao desconhecida: ${arg}`);
     else out.positionals.push(arg);
@@ -1294,11 +1296,14 @@ const requestJson = async (
             return;
           }
           if (response.statusCode < 200 || response.statusCode >= 300) {
-            const err = new Error(
+            const nextAction = json?.nextAction || json?.nativeBroker?.nextAction || null;
+            const message =
               json?.code === 'export_job_in_progress'
                 ? formatExportJobInProgressMessage(json)
-                : json?.error || `HTTP ${response.statusCode}`,
-            );
+                : [json?.error || json?.message || `HTTP ${response.statusCode}`, nextAction]
+                    .filter(Boolean)
+                    .join('\n');
+            const err = new Error(message);
             err.statusCode = response.statusCode;
             err.code = json?.code || null;
             err.data = json?.data || json;
@@ -3737,6 +3742,7 @@ const summarizeTabsCliResult = (action, result = {}) => {
     claim: result.claim || result.claimed || null,
     released: result.released || null,
     reloaded: result.reloaded ?? null,
+    allowHttpBrowserFallback: result.allowHttpBrowserFallback ?? null,
     browserWake: result.browserWake || null,
     error: result.error || null,
     nextAction:
