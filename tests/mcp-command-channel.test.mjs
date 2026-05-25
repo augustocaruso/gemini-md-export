@@ -624,6 +624,19 @@ test('browser_status diagnostica e tenta self-heal sem depender do guard wrapper
   assert.doesNotMatch(guardedBlock, /gemini_browser_status/);
 });
 
+test('browser readiness expõe status estruturado do native broker', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const readyBlock = source.match(
+    /const buildLightweightBrowserReady = async \(args = \{\}\) => \{[\s\S]*?\n\};\n\nconst normalizeLimit/,
+  )?.[0];
+
+  assert.ok(readyBlock, 'buildLightweightBrowserReady deve existir');
+  assert.match(source, /const probeNativeBrowserBrokerStatus = async/);
+  assert.match(readyBlock, /const nativeBrokerStatus = await probeNativeBrowserBrokerStatus\(\)/);
+  assert.match(readyBlock, /nativeBroker:\s*nativeBrokerStatus/);
+  assert.match(readyBlock, /nativeBrokerStatus\.available !== true/);
+});
+
 test('reload de abas existentes pode atualizar extensao sem abrir navegador', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const cliSource = readFileSync(resolve(ROOT, 'bin', 'gemini-md-export.mjs'), 'utf-8');

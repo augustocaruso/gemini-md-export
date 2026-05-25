@@ -543,15 +543,47 @@ const withSoftTimeout = (promise, timeoutMs, fallback) =>
     }),
   ]);
 
-const probeNativeBrowserBrokerAvailability = async () => {
-  if (!shouldUseNativeBrowserBroker()) return false;
+const probeNativeBrowserBrokerStatus = async () => {
+  if (!shouldUseNativeBrowserBroker()) {
+    return {
+      configured: false,
+      available: false,
+      code: 'native_broker_disabled',
+      message: 'Native broker desativado por configuracao.',
+    };
+  }
   const response = await withSoftTimeout(
     nativeBrowserBroker.status({ allowFallback: true }),
     750,
     { ok: false, code: 'native_broker_probe_timeout' },
   );
-  if (response?.ok === true) return true;
-  if (response?.code === 'native_broker_unavailable') return false;
+  if (response?.ok === true) {
+    return {
+      configured: true,
+      available: true,
+      code: null,
+      message: 'Native broker conectado.',
+      response,
+    };
+  }
+  const code = response?.error?.code || response?.code || 'native_broker_unavailable';
+  const message =
+    response?.error?.message ||
+    response?.error ||
+    'Não consegui falar com o broker nativo.';
+  return {
+    configured: true,
+    available: false,
+    code,
+    message,
+    response,
+  };
+};
+
+const probeNativeBrowserBrokerAvailability = async () => {
+  const status = await probeNativeBrowserBrokerStatus();
+  if (status.available === true) return true;
+  if (status.configured === false || status.code === 'native_broker_unavailable') return false;
   return null;
 };
 
@@ -4340,6 +4372,7 @@ const buildLightweightBrowserReady = async (args = {}) => {
   let launchResult = null;
   let waitedMs = 0;
   const cdp = await buildCdpSnapshotForArgs(args);
+  const nativeBrokerStatus = await probeNativeBrowserBrokerStatus();
 
   if (args.selfHeal === true) {
     try {
@@ -4422,7 +4455,14 @@ const buildLightweightBrowserReady = async (args = {}) => {
     claimableClients,
   });
   const ready = readiness.ready;
-  const blockingIssue = readiness.blockingIssue || (!ready ? cdp.blocker?.code || null : null);
+  let blockingIssue = readiness.blockingIssue || (!ready ? cdp.blocker?.code || null : null);
+  if (
+    nativeBrokerStatus.configured === true &&
+    nativeBrokerStatus.available !== true &&
+    claimableClients.length === 0
+  ) {
+    blockingIssue = nativeBrokerStatus.code || blockingIssue;
+  }
   const summarizedClients = selectableClients.map(summarizeClient);
   const summarizedMatchingClients = matchingClients.map(summarizeClient);
   return {
@@ -4460,6 +4500,7 @@ const buildLightweightBrowserReady = async (args = {}) => {
           url: cdp.blocker.url,
         }
       : null,
+    nativeBroker: nativeBrokerStatus,
     extensionReadiness: buildExtensionReadiness({
       connectedClients: allLiveClients.map(summarizeClient),
       matchingClients: summarizedMatchingClients,

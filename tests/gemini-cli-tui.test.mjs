@@ -2314,6 +2314,44 @@ test('CLI tabs reload explica quando nao ha canal para recarregar abas existente
   });
 });
 
+test('CLI browser status surfaces native broker blocker from readiness', async () => {
+  await withServer((req, res, url) => {
+    if (url.pathname === '/agent/ready') {
+      sendJson(res, 200, {
+        ready: false,
+        blockingIssue: 'native_broker_extension_disconnected',
+        connectedClientCount: 0,
+        selectableTabCount: 0,
+        commandReadyClientCount: 0,
+        nativeBroker: {
+          configured: true,
+          available: false,
+          code: 'native_broker_extension_disconnected',
+          message: 'A extensão ainda não abriu a porta nativa do broker.',
+        },
+      });
+      return;
+    }
+    if (url.pathname === '/agent/clients') {
+      sendJson(res, 200, { mcp: { bridgeRole: 'primary' }, connectedClients: [] });
+      return;
+    }
+    sendJson(res, 404, { error: `not found: ${url.pathname}` });
+  }, async (bridgeUrl) => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+    const run = await main(
+      ['browser', 'status', '--bridge-url', bridgeUrl, '--plain', '--no-wake', '--result-json'],
+      { stdout, stderr },
+    );
+
+    assert.equal(run.exitCode, 4);
+    assert.match(stdout.text(), /A extensão ainda não abriu a porta nativa do broker/);
+    assert.equal(run.result.nativeBroker.code, 'native_broker_extension_disconnected');
+    assert.equal(stderr.text(), '');
+  });
+});
+
 test('CLI falha rapido quando navegador cai na verificacao do Google', async () => {
   const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-cli-google-sorry-'));
   try {

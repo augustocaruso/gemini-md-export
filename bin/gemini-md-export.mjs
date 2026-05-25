@@ -3544,10 +3544,12 @@ const runBrowser = async (parsed, streams = {}) => {
     bridgeRole: clients?.mcp?.bridgeRole || null,
     connectedClients: clients?.connectedClients || [],
     existingTabsReload: ready.existingTabsReload || null,
+    nativeBroker: ready.nativeBroker || null,
     nextAction:
       ready.ready === true
         ? 'Bridge, extensao e aba Gemini parecem prontos.'
-        : ready.browserDiagnostic?.message ||
+        : ready.nativeBroker?.message ||
+          ready.browserDiagnostic?.message ||
           ready.extensionReadiness?.nextAction?.message ||
           ready.cliBrowserWake?.reason ||
           ready.cliBrowserWake?.error ||
