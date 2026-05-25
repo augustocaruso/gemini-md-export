@@ -115,3 +115,19 @@ test('MCP validates export payload before writing files', () => {
   assert.match(source, /validateNativeExportTabLeaseForJob/);
   assert.match(source, /shouldRequireNativeExportTabLease/);
 });
+
+test('recent export job validates native lease before creating job', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const endpointBlock = source.match(
+    /url\.pathname === '\/agent\/export-recent-chats'[\s\S]*?\n  if \(req\.method === 'GET' && url\.pathname === '\/agent\/export-missing-chats'\)/,
+  )?.[0];
+
+  assert.ok(endpointBlock, 'export recent endpoint deve existir');
+  assert.match(endpointBlock, /validateNativeExportTabLeaseForJob/);
+  assert.match(endpointBlock, /_nativeExportLease:\s*nativeLease/);
+  assert.ok(
+    endpointBlock.indexOf('validateNativeExportTabLeaseForJob') <
+      endpointBlock.indexOf('startRecentChatsExportJob'),
+    'lease nativa precisa ser validada antes de criar job',
+  );
+});

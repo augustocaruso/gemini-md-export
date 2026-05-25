@@ -348,6 +348,21 @@ test('recent export builds operation targets with batch and history positions', 
   assert.match(collectBlock, /targetChatId: args\.targetChatId \|\| normalizeConversationChatId\(conversation\) \|\| null/);
 });
 
+test('export recente revalida lease nativa antes de comando pesado por conversa', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const collectBlock = source.match(
+    /const collectConversationItemPayloadForClient = async[\s\S]*?\nconst saveCollectedConversationPayload/,
+  )?.[0];
+
+  assert.ok(collectBlock, 'collectConversationItemPayloadForClient deve existir');
+  assert.match(collectBlock, /validateNativeExportTabLeaseForJob/);
+  assert.ok(
+    collectBlock.indexOf('validateNativeExportTabLeaseForJob') <
+      collectBlock.indexOf("'get-chat-by-id'"),
+    'lease nativa precisa ser revalidada antes do get-chat-by-id',
+  );
+});
+
 test('start de export tem budget para preparar aba automaticamente', () => {
   const cliSource = readFileSync(resolve(ROOT, 'bin', 'gemini-md-export.mjs'), 'utf-8');
   const startExportBlock = cliSource.match(

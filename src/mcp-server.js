@@ -3289,6 +3289,17 @@ const validateNativeExportTabLeaseForJob = async (args = {}, localClaim = null, 
   return validateExportTabLeaseForJob(result.tab || result);
 };
 
+const validateNativeExportLeaseForClaim = async (client, args = {}, claim = null) =>
+  validateNativeExportTabLeaseForJob(
+    {
+      ...args,
+      claimId: claim?.claimId || args.claimId,
+      tabId: claim?.tabId ?? args.tabId,
+    },
+    claim,
+    client,
+  );
+
 const requireClient = (selector = {}) => {
   cleanupStaleClients();
   cleanupExpiredTabClaims();
@@ -6579,6 +6590,17 @@ const collectConversationItemPayloadForClient = async (client, conversation, arg
   const hydrationArgs = exportHydrationArgs(args);
   const commandTimeoutMs = exportCommandTimeoutMs(args);
   const prepared = await ensureClientActiveForExport(client, args);
+  if (args._nativeExportLease || args.claimId || args.requireNativeExportLease === true) {
+    await validateNativeExportTabLeaseForJob(
+      {
+        ...args,
+        claimId: args._nativeExportLease?.claimId || args.claimId,
+        tabId: args._nativeExportLease?.tabId ?? prepared.client?.tabId ?? args.tabId,
+      },
+      args._nativeExportLease || null,
+      prepared.client,
+    );
+  }
   args.onOperationProgress?.({ phase: 'browser-command-started' });
   assertConversationOperationNotAborted(args);
   const command = await enqueueCommandWithClientRecovery(
@@ -10882,8 +10904,14 @@ const legacyRawTools = [
     call: async (args = {}) => {
       const client = requireClient(args);
       assertNoRunningBrowserExportJob(client);
-      await ensureTabClaimForJob(client, args, TAB_CLAIM_LABELS.export);
-      return toolTextResult(startRecentChatsExportJob(client, args));
+      const claim = await ensureTabClaimForJob(client, args, TAB_CLAIM_LABELS.export);
+      const nativeLease = await validateNativeExportLeaseForClaim(client, args, claim);
+      return toolTextResult(
+        startRecentChatsExportJob(client, {
+          ...args,
+          _nativeExportLease: nativeLease,
+        }),
+      );
     },
   },
   {
@@ -10978,10 +11006,12 @@ const legacyRawTools = [
     call: async (args = {}) => {
       const client = requireClient(args);
       assertNoRunningBrowserExportJob(client);
-      await ensureTabClaimForJob(client, args, TAB_CLAIM_LABELS.export);
+      const claim = await ensureTabClaimForJob(client, args, TAB_CLAIM_LABELS.export);
+      const nativeLease = await validateNativeExportLeaseForClaim(client, args, claim);
       return toolTextResult(
         startRecentChatsExportJob(client, {
           ...args,
+          _nativeExportLease: nativeLease,
           outputDir: args.outputDir || args.vaultDir,
           existingScanDir: args.vaultDir,
           exportMissingOnly: true,
@@ -11073,10 +11103,12 @@ const legacyRawTools = [
     call: async (args = {}) => {
       const client = requireClient(args);
       assertNoRunningBrowserExportJob(client);
-      await ensureTabClaimForJob(client, args, TAB_CLAIM_LABELS.sync);
+      const claim = await ensureTabClaimForJob(client, args, TAB_CLAIM_LABELS.sync);
+      const nativeLease = await validateNativeExportLeaseForClaim(client, args, claim);
       return toolTextResult(
         startRecentChatsExportJob(client, {
           ...args,
+          _nativeExportLease: nativeLease,
           outputDir: args.outputDir || args.vaultDir,
           existingScanDir: args.vaultDir,
           exportMissingOnly: true,
@@ -11151,8 +11183,14 @@ const legacyRawTools = [
     call: async (args = {}) => {
       const client = requireClient(args);
       assertNoRunningBrowserExportJob(client);
-      await ensureTabClaimForJob(client, args, TAB_CLAIM_LABELS.export);
-      return toolTextResult(startDirectChatsExportJob(client, args));
+      const claim = await ensureTabClaimForJob(client, args, TAB_CLAIM_LABELS.export);
+      const nativeLease = await validateNativeExportLeaseForClaim(client, args, claim);
+      return toolTextResult(
+        startDirectChatsExportJob(client, {
+          ...args,
+          _nativeExportLease: nativeLease,
+        }),
+      );
     },
   },
   {
@@ -13197,12 +13235,22 @@ const bridgeServer = createServer(async (req, res) => {
       const selector = clientSelectorFromSearchParams(url.searchParams);
       const client = await selectRecentExportClient(selector);
       assertNoRunningBrowserExportJob(client);
-      await ensureTabClaimForJob(client, selector, TAB_CLAIM_LABELS.export);
+      const claim = await ensureTabClaimForJob(client, selector, TAB_CLAIM_LABELS.export);
+      const nativeLease = await validateNativeExportTabLeaseForJob(
+        {
+          ...selector,
+          claimId: claim?.claimId || selector.claimId,
+          tabId: claim?.tabId ?? selector.tabId,
+        },
+        claim,
+        client,
+      );
       sendAgentJson(
         res,
         202,
         startRecentChatsExportJob(client, {
           ...selector,
+          _nativeExportLease: nativeLease,
           outputDir: url.searchParams.get('outputDir'),
           resumeReportFile: url.searchParams.get('resumeReportFile') || url.searchParams.get('reportFile') || undefined,
           ...dateImportArgsFromSearchParams(url.searchParams),
@@ -13233,12 +13281,22 @@ const bridgeServer = createServer(async (req, res) => {
       const selector = clientSelectorFromSearchParams(url.searchParams);
       const client = await selectRecentExportClient(selector);
       assertNoRunningBrowserExportJob(client);
-      await ensureTabClaimForJob(client, selector, TAB_CLAIM_LABELS.export);
+      const claim = await ensureTabClaimForJob(client, selector, TAB_CLAIM_LABELS.export);
+      const nativeLease = await validateNativeExportTabLeaseForJob(
+        {
+          ...selector,
+          claimId: claim?.claimId || selector.claimId,
+          tabId: claim?.tabId ?? selector.tabId,
+        },
+        claim,
+        client,
+      );
       sendAgentJson(
         res,
         202,
         startRecentChatsExportJob(client, {
           ...selector,
+          _nativeExportLease: nativeLease,
           vaultDir: url.searchParams.get('vaultDir') || url.searchParams.get('existingScanDir'),
           existingScanDir: url.searchParams.get('existingScanDir') || url.searchParams.get('vaultDir'),
           outputDir:
@@ -13274,12 +13332,22 @@ const bridgeServer = createServer(async (req, res) => {
       const selector = clientSelectorFromSearchParams(url.searchParams);
       const client = await selectRecentExportClient(selector);
       assertNoRunningBrowserExportJob(client);
-      await ensureTabClaimForJob(client, selector, TAB_CLAIM_LABELS.sync);
+      const claim = await ensureTabClaimForJob(client, selector, TAB_CLAIM_LABELS.sync);
+      const nativeLease = await validateNativeExportTabLeaseForJob(
+        {
+          ...selector,
+          claimId: claim?.claimId || selector.claimId,
+          tabId: claim?.tabId ?? selector.tabId,
+        },
+        claim,
+        client,
+      );
       sendAgentJson(
         res,
         202,
         startRecentChatsExportJob(client, {
           ...selector,
+          _nativeExportLease: nativeLease,
           vaultDir: url.searchParams.get('vaultDir'),
           existingScanDir: url.searchParams.get('vaultDir'),
           outputDir: url.searchParams.get('outputDir') || url.searchParams.get('vaultDir') || undefined,
@@ -13328,13 +13396,23 @@ const bridgeServer = createServer(async (req, res) => {
       };
       const client = await selectRecentExportClient(selector);
       assertNoRunningBrowserExportJob(client);
-      await ensureTabClaimForJob(client, selector, TAB_CLAIM_LABELS.export);
+      const claim = await ensureTabClaimForJob(client, selector, TAB_CLAIM_LABELS.export);
+      const nativeLease = await validateNativeExportTabLeaseForJob(
+        {
+          ...selector,
+          claimId: claim?.claimId || selector.claimId,
+          tabId: claim?.tabId ?? selector.tabId,
+        },
+        claim,
+        client,
+      );
       sendAgentJson(
         res,
         202,
         startDirectChatsExportJob(client, {
           ...selector,
           ...bodySelector,
+          _nativeExportLease: nativeLease,
           outputDir: body.outputDir || url.searchParams.get('outputDir') || undefined,
           ...dateImportArgsFromSearchParams(url.searchParams, body),
           chatIds,
