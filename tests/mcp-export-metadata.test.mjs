@@ -13,6 +13,9 @@ import {
   mergeExportDateImportBatchEvidenceWithMatches,
 } from '../build/ts/mcp/export-metadata.js';
 import {
+  DEFAULT_EXPORT_DATE_IMPORT_ACTIVITY_PRE_LAUNCH_WAIT_MS,
+  DEFAULT_EXPORT_DATE_IMPORT_ACTIVITY_WAIT_MS,
+  buildExportDateImportBatchEvidenceWithActivityFallback,
   defaultDateImportSummary,
   hasDateImportSource,
   shouldUseMyActivityForDateImport,
@@ -323,6 +326,74 @@ test('export metadata usa My Activity como fallback quando Takeout fica parcial'
     assert.equal(result.ok, true);
     assert.equal(result.receipt.source, 'my-activity');
     assert.equal(result.receipt.dateCreated, '2026-05-10T06:46:09Z');
+    assert.equal(result.receipt.dateLastMessage, '2026-05-10T07:12:31Z');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('export metadata fallback passa claim visual e espera longa para My Activity', async () => {
+  const dir = mkdtempSync(resolve(tmpdir(), 'gme-export-metadata-'));
+  const takeoutPath = resolve(dir, 'Minhaatividade.html');
+  writeFileSync(
+    takeoutPath,
+    `<!doctype html><html><body>
+<div class="outer-cell"><div>Gemini Apps</div><div>Prompted&nbsp;Primeiro prompt sensível de fixture HTML</div><div>10 de mai. de 2026, 03:46:09 BRT</div><p>Primeira resposta sensível de fixture HTML</p></div>
+</body></html>`,
+    'utf-8',
+  );
+
+  try {
+    const integrity = validateMcpExportPayloadBeforeWrite(payload, {
+      expectedChatId: 'b8e7c075effe9457',
+    });
+    const entries = [{ key: 'b8e7c075effe9457', payload, integrity }];
+    let scanArgs = null;
+    const batch = await buildExportDateImportBatchEvidenceWithActivityFallback(
+      entries,
+      {
+        takeout: takeoutPath,
+        _exportDateImportVisualGroupTabId: 713803072,
+      },
+      {
+        claimLabel: '🔄 Sincroniza',
+        scanActivity: async (args) => {
+          scanArgs = args;
+          return {
+            matches: [
+              {
+                chatId: 'b8e7c075effe9457',
+                source: 'my-activity-web',
+                kind: 'last_message',
+                dateKind: 'last_message',
+                confidence: 'strong',
+                date: '2026-05-10T07:12:31Z',
+                warnings: [],
+              },
+            ],
+            checkpoint: { loadedCardCount: 12 },
+            browserWake: { attempted: false },
+          };
+        },
+      },
+    );
+
+    assert.equal(scanArgs.visualGroupTabId, 713803072);
+    assert.equal(scanArgs.waitMs, DEFAULT_EXPORT_DATE_IMPORT_ACTIVITY_WAIT_MS);
+    assert.equal(scanArgs.preLaunchWaitMs, DEFAULT_EXPORT_DATE_IMPORT_ACTIVITY_PRE_LAUNCH_WAIT_MS);
+    assert.equal(scanArgs.openIfMissing, true);
+    assert.equal(scanArgs.openDetails, false);
+    assert.equal(scanArgs.claimLabel, '🔄 Sincroniza');
+    assert.equal(scanArgs.candidates.length, 1);
+
+    const result = enrichExportPayloadWithMetadataDates({
+      payload,
+      integrity,
+      context: createExportDateImportContext({ takeoutPath, useMyActivity: true }),
+      groupedEvidence: batch.groupedByKey.get('b8e7c075effe9457'),
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.receipt.source, 'my-activity');
     assert.equal(result.receipt.dateLastMessage, '2026-05-10T07:12:31Z');
   } finally {
     rmSync(dir, { recursive: true, force: true });

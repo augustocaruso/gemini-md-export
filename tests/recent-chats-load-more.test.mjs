@@ -260,6 +260,26 @@ test('export parcial carrega mais historico ate maxChats antes de fatiar', () =>
   assert.match(block, /job\.loadMoreTimedOut = loadMore\.timedOut === true && !loadMoreResolved/);
 });
 
+test('export recente passa claim visual Gemini para fallback My Activity de datas', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const runtimeSource = readFileSync(
+    resolve(ROOT, 'src', 'mcp', 'export-date-import-runtime.ts'),
+    'utf-8',
+  );
+  const startBlock = source.match(
+    /const startRecentChatsExportJob = \(client, args = \{\}\) => \{[\s\S]*?\n  const job = \{/,
+  )?.[0];
+  assert.ok(startBlock, 'startRecentChatsExportJob deve existir');
+  assert.match(startBlock, /const activeClaim = claimForClient\(client\)/);
+  assert.match(startBlock, /const exportDateImportVisualGroupTabId = normalizeTabId\(activeClaim\?\.tabId \?\? client\.tabId\)/);
+  assert.match(startBlock, /args\._exportDateImportVisualGroupTabId = exportDateImportVisualGroupTabId/);
+  assert.match(runtimeSource, /DEFAULT_EXPORT_DATE_IMPORT_ACTIVITY_WAIT_MS = 45_000/);
+  assert.match(runtimeSource, /DEFAULT_EXPORT_DATE_IMPORT_ACTIVITY_PRE_LAUNCH_WAIT_MS = 8_000/);
+  assert.match(runtimeSource, /visualGroupTabId:[\s\S]*args\._exportDateImportVisualGroupTabId/);
+  assert.match(runtimeSource, /waitMs: dateImportActivityWaitMs\(args\)/);
+  assert.match(runtimeSource, /preLaunchWaitMs: dateImportActivityPreLaunchWaitMs\(args\)/);
+});
+
 test('resume de export parcial preserva limite original em relatorios encadeados', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const resumeScopeSource = readFileSync(

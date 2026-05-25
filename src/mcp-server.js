@@ -134,6 +134,9 @@ const {
   reloadExtensionForExistingTabs,
 } = await import(compiledTsModuleUrl('mcp', 'existing-tabs-reload.js'));
 const {
+  extensionReloadAssumedResultForError,
+} = await import(compiledTsModuleUrl('mcp', 'extension-reload-runtime.js'));
+const {
   assertActiveClaimableGeminiClient,
   explainActiveClaimableGeminiClientRejection,
   getActiveClaimableGeminiClients,
@@ -152,6 +155,12 @@ const {
 const {
   evaluateBridgeHealth,
 } = await import(compiledTsModuleUrl('mcp', 'bridge-health.js'));
+const {
+  isRecentCommandFailureBlocking,
+} = await import(compiledTsModuleUrl('mcp', 'command-channel-health.js'));
+const {
+  resolveActivatedTargetClient,
+} = await import(compiledTsModuleUrl('mcp', 'tab-runtime.js'));
 const {
   isCommandSseDeliveryEnabled,
 } = await import(compiledTsModuleUrl('mcp', 'command-channel.js'));
@@ -2891,8 +2900,7 @@ const clearClientCommandTimeout = (client) => {
 };
 
 const clientHasRecentCommandFailure = (client, now = Date.now()) =>
-  !!client?.lastCommandTimeoutAt &&
-  now - Number(client.lastCommandTimeoutAt) <= COMMAND_CHANNEL_FAILURE_COOLDOWN_MS;
+  isRecentCommandFailureBlocking(client, now, COMMAND_CHANNEL_FAILURE_COOLDOWN_MS);
 
 const enqueueCommand = (clientId, type, args = {}, options = {}) => {
   const client = clients.get(clientId);
@@ -3173,6 +3181,18 @@ const tryNativeBrowserBrokerTabsAction = async (action, args = {}) => {
           claimId: args.claimId || null,
         },
         { allowFallback: true },
+      ),
+      action,
+    );
+  }
+  if (action === 'reload') {
+    return nativeBrowserBrokerToolResult(
+      await nativeBrowserBroker.reload(
+        {
+          tabId: args.tabId ?? null,
+          claimId: args.claimId || null,
+        },
+        { allowFallback: args.allowHttpBrowserFallback === true },
       ),
       action,
     );
@@ -3534,6 +3554,10 @@ const reloadChromeExtensionForClient = async (client, args = {}) => {
     });
     return result || null;
   } catch (err) {
+    const assumedReload = extensionReloadAssumedResultForError(err);
+    if (assumedReload) {
+      return assumedReload;
+    }
     if (/Timeout aguardando resposta/.test(err?.message || '')) {
       if (err.commandDispatched) {
         return {
@@ -6313,10 +6337,12 @@ const activateBrowserTabById = async (rawTabId, args = {}, preferredClient = nul
 
   const cdpActivation = await activateBrowserTabWithCdp(preferredClient, args);
   if (cdpActivation?.ok) {
-    const confirmedClient =
-      (await waitForActivatedBrowserTabById(tabId, args)) ||
-      liveClientForBrowserTabId(tabId) ||
-      preferredClient;
+    const confirmedClient = resolveActivatedTargetClient({
+      targetTabId: tabId,
+      activeClient: await waitForActivatedBrowserTabById(tabId, args),
+      liveClient: liveClientForBrowserTabId(tabId),
+      preferredClient,
+    });
     if (confirmedClient) {
       confirmedClient.isActiveTab = true;
     }
@@ -6363,9 +6389,28 @@ const activateBrowserTabById = async (rawTabId, args = {}, preferredClient = nul
       );
       const result = command.result || null;
       if (result?.ok && result.isActiveTab !== false) {
+        const targetClient = resolveActivatedTargetClient({
+          targetTabId: tabId,
+          activeClient: activeClientForBrowserTabId(tabId),
+          liveClient: liveClientForBrowserTabId(tabId),
+          preferredClient,
+        });
+        if (!targetClient) {
+          lastError = new Error(
+            'A aba do navegador foi ativada, mas o cliente alvo do Gemini ainda não reconectou.',
+          );
+          lastError.code = 'target_tab_client_missing_after_activation';
+          lastError.data = {
+            tabId,
+            broker: summarizeClient(command.client || broker),
+            result,
+          };
+          continue;
+        }
+        targetClient.isActiveTab = true;
         return {
           broker: command.client || broker,
-          client: activeClientForBrowserTabId(tabId) || liveClientForBrowserTabId(tabId) || command.client || broker,
+          client: targetClient,
           result,
         };
       }
@@ -9411,6 +9456,13 @@ const startRecentChatsExportJob = (client, args = {}) => {
   const skipExisting =
     typeof args.skipExisting === 'boolean' ? args.skipExisting : !effectiveHasMaxChats;
   const activeClaim = claimForClient(client);
+  const exportDateImportVisualGroupTabId = normalizeTabId(activeClaim?.tabId ?? client.tabId);
+  if (
+    exportDateImportVisualGroupTabId !== null &&
+    args._exportDateImportVisualGroupTabId === undefined
+  ) {
+    args._exportDateImportVisualGroupTabId = exportDateImportVisualGroupTabId;
+  }
   const job = {
     jobId: randomUUID(),
     type: 'recent-chats-export',
@@ -9828,6 +9880,10 @@ const reloadGeminiTabs = async (args = {}) => {
     explicit: args.explicit === true || args.intent === 'tab_management' || args.diagnostic === true,
   });
   const delayMs = Math.max(0, Math.min(10_000, Number(args.delayMs || 500)));
+  const nativeReload = await tryNativeBrowserBrokerTabsAction('reload', args);
+  if (nativeReload && (nativeReload.ok !== false || args.allowHttpBrowserFallback !== true)) {
+    return nativeReload;
+  }
   await reloadExtensionForExistingTabs(
     args,
     ensureBrowserExtensionReady,
@@ -9840,8 +9896,11 @@ const reloadGeminiTabs = async (args = {}) => {
   if (liveClients.length === 0) {
     return {
       ok: false,
+      code: 'no_connected_clients_for_reload',
       reloaded: 0,
       error: 'Nenhuma aba viva do Gemini conectada à extensão.',
+      nextAction:
+        'Sem aba conectada, a CLI nao consegue recarregar abas existentes por comando. Use um cliente conectado, CDP ou native broker antes do reload.',
     };
   }
 

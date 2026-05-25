@@ -2703,6 +2703,9 @@ const shouldReloadExistingTabsForReady = (ready = {}, flags = {}) => {
   if (connected <= 0) return false;
   const issue = String(ready.blockingIssue || '');
   return [
+    'extension_version_mismatch',
+    'extension_protocol_mismatch',
+    'extension_build_mismatch',
     'no_selectable_gemini_tab',
     'no_active_claimable_gemini_tab',
     'command_channel_not_ready',
@@ -3735,11 +3738,12 @@ const summarizeTabsCliResult = (action, result = {}) => {
     browserWake: result.browserWake || null,
     error: result.error || null,
     nextAction:
-      action === 'list' && tabs.length > 1
+      result.nextAction ||
+      (action === 'list' && tabs.length > 1
         ? 'Rode gemini-md-export tabs claim --index <n> --tui --result-json e reutilize o claimId no sync/export.'
         : action === 'list' && tabs.length === 1
           ? 'Rode gemini-md-export tabs claim --index 1 --tui --result-json ou passe --client-id diretamente.'
-          : null,
+          : null),
   };
 };
 
@@ -3768,6 +3772,10 @@ const tabsPlainLabel = (action, summary = {}) => {
       `tabId=${summary.claim.tabId ?? '-'}`,
       `label=${summary.claim.label || '-'}`,
     ].join('\n');
+  }
+
+  if (!summary.ok && summary.nextAction) {
+    return [`tabs ${action}: falhou`, summary.nextAction].join('\n');
   }
 
   return summary.ok ? `tabs ${action}: ok` : `tabs ${action}: falhou`;

@@ -434,6 +434,7 @@ test('browser_status expõe saúde da bridge MCP/Chrome', () => {
   assert.match(source, /contentScript/);
   assert.match(source, /diagnostics/);
   assert.match(source, /const clientHasOpenCommandChannel = \(client\) =>\s*clientCommandEventStreamUsable\(client\) \|\|/);
+  assert.match(source, /isRecentCommandFailureBlocking/);
   assert.match(source, /const commandChannelReadyForClient = \(client\) =>\s*clientHasOpenCommandChannel\(client\) &&\s*!clientHasRecentCommandFailure\(client\);/);
   assert.match(source, /recentCommandFailure:\s*clientHasRecentCommandFailure\(client, now\)/);
 });
@@ -648,6 +649,34 @@ test('reload de abas existentes pode atualizar extensao sem abrir navegador', ()
   assert.match(cliReloadBlock, /openIfMissing:\s*false/);
   assert.match(cliReloadBlock, /allowReload:\s*true/);
   assert.match(wakeDecisionBlock, /issue === 'no_selectable_gemini_tab'[\s\S]*connected <= 0/);
+});
+
+test('reload de abas usa native broker antes de depender de clientes vivos', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const reloadBlock = source.match(
+    /const reloadGeminiTabs = async \(args = \{\}\) => \{[\s\S]*?\n\};\n\nconst legacyRawTools/,
+  )?.[0];
+
+  assert.ok(reloadBlock, 'reloadGeminiTabs deve existir');
+  assert.match(reloadBlock, /tryNativeBrowserBrokerTabsAction\('reload', args\)/);
+  assert.ok(
+    reloadBlock.indexOf("tryNativeBrowserBrokerTabsAction('reload', args)") <
+      reloadBlock.indexOf('const liveClients = getLiveClients()'),
+    'native broker precisa rodar antes de getLiveClients',
+  );
+  assert.match(source, /nativeBrowserBroker\.reload/);
+});
+
+test('self-reload trata Extension context invalidated como reload em andamento', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const reloadClientBlock = source.match(
+    /const reloadChromeExtensionForClient = async[\s\S]*?\n\};\n\nconst reloadChromeExtension = async/,
+  )?.[0];
+
+  assert.ok(reloadClientBlock, 'reloadChromeExtensionForClient deve existir');
+  assert.match(source, /extensionReloadAssumedResultForError/);
+  assert.match(reloadClientBlock, /extensionReloadAssumedResultForError\(err\)/);
+  assert.match(reloadClientBlock, /return assumedReload/);
 });
 
 test('MCP expõe diagnóstico e cleanup controlado de processos sem guard de browser', () => {

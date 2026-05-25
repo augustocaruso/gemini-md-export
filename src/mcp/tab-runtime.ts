@@ -51,6 +51,18 @@ export type BrowserClientRuntimeEvidenceOptions = {
   readonly expectedBuildStamp?: string | null;
 };
 
+export type BrowserTabTargetClient = {
+  readonly clientId?: string | null;
+  readonly tabId?: number | string | null;
+};
+
+export type ActivatedTargetClientResolution<T extends BrowserTabTargetClient> = {
+  readonly targetTabId?: number | string | null;
+  readonly activeClient?: T | null;
+  readonly liveClient?: T | null;
+  readonly preferredClient?: T | null;
+};
+
 const TERMINAL_STATUSES = new Set(['completed', 'completed_with_errors', 'failed', 'cancelled']);
 
 const normalizeId = (value: number | string | null | undefined): string | null => {
@@ -106,6 +118,27 @@ const clientHasPageEvidence = (client: BrowserClientRuntimeEvidence) =>
       normalizeId(client.page?.chatId) ||
       normalizeId(client.page?.notebookId),
   );
+
+const clientTargetsBrowserTab = (
+  client: BrowserTabTargetClient | null | undefined,
+  targetTabId: number | string | null | undefined,
+) => {
+  const target = normalizeNumber(targetTabId);
+  const tabId = normalizeNumber(client?.tabId);
+  return target !== null && tabId !== null && tabId === target;
+};
+
+export const resolveActivatedTargetClient = <T extends BrowserTabTargetClient>({
+  targetTabId = null,
+  activeClient = null,
+  liveClient = null,
+  preferredClient = null,
+}: ActivatedTargetClientResolution<T>): T | null => {
+  for (const client of [activeClient, liveClient, preferredClient]) {
+    if (clientTargetsBrowserTab(client, targetTabId)) return client;
+  }
+  return null;
+};
 
 export const clientHasLiveRuntimeEvidence = (
   client: BrowserClientRuntimeEvidence,

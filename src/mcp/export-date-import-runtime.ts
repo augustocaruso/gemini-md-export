@@ -19,6 +19,31 @@ type SaveCollectedConversationPayload = (
   args?: RuntimeArgs,
 ) => Promise<RuntimeArgs>;
 
+export const DEFAULT_EXPORT_DATE_IMPORT_ACTIVITY_WAIT_MS = 45_000;
+export const DEFAULT_EXPORT_DATE_IMPORT_ACTIVITY_PRE_LAUNCH_WAIT_MS = 8_000;
+
+const normalizePositiveTimeoutMs = (
+  value: unknown,
+  fallback: number,
+  max = 120_000,
+): number => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return Math.min(Math.floor(parsed), max);
+};
+
+const dateImportActivityWaitMs = (args: RuntimeArgs = {}): number =>
+  normalizePositiveTimeoutMs(
+    args.activityWaitMs ?? args.myActivityWaitMs ?? args.waitMs,
+    DEFAULT_EXPORT_DATE_IMPORT_ACTIVITY_WAIT_MS,
+  );
+
+const dateImportActivityPreLaunchWaitMs = (args: RuntimeArgs = {}): number =>
+  normalizePositiveTimeoutMs(
+    args.activityPreLaunchWaitMs ?? args.myActivityPreLaunchWaitMs ?? args.preLaunchWaitMs,
+    DEFAULT_EXPORT_DATE_IMPORT_ACTIVITY_PRE_LAUNCH_WAIT_MS,
+  );
+
 export const dateImportToolProperties = () => ({
   takeout: {
     type: 'string',
@@ -251,6 +276,10 @@ export const buildExportDateImportBatchEvidenceWithActivityFallback = async (
     openIfMissing: args.openMyActivityIfMissing !== false && args.openIfMissing !== false,
     openDetails: false,
     claimLabel: args.claimLabel || options.claimLabel,
+    visualGroupTabId:
+      args.visualGroupTabId ?? args.groupWithTabId ?? args._exportDateImportVisualGroupTabId,
+    waitMs: dateImportActivityWaitMs(args),
+    preLaunchWaitMs: dateImportActivityPreLaunchWaitMs(args),
   });
   const matches = Array.isArray(activity.matches) ? activity.matches : [];
   args._exportDateImportActivityCheckpoint =

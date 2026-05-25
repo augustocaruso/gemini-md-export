@@ -1,11 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import {
+import * as tabRuntime from '../build/ts/mcp/tab-runtime.js';
+
+const {
   clientHasLiveRuntimeEvidence,
   selectReconnectSourcesForTab,
   shouldIncludeHeartbeatJobProgress,
-} from '../build/ts/mcp/tab-runtime.js';
+} = tabRuntime;
 
 test('tab reconnect aborts every older command client for the durable tab', () => {
   const selected = selectReconnectSourcesForTab({
@@ -147,5 +149,33 @@ test('fresh event stream can be live only when it carries concrete tab evidence'
       },
     ),
     true,
+  );
+});
+
+test('tab activation resolves only the requested browser tab target, never the broker', () => {
+  assert.equal(typeof tabRuntime.resolveActivatedTargetClient, 'function');
+
+  const broker = { clientId: 'activity-broker', tabId: 7, kind: 'activity' };
+  const target = { clientId: 'chat-target', tabId: 42, kind: 'chat' };
+
+  assert.equal(
+    tabRuntime.resolveActivatedTargetClient({
+      targetTabId: 42,
+      activeClient: null,
+      liveClient: null,
+      preferredClient: target,
+      brokerClient: broker,
+    }),
+    target,
+  );
+  assert.equal(
+    tabRuntime.resolveActivatedTargetClient({
+      targetTabId: 42,
+      activeClient: null,
+      liveClient: null,
+      preferredClient: null,
+      brokerClient: broker,
+    }),
+    null,
   );
 });

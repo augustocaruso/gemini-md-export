@@ -2198,6 +2198,122 @@ test('CLI browser status recarrega abas existentes antes de abrir navegador dura
   );
 });
 
+test('CLI browser status recarrega abas existentes quando build da extensao diverge', async () => {
+  let reloadRequested = false;
+  await withEnv(
+    {
+      GEMINI_MD_EXPORT_CLI_BROWSER_LAUNCH_DRY_RUN: 'true',
+      GEMINI_MD_EXPORT_EXISTING_TAB_GRACE_MS: '0',
+    },
+    async () => {
+      await withServer((req, res, url) => {
+        if (url.pathname === '/agent/ready') {
+          sendJson(
+            res,
+            200,
+            reloadRequested
+              ? {
+                  ready: true,
+                  mode: 'post-update',
+                  connectedClientCount: 1,
+                  selectableTabCount: 1,
+                  commandReadyClientCount: 1,
+                }
+              : {
+                  ready: false,
+                  blockingIssue: 'extension_build_mismatch',
+                  mode: 'hot',
+                  connectedClientCount: 1,
+                  selectableTabCount: 0,
+                  commandReadyClientCount: 0,
+                },
+          );
+          return;
+        }
+        if (url.pathname === '/agent/tabs' && url.searchParams.get('action') === 'reload') {
+          reloadRequested = true;
+          sendJson(res, 200, {
+            ok: true,
+            action: 'reload',
+            reloaded: 1,
+            mode: 'extension-tabs-api',
+          });
+          return;
+        }
+        if (url.pathname === '/agent/clients') {
+          sendJson(res, 200, {
+            mcp: { bridgeRole: 'primary' },
+            connectedClients: [],
+          });
+          return;
+        }
+        sendJson(res, 404, { error: `not found: ${url.pathname}` });
+      }, async (bridgeUrl) => {
+        const stdout = captureStream();
+        const stderr = captureStream();
+        const run = await main(
+          [
+            'browser',
+            'status',
+            '--bridge-url',
+            bridgeUrl,
+            '--plain',
+            '--wake',
+            '--allow-reload',
+            '--ready-wait-ms',
+            '50',
+          ],
+          { stdout, stderr },
+        );
+
+        assert.equal(run.exitCode, 0);
+        assert.doesNotMatch(stdout.text(), /Abrindo Gemini Web em background/);
+        assert.equal(stderr.text(), '');
+        assert.equal(reloadRequested, true);
+        assert.equal(run.result.existingTabsReload?.reloaded, 1);
+      });
+    },
+  );
+});
+
+test('CLI tabs reload explica quando nao ha canal para recarregar abas existentes', async () => {
+  await withServer((req, res, url) => {
+    if (url.pathname === '/agent/tabs' && url.searchParams.get('action') === 'reload') {
+      sendJson(res, 200, {
+        ok: false,
+        action: 'reload',
+        reloaded: 0,
+        code: 'no_connected_clients_for_reload',
+        error: 'Nenhuma aba viva do Gemini conectada à extensão.',
+        nextAction:
+          'Sem aba conectada, a CLI nao consegue recarregar abas existentes por comando. Use um cliente conectado, CDP ou native broker antes do reload.',
+      });
+      return;
+    }
+    sendJson(res, 404, { error: `not found: ${url.pathname}` });
+  }, async (bridgeUrl) => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+    const run = await main(
+      [
+        'tabs',
+        'reload',
+        '--bridge-url',
+        bridgeUrl,
+        '--plain',
+        '--no-wake',
+        '--result-json',
+      ],
+      { stdout, stderr },
+    );
+
+    assert.equal(run.exitCode, 4);
+    assert.match(stdout.text(), /Sem aba conectada, a CLI nao consegue recarregar abas existentes/);
+    assert.equal(run.result.nextAction.includes('native broker'), true);
+    assert.equal(stderr.text(), '');
+  });
+});
+
 test('CLI falha rapido quando navegador cai na verificacao do Google', async () => {
   const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-cli-google-sorry-'));
   try {
