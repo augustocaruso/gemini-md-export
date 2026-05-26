@@ -242,6 +242,55 @@ test('activity companion preparer waits for a post-reload My Activity client sig
   assert.equal(result.client.clientId, 'activity-new');
 });
 
+test('activity companion preparer uses export ready wait budget after reload', async () => {
+  const calls = [];
+  const readyActivityClient = { clientId: 'activity-new', tabId: 99, ready: true };
+  const prepare = createActivityCompanionPreparer({
+    normalizeTabId: (value) => {
+      const parsed = Number(value);
+      return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+    },
+    normalizeWaitMs: (value, fallbackMs, maxMs) => {
+      calls.push({ action: 'normalize-wait', value, fallbackMs, maxMs });
+      return Math.min(Number(value || fallbackMs), maxMs);
+    },
+    waitForActivityClient: async (selector, timeoutMs) => {
+      calls.push({ action: 'wait', selector, timeoutMs });
+      return selector.minRuntimeSignalAt ? readyActivityClient : null;
+    },
+    activityClientCommandReady: (client) => client?.ready === true,
+    activateBrowserTabById: async (tabId, args) => {
+      calls.push({ action: 'activate', tabId, reason: args.activateTabReason });
+      return { ok: true, tabId };
+    },
+    tryNativeBrowserBrokerTabsAction: async (action, args = {}) => {
+      calls.push({ action, args });
+      return { ok: true, action, args };
+    },
+    summarizeClient: (client) => ({ clientId: client.clientId, tabId: client.tabId }),
+    getActivityClients: () => [],
+  });
+
+  await prepare(
+    { clientId: 'chat-1', tabId: 42 },
+    { claimId: 'claim-1', readyWaitMs: 75_000 },
+    {
+      tabId: 42,
+      tab: { claimId: 'claim-1' },
+      visual: {
+        mode: 'tab-group',
+        groupId: 10,
+        tabIds: [42, 99],
+      },
+    },
+  );
+
+  const postReloadWait = calls.find(
+    (call) => call.action === 'wait' && call.selector.minRuntimeSignalAt,
+  );
+  assert.equal(postReloadWait.timeoutMs, 75_000);
+});
+
 test('MCP waitForActivityClient filters stale clients from before a requested runtime signal', async () => {
   const source = await import('node:fs/promises').then(({ readFile }) =>
     readFile(new URL('../src/mcp-server.js', import.meta.url), 'utf8'),

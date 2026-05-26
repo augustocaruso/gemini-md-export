@@ -113,7 +113,7 @@ export const shouldPrepareActivityCompanionForDateImport = (
   args: Readonly<Record<string, unknown>> = {},
 ): boolean => args.noMyActivity !== true && args.useMyActivity !== false;
 
-const DEFAULT_ACTIVITY_COMPANION_WAKE_WAIT_MS = 15_000;
+const DEFAULT_ACTIVITY_COMPANION_WAKE_WAIT_MS = 30_000;
 
 type AnyRecord = Record<string, any>;
 
@@ -122,9 +122,12 @@ const activityCompanionWakeWaitMs = (
   normalizeWaitMs: (value: unknown, fallbackMs: number, maxMs: number) => number,
 ) =>
   normalizeWaitMs(
-    args.activityCompanionWakeWaitMs ?? args.activityWaitMs ?? args.myActivityWaitMs,
+    args.activityCompanionWakeWaitMs ??
+      args.activityWaitMs ??
+      args.myActivityWaitMs ??
+      args.readyWaitMs,
     DEFAULT_ACTIVITY_COMPANION_WAKE_WAIT_MS,
-    60_000,
+    120_000,
   );
 
 const summarizeActivityCompanionWakeError = (err: any) => ({
