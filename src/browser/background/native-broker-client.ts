@@ -89,6 +89,9 @@ export type NativeBrowserBrokerCommand = Readonly<{
     focusWindow?: boolean | null;
     timeoutMs?: number | null;
     tabIds?: readonly unknown[] | null;
+    relatedTabIds?: readonly unknown[] | null;
+    visualGroupTabId?: number | null;
+    groupWithTabId?: number | null;
   };
 }>;
 

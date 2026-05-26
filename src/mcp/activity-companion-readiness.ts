@@ -44,9 +44,7 @@ const tabUrl = (tab: NativeTabLike): string => String(tab.url || tab.pendingUrl 
 
 const itemPageKind = (item: NativeTabClassificationLike | NativeTabLike): string =>
   String(
-    item && typeof item === 'object' && 'inspection' in item
-      ? item.inspection?.pageKind || ''
-      : '',
+    item && typeof item === 'object' && 'inspection' in item ? item.inspection?.pageKind || '' : '',
   );
 
 const isActivityListItem = (item: NativeTabClassificationLike | NativeTabLike): boolean => {
@@ -88,8 +86,9 @@ export const activityCompanionTabIdsForNativeTabs = (
       windowId: numberOrNull(tab.windowId),
       index: numberOrNull(tab.index),
     }))
-    .filter((item): item is { tabId: number; windowId: number | null; index: number | null } =>
-      item.tabId !== null && item.tabId !== primaryTabId,
+    .filter(
+      (item): item is { tabId: number; windowId: number | null; index: number | null } =>
+        item.tabId !== null && item.tabId !== primaryTabId,
     )
     .filter(
       (item) =>
@@ -134,7 +133,10 @@ const summarizeActivityCompanionWakeError = (err: any) => ({
   error: err?.message || String(err),
 });
 
-const claimIdFromLease = (lease: NativeExportLease | null | undefined, args: AnyRecord): string | null => {
+const claimIdFromLease = (
+  lease: NativeExportLease | null | undefined,
+  args: AnyRecord,
+): string | null => {
   const claimId = args.claimId || lease?.claimId || lease?.tab?.claimId;
   const normalized = String(claimId || '').trim();
   return normalized || null;
@@ -268,25 +270,25 @@ export const createActivityCompanionPreparer =
       error.code = 'activity_companion_not_ready';
       error.data = {
         companionTabId,
-      exportTabId,
-      activation,
-      reload,
-      restore,
-      visualRefresh,
-      connectedActivityClients: deps.getActivityClients().map(deps.summarizeClient),
-    };
+        exportTabId,
+        activation,
+        reload,
+        restore,
+        visualRefresh,
+        connectedActivityClients: deps.getActivityClients().map(deps.summarizeClient),
+      };
       throw error;
     }
 
     return {
-    attempted: true,
-    reason: 'activity-companion-ready-after-wake',
-    source: companionSource,
-    tabId: companionTabId,
-    client: deps.summarizeClient(activityClient),
-    visualRefresh,
-    activation,
-    reload,
+      attempted: true,
+      reason: 'activity-companion-ready-after-wake',
+      source: companionSource,
+      tabId: companionTabId,
+      client: deps.summarizeClient(activityClient),
+      visualRefresh,
+      activation,
+      reload,
       restore,
     };
   };

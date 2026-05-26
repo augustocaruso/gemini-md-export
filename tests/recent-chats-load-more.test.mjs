@@ -387,6 +387,10 @@ test('export recente prepara companion My Activity antes de iniciar job', () => 
     resolve(ROOT, 'src', 'mcp', 'activity-companion-readiness.ts'),
     'utf-8',
   );
+  const nativeBrokerSource = readFileSync(
+    resolve(ROOT, 'src', 'browser', 'background', 'native-broker-client.ts'),
+    'utf-8',
+  );
   const helperBlock =
     helperSource.match(/export const createActivityCompanionPreparer[\s\S]*$/)?.[0] || '';
   const endpointBlock = source.match(
@@ -397,12 +401,19 @@ test('export recente prepara companion My Activity antes de iniciar job', () => 
   )?.[0] || '';
 
   assert.match(helperSource, /activityCompanionTabIdsForNativeLease/);
+  assert.match(helperSource, /activityCompanionTabIdsForNativeTabs/);
   assert.match(helperSource, /shouldPrepareActivityCompanionForDateImport/);
   assert.match(helperBlock, /activityCompanionTabIdsForNativeLease/);
+  assert.match(helperBlock, /tryNativeBrowserBrokerTabsAction\('list'/);
+  assert.match(helperBlock, /activityCompanionTabIdsForNativeTabs/);
+  assert.match(helperBlock, /tryNativeBrowserBrokerTabsAction\('claim'/);
+  assert.match(helperBlock, /relatedTabIds: \[companionTabId\]/);
   assert.match(helperBlock, /activateBrowserTabById\(\s*companionTabId/);
   assert.match(helperBlock, /tryNativeBrowserBrokerTabsAction\('reload'/);
   assert.match(helperBlock, /waitForActivityClient\(\s*\{ tabId: companionTabId \}/);
   assert.match(helperBlock, /activateBrowserTabById\(\s*exportTabId/);
+  assert.match(nativeBrokerSource, /relatedTabIdsFromClaimPayload/);
+  assert.match(nativeBrokerSource, /applyNativeClaimVisual\(\s*[\s\S]*?relatedTabIds/);
   assert.match(endpointBlock, /prepareNativeExportJobArgs\(client/);
   assert.ok(
     jobArgsBlock.indexOf('claimNativeExportLeaseForJob') <
