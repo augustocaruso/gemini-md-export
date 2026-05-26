@@ -28,20 +28,23 @@ const scanDateImportStatuses = (items: unknown[]): Omit<DateImportIssueCounts, '
   return counts;
 };
 
+const richestDateImportItems = (job: AnyRecord): unknown[] => {
+  const successes = Array.isArray(job.successes) ? job.successes : [];
+  const conversations = Array.isArray(job.metrics?.conversations) ? job.metrics.conversations : [];
+  const recentSuccesses = Array.isArray(job.recentSuccesses) ? job.recentSuccesses : [];
+  return [successes, conversations, recentSuccesses].sort((a, b) => b.length - a.length)[0] || [];
+};
+
 export const dateImportIssueCountsForJob = (job: AnyRecord = {}): DateImportIssueCounts => {
   const counters = job.metrics?.counters || {};
   let matched = nonNegativeNumber(counters.dateImportMatched);
   let partial = nonNegativeNumber(counters.dateImportPartial);
   let unresolved = nonNegativeNumber(counters.dateImportUnresolved);
 
-  if (partial === 0 && unresolved === 0) {
-    const conversations = Array.isArray(job.metrics?.conversations) ? job.metrics.conversations : [];
-    const recentSuccesses = Array.isArray(job.recentSuccesses) ? job.recentSuccesses : [];
-    const scanned = scanDateImportStatuses(conversations.length ? conversations : recentSuccesses);
-    matched = Math.max(matched, scanned.matched);
-    partial = scanned.partial;
-    unresolved = scanned.unresolved;
-  }
+  const scanned = scanDateImportStatuses(richestDateImportItems(job));
+  matched = Math.max(matched, scanned.matched);
+  partial = Math.max(partial, scanned.partial);
+  unresolved = Math.max(unresolved, scanned.unresolved);
 
   return {
     matched,

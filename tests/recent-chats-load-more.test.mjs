@@ -13,6 +13,7 @@ import {
   normalizeRecentChatsLoadMorePlan,
   recentChatsLoadMoreRuntimeConfig,
 } from '../build/ts/mcp/recent-chats-load-more.js';
+import { compactReportItems } from '../build/ts/mcp/export-report-resume.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
@@ -705,6 +706,8 @@ test('export total consegue retomar a partir do relatório incremental', () => {
   )?.[0];
   assert.ok(jobBlock, 'runRecentChatsExportJob deve existir');
   assert.ok(recentToolBlock, 'schema de gemini_export_recent_chats deve existir');
+  assert.match(source, /compactReportItems[\s\S]*compiledTsModuleUrl\('mcp', 'export-report-resume\.js'\)/);
+  assert.doesNotMatch(source, /const compactReportItems = \(items, kind\) =>/);
   assert.match(source, /const loadRecentChatsResumeCheckpoint = \(filePath\) =>/);
   assert.match(source, /resumeReportFile:\s*\{/);
   assert.match(source, /reportFile:\s*\{/);
@@ -716,6 +719,48 @@ test('export total consegue retomar a partir do relatório incremental', () => {
   assert.match(jobBlock, /!resumedCompletedChatIds\.has\(chatId\)/);
   assert.match(jobBlock, /job\.completed = resumedCompletedCount \+ i \+ 1/);
   assert.match(reportSource, /previousFailures: job\.resume\.previousFailures/);
+});
+
+test('resume compacta sucessos antigos preservando recibo de dateImport', () => {
+  const items = compactReportItems(
+    [
+      {
+        chatId: 'c_2c52369234b6f57a',
+        title: 'Sem evidência de data',
+        filename: '2c52369234b6f57a.md',
+        dateImport: {
+          enabled: true,
+          status: 'unresolved',
+          source: 'takeout+my-activity',
+        },
+      },
+    ],
+    'success',
+  );
+
+  assert.deepEqual(items, [
+    {
+      kind: 'success',
+      index: null,
+      chatId: '2c52369234b6f57a',
+      title: 'Sem evidência de data',
+      filename: '2c52369234b6f57a.md',
+      filePath: null,
+      relativePath: null,
+      bytes: null,
+      reason: 'success',
+      mediaFileCount: null,
+      mediaFailureCount: null,
+      turns: null,
+      overwritten: null,
+      error: null,
+      dateImport: {
+        enabled: true,
+        status: 'unresolved',
+        source: 'takeout+my-activity',
+      },
+    },
+  ]);
 });
 
 test('export missing cruza histórico completo com exports raw no vault', () => {

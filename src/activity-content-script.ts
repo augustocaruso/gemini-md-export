@@ -18,6 +18,7 @@
   const SCROLL_SETTLE_MS = 500;
   const DEFAULT_MAX_CARDS = 1000;
   const DEFAULT_MAX_SCROLL_ROUNDS = 80;
+  const DATE_CONTEXT_PREVIOUS_SIBLING_LIMIT = 80;
   const MATCH_THRESHOLD = 0.58;
   const PROGRESS_DOCK_ID = 'gm-md-export-progress-dock';
   const TAB_CLAIM_DEFAULT_LABEL = '🔎 Conferindo';
@@ -186,19 +187,27 @@
   };
 
   const candidateFields = (candidate = {}) => {
+    const scoring = candidate.scoring && typeof candidate.scoring === 'object' ? candidate.scoring : candidate;
     const fields = [];
-    if (candidate.firstPrompt) fields.push({ kind: 'created', text: candidate.firstPrompt });
-    if (candidate.lastPrompt) fields.push({ kind: 'last_message', text: candidate.lastPrompt });
-    for (const sample of candidate.assistantSamples || []) {
+    if (scoring.firstPrompt) fields.push({ kind: 'created', text: scoring.firstPrompt });
+    if (scoring.lastPrompt) fields.push({ kind: 'last_message', text: scoring.lastPrompt });
+    for (const sample of scoring.assistantSamples || []) {
       if (sample) fields.push({ kind: 'last_message', text: sample });
     }
-    if (!fields.length && candidate.title) fields.push({ kind: 'unknown', text: candidate.title });
+    if (!fields.length && scoring.title) fields.push({ kind: 'unknown', text: scoring.title });
     return fields;
   };
 
-  const scoreCandidate = (candidate, text) => {
+  const candidateProbeFields = (candidate = {}) => {
+    const scoring = candidate.scoring && typeof candidate.scoring === 'object' ? candidate.scoring : candidate;
+    const fields = candidateFields(candidate);
+    if (scoring.title) fields.push({ kind: 'probe', text: scoring.title });
+    return fields;
+  };
+
+  const scoreFields = (fields, text) => {
     let best = { score: 0, kind: 'unknown', sampleHash: null, sampleLength: 0 };
-    for (const field of candidateFields(candidate)) {
+    for (const field of fields) {
       const score = tokenScore(field.text, text);
       if (score > best.score) {
         best = {
@@ -211,6 +220,10 @@
     }
     return best;
   };
+
+  const scoreCandidate = (candidate, text) => scoreFields(candidateFields(candidate), text);
+
+  const scoreCandidateProbe = (candidate, text) => scoreFields(candidateProbeFields(candidate), text);
 
   const scoreCandidateByKind = (candidate, text) => {
     const byKind = new Map();
@@ -241,23 +254,62 @@
   };
 
   const PT_MONTHS = {
+    jan: 0,
     janeiro: 0,
+    fev: 1,
     fevereiro: 1,
+    mar: 2,
     marco: 2,
     março: 2,
+    abr: 3,
     abril: 3,
+    mai: 4,
     maio: 4,
+    jun: 5,
     junho: 5,
+    jul: 6,
     julho: 6,
+    ago: 7,
     agosto: 7,
+    set: 8,
     setembro: 8,
+    out: 9,
     outubro: 9,
+    nov: 10,
     novembro: 10,
+    dez: 11,
     dezembro: 11,
   };
 
+  const EN_MONTHS = {
+    jan: 0,
+    january: 0,
+    feb: 1,
+    february: 1,
+    mar: 2,
+    march: 2,
+    apr: 3,
+    april: 3,
+    may: 4,
+    jun: 5,
+    june: 5,
+    jul: 6,
+    july: 6,
+    aug: 7,
+    august: 7,
+    sep: 8,
+    sept: 8,
+    september: 8,
+    oct: 9,
+    october: 9,
+    nov: 10,
+    november: 10,
+    dec: 11,
+    december: 11,
+  };
+
   const parseTimeParts = (text) => {
-    const match = String(text || '').match(/\b(\d{1,2}):(\d{2})(?:\s*(AM|PM))?\b/i);
+    const match = String(text || '').match(/(?:^|[^\d])(\d{1,2}):(\d{2})(?:\s*(AM|PM))?/i);
     if (!match) return null;
     let hour = Number(match[1]);
     const minute = Number(match[2]);
@@ -268,24 +320,107 @@
     return { hour, minute, second: 0 };
   };
 
+  const localIsoFromParts = ({ year, month, day }, time) =>
+    portableIsoSeconds(new Date(year, month, day, time.hour, time.minute, time.second));
+
   const parsePortugueseDate = (dateText, timeText) => {
     const normalized = normalizeText(dateText);
-    const match = normalized.match(/\b(\d{1,2})\s+de\s+([a-z]+)\s+de\s+(\d{4})\b/);
+    const match = normalized.match(/\b(\d{1,2})\s+de\s+([a-z.]+)(?:\s+de\s+(\d{4}))?\b/);
     const time = parseTimeParts(timeText);
     if (!match || !time) return null;
-    const month = PT_MONTHS[match[2]];
+    const month = PT_MONTHS[String(match[2] || '').replace(/\./g, '')];
     if (month === undefined) return null;
-    return portableIsoSeconds(new Date(Number(match[3]), month, Number(match[1]), time.hour, time.minute, time.second));
+    return localIsoFromParts(
+      {
+        year: Number(match[3] || new Date().getFullYear()),
+        month,
+        day: Number(match[1]),
+      },
+      time,
+    );
+  };
+
+  const parseEnglishDate = (dateText, timeText) => {
+    const normalized = normalizeText(dateText);
+    const match = normalized.match(
+      /\b(january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sept|sep|october|oct|november|nov|december|dec)\.?\s+(\d{1,2})(?:,?\s+(\d{4}))?\b/,
+    );
+    const time = parseTimeParts(timeText);
+    if (!match || !time) return null;
+    const month = EN_MONTHS[String(match[1] || '').replace(/\./g, '')];
+    if (month === undefined) return null;
+    return localIsoFromParts(
+      {
+        year: Number(match[3] || new Date().getFullYear()),
+        month,
+        day: Number(match[2]),
+      },
+      time,
+    );
+  };
+
+  const parseRelativeDate = (dateText, timeText) => {
+    const normalized = normalizeText(dateText);
+    const time = parseTimeParts(timeText);
+    if (!time) return null;
+    const now = new Date();
+    let offsetDays = null;
+    if (/\b(today|hoje)\b/.test(normalized)) offsetDays = 0;
+    if (/\b(yesterday|ontem)\b/.test(normalized)) offsetDays = -1;
+    if (offsetDays === null) return null;
+    const date = new Date(now.getFullYear(), now.getMonth(), now.getDate() + offsetDays);
+    return localIsoFromParts(
+      { year: date.getFullYear(), month: date.getMonth(), day: date.getDate() },
+      time,
+    );
   };
 
   const parseTextualTimestamp = (dateText, cardText) => {
     const time = parseTimeParts(cardText);
     if (!dateText || !time) return null;
+    const relative = parseRelativeDate(dateText, cardText);
+    if (relative) return relative;
     const pt = parsePortugueseDate(dateText, cardText);
     if (pt) return pt;
-    const parsed = new Date(`${dateText} ${String(cardText).match(/\b\d{1,2}:\d{2}(?:\s*(?:AM|PM))?\b/i)?.[0] || ''}`);
+    const en = parseEnglishDate(dateText, cardText);
+    if (en) return en;
+    const timeText =
+      String(cardText)
+        .match(/(?:^|[^\d])(\d{1,2}:\d{2}(?:\s*(?:AM|PM))?)/i)?.[1] || '';
+    const parsed = new Date(`${dateText} ${timeText}`);
     if (Number.isNaN(parsed.getTime())) return null;
     return portableIsoSeconds(parsed);
+  };
+
+  const looksLikeDateContext = (text) => {
+    const normalized = normalizeText(text);
+    if (!normalized || normalized.length > 90) return false;
+    return (
+      /\b(today|yesterday|hoje|ontem)\b/.test(normalized) ||
+      /\b(january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sept|sep|october|oct|november|nov|december|dec)\b/.test(
+        normalized,
+      ) ||
+      /\b\d{1,2}\s+de\s+[a-z.]+/.test(normalized)
+    );
+  };
+
+  const findDateContextText = (card) => {
+    for (let node = card, depth = 0; node && node !== document.body && depth < 8; node = node.parentElement, depth += 1) {
+      let sibling = node.previousElementSibling;
+      for (
+        let scanned = 0;
+        sibling && scanned < DATE_CONTEXT_PREVIOUS_SIBLING_LIMIT;
+        sibling = sibling.previousElementSibling, scanned += 1
+      ) {
+        const directText = String(sibling.textContent || '').replace(/\s+/g, ' ').trim();
+        if (looksLikeDateContext(directText)) return directText;
+        const heading = Array.from(sibling.querySelectorAll('h1,h2,h3,[role="heading"],time'))
+          .reverse()
+          .find((el) => looksLikeDateContext(el.textContent || ''));
+        if (heading) return String(heading.textContent || '').replace(/\s+/g, ' ').trim();
+      }
+    }
+    return '';
   };
 
   const extractCardDate = (card) => {
@@ -295,12 +430,18 @@
       parseNumericTimestamp(timestampEl?.getAttribute('data-timestamp')) ||
       parseNumericTimestamp(card.getAttribute('data-time'));
     if (numeric) return numeric;
-    const dateText =
-      card.getAttribute('data-date') ||
-      card.closest('[data-date]')?.getAttribute('data-date') ||
-      card.querySelector('[data-date]')?.getAttribute('data-date') ||
-      '';
-    return parseTextualTimestamp(dateText, card.textContent || '');
+    const cardText = card.textContent || '';
+    const dateCandidates = [
+      card.getAttribute('data-date'),
+      card.closest('[data-date]')?.getAttribute('data-date'),
+      card.querySelector('[data-date]')?.getAttribute('data-date'),
+      findDateContextText(card),
+    ].filter(Boolean);
+    for (const dateText of dateCandidates) {
+      const parsed = parseTextualTimestamp(dateText, cardText);
+      if (parsed) return parsed;
+    }
+    return null;
   };
 
   const findActivityCards = () => {
@@ -311,13 +452,21 @@
       '.activity-card',
       'c-wiz',
     ];
+    const nestedCardSelector = '[data-timestamp],[data-date],[data-gm-activity-card],.activity-card';
+    const isActivityLike = (el) => {
+      const text = normalizeText(el.textContent || '');
+      return text.includes('gemini') || Boolean(el.querySelector('[data-gm-activity-details]'));
+    };
+    const containsNestedActivity = (el) =>
+      Array.from(el.querySelectorAll(nestedCardSelector)).some(
+        (child) => child !== el && isActivityLike(child),
+      );
     const seen = new Set();
     const cards = [];
     for (const selector of selectors) {
       for (const el of document.querySelectorAll(selector)) {
         if (!(el instanceof Element) || seen.has(el)) continue;
-        const text = normalizeText(el.textContent || '');
-        if (!text.includes('gemini') && !el.querySelector('[data-gm-activity-details]')) continue;
+        if (!isActivityLike(el) || containsNestedActivity(el)) continue;
         seen.add(el);
         cards.push(el);
       }
@@ -480,6 +629,93 @@
     cardIndex,
   });
 
+  const sampleText = (value, max = 240) => {
+    const text = String(value || '').replace(/\s+/g, ' ').trim();
+    return text.length > max ? `${text.slice(0, Math.max(0, max - 3))}...` : text;
+  };
+
+  const diagnoseLoadedCards = (candidates, options = {}) => {
+    const candidateEntries = (candidates || [])
+      .filter((candidate) => candidate?.chatId)
+      .map((candidate) => [String(candidate.chatId), candidate]);
+    const cards = findActivityCards().slice(0, options.maxCards || DEFAULT_MAX_CARDS);
+    const topLimit = Math.max(0, Math.min(10, Number(options.topMatches || 5)));
+    const describeElement = (el) => {
+      if (!el) return null;
+      const text = el.textContent || '';
+      return {
+        tag: String(el.tagName || '').toLowerCase(),
+        id: el.id || '',
+        className: String(el.className || ''),
+        textHash: hashText(text),
+        textLength: text.length,
+        textSample: sampleText(text),
+      };
+    };
+    const nearbyStructure = (card) => {
+      if (options.includeStructureSample !== true) return undefined;
+      const ancestors = [];
+      for (let node = card, depth = 0; node && node !== document.body && depth < 5; node = node.parentElement, depth += 1) {
+        ancestors.push({
+          depth,
+          element: describeElement(node),
+          previousSiblings: Array.from({ length: 4 }).reduce((items) => {
+            const previous = items.length === 0 ? node.previousElementSibling : items.at(-1)?.__previous?.previousElementSibling;
+            if (!previous) return items;
+            items.push({ ...describeElement(previous), __previous: previous });
+            return items;
+          }, []).map(({ __previous, ...item }) => item),
+        });
+      }
+      return ancestors;
+    };
+    return {
+      cardCount: cards.length,
+      cards: cards.map((card, cardIndex) => {
+        const text = card.textContent || '';
+        const dateContext = findDateContextText(card);
+        const preliminary = [];
+        for (const [chatId, candidate] of candidateEntries) {
+          const score = scoreCandidateProbe(candidate, text);
+          if (score.score <= 0) continue;
+          preliminary.push({
+            chatId,
+            score: Number(score.score.toFixed(4)),
+            kind: score.kind,
+            sampleHash: score.sampleHash,
+            sampleLength: score.sampleLength,
+          });
+        }
+        preliminary.sort((left, right) => {
+          if (right.score !== left.score) return right.score - left.score;
+          return right.sampleLength - left.sampleLength;
+        });
+        return {
+          cardIndex,
+          date: extractCardDate(card),
+          dateContextHash: dateContext ? hashText(dateContext) : null,
+          dateContextLength: dateContext.length,
+          ...(options.includeTextSample === true && dateContext
+            ? { dateContextSample: sampleText(dateContext) }
+            : {}),
+          ...(options.includeTextSample === true
+            ? {
+                timeProbe: parseTimeParts(text),
+                dateContextParsed: dateContext ? parseTextualTimestamp(dateContext, text) : null,
+              }
+            : {}),
+          textHash: hashText(text),
+          textLength: text.length,
+          ...(options.includeTextSample === true ? { textSample: sampleText(text) } : {}),
+          hasDetailsButton: Boolean(detailsButtonFor(card)),
+          hasInlineDetails: Boolean(card.querySelector('[data-gm-activity-details]')),
+          topPreliminary: preliminary.slice(0, topLimit),
+          ...(options.includeStructureSample === true ? { nearbyStructure: nearbyStructure(card) } : {}),
+        };
+      }),
+    };
+  };
+
   const scanLoadedCards = async (candidates, options = {}) => {
     const candidateMap = new Map(
       (candidates || [])
@@ -496,25 +732,54 @@
     const matches = [];
     let loadedCardCount = 0;
     let lastSeenActivityToken = null;
+    const unresolvedEntries = () =>
+      Array.from(candidateMap.entries()).filter(([chatId]) => {
+        const required = requiredKinds.get(chatId) || new Set();
+        const found = foundKinds.get(chatId) || new Set();
+        return !Array.from(required).every((kind) => found.has(kind));
+      });
 
     const cards = findActivityCards().slice(0, options.maxCards || DEFAULT_MAX_CARDS);
     loadedCardCount = cards.length;
     for (let cardIndex = 0; cardIndex < cards.length; cardIndex += 1) {
       const card = cards[cardIndex];
-      const detail =
-        options.openDetails === true
-          ? await openDetailsForCard(card)
-          : card.querySelector('[data-gm-activity-details]');
-      const scoringText = `${card.textContent || ''}\n${detail?.textContent || ''}`;
-      for (const [chatId, candidate] of candidateMap.entries()) {
+      const closedText = card.textContent || '';
+      let entriesToScore = unresolvedEntries();
+      let detail = null;
+      if (options.openDetails === true) {
+        const preliminary = [];
+        for (const [chatId, candidate] of entriesToScore) {
+          const score = scoreCandidateProbe(candidate, closedText);
+          if (score.score >= MATCH_THRESHOLD) preliminary.push({ chatId, candidate, score });
+        }
+        preliminary.sort((left, right) => {
+          if (right.score.score !== left.score.score) return right.score.score - left.score.score;
+          return right.score.sampleLength - left.score.sampleLength;
+        });
+        entriesToScore = preliminary.map((item) => [item.chatId, item.candidate]);
+        if (entriesToScore.length > 0) detail = await openDetailsForCard(card);
+      } else {
+        detail = card.querySelector('[data-gm-activity-details]');
+      }
+      const scoringText = `${closedText}\n${detail?.textContent || ''}`;
+      const cardMatches = [];
+      for (const [chatId, candidate] of entriesToScore) {
         for (const score of scoreCandidateByKind(candidate, scoringText)) {
           if (score.score < MATCH_THRESHOLD) continue;
           if (foundKinds.get(chatId)?.has(score.kind)) continue;
           const match = sanitizedMatch({ candidate, card, score, cardIndex });
           if (!match.date) continue;
-          matches.push(match);
-          foundKinds.get(chatId)?.add(score.kind);
+          cardMatches.push({ chatId, match });
         }
+      }
+      cardMatches.sort((left, right) => {
+        if (right.match.score !== left.match.score) return right.match.score - left.match.score;
+        return right.match.sampleLength - left.match.sampleLength;
+      });
+      const best = cardMatches[0];
+      if (best) {
+        matches.push(best.match);
+        foundKinds.get(best.chatId)?.add(best.match.kind);
       }
       lastSeenActivityToken = extractCardDate(card) || hashText(card.textContent || '');
       if (options.openDetails === true) await closeOpenDetails();
@@ -548,6 +813,25 @@
       0,
       Math.min(DEFAULT_MAX_SCROLL_ROUNDS, Number(args.maxScrollRounds || DEFAULT_MAX_SCROLL_ROUNDS)),
     );
+    if (args.diagnoseCards === true) {
+      const diagnostics = diagnoseLoadedCards(candidates, {
+        maxCards,
+        topMatches: args.topMatches,
+        includeTextSample: args.includeTextSample === true,
+        includeStructureSample: args.includeStructureSample === true,
+      });
+      return {
+        ok: true,
+        source: 'my-activity-web',
+        diagnostics,
+        checkpoint: {
+          lastSeenActivityToken:
+            diagnostics.cards.at(-1)?.date || diagnostics.cards.at(-1)?.textHash || null,
+          loadedCardCount: diagnostics.cardCount,
+          resolvedChatIds: [],
+        },
+      };
+    }
     beginActivityProgress({ candidateTotal: candidates.length, maxCards });
     try {
       const allMatches = [];
@@ -560,6 +844,7 @@
       for (let round = 0; round <= maxScrollRounds; round += 1) {
         const partial = await scanLoadedCards(candidates, {
           maxCards,
+          openDetails: args.openDetails === true,
           onProgress: (progress) => {
             updateActivityProgress({
               ...progress,

@@ -734,10 +734,14 @@ export const createAutoTabClaimReleaseForJob =
         reason,
       });
       if (deps.shouldUseNativeBrowserBroker()) {
+        const releasedVisual = ((job.tabClaimRelease as MutableRecord | undefined)?.released as
+          | MutableRecord
+          | undefined)?.visual as MutableRecord | undefined;
+        const nativeReleaseTabIds = releaseTabIds || releasedVisual?.tabIds || null;
         job.nativeTabClaimRelease = await deps.tryNativeBrowserBrokerTabsAction('release', {
           tabId: releaseTabId,
           claimId: job.tabClaimId,
-          tabIds: releaseTabIds,
+          tabIds: nativeReleaseTabIds,
           reason: `${reason}-native-visual`,
         });
         if (job.tabClaimRelease && typeof job.tabClaimRelease === 'object') {

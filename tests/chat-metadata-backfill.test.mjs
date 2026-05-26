@@ -332,7 +332,7 @@ Primeira resposta sensível
     assert.equal(activityPayload.candidates[0].chatId, 'b8e7c075effe9457');
     assert.equal(activityPayload.candidates[0].title, 'Exemplo');
     assert.match(activityPayload.candidates[0].firstPrompt, /Primeiro prompt sensível/);
-    assert.equal(activityPayload.openDetails, false);
+    assert.equal(activityPayload.openDetails, true);
     assert.equal(activityPayload.openIfMissing, true);
 
     const updated = readFileSync(chatPath, 'utf-8');

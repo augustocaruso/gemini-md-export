@@ -22,6 +22,22 @@ type SaveCollectedConversationPayload = (
 export const DEFAULT_EXPORT_DATE_IMPORT_ACTIVITY_WAIT_MS = 45_000;
 export const DEFAULT_EXPORT_DATE_IMPORT_ACTIVITY_PRE_LAUNCH_WAIT_MS = 8_000;
 
+const RECOVERABLE_ACTIVITY_DATE_IMPORT_ERRORS = new Set([
+  'activity_client_missing',
+  'activity_client_version_mismatch',
+  'activity_scan_timeout',
+  'activity_tab_activation_failed',
+  'activity_companion_not_ready',
+  'command_timeout',
+  'tab_operation_in_progress',
+]);
+
+const isRecoverableActivityDateImportError = (err: RuntimeArgs): boolean => {
+  if (err?.code === 'operation_cancelled' || err?.name === 'AbortError') return false;
+  if (RECOVERABLE_ACTIVITY_DATE_IMPORT_ERRORS.has(String(err?.code || ''))) return true;
+  return Boolean(err?.code && String(err.code).startsWith('activity_'));
+};
+
 const normalizePositiveTimeoutMs = (value: unknown, fallback: number, max = 120_000): number => {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
@@ -308,24 +324,43 @@ export const buildExportDateImportBatchEvidenceWithActivityFallback = async (
 
   throwIfAborted(args.abortSignal);
   const activityWaitMs = dateImportActivityWaitMs(args);
-  const activity = await abortable(
-    options.scanActivity({
-      ...args,
-      candidates,
-      resume: args._exportDateImportActivityCheckpoint || null,
-      openIfMissing: args.openMyActivityIfMissing !== false && args.openIfMissing !== false,
-      openDetails: false,
-      claimLabel: args.claimLabel || options.claimLabel,
-      activityTabId: args.activityTabId ?? args.activityCompanion?.tabId,
-      claimVisual: args.claimVisual ?? (args.activityCompanion?.tabId ? false : undefined),
-      visualGroupTabId:
-        args.visualGroupTabId ?? args.groupWithTabId ?? args._exportDateImportVisualGroupTabId,
-      waitMs: activityWaitMs,
-      activityCommandTimeoutMs: args.activityCommandTimeoutMs ?? activityWaitMs + 15_000,
-      preLaunchWaitMs: dateImportActivityPreLaunchWaitMs(args),
-    }),
-    args.abortSignal,
-  );
+  let activity: RuntimeArgs;
+  try {
+    activity = await abortable(
+      options.scanActivity({
+        ...args,
+        candidates,
+        resume: args._exportDateImportActivityCheckpoint || null,
+        openIfMissing: args.openMyActivityIfMissing !== false && args.openIfMissing !== false,
+        openDetails: true,
+        claimLabel: args.claimLabel || options.claimLabel,
+        activityTabId: args.activityTabId ?? args.activityCompanion?.tabId,
+        claimVisual: args.claimVisual ?? (args.activityCompanion?.tabId ? false : undefined),
+        visualGroupTabId:
+          args.visualGroupTabId ?? args.groupWithTabId ?? args._exportDateImportVisualGroupTabId,
+        waitMs: activityWaitMs,
+        activityCommandTimeoutMs: args.activityCommandTimeoutMs ?? activityWaitMs + 15_000,
+        preLaunchWaitMs: dateImportActivityPreLaunchWaitMs(args),
+      }),
+      args.abortSignal,
+    );
+  } catch (err) {
+    if (!isRecoverableActivityDateImportError(err as RuntimeArgs)) throw err;
+    args._exportDateImportActivitySummary = {
+      attempted: true,
+      candidates: candidates.length,
+      matched: 0,
+      loadedCardCount: null,
+      checkpoint: args._exportDateImportActivityCheckpoint || null,
+      browserWake: null,
+      tabClaimWarning: null,
+      error: {
+        code: (err as RuntimeArgs)?.code || 'activity_date_import_failed',
+        message: (err as Error)?.message || String(err),
+      },
+    };
+    return batch;
+  }
   throwIfAborted(args.abortSignal);
   const matches = Array.isArray(activity.matches) ? activity.matches : [];
   args._exportDateImportActivityCheckpoint =

@@ -52,3 +52,31 @@ test('dateImportIssueCountsForJob falls back to conversation receipts for old jo
     pending: 2,
   });
 });
+
+test('dateImportIssueCountsForJob uses consolidated successes after resume', () => {
+  const successes = [
+    ...Array.from({ length: 28 }, () => ({ dateImport: { status: 'matched' } })),
+    { dateImport: { status: 'unresolved' } },
+    { dateImport: { status: 'unresolved' } },
+  ];
+  const job = {
+    dateImport: { enabled: true },
+    successes,
+    metrics: {
+      counters: {
+        dateImportMatched: 1,
+      },
+      conversations: [{ dateImport: { status: 'matched' } }],
+    },
+  };
+
+  assert.deepEqual(dateImportIssueCountsForJob(job), {
+    matched: 28,
+    partial: 0,
+    unresolved: 2,
+    pending: 2,
+  });
+  assert.deepEqual(metadataDateWarningsForJob(job), [
+    '2 conversas ficaram sem datas no Takeout/My Activity.',
+  ]);
+});

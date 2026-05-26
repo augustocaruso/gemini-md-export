@@ -29,7 +29,14 @@ import {
   telemetryStatus,
 } from '../src/telemetry.mjs';
 import { browserControlParamsFromFlags } from '../build/ts/cdp/runtime-options.js';
+import {
+  bridgeMismatchIntervalMessage,
+  bridgeMismatchStatusDetail,
+  bridgeRuntimeFilesMismatch,
+  staleBridgeMessage,
+} from '../build/ts/cli/bridge-runtime-freshness.js';
 import { runFixVaultCommand } from '../build/ts/cli/fix-vault-runner.js';
+import { summarizeJobTotals as jobTotals } from '../build/ts/cli/job-result-summary.js';
 import {
   buildExportJobProgressViewModel,
   buildProgressViewModel,
@@ -183,7 +190,7 @@ const commonOptionHelp = () => [
   '  --wake                   Pode abrir/acordar o navegador se nenhuma aba estiver conectada.',
   '  --no-wake                Nao abrir/acordar o navegador. Default.',
   '  --activate-tab           Pode tornar a aba Gemini alvo ativa dentro do navegador.',
-  '  --no-activate-tab        Nao ativar aba automaticamente. Default.',
+  '  --no-activate-tab        Nao ativar aba automaticamente. Em export/sync, opt-out explicito.',
   '  --focus-window           Pode trazer a janela do navegador para frente.',
   '  --no-focus-window        Nao focar janela do navegador. Default.',
   '  --no-self-heal           Nao tentar auto-recuperacao da extensao.',
@@ -872,6 +879,7 @@ const parseArgs = (argv) => {
       color: process.env.NO_COLOR ? false : true,
       wakeBrowser: false,
       activateTab: false,
+      activateTabExplicit: false,
       focusWindow: false,
       selfHeal: true,
       allowReload: false,
@@ -1019,8 +1027,14 @@ const parseArgs = (argv) => {
     else if (arg === '--no-exit-when-idle') out.flags.bridgeExitWhenIdle = false;
     else if (arg === '--wake' || arg === '--wake-browser') out.flags.wakeBrowser = true;
     else if (arg === '--no-wake') out.flags.wakeBrowser = false;
-    else if (arg === '--activate-tab') out.flags.activateTab = true;
-    else if (arg === '--no-activate-tab') out.flags.activateTab = false;
+    else if (arg === '--activate-tab') {
+      out.flags.activateTab = true;
+      out.flags.activateTabExplicit = true;
+    }
+    else if (arg === '--no-activate-tab') {
+      out.flags.activateTab = false;
+      out.flags.activateTabExplicit = true;
+    }
     else if (arg === '--focus-window') out.flags.focusWindow = true;
     else if (arg === '--no-focus-window') out.flags.focusWindow = false;
     else if (arg === '--no-self-heal') out.flags.selfHeal = false;
@@ -1528,6 +1542,12 @@ const bridgeHealthMismatch = (health = {}) => {
 const bridgeRuntimeMismatch = async (flags, health = {}) => {
   const mismatch = bridgeHealthMismatch(health);
   if (mismatch) return mismatch;
+  const runtimeFilesMismatch = bridgeRuntimeFilesMismatch(health, {
+    packageRoot: PACKAGE_ROOT,
+    version: VERSION,
+    expectedProtocolVersion: EXPECTED_BRIDGE_PROTOCOL_VERSION,
+  });
+  if (runtimeFilesMismatch) return runtimeFilesMismatch;
   if (!EXPECTED_CHROME_EXTENSION_INFO.buildStamp || health.expectedChromeExtension) return null;
   try {
     const diagnostics = await requestJson(flags.bridgeUrl, '/agent/clients', { timeoutMs: 1500 });
@@ -1563,39 +1583,10 @@ const isSafeStaleBridgeTarget = (health, mismatch) => {
   return bridgeProcessLooksLikeExporter(processInfo);
 };
 
-const staleBridgeMessage = (mismatch, { safe = false } = {}) => {
-  const processInfo = mismatch?.process || {};
-  const pid = processInfo.pid ? ` PID ${processInfo.pid}` : '';
-  const path = processInfo.root || processInfo.path || processInfo.commandLine || null;
-  const location = path ? `\nProcesso: ${path}` : '';
-  if (mismatch?.kind === 'name') {
-    return `A porta da bridge respondeu como ${mismatch.actualName || 'outro serviço'}, não como gemini-md-export.${location}`;
-  }
-  if (mismatch?.kind === 'protocol') {
-    return (
-      `Bridge local desatualizada${pid}: protocolo ${mismatch.actualProtocolVersion ?? '?'}; ` +
-      `esta CLI espera protocolo ${mismatch.expectedProtocolVersion ?? '?'}.${location}` +
-      (safe ? '' : '\nNão encontrei um alvo seguro para reiniciar automaticamente.')
-    );
-  }
-  if (mismatch?.kind === 'browser-build') {
-    return (
-      `Bridge local desatualizada${pid}: build da extensão ${mismatch.actualBuildStamp ?? '?'}; ` +
-      `esta CLI espera ${mismatch.expectedBuildStamp ?? '?'}.${location}` +
-      (safe ? '' : '\nNão encontrei um alvo seguro para reiniciar automaticamente.')
-    );
-  }
-  return (
-    `Bridge local desatualizada${pid}: ${mismatch?.actualVersion || '?'} -> ${mismatch?.expectedVersion || VERSION}.` +
-    location +
-    (safe ? '' : '\nNão encontrei um alvo seguro para reiniciar automaticamente.')
-  );
-};
-
 const createStaleBridgeError = (health, mismatch, details = {}) => {
   const err = new Error(
     [
-      staleBridgeMessage(mismatch, details),
+      staleBridgeMessage(mismatch, { ...details, version: VERSION }),
       'Feche a sessão antiga do Gemini CLI/exporter ou rode cleanup stale-processes depois de conferir o PID.',
     ]
       .filter(Boolean)
@@ -1628,7 +1619,7 @@ const createActiveExportBridgeError = (health, mismatch = null, details = {}) =>
   const activeCount = bridgeActiveJobCount(health);
   const processInfo = bridgeProcessInfo(health);
   const pid = processInfo.pid ? ` PID ${processInfo.pid}` : '';
-  const reason = mismatch ? `${staleBridgeMessage(mismatch, { safe: true })}\n` : '';
+  const reason = mismatch ? `${staleBridgeMessage(mismatch, { safe: true, version: VERSION })}\n` : '';
   const plural = activeCount === 1 ? 'export ativo' : 'exports ativos';
   const err = new Error(
     `${reason}Bridge local${pid} tem ${activeCount} ${plural}. ` +
@@ -1775,14 +1766,11 @@ const recoverStaleBridge = async (flags, ui, health, mismatch) => {
     throw createStaleBridgeError(health, mismatch, { safe });
   }
   if (shouldWriteInlineStatus(ui)) {
-    ui.stdout.write(`${staleBridgeMessage(mismatch, { safe: true })}\n`);
+    ui.stdout.write(`${staleBridgeMessage(mismatch, { safe: true, version: VERSION })}\n`);
     ui.stdout.write('Reiniciando bridge local...\n');
   } else {
     setWaitNote(ui, 'Atualizando bridge local', {
-      detail:
-        mismatch.kind === 'browser-build'
-          ? `Bridge antiga detectada: build ${mismatch.actualBuildStamp || '?'} -> ${mismatch.expectedBuildStamp || '?'}`
-          : `Bridge antiga detectada: ${mismatch.actualVersion || '?'} -> ${mismatch.expectedVersion || VERSION}`,
+      detail: bridgeMismatchStatusDetail(mismatch, VERSION),
     });
   }
   const terminated = await terminateStaleBridgeProcess(health, {
@@ -1846,9 +1834,7 @@ const ensureBridgeAvailable = async (flags, ui, options = {}) => {
         renderIntervalMs: DEFAULT_TUI_RENDER_INTERVAL_MS,
         tuiKind: 'ready',
         intervalMessage: (elapsedMs) =>
-          mismatch.kind === 'browser-build'
-            ? `Bridge antiga detectada: build ${mismatch.actualBuildStamp || '?'} -> ${mismatch.expectedBuildStamp || '?'}; ${formatDuration(elapsedMs)} decorridos.`
-            : `Bridge antiga detectada: ${mismatch.actualVersion || '?'} -> ${mismatch.expectedVersion || VERSION}; ${formatDuration(elapsedMs)} decorridos.`,
+          bridgeMismatchIntervalMessage(mismatch, formatDuration(elapsedMs), VERSION),
       },
       () => recoverStaleBridge(flags, ui, health, mismatch),
     );
@@ -2023,19 +2009,6 @@ const terminalColorForStatus = (status) => {
   return 'cyan';
 };
 
-const jobTotals = (job = {}) => {
-  const decision = job.decisionSummary || {};
-  const totals = decision.totals || {};
-  const downloaded = Number(totals.downloadedNow ?? job.successCount ?? 0) || 0;
-  const failed = Number(totals.failed ?? job.failureCount ?? 0) || 0;
-  const skipped = Number(totals.skipped ?? job.skippedCount ?? 0) || 0;
-  const warnings = Number(totals.mediaWarnings ?? 0) || 0;
-  const webSeen = totals.geminiWebSeen ?? job.webConversationCount ?? job.loadedCount ?? null;
-  const existing = totals.existingInVault ?? job.existingVaultCount ?? null;
-  const missing = totals.missingInVault ?? job.missingCount ?? null;
-  return { downloaded, failed, skipped, warnings, webSeen, existing, missing };
-};
-
 const fitTerminalLine = (ui, text, reserved = 0) => {
   const width = Math.max(24, (Number(ui.stdout.columns) || terminalWidth(ui)) - reserved);
   const value = String(text || '');
@@ -2095,6 +2068,7 @@ const summarizeForResultJson = (job = {}) => {
     downloadedCount: totals.downloaded,
     skippedCount: totals.skipped,
     warningCount: totals.warnings,
+    dateImport: totals.dateImport,
     failedCount: totals.failed,
     failures: failures.slice(-10).map((failure) => ({
       index: failure.index ?? null,
@@ -3127,6 +3101,57 @@ const fetchJobList = async (bridgeUrl, flags = {}) =>
     },
   );
 
+const exportJobTypeForKind = (kind) => {
+  if (kind === 'selected' || kind === 'reexport') return 'direct-chats-export';
+  if (kind === 'notebook') return 'notebook-export';
+  return 'recent-chats-export';
+};
+
+const isTabBusyStartError = (err) =>
+  err?.code === 'tab_operation_in_progress' ||
+  err?.data?.code === 'tab_operation_in_progress' ||
+  /tab_operation_in_progress|aba ja esta executando|aba já esta executando|aba ja está executando|aba já está executando/i.test(
+    String(err?.message || ''),
+  );
+
+const sameResolvedPath = (left, right) => {
+  if (!left || !right) return true;
+  try {
+    return resolve(String(left)) === resolve(String(right));
+  } catch {
+    return String(left) === String(right);
+  }
+};
+
+const activeJobMatchesExportStart = (job = {}, kind, flags = {}) => {
+  if (!job.jobId || TERMINAL_STATUSES.has(job.status)) return false;
+  if (job.type && job.type !== exportJobTypeForKind(kind)) return false;
+  if (!sameResolvedPath(job.outputDir, flags.outputDir || flags.vaultDir)) return false;
+  if (flags.maxChats !== undefined && job.maxChats !== undefined) {
+    if (Number(job.maxChats) !== Number(flags.maxChats)) return false;
+  }
+  return true;
+};
+
+const adoptActiveExportJobAfterStartBusy = async (bridgeUrl, kind, flags, ui, err) => {
+  if (!isTabBusyStartError(err)) return null;
+  let active = null;
+  try {
+    active = await fetchJobList(bridgeUrl, { active: true, limit: 10 });
+  } catch {
+    return null;
+  }
+  const matches = (Array.isArray(active?.jobs) ? active.jobs : []).filter((job) =>
+    activeJobMatchesExportStart(job, kind, flags),
+  );
+  if (matches.length !== 1) return null;
+  const job = matches[0];
+  if (shouldWriteInlineStatus(ui)) {
+    ui.stdout.write(`Job ja estava ativo; acompanhando ${job.jobId}.\n`);
+  }
+  return job;
+};
+
 const cancelJob = async (bridgeUrl, jobId) =>
   requestJson(bridgeUrl, appendParams('/agent/export-job-cancel', { jobId }), {
     timeoutMs: 20000,
@@ -3429,6 +3454,7 @@ const attachJobContextToErrorMessage = (err, job = {}) => {
 const runSync = async (parsed, streams = {}) => {
   const flags = { ...parsed.flags };
   if (flags.allowReloadExplicit !== true) flags.allowReload = true;
+  if (flags.activateTabExplicit !== true) flags.activateTab = true;
   if (flags.readyWaitMsExplicit !== true) {
     flags.readyWaitMs = Math.max(Number(flags.readyWaitMs || 0), DEFAULT_EXPORT_READY_WAIT_MS);
   }
@@ -4228,6 +4254,7 @@ const runExport = async (parsed, streams = {}) => {
   const subcommand = parsed.positionals[0];
   const flags = { ...parsed.flags };
   if (flags.allowReloadExplicit !== true) flags.allowReload = true;
+  if (flags.activateTabExplicit !== true) flags.activateTab = true;
   if (flags.readyWaitMsExplicit !== true) {
     flags.readyWaitMs = Math.max(Number(flags.readyWaitMs || 0), DEFAULT_EXPORT_READY_WAIT_MS);
   }
@@ -4295,7 +4322,13 @@ const runExport = async (parsed, streams = {}) => {
     }
     await ensureBridgeAvailable(flags, ui);
     await ensureReadyForExport(flags.bridgeUrl, flags, ui);
-    initialJob = await startExportJob(flags.bridgeUrl, isSelectedExport ? 'selected' : subcommand, flags);
+    const exportKind = isSelectedExport ? 'selected' : subcommand;
+    try {
+      initialJob = await startExportJob(flags.bridgeUrl, exportKind, flags);
+    } catch (err) {
+      initialJob = await adoptActiveExportJobAfterStartBusy(flags.bridgeUrl, exportKind, flags, ui, err);
+      if (!initialJob) throw err;
+    }
     uninstallSignalCleanup = installJobSignalCleanup({
       flags,
       ui,

@@ -53,7 +53,7 @@ export const requestMetadataActivityScan = async ({
         })),
         resume: resume || null,
         openIfMissing,
-        openDetails: false,
+        openDetails: true,
       }),
     });
     const text = await response.text();

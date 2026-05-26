@@ -117,6 +117,182 @@ test('activity content script resolve candidatos sem vazar texto sensível', asy
   assert.doesNotMatch(serialized, /transportador de serotonina/);
 });
 
+test('activity content script aceita candidatos com scoring do MCP', async () => {
+  const debug = loadHarness(`
+    <div class="activity-card" data-date="May 10, 2026" data-timestamp="1778395569000">
+      <div>Gemini Apps</div>
+      <section data-gm-activity-details>
+        <p>Prompted Gemini</p>
+        <p>Primeiro prompt sensível de fixture HTML</p>
+        <p>Primeira resposta sensível de fixture HTML</p>
+      </section>
+    </div>
+  `);
+
+  const result = await debug.scanActivityPage({
+    candidates: [
+      {
+        chatId: 'b8e7c075effe9457',
+        scoring: {
+          firstPrompt: 'Primeiro prompt sensível de fixture HTML',
+          assistantSamples: ['Primeira resposta sensível de fixture HTML'],
+        },
+      },
+    ],
+    maxCards: 20,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.matches[0].chatId, 'b8e7c075effe9457');
+  assert.equal(result.matches[0].date, '2026-05-10T06:46:09Z');
+});
+
+test('activity content script abre detalhes quando scan pede openDetails', async () => {
+  const debug = loadHarness(`
+    <div class="activity-card" data-date="May 10, 2026" data-timestamp="1778395569000">
+      <div>Gemini Apps</div>
+      <div>Consulta com título visível do My Activity</div>
+      <button aria-label="Item details">Item details</button>
+    </div>
+  `);
+  const { document } = debug._window;
+  document.querySelector('button').addEventListener('click', () => {
+    const dialog = document.createElement('div');
+    dialog.setAttribute('role', 'dialog');
+    dialog.innerHTML = '<p>Prompt oculto em detalhes do My Activity</p>';
+    document.body.appendChild(dialog);
+  });
+
+  const result = await debug.scanActivityPage({
+    candidates: [
+      {
+        chatId: 'b8e7c075effe9457',
+        scoring: {
+          title: 'Consulta com título visível do My Activity',
+          firstPrompt: 'Prompt oculto em detalhes do My Activity',
+        },
+      },
+    ],
+    maxCards: 20,
+    openDetails: true,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.matches[0].chatId, 'b8e7c075effe9457');
+  assert.equal(result.matches[0].date, '2026-05-10T06:46:09Z');
+});
+
+test('activity content script nao abre detalhes sem match preliminar no card fechado', async () => {
+  let detailClicks = 0;
+  const debug = loadHarness(`
+    <div class="activity-card" data-date="May 10, 2026" data-timestamp="1778395569000">
+      <div>Gemini Apps</div>
+      <div>Texto de outro chat qualquer</div>
+      <button aria-label="Item details">Item details</button>
+    </div>
+  `);
+  const { document } = debug._window;
+  document.querySelector('button').addEventListener('click', () => {
+    detailClicks += 1;
+    const dialog = document.createElement('div');
+    dialog.setAttribute('role', 'dialog');
+    dialog.textContent = 'Prompt oculto que nao deveria ser lido sem candidato preliminar';
+    document.body.appendChild(dialog);
+  });
+
+  const result = await debug.scanActivityPage({
+    candidates: [
+      {
+        chatId: 'b8e7c075effe9457',
+        scoring: {
+          title: 'Consulta com título visível do My Activity',
+          firstPrompt: 'Prompt oculto que nao deveria ser lido sem candidato preliminar',
+        },
+      },
+    ],
+    maxCards: 20,
+    openDetails: true,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.matches.length, 0);
+  assert.equal(detailClicks, 0);
+});
+
+test('activity content script diagnostica cards sem retornar texto bruto por padrao', async () => {
+  const debug = loadHarness(`
+    <div class="activity-card" data-date="May 10, 2026" data-timestamp="1778395569000">
+      <div>Gemini Apps</div>
+      <div>Consulta com título visível do My Activity</div>
+      <button aria-label="Item details">Item details</button>
+    </div>
+  `);
+
+  const result = await debug.scanActivityPage({
+    diagnoseCards: true,
+    candidates: [
+      {
+        chatId: 'b8e7c075effe9457',
+        scoring: {
+          title: 'Consulta com título visível do My Activity',
+          firstPrompt: 'Prompt oculto em detalhes do My Activity',
+        },
+      },
+    ],
+    maxCards: 20,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.diagnostics.cardCount, 1);
+  assert.equal(result.diagnostics.cards[0].hasDetailsButton, true);
+  assert.equal(result.diagnostics.cards[0].topPreliminary[0].chatId, 'b8e7c075effe9457');
+  assert.equal(result.diagnostics.cards[0].topPreliminary[0].score, 1);
+  const serialized = JSON.stringify(result);
+  assert.doesNotMatch(serialized, /Consulta com título visível/);
+  assert.doesNotMatch(serialized, /Prompt oculto/);
+});
+
+test('activity content script ignora container agregador com varios cards', async () => {
+  const debug = loadHarness(`
+    <div data-timestamp="1778390000000">
+      <div class="activity-card" data-timestamp="1778395569000">
+        <div>Gemini Apps</div>
+        <section data-gm-activity-details>
+          <p>Primeiro prompt sensível de fixture HTML</p>
+        </section>
+      </div>
+      <div class="activity-card" data-timestamp="1778399551000">
+        <div>Gemini Apps</div>
+        <section data-gm-activity-details>
+          <p>Último prompt sensível de fixture HTML</p>
+        </section>
+      </div>
+    </div>
+  `);
+
+  const result = await debug.scanActivityPage({
+    candidates: [
+      {
+        chatId: 'b8e7c075effe9457',
+        scoring: { firstPrompt: 'Primeiro prompt sensível de fixture HTML' },
+      },
+      {
+        chatId: 'c8e7c075effe9457',
+        scoring: { firstPrompt: 'Último prompt sensível de fixture HTML' },
+      },
+    ],
+    maxCards: 20,
+  });
+
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(result.matches.map((match) => [match.chatId, match.date]))),
+    [
+      ['b8e7c075effe9457', '2026-05-10T06:46:09Z'],
+      ['c8e7c075effe9457', '2026-05-10T07:52:31Z'],
+    ],
+  );
+});
+
 test('activity content script converte data textual local para UTC sem milissegundos', async () => {
   const originalTz = process.env.TZ;
   process.env.TZ = 'America/Sao_Paulo';
@@ -143,6 +319,81 @@ test('activity content script converte data textual local para UTC sem milissegu
     });
 
     assert.equal(result.matches[0].date, '2026-05-10T06:46:00Z');
+  } finally {
+    if (originalTz === undefined) delete process.env.TZ;
+    else process.env.TZ = originalTz;
+  }
+});
+
+test('activity content script usa cabecalho de data anterior ao card', async () => {
+  const originalTz = process.env.TZ;
+  process.env.TZ = 'America/Sao_Paulo';
+  try {
+    const debug = loadHarness(`
+      <section>
+        <h2>May 10, 2026</h2>
+        <div class="activity-card">
+          <div>Gemini Apps</div>
+          <span data-date="metadado interno sem data parseavel"></span>
+          <div>Prompted Resumo sobre pneumotórax3:46 AM • Details</div>
+        </div>
+      </section>
+    `);
+
+    const result = await debug.scanActivityPage({
+      candidates: [
+        {
+          chatId: 'aaaaaaaaaaaa',
+          firstPrompt: 'Resumo sobre pneumotórax',
+        },
+      ],
+      maxCards: 20,
+    });
+
+    assert.equal(result.matches[0].date, '2026-05-10T06:46:00Z');
+  } finally {
+    if (originalTz === undefined) delete process.env.TZ;
+    else process.env.TZ = originalTz;
+  }
+});
+
+test('activity content script carrega cabecalho de data distante no mesmo grupo', async () => {
+  const originalTz = process.env.TZ;
+  process.env.TZ = 'America/Sao_Paulo';
+  try {
+    const previousCards = Array.from(
+      { length: 16 },
+      (_, index) => `
+        <div class="activity-card">
+          <div>Gemini Apps</div>
+          <div>Prompted Outro item ${index}2:${String(index).padStart(2, '0')} AM • Details</div>
+        </div>
+      `,
+    ).join('');
+    const debug = loadHarness(`
+      <section>
+        <h2>May 10, 2026</h2>
+        ${previousCards}
+        <div class="activity-card">
+          <div>Gemini Apps</div>
+          <span data-date="metadado interno sem data parseavel"></span>
+          <div>Prompted Caso real com cabecalho distante e texto suficiente para evidencia3:46 AM • Details</div>
+        </div>
+      </section>
+    `);
+
+    const result = await debug.scanActivityPage({
+      candidates: [
+        {
+          chatId: 'bbbbbbbbbbbb',
+          firstPrompt: 'Caso real com cabecalho distante e texto suficiente para evidencia',
+        },
+      ],
+      maxCards: 30,
+    });
+
+    const match = result.matches.find((item) => item.chatId === 'bbbbbbbbbbbb');
+    assert.equal(match?.date, '2026-05-10T06:46:00Z');
   } finally {
     if (originalTz === undefined) delete process.env.TZ;
     else process.env.TZ = originalTz;

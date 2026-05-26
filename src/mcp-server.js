@@ -135,6 +135,10 @@ const {
   metadataDateWarningsForJob,
 } = await import(compiledTsModuleUrl('mcp', 'export-job-date-summary.js'));
 const {
+  compactReportItems,
+  normalizeReportItemChatId,
+} = await import(compiledTsModuleUrl('mcp', 'export-report-resume.js'));
+const {
   abortPendingCommandsAfterEventStreamReconnect,
   activityClientMatchesSelector,
   buildActiveExportJobReloadErrorInfo,
@@ -5407,38 +5411,6 @@ const normalizeReportPath = (filePath) => {
   if (!filePath) return null;
   return resolveOutputDir(filePath);
 };
-
-const normalizeReportItemChatId = (item = {}) =>
-  normalizeConversationChatId(item) ||
-  chatIdFromText(item.chatId) ||
-  chatIdFromText(item.url) ||
-  chatIdFromText(item.filename) ||
-  chatIdFromText(item.filePath) ||
-  '';
-
-const compactReportItems = (items, kind) =>
-  (Array.isArray(items) ? items : [])
-    .map((item) => {
-      const chatId = normalizeReportItemChatId(item);
-      if (!chatId) return null;
-      return {
-        kind,
-        index: item.index ?? null,
-        chatId: chatId.toLowerCase(),
-        title: item.title || null,
-        filename: item.filename || null,
-        filePath: item.filePath || null,
-        relativePath: item.relativePath || null,
-        bytes: item.bytes ?? null,
-        reason: item.reason || kind,
-        mediaFileCount: item.mediaFileCount ?? null,
-        mediaFailureCount: item.mediaFailureCount ?? null,
-        turns: item.turns ?? null,
-        overwritten: item.overwritten ?? null,
-        error: item.error || null,
-      };
-    })
-    .filter(Boolean);
 
 const loadRecentChatsResumeCheckpoint = (filePath) => {
   const reportFile = normalizeReportPath(filePath);

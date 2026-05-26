@@ -389,23 +389,43 @@ export const runRecentExportConversationOperation = async (
           let dateImport: AnyRecord | null = null;
           try {
             if (deps.hasDateImportSource(args)) {
-              batchEvidence = await deps.buildExportDateImportBatchEvidenceForPayloads(
-                [
-                  {
-                    key: String(integrity.snapshot?.chatId || target.targetChatId).toLowerCase(),
-                    payload,
-                    integrity,
+              try {
+                batchEvidence = await deps.buildExportDateImportBatchEvidenceForPayloads(
+                  [
+                    {
+                      key: String(integrity.snapshot?.chatId || target.targetChatId).toLowerCase(),
+                      payload,
+                      integrity,
+                    },
+                  ],
+                  args,
+                );
+                job.dateImport = {
+                  ...(job.dateImport || {}),
+                  batchCandidates: batchEvidence.candidates,
+                  ...(args._exportDateImportActivitySummary
+                    ? { myActivity: args._exportDateImportActivitySummary }
+                    : {}),
+                };
+              } catch (err: any) {
+                deps.appendExportJobTrace(job, 'date_import_batch_evidence_unavailable', {
+                  index,
+                  chatId: target.targetChatId,
+                  operationId,
+                  code: err?.code || null,
+                  error: err?.message || String(err),
+                });
+                job.dateImport = {
+                  ...(job.dateImport || {}),
+                  batchCandidates: 0,
+                  myActivity: {
+                    ...(job.dateImport?.myActivity || {}),
+                    attempted: true,
+                    error: err?.message || String(err),
+                    code: err?.code || null,
                   },
-                ],
-                args,
-              );
-              job.dateImport = {
-                ...(job.dateImport || {}),
-                batchCandidates: batchEvidence.candidates,
-                ...(args._exportDateImportActivitySummary
-                  ? { myActivity: args._exportDateImportActivitySummary }
-                  : {}),
-              };
+                };
+              }
             }
             dateImport = await deps.enrichExportPayloadWithDates({
               payload,
@@ -421,7 +441,7 @@ export const runRecentExportConversationOperation = async (
 
           operationDateImportReceipt = dateImport.receipt;
           if (!dateImport.ok) {
-            deps.appendExportJobTrace(job, 'date_import_unresolved', {
+            deps.appendExportJobTrace(job, 'date_import_unresolved_saved_without_abort', {
               index,
               chatId: target.targetChatId,
               operationId,
@@ -429,16 +449,10 @@ export const runRecentExportConversationOperation = async (
               dateImport: dateImport.receipt || null,
               evidenceCount: Array.isArray(dateImport.evidence) ? dateImport.evidence.length : null,
             });
-            const error = new Error(
-              dateImport.message || 'Datas da conversa não foram resolvidas.',
-            );
-            (error as AnyRecord).code = dateImport.code || 'metadata_unresolved';
-            (error as AnyRecord).data = {
-              code: dateImport.code || 'metadata_unresolved',
-              dateImport: dateImport.receipt || { enabled: false, status: 'unresolved' },
-              evidence: Array.isArray(dateImport.evidence) ? dateImport.evidence : [],
+            return {
+              payload: dateImport.payload || payload,
+              receipt: dateImport.receipt || { enabled: true, status: 'unresolved' },
             };
-            throw error;
           }
           return {
             payload: dateImport.payload,

@@ -972,6 +972,67 @@ test('CLI substitui bridge antiga segura por bridge atual antes de seguir', asyn
   }
 });
 
+test('CLI substitui bridge com arquivos instalados mais novos que o processo', async () => {
+  const port = await getFreePort();
+  const bridgeUrl = `http://127.0.0.1:${port}`;
+  const oldBridge = await spawnFakeOldBridge(port, {
+    version: PACKAGE_VERSION,
+    protocolVersion: 2,
+    startedAt: '2020-01-01T00:00:00.000Z',
+  });
+  const stdout = captureStream();
+  const stderr = captureStream();
+  let freshBridgePid = null;
+
+  try {
+    const run = await main(
+      [
+        'doctor',
+        '--bridge-url',
+        bridgeUrl,
+        '--json',
+        '--no-wake',
+        '--no-self-heal',
+        '--no-reload',
+        '--ready-wait-ms',
+        '0',
+        '--bridge-start-wait-ms',
+        '10000',
+      ],
+      { stdout, stderr },
+    );
+
+    assert.equal(run.exitCode, 4);
+    const parsed = JSON.parse(stdout.text());
+    assert.equal(parsed.bridge.ok, true);
+    assert.equal(parsed.bridge.version, PACKAGE_VERSION);
+    assert.notEqual(parsed.bridge.pid, oldBridge.pid);
+    assert.equal(stderr.text(), '');
+    assert.equal(await waitForChildExit(oldBridge), true);
+
+    const health = await waitForHealth(bridgeUrl);
+    freshBridgePid = health.pid;
+    assert.equal(health.version, PACKAGE_VERSION);
+    assert.equal(health.bridgeOnly, true);
+  } finally {
+    if (freshBridgePid) {
+      try {
+        process.kill(freshBridgePid, 'SIGTERM');
+      } catch {
+        // Process may already have exited.
+      }
+    }
+    if (isPidAlive(oldBridge.pid)) {
+      try {
+        process.kill(oldBridge.pid, 'SIGTERM');
+      } catch {
+        // Process may already have exited.
+      }
+    }
+    await sleep(150);
+  }
+});
+
 test('CLI nao substitui bridge antiga enquanto ha export ativo', async () => {
   const port = await getFreePort();
   const bridgeUrl = `http://127.0.0.1:${port}`;
@@ -1885,6 +1946,65 @@ test('CLI sync --plain destaca historico incompleto e falhas no RESULT_JSON', as
     assert.equal(result.fullHistoryVerified, false);
     assert.equal(result.failures[0].chatId, '3c1d9107303b754e');
     assert.equal(result.loadMoreTimedOut, true);
+    assert.equal(stderr.text(), '');
+  });
+});
+
+test('CLI RESULT_JSON conta datas pendentes como avisos', async () => {
+  const completedWithPendingDates = {
+    ...completedJob,
+    decisionSummary: {
+      ...completedJob.decisionSummary,
+      totals: {
+        ...completedJob.decisionSummary.totals,
+        dateImport: {
+          matched: 1,
+          partial: 0,
+          unresolved: 1,
+          pending: 1,
+        },
+      },
+      warnings: ['1 conversa ficou sem datas no Takeout/My Activity.'],
+    },
+  };
+
+  await withServer((req, res, url) => {
+    if (url.pathname === '/agent/ready') {
+      sendJson(res, 200, {
+        ready: true,
+        mode: 'hot',
+        connectedClientCount: 1,
+        selectableTabCount: 1,
+        commandReadyClientCount: 1,
+      });
+      return;
+    }
+    if (url.pathname === '/agent/export-recent-chats') {
+      sendJson(res, 202, completedWithPendingDates);
+      return;
+    }
+    sendJson(res, 404, { error: `not found: ${url.pathname}` });
+  }, async (bridgeUrl) => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+    const run = await main(
+      ['export', 'recent', '--bridge-url', bridgeUrl, '--plain', '--result-json', '--poll-ms', '10'],
+      { stdout, stderr },
+    );
+
+    assert.equal(run.exitCode, 0);
+    const resultLine = stdout
+      .text()
+      .split(/\r?\n/)
+      .find((line) => line.startsWith('RESULT_JSON '));
+    const result = JSON.parse(resultLine.replace('RESULT_JSON ', ''));
+    assert.equal(result.warningCount, 1);
+    assert.deepEqual(result.dateImport, {
+      matched: 1,
+      partial: 0,
+      unresolved: 1,
+      pending: 1,
+    });
     assert.equal(stderr.text(), '');
   });
 });
@@ -2859,6 +2979,8 @@ test('CLI export recent recarrega abas existentes automaticamente antes de inici
           (item) => item.pathname === '/agent/tabs' && item.searchParams.get('action') === 'reload',
         );
         assert.equal(reloadRequest?.searchParams.get('allowReload'), 'true');
+        const exportRequest = requests.find((item) => item.pathname === '/agent/export-recent-chats');
+        assert.equal(exportRequest?.searchParams.get('activateTab'), 'true');
         const postReloadReady = readyRequests.find(
           (item) => item.searchParams.get('waitMs') === '75000',
         );
@@ -2866,6 +2988,147 @@ test('CLI export recent recarrega abas existentes automaticamente antes de inici
       });
     },
   );
+});
+
+test('CLI export recent respeita opt-out explicito de ativacao de aba', async () => {
+  await withServer((req, res, url) => {
+    if (url.pathname === '/agent/ready') {
+      sendJson(res, 200, {
+        ready: true,
+        mode: 'hot',
+        connectedClientCount: 1,
+        selectableTabCount: 1,
+        commandReadyClientCount: 1,
+      });
+      return;
+    }
+    if (url.pathname === '/agent/export-recent-chats') {
+      sendJson(res, 200, {
+        jobId: 'job-1',
+        status: 'completed',
+        phase: 'done',
+        successCount: 1,
+        failureCount: 0,
+        completed: 1,
+        requested: 1,
+        outputDir: '/tmp/gemini-md-export-test',
+      });
+      return;
+    }
+    sendJson(res, 404, { error: `not found: ${url.pathname}` });
+  }, async (bridgeUrl, requests) => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+    const run = await main(
+      [
+        'export',
+        'recent',
+        '--bridge-url',
+        bridgeUrl,
+        '--plain',
+        '--no-activate-tab',
+        '--max-chats',
+        '1',
+        '--output-dir',
+        '/tmp/gemini-md-export-test',
+      ],
+      { stdout, stderr },
+    );
+
+    assert.equal(run.exitCode, 0);
+    assert.equal(stderr.text(), '');
+    const exportRequest = requests.find((item) => item.pathname === '/agent/export-recent-chats');
+    assert.equal(exportRequest?.searchParams.get('activateTab'), 'false');
+  });
+});
+
+test('CLI export recent adota job ativo quando start retorna aba ocupada', async () => {
+  const outputDir = '/tmp/gemini-md-export-adopt';
+  let activeJobsRequested = false;
+  let statusRequested = false;
+
+  await withServer((req, res, url) => {
+    if (url.pathname === '/agent/ready') {
+      sendJson(res, 200, {
+        ready: true,
+        mode: 'hot',
+        connectedClientCount: 1,
+        selectableTabCount: 1,
+        commandReadyClientCount: 1,
+      });
+      return;
+    }
+    if (url.pathname === '/agent/export-recent-chats') {
+      sendJson(res, 503, {
+        code: 'tab_operation_in_progress',
+        error: 'A aba ja esta executando uma operacao pesada.',
+      });
+      return;
+    }
+    if (url.pathname === '/agent/export-jobs') {
+      activeJobsRequested = url.searchParams.get('active') === 'true';
+      sendJson(res, 200, {
+        ok: true,
+        jobs: [
+          {
+            jobId: 'job-adopted',
+            type: 'recent-chats-export',
+            status: 'running',
+            phase: 'exporting',
+            outputDir,
+            maxChats: 2,
+            successCount: 1,
+            failureCount: 0,
+            skippedCount: 0,
+            completed: 1,
+            requested: 2,
+          },
+        ],
+      });
+      return;
+    }
+    if (url.pathname === '/agent/export-job-status') {
+      statusRequested = true;
+      sendJson(res, 200, {
+        jobId: 'job-adopted',
+        type: 'recent-chats-export',
+        status: 'completed',
+        phase: 'done',
+        outputDir,
+        maxChats: 2,
+        successCount: 2,
+        failureCount: 0,
+        skippedCount: 0,
+        completed: 2,
+        requested: 2,
+      });
+      return;
+    }
+    sendJson(res, 404, { error: `not found: ${url.pathname}` });
+  }, async (bridgeUrl) => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+    const run = await main(
+      [
+        'export',
+        'recent',
+        '--bridge-url',
+        bridgeUrl,
+        '--plain',
+        '--max-chats',
+        '2',
+        '--output-dir',
+        outputDir,
+      ],
+      { stdout, stderr },
+    );
+
+    assert.equal(run.exitCode, 0);
+    assert.equal(activeJobsRequested, true);
+    assert.equal(statusRequested, true);
+    assert.match(stdout.text(), /Job ja estava ativo; acompanhando job-adopted/);
+    assert.equal(stderr.text(), '');
+  });
 });
 
 test('CLI tabs reload explica quando nao ha canal para recarregar abas existentes', async () => {

@@ -75,7 +75,7 @@ export const buildRecentChatsExportReportPayload = (
   tabSession: deps.summarizeTabSession(job.tabSession),
   trace: deps.summarizeJobTrace(job.trace),
   progressMessage: deps.exportJobProgressMessage(job),
-  decisionSummary: deps.exportJobDecisionSummary(job),
+  decisionSummary: deps.exportJobDecisionSummary({ ...job, successes, recentSuccesses: successes }),
   nextAction: deps.exportJobNextAction(job),
   current: job.current || null,
   successes,
@@ -142,7 +142,7 @@ export const buildDirectChatsExportReportPayload = (
   tabSession: deps.summarizeTabSession(job.tabSession),
   trace: deps.summarizeJobTrace(job.trace),
   progressMessage: deps.exportJobProgressMessage(job),
-  decisionSummary: deps.exportJobDecisionSummary(job),
+  decisionSummary: deps.exportJobDecisionSummary({ ...job, successes, recentSuccesses: successes }),
   nextAction: deps.exportJobNextAction(job),
   current: job.current || null,
   items: job.items.map((item: AnyRecord, index: number) => ({

@@ -389,7 +389,7 @@ test('export metadata fallback passa claim visual e espera longa para My Activit
     assert.equal(scanArgs.activityCommandTimeoutMs, DEFAULT_EXPORT_DATE_IMPORT_ACTIVITY_WAIT_MS + 15_000);
     assert.equal(scanArgs.preLaunchWaitMs, DEFAULT_EXPORT_DATE_IMPORT_ACTIVITY_PRE_LAUNCH_WAIT_MS);
     assert.equal(scanArgs.openIfMissing, true);
-    assert.equal(scanArgs.openDetails, false);
+    assert.equal(scanArgs.openDetails, true);
     assert.equal(scanArgs.claimLabel, '🔄 Sincroniza');
     assert.equal(scanArgs.candidates.length, 1);
 
@@ -402,6 +402,51 @@ test('export metadata fallback passa claim visual e espera longa para My Activit
     assert.equal(result.ok, true);
     assert.equal(result.receipt.source, 'my-activity');
     assert.equal(result.receipt.dateLastMessage, '2026-05-10T07:12:31Z');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('export metadata fallback preserva export quando My Activity some', async () => {
+  const dir = mkdtempSync(resolve(tmpdir(), 'gme-export-metadata-'));
+  const takeoutPath = resolve(dir, 'Minhaatividade.html');
+  writeFileSync(
+    takeoutPath,
+    `<!doctype html><html><body>
+<div class="outer-cell"><div>Gemini Apps</div><div>Prompted&nbsp;Primeiro prompt sensível de fixture HTML</div><div>10 de mai. de 2026, 03:46:09 BRT</div><p>Primeira resposta sensível de fixture HTML</p></div>
+</body></html>`,
+    'utf-8',
+  );
+
+  try {
+    const integrity = validateMcpExportPayloadBeforeWrite(payload, {
+      expectedChatId: 'b8e7c075effe9457',
+    });
+    const entries = [{ key: 'b8e7c075effe9457', payload, integrity }];
+    const args = { takeout: takeoutPath };
+
+    const batch = await buildExportDateImportBatchEvidenceWithActivityFallback(entries, args, {
+      scanActivity: async () => {
+        const error = new Error('Nenhuma aba do My Activity conectada à extensão.');
+        error.code = 'activity_client_missing';
+        throw error;
+      },
+    });
+
+    assert.equal(args._exportDateImportActivitySummary.attempted, true);
+    assert.equal(args._exportDateImportActivitySummary.error.code, 'activity_client_missing');
+
+    const result = enrichExportPayloadWithMetadataDates({
+      payload,
+      integrity,
+      context: createExportDateImportContext({ takeoutPath, useMyActivity: true }),
+      groupedEvidence: batch.groupedByKey.get('b8e7c075effe9457'),
+    });
+    assert.equal(result.ok, true);
+    assert.equal(result.receipt.status, 'partial');
+    assert.equal(result.receipt.source, 'takeout');
+    assert.equal(result.receipt.dateCreated, '2026-05-10T06:46:09Z');
+    assert.equal(result.receipt.dateLastMessage, null);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

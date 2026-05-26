@@ -265,6 +265,93 @@ test('recent export saves conversation with partial date receipt instead of fail
   );
 });
 
+test('recent export saves conversation when My Activity date evidence is unavailable', async () => {
+  let saveCalled = false;
+  const activityError = new Error('Nenhuma aba do My Activity conectada à extensão.');
+  activityError.code = 'activity_client_missing';
+  const deps = createDeps({
+    hasDateImportSource: () => true,
+    buildExportDateImportBatchEvidenceForPayloads: async () => {
+      throw activityError;
+    },
+    downloadConversationItemWithRetry: async (_job, client, conversation) => ({
+      activeClient: client,
+      browserCommandMs: 4,
+      result: {
+        payload: {
+          chatId: conversation.chatId,
+          title: conversation.title,
+          content: '# ok',
+          metrics: { timings: {}, counters: {} },
+        },
+        conversation,
+      },
+    }),
+    enrichExportPayloadWithDates: async ({ payload }) => ({
+      ok: true,
+      payload,
+      receipt: {
+        enabled: true,
+        status: 'unresolved',
+        source: 'takeout+my-activity',
+        dateCreated: null,
+        dateLastMessage: null,
+        evidenceCount: 0,
+      },
+      evidence: [],
+    }),
+    writeExportPayloadBundle: () => {
+      saveCalled = true;
+      return {
+        filePath: `/tmp/${target.targetChatId}.md`,
+        filename: `${target.targetChatId}.md`,
+        bytes: 123,
+        mediaFiles: [],
+      };
+    },
+  });
+  const job = {
+    jobId: 'job-1',
+    phase: 'exporting',
+    outputDir: '/tmp/export',
+    completed: 21,
+    dateImport: { enabled: true, source: 'takeout+my-activity' },
+  };
+  const client = { clientId: 'client-1' };
+  const failures = [];
+  const successes = [];
+
+  const result = await runRecentExportConversationOperation(
+    {
+      args: {},
+      client,
+      conversation: { chatId: target.targetChatId, title: target.title },
+      failures,
+      index: 22,
+      itemMetric: {},
+      job,
+      noProgressMs: 200,
+      operationId: 'job-1:022:f05318e93e234d75',
+      successes,
+      target,
+    },
+    deps,
+  );
+
+  assert.equal(result.client, client);
+  assert.equal(saveCalled, true);
+  assert.equal(successes.length, 1);
+  assert.equal(failures.length, 0);
+  assert.equal(successes[0].receipts.dateImport.status, 'unresolved');
+  assert.ok(
+    deps.traces.some(
+      (trace) =>
+        trace.event === 'date_import_batch_evidence_unavailable' &&
+        trace.payload.code === 'activity_client_missing',
+    ),
+  );
+});
+
 test('recent export watchdog follows active browser operation progress while download is still running', async () => {
   const operationId = 'job-1:022:f05318e93e234d75';
   const startedAt = Date.now();
