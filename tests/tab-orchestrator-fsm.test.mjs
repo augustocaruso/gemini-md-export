@@ -3,7 +3,10 @@ import test from 'node:test';
 
 import {
   classifyRuntimeEvidence,
+  allocateTabForPurpose,
+  initialTabPoolState,
   initialRecoveryState,
+  reduceTabLifecycle,
   reduceRuntimeRecovery,
   runtimeEpochId,
   runtimeEvidenceSatisfiesDesired,
@@ -292,12 +295,289 @@ const desiredEpochId = runtimeEpochId(expected);
 const strongDesiredEvidence = (overrides = {}) =>
   classifyRuntimeEvidence({
     client: matchingClient({
+      tabId: 42,
       eventStreamConnected: true,
       ...overrides,
     }),
     expected,
     nowMs: 1400,
   });
+
+const weakDesiredEvidence = (overrides = {}) =>
+  classifyRuntimeEvidence({
+    client: matchingClient({
+      tabId: 43,
+      eventStreamConnected: false,
+      ...overrides,
+    }),
+    expected,
+    nowMs: 1400,
+  });
+
+const observedPoolWith = (...evidenceItems) => {
+  let state = initialTabPoolState({ desiredEpochId, nowMs: 1000 });
+  for (const evidence of evidenceItems) {
+    state = reduceTabLifecycle(state, {
+      type: 'tabObserved',
+      nowMs: evidence.observedAtMs,
+      evidence,
+    }).state;
+  }
+  return state;
+};
+
+const allocationRequest = (overrides = {}) => ({
+  purpose: 'export-current-chat',
+  pageKind: 'activity',
+  requireStrongRuntime: true,
+  allowCreate: false,
+  claimId: 'claim-export-1',
+  ...overrides,
+});
+
+test('initial tab pool is empty for the desired epoch', () => {
+  assert.deepEqual(initialTabPoolState({ desiredEpochId, nowMs: 1000 }), {
+    desiredEpochId,
+    tabs: [],
+    updatedAtMs: 1000,
+  });
+});
+
+test('ready observed tab is allocated and emits tab.claim', () => {
+  const state = observedPoolWith(strongDesiredEvidence({ tabId: 7, page: { kind: 'activity' } }));
+
+  const result = allocateTabForPurpose(state, allocationRequest({ claimId: 'claim-7' }));
+
+  assert.equal(result.status, 'allocated');
+  assert.equal(result.tab.tabId, 7);
+  assert.deepEqual(result.effects, [
+    {
+      type: 'tab.claim',
+      reason: 'export-current-chat',
+      tabId: 7,
+      claimId: 'claim-7',
+    },
+  ]);
+});
+
+test('page-kind mismatch is not allocated', () => {
+  const state = observedPoolWith(strongDesiredEvidence({ tabId: 8, page: { kind: 'chat' } }));
+
+  const result = allocateTabForPurpose(state, allocationRequest());
+
+  assert.equal(result.status, 'unavailable');
+  assert.equal(result.reason, 'no_ready_tab_for_purpose');
+  assert.deepEqual(result.candidates, []);
+});
+
+test('quarantined tab is skipped and another matching ready tab is allocated', () => {
+  let state = observedPoolWith(
+    strongDesiredEvidence({ tabId: 9, page: { kind: 'activity' } }),
+    strongDesiredEvidence({ tabId: 10, clientId: 'other-ready', page: { kind: 'activity' } }),
+  );
+  state = reduceTabLifecycle(state, {
+    type: 'tabQuarantined',
+    nowMs: 1500,
+    tabId: 9,
+    reason: 'runtime_epoch_timeout',
+  }).state;
+
+  const result = allocateTabForPurpose(state, allocationRequest({ claimId: 'claim-10' }));
+
+  assert.equal(result.status, 'allocated');
+  assert.equal(result.tab.tabId, 10);
+  assert.deepEqual(result.effects, [
+    {
+      type: 'tab.claim',
+      reason: 'export-current-chat',
+      tabId: 10,
+      claimId: 'claim-10',
+    },
+  ]);
+});
+
+test('busy tab is skipped', () => {
+  let state = observedPoolWith(strongDesiredEvidence({ tabId: 11, page: { kind: 'activity' } }));
+  state = reduceTabLifecycle(state, {
+    type: 'tabBusy',
+    nowMs: 1500,
+    tabId: 11,
+    reason: 'hydrating_chat',
+  }).state;
+
+  const result = allocateTabForPurpose(state, allocationRequest());
+
+  assert.equal(result.status, 'unavailable');
+  assert.deepEqual(result.candidates, []);
+});
+
+test('ambiguous ready candidates return ambiguous and diagnostic effect', () => {
+  const state = observedPoolWith(
+    strongDesiredEvidence({ tabId: 12, page: { kind: 'activity' } }),
+    strongDesiredEvidence({ tabId: 13, clientId: 'second-ready', page: { kind: 'activity' } }),
+  );
+
+  const result = allocateTabForPurpose(state, allocationRequest());
+
+  assert.equal(result.status, 'ambiguous');
+  assert.deepEqual(
+    result.candidates.map((candidate) => candidate.tabId),
+    [12, 13],
+  );
+  assert.deepEqual(result.effects, [
+    {
+      type: 'diagnostic.record',
+      reason: 'export-current-chat',
+      code: 'ambiguous_tab_allocation',
+      severity: 'warning',
+    },
+  ]);
+});
+
+test('no candidate with allowCreate opens browser', () => {
+  const state = initialTabPoolState({ desiredEpochId, nowMs: 1000 });
+
+  const result = allocateTabForPurpose(
+    state,
+    allocationRequest({
+      allowCreate: true,
+      createUrl: 'https://gemini.google.com/app',
+    }),
+  );
+
+  assert.equal(result.status, 'needs_create');
+  assert.deepEqual(result.effects, [
+    {
+      type: 'browser.open',
+      reason: 'export-current-chat',
+      url: 'https://gemini.google.com/app',
+      pageKind: 'activity',
+    },
+  ]);
+});
+
+test('no candidate without create returns unavailable diagnostic', () => {
+  const state = initialTabPoolState({ desiredEpochId, nowMs: 1000 });
+
+  const result = allocateTabForPurpose(state, allocationRequest());
+
+  assert.equal(result.status, 'unavailable');
+  assert.equal(result.reason, 'no_ready_tab_for_purpose');
+  assert.deepEqual(result.effects, [
+    {
+      type: 'diagnostic.record',
+      reason: 'export-current-chat',
+      code: 'no_ready_tab_for_purpose',
+      severity: 'warning',
+    },
+  ]);
+});
+
+test('observed weak wrong or rejected evidence is not considered ready when strong runtime is required', () => {
+  const weak = weakDesiredEvidence({ tabId: 14, page: { kind: 'activity' } });
+  const wrongEpoch = classifyRuntimeEvidence({
+    client: matchingClient({
+      clientId: 'wrong-epoch',
+      tabId: 15,
+      buildStamp: '20260526-1100',
+      eventStreamConnected: true,
+      page: { kind: 'activity' },
+    }),
+    expected,
+    nowMs: 1400,
+  });
+  const rejected = classifyRuntimeEvidence({
+    client: matchingClient({
+      clientId: 'stale-client',
+      tabId: 16,
+      lastSeenAt: null,
+      eventStreamConnected: true,
+      page: { kind: 'activity' },
+    }),
+    expected,
+    nowMs: 1400,
+  });
+  const state = observedPoolWith(weak, wrongEpoch, rejected);
+
+  assert.deepEqual(
+    state.tabs.map((tab) => [tab.tabId, tab.status]),
+    [
+      [14, 'observed'],
+      [15, 'observed'],
+      [16, 'observed'],
+    ],
+  );
+
+  const result = allocateTabForPurpose(state, allocationRequest());
+
+  assert.equal(result.status, 'unavailable');
+  assert.deepEqual(result.candidates, []);
+});
+
+test('tabObserved upserts by tabId and clientId rather than duplicating', () => {
+  let state = initialTabPoolState({ desiredEpochId, nowMs: 1000 });
+
+  state = reduceTabLifecycle(state, {
+    type: 'tabObserved',
+    nowMs: 1400,
+    evidence: strongDesiredEvidence({
+      tabId: 17,
+      clientId: 'first-client-for-tab',
+      page: { kind: 'activity' },
+    }),
+  }).state;
+  state = reduceTabLifecycle(state, {
+    type: 'tabObserved',
+    nowMs: 1500,
+    evidence: strongDesiredEvidence({
+      tabId: 17,
+      clientId: 'second-client-for-tab',
+      page: { kind: 'activity' },
+    }),
+  }).state;
+  state = reduceTabLifecycle(state, {
+    type: 'tabObserved',
+    nowMs: 1600,
+    evidence: strongDesiredEvidence({
+      tabId: null,
+      clientId: 'client-only',
+      page: { kind: 'activity' },
+    }),
+  }).state;
+  state = reduceTabLifecycle(state, {
+    type: 'tabObserved',
+    nowMs: 1700,
+    evidence: strongDesiredEvidence({
+      tabId: null,
+      clientId: 'client-only',
+      page: { kind: 'chat' },
+    }),
+  }).state;
+
+  assert.equal(state.tabs.length, 2);
+  assert.deepEqual(
+    state.tabs.map((tab) => ({
+      tabId: tab.tabId,
+      clientId: tab.clientId,
+      pageKind: tab.pageKind,
+      status: tab.status,
+    })),
+    [
+      {
+        tabId: 17,
+        clientId: 'second-client-for-tab',
+        pageKind: 'activity',
+        status: 'ready',
+      },
+      {
+        tabId: null,
+        clientId: 'client-only',
+        pageKind: 'chat',
+        status: 'ready',
+      },
+    ],
+  );
+});
 
 test('initial recovery state shape', () => {
   assert.deepEqual(initialRecoveryState({ desiredEpochId, nowMs: 1000 }), {
