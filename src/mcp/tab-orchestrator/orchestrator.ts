@@ -62,17 +62,77 @@ const observeEvidence = (
   desiredEpochId: string,
   nowMs: number,
   evidence: RuntimeEpochEvidence[],
+  clients: ObservedTabClient[],
 ): TabPoolState => {
   let state = initialTabPoolState({ desiredEpochId, nowMs });
-  for (const item of evidence) {
+  for (const [index, item] of evidence.entries()) {
     state = reduceTabLifecycle(state, {
       type: 'tabObserved',
       nowMs,
       evidence: item,
     }).state;
+    const leaseClaimId = observedClaimId(clients[index]);
+    if (leaseClaimId) {
+      state = hydrateObservedLease(state, item, leaseClaimId);
+    }
   }
   return state;
 };
+
+const observedClaimId = (client?: ObservedTabClient): string | null => {
+  const claim = client?.tabClaim;
+  if (!claim || typeof claim !== 'object') return null;
+  const value = claim.claimId;
+  if (typeof value !== 'string' || !value.trim()) return null;
+  return value;
+};
+
+const evidenceMatchesTab = (
+  item: RuntimeEpochEvidence,
+  tab: TabPoolState['tabs'][number],
+): boolean => {
+  if (item.tabId !== null) return tab.tabId === item.tabId;
+  if (item.clientId !== null) return tab.clientId === item.clientId;
+  return false;
+};
+
+const hydrateObservedLease = (
+  state: TabPoolState,
+  item: RuntimeEpochEvidence,
+  leaseClaimId: string,
+): TabPoolState => ({
+  ...state,
+  tabs: state.tabs.map((tab) =>
+    evidenceMatchesTab(item, tab) ? { ...tab, leaseClaimId } : tab,
+  ),
+});
+
+const summarizeEvidence = (item: RuntimeEpochEvidence) => ({
+  clientId: item.clientId,
+  tabId: item.tabId,
+  pageKind: item.pageKind,
+  epochId: item.epochId,
+  strength: item.strength,
+  rejectReason: item.rejectReason ?? null,
+});
+
+const evidenceCounts = (evidence: RuntimeEpochEvidence[]) => {
+  const byStrength = { rejected: 0, weak: 0, strong: 0 };
+  const byPageKind: Record<string, number> = {};
+  for (const item of evidence) {
+    byStrength[item.strength] += 1;
+    const pageKind = item.pageKind ?? 'unknown';
+    byPageKind[pageKind] = (byPageKind[pageKind] ?? 0) + 1;
+  }
+  return {
+    total: evidence.length,
+    byStrength,
+    byPageKind,
+  };
+};
+
+const modeAllowsRuntimeRecovery = (mode: TabOrchestratorMode): boolean =>
+  mode === 'activity_scan' || mode === 'interactive';
 
 const recoveryForEvidence = (
   desiredEpochId: string,
@@ -107,7 +167,7 @@ export const planTabOrchestration = (
       nowMs: request.nowMs,
     }),
   );
-  const state = observeEvidence(desiredEpochId, request.nowMs, evidence);
+  const state = observeEvidence(desiredEpochId, request.nowMs, evidence, request.clients);
   const allowCreate = request.mode === 'job_safe' ? false : request.allowCreate;
   const allocation = allocateTabForPurpose(state, {
     purpose: request.purpose,
@@ -119,9 +179,11 @@ export const planTabOrchestration = (
   });
   const diagnostics: Record<string, unknown> = {
     desiredEpochId,
+    requestedPageKind: request.desiredPageKind,
     allocationStatus: allocation.status,
     mode: request.mode,
     purpose: request.purpose,
+    evidenceCounts: evidenceCounts(evidence),
   };
 
   if (allocation.status === 'allocated') {
@@ -168,11 +230,22 @@ export const planTabOrchestration = (
     };
   }
 
-  const rejectedEvidence =
-    matchingPageEvidence.find((item) => item.strength === 'rejected') ||
-    evidence.find((item) => item.strength === 'rejected');
+  const rejectedEvidence = matchingPageEvidence.find((item) => item.strength === 'rejected');
   if (rejectedEvidence) {
-    const recovery = recoveryForEvidence(desiredEpochId, request.nowMs, rejectedEvidence);
+    const recoveryAllowed = modeAllowsRuntimeRecovery(request.mode);
+    const recovery = recoveryAllowed
+      ? recoveryForEvidence(desiredEpochId, request.nowMs, rejectedEvidence)
+      : {
+          status: 'suppressed',
+          effects: [
+            {
+              type: 'diagnostic.record' as const,
+              reason: rejectedEvidence.rejectReason ?? 'runtime_epoch_not_ready',
+              code: 'runtime_recovery_suppressed',
+              severity: 'warning' as const,
+            },
+          ],
+        };
     return {
       ready: false,
       blocker: blocker(
@@ -186,6 +259,8 @@ export const planTabOrchestration = (
       diagnostics: {
         ...diagnostics,
         recoveryStatus: recovery.status,
+        recoverySuppressed: !recoveryAllowed,
+        rejectedEvidence: summarizeEvidence(rejectedEvidence),
       },
     };
   }

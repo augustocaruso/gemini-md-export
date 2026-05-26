@@ -1492,3 +1492,120 @@ test('old build heartbeat produces runtime epoch blocker and never ready', () =>
   assert.equal(result.blocker?.code, 'runtime_epoch_not_ready');
   assert.equal(result.selected, undefined);
 });
+
+test('rejected evidence from another page kind does not block requested activity page', () => {
+  const result = planTabOrchestration(
+    orchestrationRequest({
+      desiredPageKind: 'activity',
+      clients: [
+        matchingClient({
+          clientId: 'old-chat',
+          tabId: 7,
+          buildStamp: '20260526-1100',
+          lastSeenAt: 1900,
+          eventStreamConnected: true,
+          page: { kind: 'chat' },
+        }),
+      ],
+    }),
+  );
+
+  assert.equal(result.ready, false);
+  assert.equal(result.blocker?.code, 'no_ready_tab_for_purpose');
+  assert.equal(result.effects.some((effect) => effect.type === 'extension.reloadSelf'), false);
+  assert.equal(result.diagnostics.rejectedEvidence?.pageKind, undefined);
+});
+
+test('diagnostic mode with rejected runtime does not plan extension reload', () => {
+  const result = planTabOrchestration(
+    orchestrationRequest({
+      mode: 'diagnostic',
+      purpose: 'gemini_ready',
+      clients: [
+        matchingClient({
+          clientId: 'old-diagnostic',
+          tabId: 8,
+          buildStamp: '20260526-1100',
+          lastSeenAt: 1900,
+          eventStreamConnected: true,
+          page: { kind: 'activity' },
+        }),
+      ],
+    }),
+  );
+
+  assert.equal(result.blocker?.code, 'runtime_epoch_not_ready');
+  assert.equal(result.effects.some((effect) => effect.type === 'extension.reloadSelf'), false);
+  assert.equal(result.effects.some((effect) => effect.type === 'serviceWorker.selfHeal'), false);
+  assert.equal(result.diagnostics.recoverySuppressed, true);
+});
+
+test('job_safe mode with rejected runtime does not plan reload or browser open', () => {
+  const result = planTabOrchestration(
+    orchestrationRequest({
+      mode: 'job_safe',
+      allowCreate: true,
+      createUrl: 'https://gemini.google.com/app',
+      clients: [
+        matchingClient({
+          clientId: 'old-job',
+          tabId: 9,
+          buildStamp: '20260526-1100',
+          lastSeenAt: 1900,
+          eventStreamConnected: true,
+          page: { kind: 'activity' },
+        }),
+      ],
+    }),
+  );
+
+  assert.equal(result.blocker?.code, 'runtime_epoch_not_ready');
+  assert.equal(result.effects.some((effect) => effect.type === 'extension.reloadSelf'), false);
+  assert.equal(result.effects.some((effect) => effect.type === 'browser.open'), false);
+  assert.equal(result.diagnostics.recoverySuppressed, true);
+});
+
+test('observed tabClaim hydrates lease and prevents allocation', () => {
+  const result = planTabOrchestration(
+    orchestrationRequest({
+      clients: [
+        matchingClient({
+          clientId: 'claimed-activity',
+          tabId: 10,
+          lastSeenAt: 1900,
+          eventStreamConnected: true,
+          page: { kind: 'activity' },
+          tabClaim: { claimId: 'other-session' },
+        }),
+      ],
+    }),
+  );
+
+  assert.equal(result.ready, false);
+  assert.equal(result.blocker?.code, 'no_ready_tab_for_purpose');
+  assert.equal(result.state.tabs[0].leaseClaimId, 'other-session');
+  assert.equal(result.effects.some((effect) => effect.type === 'tab.claim'), false);
+});
+
+test('orchestration diagnostics include requested page and evidence counts', () => {
+  const result = planTabOrchestration(
+    orchestrationRequest({
+      clients: [
+        matchingClient({
+          clientId: 'weak-activity-diagnostic',
+          tabId: 11,
+          lastSeenAt: 1900,
+          eventStreamConnected: false,
+          page: { kind: 'activity' },
+        }),
+      ],
+    }),
+  );
+
+  assert.equal(result.diagnostics.requestedPageKind, 'activity');
+  assert.deepEqual(result.diagnostics.evidenceCounts, {
+    total: 1,
+    byStrength: { rejected: 0, weak: 1, strong: 0 },
+    byPageKind: { activity: 1 },
+  });
+});
