@@ -19,11 +19,29 @@ const previousExpected = {
   protocolVersion: 2,
 };
 
+const matchingClient = (overrides = {}) => ({
+  clientId: 'matching-runtime',
+  extensionVersion: '1.2.3',
+  buildStamp: '20260526-1200',
+  protocolVersion: 2,
+  lastSeenAt: 1000,
+  eventStreamConnected: false,
+  commandPollPending: false,
+  pendingCommandPoll: false,
+  source: 'content-script',
+  page: { kind: 'activity' },
+  ...overrides,
+});
+
 test('runtime epoch id is stable for expected version/build/protocol', () => {
   assert.equal(
     runtimeEpochId(expected),
     'ext:1.2.3|build:20260526-1200|protocol:2',
   );
+});
+
+test('runtime epoch id uses unknown for missing expected runtime parts', () => {
+  assert.equal(runtimeEpochId({}), 'ext:unknown|build:unknown|protocol:unknown');
 });
 
 test('heartbeat-only matching runtime is weak evidence and not sufficient for command readiness', () => {
@@ -200,4 +218,69 @@ test('classified evidence includes tab identity, page kind, observed time, and r
     lastSeenAt: 1000,
     source: 'content-script',
   });
+});
+
+test('stale numeric timestamp is rejected as client_stale', () => {
+  const evidence = classifyRuntimeEvidence({
+    client: matchingClient({ lastSeenAt: 1000 }),
+    expected,
+    nowMs: 31_001,
+  });
+
+  assert.equal(evidence.strength, 'rejected');
+  assert.equal(evidence.rejectReason, 'client_stale');
+});
+
+test('future timestamp is rejected as client_stale', () => {
+  const evidence = classifyRuntimeEvidence({
+    client: matchingClient({ lastSeenAt: 2000 }),
+    expected,
+    nowMs: 1000,
+  });
+
+  assert.equal(evidence.strength, 'rejected');
+  assert.equal(evidence.rejectReason, 'client_stale');
+});
+
+test('missing timestamp is rejected as client_stale', () => {
+  const evidence = classifyRuntimeEvidence({
+    client: matchingClient({ lastSeenAt: null }),
+    expected,
+    nowMs: 1000,
+  });
+
+  assert.equal(evidence.strength, 'rejected');
+  assert.equal(evidence.rejectReason, 'client_stale');
+});
+
+test('fresh ISO timestamp is accepted as live runtime evidence', () => {
+  const evidence = classifyRuntimeEvidence({
+    client: matchingClient({
+      lastSeenAt: '2026-05-26T15:00:00.000Z',
+      eventStreamConnected: true,
+    }),
+    expected,
+    nowMs: Date.parse('2026-05-26T15:00:01.000Z'),
+  });
+
+  assert.equal(evidence.strength, 'strong');
+  assert.equal(evidence.rejectReason, undefined);
+});
+
+test('weak evidence satisfies desired weak runtime without command channel', () => {
+  const evidence = classifyRuntimeEvidence({
+    client: matchingClient(),
+    expected,
+    nowMs: 1200,
+  });
+
+  assert.equal(evidence.strength, 'weak');
+  assert.equal(
+    runtimeEvidenceSatisfiesDesired(evidence, {
+      requiredEpochId: runtimeEpochId(expected),
+      minStrength: 'weak',
+      requireCommandChannel: false,
+    }),
+    true,
+  );
 });

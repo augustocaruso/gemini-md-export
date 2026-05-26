@@ -9,21 +9,21 @@ export type ExpectedExtensionRuntime = Readonly<{
 }>;
 
 export type ObservedTabClient = Readonly<{
-  clientId: string | null;
-  tabId: number | string | null;
-  windowId: number | string | null;
-  url: string | null;
-  source: string | null;
-  page: Readonly<Record<string, unknown>> | null;
-  extensionVersion: string | null;
-  buildStamp: string | null;
-  protocolVersion: number | string | null;
-  lastSeenAt: number | string | null;
-  eventStreamConnected: boolean | null;
-  commandPollPending: boolean | null;
-  pendingCommandPoll: boolean | null;
-  commandChannelStatus: string | null;
-  tabClaim: Readonly<Record<string, unknown>> | null;
+  clientId?: string | null;
+  tabId?: number | string | null;
+  windowId?: number | string | null;
+  url?: string | null;
+  source?: string | null;
+  page?: Readonly<Record<string, unknown>> | null;
+  extensionVersion?: string | null;
+  buildStamp?: string | null;
+  protocolVersion?: number | string | null;
+  lastSeenAt?: number | string | null;
+  eventStreamConnected?: boolean | null;
+  commandPollPending?: boolean | null;
+  pendingCommandPoll?: boolean | null;
+  commandChannelStatus?: string | null;
+  tabClaim?: Readonly<Record<string, unknown>> | null;
 }>;
 
 export type RuntimeEvidenceRejectReason = 'runtime_epoch_mismatch' | 'client_stale';

@@ -14,8 +14,11 @@ const epochPart = (value: number | string | null | undefined): string => {
 
 const timestampMs = (value: number | string | null | undefined): number | null => {
   if (value === null || value === undefined || value === '') return null;
-  const timestamp = Number(value);
-  return Number.isFinite(timestamp) ? timestamp : null;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  const numericTimestamp = Number(value);
+  if (Number.isFinite(numericTimestamp)) return numericTimestamp;
+  const parsedTimestamp = Date.parse(value);
+  return Number.isFinite(parsedTimestamp) ? parsedTimestamp : null;
 };
 
 const numberOrNull = (value: number | string | null | undefined): number | null => {
