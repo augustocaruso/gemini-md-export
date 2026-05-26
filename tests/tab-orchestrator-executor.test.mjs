@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { executeTabOrchestratorEffects } from '../build/ts/mcp/tab-orchestrator/index.js';
+import {
+  createMcpTabOrchestratorEffectAdapter,
+  executeTabOrchestratorEffects,
+} from '../build/ts/mcp/tab-orchestrator/index.js';
 
 const effects = {
   reloadSelf: { type: 'extension.reloadSelf', reason: 'new build', clientId: 'client-1' },
@@ -215,4 +218,66 @@ test('empty effects returns completed with empty executed list', async () => {
 
   assert.deepEqual(report, { status: 'completed', executed: [] });
   assert.deepEqual(calls, []);
+});
+
+test('MCP effect adapter refuses extension reload without an explicit client id', async () => {
+  const calls = [];
+  const adapter = createMcpTabOrchestratorEffectAdapter({
+    getLiveClients: () => [{ clientId: 'client-1' }],
+    normalizeTabId: (value) => value,
+    reloadChromeExtensionForClient: async (client, args) => {
+      calls.push({ client, args });
+      return { ok: true };
+    },
+    tryNativeBrowserBrokerTabsAction: async () => ({ ok: true }),
+    launchChromeForGemini: async () => ({ ok: true }),
+    claimTabForClient: async () => ({ ok: true }),
+    waitForLiveClients: async () => [],
+    buildTabOrchestratorPlan: () => ({ evidence: [] }),
+    pollIntervalMs: 10,
+  });
+
+  const skipped = await adapter.reloadExtensionSelf({
+    type: 'extension.reloadSelf',
+    reason: 'no explicit target',
+  });
+  const reloaded = await adapter.reloadExtensionSelf(effects.reloadSelf);
+
+  assert.deepEqual(skipped, { skipped: true, reason: 'no_client_for_extension_reload' });
+  assert.deepEqual(reloaded, { ok: true });
+  assert.deepEqual(calls, [
+    {
+      client: { clientId: 'client-1' },
+      args: { reason: 'new build', explicit: true },
+    },
+  ]);
+});
+
+test('MCP effect adapter validates runtime.waitForEpoch against strong matching epoch evidence', async () => {
+  const adapter = createMcpTabOrchestratorEffectAdapter({
+    getLiveClients: () => [],
+    normalizeTabId: (value) => value,
+    reloadChromeExtensionForClient: async () => ({ ok: true }),
+    tryNativeBrowserBrokerTabsAction: async () => ({ ok: true }),
+    launchChromeForGemini: async () => ({ ok: true }),
+    claimTabForClient: async () => ({ ok: true }),
+    waitForLiveClients: async () => [{ clientId: 'ready-client' }],
+    buildTabOrchestratorPlan: () => ({
+      evidence: [
+        { epochId: 'epoch-1', strength: 'weak' },
+        { epochId: 'epoch-2', strength: 'strong' },
+        { epochId: 'epoch-1', strength: 'strong' },
+      ],
+    }),
+    pollIntervalMs: 10,
+  });
+
+  const result = await adapter.waitForRuntimeEpoch(effects.waitForEpoch);
+
+  assert.deepEqual(result, {
+    ready: true,
+    epochId: 'epoch-1',
+    matchingStrongClientCount: 1,
+    connectedClientCount: 1,
+  });
 });

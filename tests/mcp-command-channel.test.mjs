@@ -762,6 +762,74 @@ test('browser readiness expõe status estruturado do native broker', () => {
   assert.match(nativeGateSource, /nativeBrokerStatus\.available !== true/);
 });
 
+test('browser readiness inclui diagnostico do tab orchestrator FSM', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const readyBlock = source.match(
+    /const buildLightweightBrowserReady = async \(args = \{\}\) => \{[\s\S]*?\n\};\n\nconst normalizeLimit/,
+  )?.[0] || '';
+
+  assert.match(source, /buildMcpTabOrchestratorPlan/);
+  assert.match(source, /executeTabOrchestratorEffects/);
+  assert.match(source, /summarizeTabOrchestratorPlan/);
+  assert.match(source, /tabOrchestratorBlockingIssueForReady/);
+  assert.match(source, /const tabOrchestratorClientDeps = \{/);
+  assert.match(readyBlock, /const tabOrchestratorPlan = buildTabOrchestratorPlan\(\{/);
+  assert.match(readyBlock, /mode:\s*'diagnostic'/);
+  assert.match(readyBlock, /desiredPageKind:\s*'chat'/);
+  assert.match(readyBlock, /const tabOrchestratorBlockingIssue = tabOrchestratorBlockingIssueForReady\(/);
+  assert.match(readyBlock, /blockingIssue: tabOrchestratorBlockingIssue \|\| blockingIssue/);
+  assert.match(readyBlock, /tabOrchestrator:\s*summarizeTabOrchestratorPlan\(tabOrchestratorPlan\)/);
+});
+
+test('My Activity scan readiness passa pelo tab orchestrator antes de iniciar scan', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const ensureActivityBlock = source.match(
+    /const ensureActivityClientForScan = async \(args = \{\}\) => \{[\s\S]*?\n\};\n\nconst scanActivityWithClient/,
+  )?.[0] || '';
+
+  assert.match(ensureActivityBlock, /const activityTabOrchestratorPlan = buildTabOrchestratorPlan\(\{/);
+  assert.match(ensureActivityBlock, /mode:\s*'activity_scan'/);
+  assert.match(ensureActivityBlock, /desiredPageKind:\s*'activity'/);
+  assert.match(ensureActivityBlock, /await throwActivityTabOrchestratorBlocker/);
+  assert.match(source, /const throwActivityTabOrchestratorBlocker = async \(plan, activityClients = \[\]\) =>/);
+  assert.match(source, /const activityTabOrchestratorExecution = await executeTabOrchestratorPlanEffects\(plan\)/);
+  assert.match(source, /effectExecution:\s*activityTabOrchestratorExecution/);
+});
+
+test('reload de abas retorna diagnostico de recovery do tab orchestrator', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const reloadBlock = source.match(
+    /const reloadGeminiTabs = async \(args = \{\}\) => \{[\s\S]*?\n\};\n\nconst legacyRawTools/,
+  )?.[0] || '';
+
+  assert.match(reloadBlock, /const tabOrchestratorPlan = buildTabOrchestratorPlan\(\{/);
+  assert.match(reloadBlock, /mode:\s*'interactive'/);
+  assert.match(reloadBlock, /desiredPageKind:\s*'chat'/);
+  assert.match(reloadBlock, /const summarizeReloadTabOrchestrator = \(\) =>/);
+  assert.match(reloadBlock, /buildTabOrchestratorReloadRecovery\(\{/);
+  assert.match(reloadBlock, /clients:\s*getLiveClients\(\)/);
+  assert.match(reloadBlock, /clientDeps:\s*tabOrchestratorClientDeps/);
+  assert.match(reloadBlock, /tabOrchestrator:\s*summarizeReloadTabOrchestrator\(\)/);
+});
+
+test('MCP possui adapter injetavel para executar efeitos do tab orchestrator', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const adapterBlock = source.match(
+    /const createTabOrchestratorMcpAdapter = \(\) =>[\s\S]*?\n  \}\);\n\nconst executeTabOrchestratorPlanEffects/,
+  )?.[0] || '';
+
+  assert.ok(adapterBlock, 'adapter do tab orchestrator deve existir antes do ready');
+  assert.match(adapterBlock, /createMcpTabOrchestratorEffectAdapter/);
+  assert.match(adapterBlock, /reloadChromeExtensionForClient/);
+  assert.match(adapterBlock, /tryNativeBrowserBrokerTabsAction/);
+  assert.match(adapterBlock, /launchChromeForGemini/);
+  assert.match(adapterBlock, /claimTabForClient/);
+  assert.match(adapterBlock, /waitForLiveClients/);
+  assert.match(adapterBlock, /buildTabOrchestratorPlan/);
+  assert.match(adapterBlock, /processSessionId:\s*PROCESS_SESSION_ID/);
+  assert.match(source, /const executeTabOrchestratorPlanEffects = \(plan\) =>\s*executeTabOrchestratorEffects/);
+});
+
 test('browser readiness and reload endpoints defer extension reload while export job is active', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const runtimeHelperSource = readFileSync(

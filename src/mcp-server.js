@@ -259,6 +259,14 @@ const {
 const {
   selectExplicitReloadClient,
 } = await import(compiledTsModuleUrl('mcp', 'reload-target.js'));
+const {
+  buildMcpTabOrchestratorPlan,
+  buildTabOrchestratorReloadRecovery,
+  createMcpTabOrchestratorEffectAdapter,
+  executeTabOrchestratorEffects,
+  summarizeTabOrchestratorPlan,
+  tabOrchestratorBlockingIssueForReady,
+} = await import(compiledTsModuleUrl('mcp', 'tab-orchestrator', 'index.js'));
 const agentJson = await import(
   compiledTsModuleUrl('mcp', 'agent-json.js')
 );
@@ -4297,6 +4305,24 @@ const commandChannelReadyForClient = (client) =>
   clientHasOpenCommandChannel(client) &&
   !clientHasRecentCommandFailure(client);
 
+const createTabOrchestratorMcpAdapter = () =>
+  createMcpTabOrchestratorEffectAdapter({
+    getLiveClients,
+    normalizeTabId,
+    reloadChromeExtensionForClient,
+    tryNativeBrowserBrokerTabsAction,
+    launchChromeForGemini,
+    claimTabForClient,
+    waitForLiveClients,
+    buildTabOrchestratorPlan,
+    profileDirectory: CHROME_GUARD_CONFIG.profileDirectory,
+    pollIntervalMs: CHROME_GUARD_CONFIG.pollIntervalMs || 500,
+    processSessionId: PROCESS_SESSION_ID,
+  });
+
+const executeTabOrchestratorPlanEffects = (plan) =>
+  executeTabOrchestratorEffects(plan.effects || [], createTabOrchestratorMcpAdapter());
+
 const buildLightweightBrowserReady = async (args = {}) => {
   const startedAt = Date.now();
   cleanupStaleClients();
@@ -4405,12 +4431,26 @@ const buildLightweightBrowserReady = async (args = {}) => {
     nativeBrokerStatus,
     claimableClientCount: claimableClients.length,
   });
+  const tabOrchestratorPlan = buildTabOrchestratorPlan({
+    mode: 'diagnostic',
+    desiredPageKind: 'chat',
+    purpose: 'gemini_ready',
+    claimId: args.claimId || `ready-${PROCESS_SESSION_ID}`,
+    clients: allLiveClients,
+    allowCreate: args.wakeBrowser === true,
+    createUrl: 'https://gemini.google.com/app',
+  });
+  const tabOrchestratorBlockingIssue = tabOrchestratorBlockingIssueForReady(
+    tabOrchestratorPlan,
+    blockingIssue,
+  );
+  const effectiveReady = ready && !tabOrchestratorBlockingIssue;
   const summarizedClients = selectableClients.map(summarizeClient);
   const summarizedMatchingClients = matchingClients.map(summarizeClient);
   return {
-    ok: ready,
-    ready,
-    blockingIssue,
+    ok: effectiveReady,
+    ready: effectiveReady,
+    blockingIssue: tabOrchestratorBlockingIssue || blockingIssue,
     mode,
     generatedAt: new Date().toISOString(),
     expectedChromeExtension: EXPECTED_CHROME_EXTENSION_INFO,
@@ -4443,6 +4483,7 @@ const buildLightweightBrowserReady = async (args = {}) => {
         }
       : null,
     nativeBroker: nativeBrokerStatus,
+    tabOrchestrator: summarizeTabOrchestratorPlan(tabOrchestratorPlan),
     extensionReadiness: buildExtensionReadiness({
       connectedClients: allLiveClients.map(summarizeClient),
       matchingClients: summarizedMatchingClients,
@@ -4486,6 +4527,36 @@ const recentConversationsForClient = (client) =>
 const recentConversationCountForClient = (client) => recentConversationsForClient(client).length;
 
 const clientBuildStamp = (client) => client?.page?.buildStamp || client?.buildStamp || null;
+
+const tabOrchestratorClientDeps = {
+  normalizeTabId,
+  clientBuildStamp,
+  clientCommandEventStreamUsable,
+  commandChannelReadyForClient,
+};
+
+const buildTabOrchestratorPlan = ({
+  mode,
+  desiredPageKind,
+  purpose,
+  claimId,
+  clients: planClients,
+  allowCreate = false,
+  createUrl,
+  nowMs = Date.now(),
+}) =>
+  buildMcpTabOrchestratorPlan({
+    mode,
+    expected: EXPECTED_CHROME_EXTENSION_INFO,
+    nowMs,
+    desiredPageKind,
+    purpose,
+    claimId,
+    clients: planClients || [],
+    clientDeps: tabOrchestratorClientDeps,
+    allowCreate,
+    createUrl,
+  });
 
 const clientMatchesExpectedBrowserExtension = (client) =>
   String(client?.extensionVersion || '') === EXPECTED_CHROME_EXTENSION_INFO.extensionVersion &&
@@ -4667,6 +4738,25 @@ const activityClientVersionMismatchError = (activityClients = []) => {
   return error;
 };
 
+const throwActivityTabOrchestratorBlocker = async (plan, activityClients = []) => {
+  if (plan.ready || !plan.blocker) return;
+  if (
+    plan.blocker.code !== 'runtime_epoch_not_ready' &&
+    plan.blocker.code !== 'command_channel_not_ready'
+  ) {
+    return;
+  }
+  const activityTabOrchestratorExecution = await executeTabOrchestratorPlanEffects(plan);
+  const error = activityClientVersionMismatchError(activityClients);
+  error.data = {
+    ...(error.data || {}),
+    tabOrchestrator: summarizeTabOrchestratorPlan(plan, {
+      effectExecution: activityTabOrchestratorExecution,
+    }),
+  };
+  throw error;
+};
+
 const requireActivityClient = (selector = {}) => {
   cleanupStaleClients();
   const activityClients = getActivityClients();
@@ -4696,6 +4786,18 @@ const requireActivityClient = (selector = {}) => {
 
 const ensureActivityClientForScan = async (args = {}) => {
   const selector = { clientId: args.activityClientId, tabId: args.activityTabId };
+  const activityClientsForPlan = getActivityClients().filter((client) =>
+    activityClientMatchesSelector(client, selector, { normalizeTabId }),
+  );
+  const activityTabOrchestratorPlan = buildTabOrchestratorPlan({
+    mode: 'activity_scan',
+    desiredPageKind: 'activity',
+    purpose: 'my_activity_scan',
+    claimId: args.claimId || `activity-scan-${PROCESS_SESSION_ID}`,
+    clients: activityClientsForPlan,
+    allowCreate: false,
+  });
+  await throwActivityTabOrchestratorBlocker(activityTabOrchestratorPlan, activityClientsForPlan);
   try {
     const client = requireActivityClient(selector);
     return {
@@ -9762,9 +9864,31 @@ const reloadGeminiTabs = async (args = {}) => {
   const activeReloadBlocked = activeExportJobReloadResult('tab-reload');
   if (activeReloadBlocked) return activeReloadBlocked;
   const delayMs = Math.max(0, Math.min(10_000, Number(args.delayMs || 500)));
+  const tabOrchestratorPlan = buildTabOrchestratorPlan({
+    mode: 'interactive',
+    desiredPageKind: 'chat',
+    purpose: 'gemini_tabs_reload',
+    claimId: args.claimId || `reload-${PROCESS_SESSION_ID}`,
+    clients: getLiveClients(),
+    allowCreate: false,
+  });
+  const summarizeReloadTabOrchestrator = () =>
+    summarizeTabOrchestratorPlan(tabOrchestratorPlan, {
+      recovery: buildTabOrchestratorReloadRecovery({
+        expected: EXPECTED_CHROME_EXTENSION_INFO,
+        clients: getLiveClients(),
+        clientDeps: tabOrchestratorClientDeps,
+        message: 'Extension context invalidated after reload',
+      }),
+    });
   const nativeReload = await tryNativeBrowserBrokerTabsAction('reload', args);
   await attachContentScriptSelfHealToNativeReload(nativeReload, args, tryNativeBrowserBrokerTabsAction);
-  if (shouldReturnNativeBrokerReloadResult(nativeReload, args)) return nativeReload;
+  if (shouldReturnNativeBrokerReloadResult(nativeReload, args)) {
+    return {
+      ...nativeReload,
+      tabOrchestrator: summarizeReloadTabOrchestrator(),
+    };
+  }
   await reloadExtensionForExistingTabs(
     args,
     ensureBrowserExtensionReady,
@@ -9775,7 +9899,10 @@ const reloadGeminiTabs = async (args = {}) => {
   );
   const liveClients = getLiveClients();
   if (liveClients.length === 0) {
-    return noConnectedClientsForReloadResult();
+    return {
+      ...noConnectedClientsForReloadResult(),
+      tabOrchestrator: summarizeReloadTabOrchestrator(),
+    };
   }
 
   const selector = normalizeClientSelector(args);
@@ -9795,6 +9922,7 @@ const reloadGeminiTabs = async (args = {}) => {
       reloaded: result?.ok ? 1 : 0,
       client: summarizeClient(client),
       result,
+      tabOrchestrator: summarizeReloadTabOrchestrator(),
     };
   }
 
@@ -9812,6 +9940,7 @@ const reloadGeminiTabs = async (args = {}) => {
       reloaded: result.reloaded ?? liveClients.length,
       controller: summarizeClient(controller),
       result,
+      tabOrchestrator: summarizeReloadTabOrchestrator(),
     };
   }
 
@@ -9847,6 +9976,7 @@ const reloadGeminiTabs = async (args = {}) => {
     controllerResult: result,
     successes,
     failures,
+    tabOrchestrator: summarizeReloadTabOrchestrator(),
   };
 };
 

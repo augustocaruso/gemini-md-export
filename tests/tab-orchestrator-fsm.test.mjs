@@ -4,6 +4,8 @@ import test from 'node:test';
 import {
   classifyRuntimeEvidence,
   allocateTabForPurpose,
+  buildTabOrchestratorReloadRecovery,
+  clientToObservedTabClient,
   initialTabPoolState,
   initialRecoveryState,
   planTabOrchestration,
@@ -11,6 +13,8 @@ import {
   reduceRuntimeRecovery,
   runtimeEpochId,
   runtimeEvidenceSatisfiesDesired,
+  summarizeTabOrchestratorPlan,
+  tabOrchestratorBlockingIssueForReady,
 } from '../build/ts/mcp/tab-orchestrator/index.js';
 
 const expected = {
@@ -1608,4 +1612,115 @@ test('orchestration diagnostics include requested page and evidence counts', () 
     byStrength: { rejected: 0, weak: 1, strong: 0 },
     byPageKind: { activity: 1 },
   });
+});
+
+test('MCP integration helper converts runtime client evidence without leaking MCP helpers into FSMs', () => {
+  const observed = clientToObservedTabClient(
+    {
+      clientId: 'client-1',
+      tabId: '42',
+      windowId: '7',
+      page: { kind: 'chat', url: 'https://gemini.google.com/app/abcdefabcdef' },
+      extensionVersion: '1.2.3',
+      protocolVersion: 2,
+      lastSeenAt: 1000,
+      commandPoll: { polling: true },
+      pendingPoll: true,
+      tabClaim: { claimId: 'claim-1' },
+    },
+    {
+      normalizeTabId: (value) => Number(value),
+      clientBuildStamp: () => '20260526-1200',
+      clientCommandEventStreamUsable: () => true,
+      commandChannelReadyForClient: () => true,
+    },
+  );
+
+  assert.deepEqual(observed, {
+    clientId: 'client-1',
+    tabId: 42,
+    windowId: 7,
+    url: 'https://gemini.google.com/app/abcdefabcdef',
+    source: null,
+    page: { kind: 'chat', url: 'https://gemini.google.com/app/abcdefabcdef' },
+    extensionVersion: '1.2.3',
+    buildStamp: '20260526-1200',
+    protocolVersion: 2,
+    lastSeenAt: 1000,
+    eventStreamConnected: true,
+    commandPollPending: true,
+    pendingCommandPoll: true,
+    commandChannelStatus: 'ready',
+    tabClaim: { claimId: 'claim-1' },
+  });
+});
+
+test('MCP integration helper summarizes plans with optional recovery and effect execution', () => {
+  const plan = planTabOrchestration(
+    orchestrationRequest({
+      clients: [matchingClient({ eventStreamConnected: true })],
+    }),
+  );
+  const recovery = buildTabOrchestratorReloadRecovery({
+    expected,
+    nowMs: 1200,
+    message: 'Extension context invalidated after reload',
+  });
+  const effectExecution = { status: 'completed', executed: [] };
+  const summary = summarizeTabOrchestratorPlan(plan, { recovery, effectExecution });
+
+  assert.equal(summary.ready, true);
+  assert.equal(summary.recovery.status, 'awaiting_runtime_epoch');
+  assert.equal(summary.recovery.state.status, 'awaiting_runtime_epoch');
+  assert.equal(
+    summary.recovery.effects.some((effect) => effect.type === 'runtime.waitForEpoch'),
+    true,
+  );
+  assert.equal(summary.effectExecution, effectExecution);
+});
+
+test('MCP integration helper marks reload recovery ready after strong runtime evidence', () => {
+  const recovery = buildTabOrchestratorReloadRecovery({
+    expected,
+    nowMs: 1200,
+    clients: [matchingClient({ eventStreamConnected: true, page: { kind: 'chat' } })],
+    clientDeps: {
+      normalizeTabId: (value) => (value == null ? null : Number(value)),
+      clientBuildStamp: (client) => client.buildStamp,
+      clientCommandEventStreamUsable: (client) => client.eventStreamConnected === true,
+      commandChannelReadyForClient: (client) => client.eventStreamConnected === true,
+    },
+  });
+
+  assert.equal(recovery.status, 'ready');
+  assert.equal(recovery.state.status, 'ready');
+});
+
+test('MCP integration helper promotes orchestrator blockers only when stricter than legacy readiness', () => {
+  const errorPlan = {
+    blocker: {
+      code: 'runtime_epoch_not_ready',
+      message: 'runtime stale',
+      severity: 'error',
+    },
+  };
+  const warningPlan = {
+    blocker: {
+      code: 'command_channel_not_ready',
+      message: 'warming',
+      severity: 'warning',
+    },
+  };
+
+  assert.deepEqual(tabOrchestratorBlockingIssueForReady(errorPlan, { code: 'legacy' }), {
+    code: 'runtime_epoch_not_ready',
+    message: 'runtime stale',
+    severity: 'error',
+    source: 'tab-orchestrator',
+  });
+  assert.equal(tabOrchestratorBlockingIssueForReady(warningPlan, { code: 'legacy' }), null);
+  assert.equal(
+    tabOrchestratorBlockingIssueForReady(warningPlan, null),
+    null,
+  );
 });
