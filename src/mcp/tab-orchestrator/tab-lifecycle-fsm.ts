@@ -21,9 +21,27 @@ export type TabPoolState = {
 
 export type TabLifecycleEvent =
   | { type: 'tabObserved'; nowMs: number; evidence: RuntimeEpochEvidence }
-  | { type: 'tabBusy'; nowMs: number; tabId: number | null; reason: string }
-  | { type: 'tabReleased'; nowMs: number; tabId: number | null; claimId?: string }
-  | { type: 'tabQuarantined'; nowMs: number; tabId: number | null; reason: string };
+  | {
+      type: 'tabBusy';
+      nowMs: number;
+      tabId: number | null;
+      clientId?: string | null;
+      reason: string;
+    }
+  | {
+      type: 'tabReleased';
+      nowMs: number;
+      tabId: number | null;
+      clientId?: string | null;
+      claimId?: string;
+    }
+  | {
+      type: 'tabQuarantined';
+      nowMs: number;
+      tabId: number | null;
+      clientId?: string | null;
+      reason: string;
+    };
 
 export type TabAllocationRequest = {
   purpose: string;
@@ -87,11 +105,23 @@ const matchesObservedIdentity = (tab: ManagedTab, evidence: RuntimeEpochEvidence
   return tab.tabId === null && tab.clientId === null;
 };
 
-const updateByTabId = (
+const matchesLifecycleIdentity = (
+  tab: ManagedTab,
+  identity: { tabId: number | null; clientId?: string | null },
+): boolean => {
+  if (identity.tabId !== null) return tab.tabId === identity.tabId;
+  if (identity.clientId !== null && identity.clientId !== undefined) {
+    return tab.clientId === identity.clientId;
+  }
+  return false;
+};
+
+const updateByLifecycleIdentity = (
   state: TabPoolState,
-  tabId: number | null,
+  identity: { tabId: number | null; clientId?: string | null },
   update: (tab: ManagedTab) => ManagedTab,
-): ManagedTab[] => state.tabs.map((tab) => (tab.tabId === tabId ? update(tab) : tab));
+): ManagedTab[] =>
+  state.tabs.map((tab) => (matchesLifecycleIdentity(tab, identity) ? update(tab) : tab));
 
 export const reduceTabLifecycle = (
   state: TabPoolState,
@@ -128,7 +158,7 @@ export const reduceTabLifecycle = (
     return {
       state: {
         ...state,
-        tabs: updateByTabId(state, event.tabId, (tab) => ({
+        tabs: updateByLifecycleIdentity(state, event, (tab) => ({
           ...tab,
           status: 'busy',
           updatedAtMs: event.nowMs,
@@ -143,7 +173,7 @@ export const reduceTabLifecycle = (
     return {
       state: {
         ...state,
-        tabs: updateByTabId(state, event.tabId, (tab) => {
+        tabs: updateByLifecycleIdentity(state, event, (tab) => {
           const { leaseClaimId: _leaseClaimId, ...releasedTab } = tab;
           return {
             ...releasedTab,
@@ -160,7 +190,7 @@ export const reduceTabLifecycle = (
   return {
     state: {
       ...state,
-      tabs: updateByTabId(state, event.tabId, (tab) => ({
+      tabs: updateByLifecycleIdentity(state, event, (tab) => ({
         ...tab,
         status: 'quarantined',
         quarantineReason: event.reason,

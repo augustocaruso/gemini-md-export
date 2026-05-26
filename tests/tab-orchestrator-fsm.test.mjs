@@ -579,6 +579,122 @@ test('tabObserved upserts by tabId and clientId rather than duplicating', () => 
   );
 });
 
+test('client-only tabBusy updates only the matching clientId', () => {
+  let state = observedPoolWith(
+    strongDesiredEvidence({ tabId: null, clientId: 'client-only-a', page: { kind: 'activity' } }),
+    strongDesiredEvidence({ tabId: null, clientId: 'client-only-b', page: { kind: 'activity' } }),
+  );
+
+  state = reduceTabLifecycle(state, {
+    type: 'tabBusy',
+    nowMs: 1800,
+    tabId: null,
+    clientId: 'client-only-a',
+    reason: 'hydrating_chat',
+  }).state;
+
+  assert.deepEqual(
+    state.tabs.map((tab) => [tab.clientId, tab.status, tab.updatedAtMs]),
+    [
+      ['client-only-a', 'busy', 1800],
+      ['client-only-b', 'ready', 1400],
+    ],
+  );
+});
+
+test('client-only tabQuarantined updates only the matching clientId', () => {
+  let state = observedPoolWith(
+    strongDesiredEvidence({ tabId: null, clientId: 'client-only-a', page: { kind: 'activity' } }),
+    strongDesiredEvidence({ tabId: null, clientId: 'client-only-b', page: { kind: 'activity' } }),
+  );
+
+  state = reduceTabLifecycle(state, {
+    type: 'tabQuarantined',
+    nowMs: 1800,
+    tabId: null,
+    clientId: 'client-only-b',
+    reason: 'runtime_epoch_timeout',
+  }).state;
+
+  assert.deepEqual(
+    state.tabs.map((tab) => [tab.clientId, tab.status, tab.quarantineReason, tab.updatedAtMs]),
+    [
+      ['client-only-a', 'ready', undefined, 1400],
+      ['client-only-b', 'quarantined', 'runtime_epoch_timeout', 1800],
+    ],
+  );
+});
+
+test('client-only tabReleased updates only the matching clientId', () => {
+  let state = observedPoolWith(
+    strongDesiredEvidence({ tabId: null, clientId: 'client-only-a', page: { kind: 'activity' } }),
+    strongDesiredEvidence({ tabId: null, clientId: 'client-only-b', page: { kind: 'activity' } }),
+  );
+  state = reduceTabLifecycle(state, {
+    type: 'tabBusy',
+    nowMs: 1800,
+    tabId: null,
+    clientId: 'client-only-a',
+    reason: 'hydrating_chat',
+  }).state;
+
+  state = reduceTabLifecycle(state, {
+    type: 'tabReleased',
+    nowMs: 1900,
+    tabId: null,
+    clientId: 'client-only-a',
+    claimId: 'claim-client-a',
+  }).state;
+
+  assert.deepEqual(
+    state.tabs.map((tab) => [tab.clientId, tab.status, tab.updatedAtMs]),
+    [
+      ['client-only-a', 'ready', 1900],
+      ['client-only-b', 'ready', 1400],
+    ],
+  );
+});
+
+test('anonymous lifecycle event with no tabId or clientId does not update client-only tabs', () => {
+  const state = observedPoolWith(
+    strongDesiredEvidence({ tabId: null, clientId: 'client-only-a', page: { kind: 'activity' } }),
+    strongDesiredEvidence({ tabId: null, clientId: 'client-only-b', page: { kind: 'activity' } }),
+  );
+
+  const transition = reduceTabLifecycle(state, {
+    type: 'tabBusy',
+    nowMs: 1800,
+    tabId: null,
+    reason: 'missing_identity',
+  });
+
+  assert.deepEqual(transition.state.tabs, state.tabs);
+  assert.equal(transition.state.updatedAtMs, 1800);
+});
+
+test('tabId lifecycle events still match by tabId before clientId', () => {
+  let state = observedPoolWith(
+    strongDesiredEvidence({ tabId: 18, clientId: 'old-client', page: { kind: 'activity' } }),
+    strongDesiredEvidence({ tabId: 19, clientId: 'target-client', page: { kind: 'activity' } }),
+  );
+
+  state = reduceTabLifecycle(state, {
+    type: 'tabBusy',
+    nowMs: 1800,
+    tabId: 18,
+    clientId: 'target-client',
+    reason: 'hydrate_by_tab_id',
+  }).state;
+
+  assert.deepEqual(
+    state.tabs.map((tab) => [tab.tabId, tab.clientId, tab.status]),
+    [
+      [18, 'old-client', 'busy'],
+      [19, 'target-client', 'ready'],
+    ],
+  );
+});
+
 test('initial recovery state shape', () => {
   assert.deepEqual(initialRecoveryState({ desiredEpochId, nowMs: 1000 }), {
     status: 'idle',
