@@ -233,7 +233,7 @@ export const reduceTabLifecycle = (
           const { leaseClaimId: _leaseClaimId, ...releasedTab } = tab;
           return {
             ...releasedTab,
-            status: 'ready',
+            status: tab.status === 'quarantined' ? 'quarantined' : 'ready',
             updatedAtMs: event.nowMs,
           };
         }),

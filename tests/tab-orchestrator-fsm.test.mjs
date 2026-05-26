@@ -855,6 +855,35 @@ test('tabReleased without claimId does not clear an active lease', () => {
   assert.equal(released.tabs[0].status, 'ready');
 });
 
+test('tabReleased after quarantine clears matching lease without resurrecting tab', () => {
+  const state = observedPoolWith(strongDesiredEvidence({ tabId: 29, page: { kind: 'activity' } }));
+  const allocated = allocateTabForPurpose(state, allocationRequest({ claimId: 'claim-29' }));
+  assert.equal(allocated.status, 'allocated');
+
+  const quarantined = reduceTabLifecycle(allocated.state, {
+    type: 'tabQuarantined',
+    nowMs: 1800,
+    tabId: 29,
+    reason: 'runtime_epoch_timeout',
+  }).state;
+
+  const released = reduceTabLifecycle(quarantined, {
+    type: 'tabReleased',
+    nowMs: 1900,
+    tabId: 29,
+    claimId: 'claim-29',
+  }).state;
+
+  assert.equal(released.tabs[0].leaseClaimId, undefined);
+  assert.equal(released.tabs[0].status, 'quarantined');
+  assert.equal(released.tabs[0].quarantineReason, 'runtime_epoch_timeout');
+
+  const next = allocateTabForPurpose(released, allocationRequest({ claimId: 'claim-next' }));
+
+  assert.equal(next.status, 'unavailable');
+  assert.deepEqual(next.candidates, []);
+});
+
 test('observing same client first without tabId then with tabId merges into one tab', () => {
   let state = initialTabPoolState({ desiredEpochId, nowMs: 1000 });
 
