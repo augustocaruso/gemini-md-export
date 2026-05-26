@@ -155,6 +155,10 @@ export const reduceRuntimeRecovery = (
       };
     }
 
+    if (state.status === 'idle') {
+      return { state, effects: [] };
+    }
+
     const reason = event.evidence.rejectReason ?? 'insufficient_runtime_evidence';
     const nextState: RuntimeRecoveryState = {
       ...state,

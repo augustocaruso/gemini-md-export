@@ -458,6 +458,58 @@ test('strong evidence for desired epoch completes recovery with no effects', () 
   assert.deepEqual(transition.effects, []);
 });
 
+test('weak evidence from idle keeps idle and emits no effects', () => {
+  const idle = initialRecoveryState({ desiredEpochId, nowMs: 1000 });
+  const weakEvidence = classifyRuntimeEvidence({
+    client: matchingClient(),
+    expected,
+    nowMs: 1100,
+  });
+
+  const transition = reduceRuntimeRecovery(idle, {
+    type: 'runtimeEvidenceObserved',
+    nowMs: 1100,
+    evidence: weakEvidence,
+  });
+
+  assert.deepEqual(transition.state, idle);
+  assert.deepEqual(transition.effects, []);
+});
+
+test('rejected stale evidence from idle keeps idle and emits no effects', () => {
+  const idle = initialRecoveryState({ desiredEpochId, nowMs: 1000 });
+  const staleEvidence = classifyRuntimeEvidence({
+    client: matchingClient({ lastSeenAt: 1000 }),
+    expected,
+    nowMs: 31_001,
+  });
+
+  const transition = reduceRuntimeRecovery(idle, {
+    type: 'runtimeEvidenceObserved',
+    nowMs: 31_001,
+    evidence: staleEvidence,
+  });
+
+  assert.deepEqual(transition.state, idle);
+  assert.deepEqual(transition.effects, []);
+});
+
+test('strong evidence from idle moves to ready with no effects', () => {
+  const idle = initialRecoveryState({ desiredEpochId, nowMs: 1000 });
+
+  const transition = reduceRuntimeRecovery(idle, {
+    type: 'runtimeEvidenceObserved',
+    nowMs: 1100,
+    evidence: strongDesiredEvidence(),
+  });
+
+  assert.equal(transition.state.status, 'ready');
+  assert.equal(transition.state.updatedAtMs, 1100);
+  assert.equal(transition.state.attempts, 0);
+  assert.equal(transition.state.rejectedEvidenceCount, 0);
+  assert.deepEqual(transition.effects, []);
+});
+
 test('stale or weak evidence after ready keeps ready and emits no effects', () => {
   const ready = reduceRuntimeRecovery(
     reduceRuntimeRecovery(initialRecoveryState({ desiredEpochId, nowMs: 1000 }), {
