@@ -55,22 +55,28 @@ export type TabAllocationRequest = {
 export type TabAllocationResult =
   | {
       status: 'allocated';
+      tabId: number | null;
+      clientId: string | null;
       tab: ManagedTab;
+      state: TabPoolState;
       effects: TabOrchestratorEffect[];
     }
   | {
       status: 'ambiguous';
       candidates: ManagedTab[];
+      state: TabPoolState;
       effects: TabOrchestratorEffect[];
     }
   | {
       status: 'needs_create';
+      state: TabPoolState;
       effects: TabOrchestratorEffect[];
     }
   | {
       status: 'unavailable';
       reason: 'no_ready_tab_for_purpose';
       candidates: ManagedTab[];
+      state: TabPoolState;
       effects: TabOrchestratorEffect[];
     };
 
@@ -98,6 +104,17 @@ const statusForObservedEvidence = (
   evidence: RuntimeEpochEvidence,
   desiredEpochId: string,
 ): TabLifecycleStatus => (hasDesiredStrongRuntime(evidence, desiredEpochId) ? 'ready' : 'observed');
+
+const statusForObservedUpdate = (
+  tab: ManagedTab,
+  evidence: RuntimeEpochEvidence,
+  desiredEpochId: string,
+): TabLifecycleStatus => {
+  if (tab.status === 'observed' || tab.status === 'ready') {
+    return statusForObservedEvidence(evidence, desiredEpochId);
+  }
+  return tab.status;
+};
 
 const matchesObservedIdentity = (tab: ManagedTab, evidence: RuntimeEpochEvidence): boolean => {
   if (evidence.tabId !== null) return tab.tabId === evidence.tabId;
@@ -142,7 +159,19 @@ export const reduceTabLifecycle = (
     const tabs =
       existingIndex === -1
         ? [...state.tabs, observedTab]
-        : state.tabs.map((tab, index) => (index === existingIndex ? observedTab : tab));
+        : state.tabs.map((tab, index) =>
+            index === existingIndex
+              ? {
+                  ...tab,
+                  tabId: event.evidence.tabId,
+                  clientId: event.evidence.clientId,
+                  pageKind: event.evidence.pageKind,
+                  status: statusForObservedUpdate(tab, event.evidence, state.desiredEpochId),
+                  evidence: event.evidence,
+                  updatedAtMs: event.nowMs,
+                }
+              : tab,
+          );
 
     return {
       state: {
@@ -209,11 +238,23 @@ const canAllocate = (
 ): boolean => {
   if (tab.pageKind !== request.pageKind) return false;
   if (tab.status !== 'ready') return false;
+  if (tab.leaseClaimId) return false;
   if (request.requireStrongRuntime && !hasDesiredStrongRuntime(tab.evidence, desiredEpochId)) {
     return false;
   }
   return true;
 };
+
+const reserveTabLease = (
+  state: TabPoolState,
+  tab: ManagedTab,
+  claimId: string,
+): TabPoolState => ({
+  ...state,
+  tabs: state.tabs.map((candidate) =>
+    candidate === tab ? { ...candidate, leaseClaimId: claimId } : candidate,
+  ),
+});
 
 export const allocateTabForPurpose = (
   state: TabPoolState,
@@ -223,9 +264,13 @@ export const allocateTabForPurpose = (
 
   if (candidates.length === 1) {
     const tab = candidates[0];
+    const nextState = reserveTabLease(state, tab, request.claimId);
     return {
       status: 'allocated',
+      tabId: tab.tabId,
+      clientId: tab.clientId,
       tab,
+      state: nextState,
       effects: [
         {
           type: 'tab.claim',
@@ -241,6 +286,7 @@ export const allocateTabForPurpose = (
     return {
       status: 'ambiguous',
       candidates,
+      state,
       effects: [
         {
           type: 'diagnostic.record',
@@ -255,6 +301,7 @@ export const allocateTabForPurpose = (
   if (request.allowCreate && request.createUrl) {
     return {
       status: 'needs_create',
+      state,
       effects: [
         {
           type: 'browser.open',
@@ -270,6 +317,7 @@ export const allocateTabForPurpose = (
     status: 'unavailable',
     reason: 'no_ready_tab_for_purpose',
     candidates: [],
+    state,
     effects: [
       {
         type: 'diagnostic.record',

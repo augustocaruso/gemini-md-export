@@ -349,6 +349,8 @@ test('ready observed tab is allocated and emits tab.claim', () => {
   const result = allocateTabForPurpose(state, allocationRequest({ claimId: 'claim-7' }));
 
   assert.equal(result.status, 'allocated');
+  assert.equal(result.tabId, 7);
+  assert.equal(result.clientId, 'matching-runtime');
   assert.equal(result.tab.tabId, 7);
   assert.deepEqual(result.effects, [
     {
@@ -693,6 +695,127 @@ test('tabId lifecycle events still match by tabId before clientId', () => {
       [19, 'target-client', 'ready'],
     ],
   );
+});
+
+test('quarantined tab followed by strong tabObserved remains quarantined and is skipped', () => {
+  let state = observedPoolWith(strongDesiredEvidence({ tabId: 20, page: { kind: 'activity' } }));
+  state = reduceTabLifecycle(state, {
+    type: 'tabQuarantined',
+    nowMs: 1500,
+    tabId: 20,
+    reason: 'runtime_epoch_timeout',
+  }).state;
+
+  state = reduceTabLifecycle(state, {
+    type: 'tabObserved',
+    nowMs: 1600,
+    evidence: strongDesiredEvidence({
+      tabId: 20,
+      clientId: 'matching-runtime-after-quarantine',
+      page: { kind: 'activity' },
+    }),
+  }).state;
+
+  assert.equal(state.tabs[0].status, 'quarantined');
+  assert.equal(state.tabs[0].clientId, 'matching-runtime-after-quarantine');
+  assert.equal(state.tabs[0].quarantineReason, 'runtime_epoch_timeout');
+
+  const result = allocateTabForPurpose(state, allocationRequest());
+
+  assert.equal(result.status, 'unavailable');
+  assert.deepEqual(result.candidates, []);
+});
+
+test('busy tab followed by strong tabObserved remains busy and is skipped', () => {
+  let state = observedPoolWith(strongDesiredEvidence({ tabId: 21, page: { kind: 'activity' } }));
+  state = reduceTabLifecycle(state, {
+    type: 'tabBusy',
+    nowMs: 1500,
+    tabId: 21,
+    reason: 'hydrating_chat',
+  }).state;
+
+  state = reduceTabLifecycle(state, {
+    type: 'tabObserved',
+    nowMs: 1600,
+    evidence: strongDesiredEvidence({
+      tabId: 21,
+      clientId: 'matching-runtime-after-busy',
+      page: { kind: 'activity' },
+    }),
+  }).state;
+
+  assert.equal(state.tabs[0].status, 'busy');
+  assert.equal(state.tabs[0].clientId, 'matching-runtime-after-busy');
+
+  const result = allocateTabForPurpose(state, allocationRequest());
+
+  assert.equal(result.status, 'unavailable');
+  assert.deepEqual(result.candidates, []);
+});
+
+test('allocation marks leaseClaimId in returned state and repeated allocation skips leased tab', () => {
+  const state = observedPoolWith(strongDesiredEvidence({ tabId: 22, page: { kind: 'activity' } }));
+
+  const first = allocateTabForPurpose(state, allocationRequest({ claimId: 'claim-22' }));
+
+  assert.equal(first.status, 'allocated');
+  assert.equal(first.state.tabs[0].leaseClaimId, 'claim-22');
+
+  const second = allocateTabForPurpose(first.state, allocationRequest({ claimId: 'claim-again' }));
+
+  assert.equal(second.status, 'unavailable');
+  assert.deepEqual(second.candidates, []);
+  assert.equal(second.state, first.state);
+});
+
+test('repeated allocation with returned state can choose another unleased candidate', () => {
+  const state = observedPoolWith(
+    strongDesiredEvidence({ tabId: 23, page: { kind: 'activity' } }),
+    strongDesiredEvidence({ tabId: 24, clientId: 'other-ready', page: { kind: 'activity' } }),
+  );
+
+  const first = allocateTabForPurpose(state, allocationRequest({ claimId: 'claim-23' }));
+  assert.equal(first.status, 'ambiguous');
+
+  const preleasedState = {
+    ...state,
+    tabs: state.tabs.map((tab) =>
+      tab.tabId === 23 ? { ...tab, leaseClaimId: 'claim-existing' } : tab,
+    ),
+  };
+
+  const result = allocateTabForPurpose(preleasedState, allocationRequest({ claimId: 'claim-24' }));
+
+  assert.equal(result.status, 'allocated');
+  assert.equal(result.tabId, 24);
+  assert.equal(result.state.tabs.find((tab) => tab.tabId === 23).leaseClaimId, 'claim-existing');
+  assert.equal(result.state.tabs.find((tab) => tab.tabId === 24).leaseClaimId, 'claim-24');
+});
+
+test('tabReleased clears lease and allows allocation again', () => {
+  const state = observedPoolWith(strongDesiredEvidence({ tabId: 25, page: { kind: 'activity' } }));
+  const allocated = allocateTabForPurpose(state, allocationRequest({ claimId: 'claim-25' }));
+  assert.equal(allocated.status, 'allocated');
+
+  const released = reduceTabLifecycle(allocated.state, {
+    type: 'tabReleased',
+    nowMs: 1800,
+    tabId: 25,
+    claimId: 'claim-25',
+  }).state;
+
+  assert.equal(released.tabs[0].status, 'ready');
+  assert.equal(released.tabs[0].leaseClaimId, undefined);
+
+  const allocatedAgain = allocateTabForPurpose(
+    released,
+    allocationRequest({ claimId: 'claim-25-again' }),
+  );
+
+  assert.equal(allocatedAgain.status, 'allocated');
+  assert.equal(allocatedAgain.tabId, 25);
+  assert.equal(allocatedAgain.state.tabs[0].leaseClaimId, 'claim-25-again');
 });
 
 test('initial recovery state shape', () => {
