@@ -216,6 +216,9 @@ test('export recente prepara automaticamente uma aba hidratada antes da claim', 
   const prepareBlock = serverSource.match(
     /const selectRecentExportClient = async[\s\S]*?\n\};\n\nconst collectConversationItemPayloadForClient/,
   )?.[0] || '';
+  const jobArgsBlock = serverSource.match(
+    /const prepareNativeExportJobArgs = async[\s\S]*?\n\};\n\nconst assertClientClaimedReadyForSession/,
+  )?.[0] || '';
   const recentEndpointBlock = serverSource.match(
     /url\.pathname === '\/agent\/export-recent-chats'[\s\S]*?\n  if \(req\.method === 'GET' && url\.pathname === '\/agent\/export-missing-chats'\)/,
   )?.[0] || '';
@@ -228,10 +231,16 @@ test('export recente prepara automaticamente uma aba hidratada antes da claim', 
   assert.match(prepareBlock, /prepareClientForBrowserExport\(candidates\[0\], selector\)/);
   assert.match(serverSource, /assertActiveClaimableGeminiClient\(\s*\n\s*hydrateClientLifecycleFields\(prepared\.client\)/);
   assert.match(recentEndpointBlock, /const client = await selectRecentExportClient\(selector\)/);
+  assert.match(recentEndpointBlock, /prepareNativeExportJobArgs\(client/);
   assert.ok(
     recentEndpointBlock.indexOf('selectRecentExportClient') <
-      recentEndpointBlock.indexOf('claimNativeExportLeaseForJob'),
+      recentEndpointBlock.indexOf('prepareNativeExportJobArgs'),
     'export recent precisa ativar/validar a aba antes de criar claim visual',
+  );
+  assert.ok(
+    jobArgsBlock.indexOf('claimNativeExportLeaseForJob') <
+      jobArgsBlock.indexOf('withNativeExportLease'),
+    'helper de job precisa criar a claim visual antes de preparar argumentos do export',
   );
   assert.match(cliSource, /const ensureReadyForExport = async/);
   assert.match(cliSource, /canPrepareExportFromReady/);
@@ -369,6 +378,38 @@ test('export recente revalida lease nativa antes de comando pesado por conversa'
     collectBlock.indexOf('validateNativeExportTabLeaseForJob') <
       collectBlock.indexOf("'get-chat-by-id'"),
     'lease nativa precisa ser revalidada antes do get-chat-by-id',
+  );
+});
+
+test('export recente prepara companion My Activity antes de iniciar job', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const helperSource = readFileSync(
+    resolve(ROOT, 'src', 'mcp', 'activity-companion-readiness.ts'),
+    'utf-8',
+  );
+  const helperBlock =
+    helperSource.match(/export const createActivityCompanionPreparer[\s\S]*$/)?.[0] || '';
+  const endpointBlock = source.match(
+    /url\.pathname === '\/agent\/export-recent-chats'[\s\S]*?\n    return;/,
+  )?.[0] || '';
+  const jobArgsBlock = source.match(
+    /const prepareNativeExportJobArgs = async[\s\S]*?\n\};\n\nconst assertClientClaimedReadyForSession/,
+  )?.[0] || '';
+
+  assert.match(helperSource, /activityCompanionTabIdsForNativeLease/);
+  assert.match(helperSource, /shouldPrepareActivityCompanionForDateImport/);
+  assert.match(helperBlock, /activityCompanionTabIdsForNativeLease/);
+  assert.match(helperBlock, /activateBrowserTabById\(\s*companionTabId/);
+  assert.match(helperBlock, /tryNativeBrowserBrokerTabsAction\('reload'/);
+  assert.match(helperBlock, /waitForActivityClient\(\s*\{ tabId: companionTabId \}/);
+  assert.match(helperBlock, /activateBrowserTabById\(\s*exportTabId/);
+  assert.match(endpointBlock, /prepareNativeExportJobArgs\(client/);
+  assert.ok(
+    jobArgsBlock.indexOf('claimNativeExportLeaseForJob') <
+      jobArgsBlock.indexOf('prepareActivityCompanionForNativeExportLease') &&
+      endpointBlock.indexOf('prepareNativeExportJobArgs') <
+        endpointBlock.indexOf('startRecentChatsExportJob'),
+    'companion My Activity precisa acordar entre a claim visual nativa e o início do job',
   );
 });
 
@@ -540,8 +581,9 @@ test('export jobs bloqueiam novo export ativo antes de tentar claim-tab', () => 
     const escaped = route.replaceAll('/', '\\/');
     const block = source.match(new RegExp(`url\\.pathname === '${escaped}'[\\s\\S]*?catch \\(err\\)`))?.[0];
     assert.ok(block, `${route} deve existir`);
-    assert.match(block, /const client = (?:await selectRecentExportClient\(selector\)|requireClient\(selector\));[\s\S]*?assertNoRunningBrowserExportJob\(client\);[\s\S]*?claimNativeExportLeaseForJob[\s\S]*?start(?:Recent|Direct)ChatsExportJob/);
+    assert.match(block, /const client = (?:await selectRecentExportClient\(selector\)|requireClient\(selector\));[\s\S]*?assertNoRunningBrowserExportJob\(client\);[\s\S]*?prepareNativeExportJobArgs[\s\S]*?start(?:Recent|Direct)ChatsExportJob/);
   }
+  assert.match(source, /const prepareNativeExportJobArgs = async[\s\S]*?claimNativeExportLeaseForJob/);
   assert.match(source, /const assertClientClaimedReadyForSession = \(client, args = \{\}\) =>/);
   assert.match(source, /const startRecentChatsExportJob = \(client, args = \{\}\) => \{[\s\S]*?assertClientClaimedReadyForSession\(client, args\)/);
   assert.match(source, /const startDirectChatsExportJob = \(client, args = \{\}\) => \{[\s\S]*?assertClientClaimedReadyForSession\(client, args\)/);

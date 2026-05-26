@@ -263,6 +263,25 @@ const nonEmptyIntegerArray = (
   return clean as [number, ...number[]];
 };
 
+const integerArray = (values: unknown): number[] =>
+  Array.isArray(values)
+    ? values.map(Number).filter((value) => Number.isInteger(value) && value > 0)
+    : [];
+
+const relatedTabIdsFromClaimPayload = (
+  tabId: number,
+  payload: NativeBrowserBrokerCommand['payload'] = {},
+): number[] => {
+  const visualGroupTabId = Number(payload?.visualGroupTabId ?? payload?.groupWithTabId);
+  return Array.from(
+    new Set([
+      ...integerArray(payload?.relatedTabIds),
+      ...integerArray(payload?.tabIds).filter((candidateTabId) => candidateTabId !== tabId),
+      ...(Number.isInteger(visualGroupTabId) && visualGroupTabId > 0 ? [visualGroupTabId] : []),
+    ]),
+  );
+};
+
 const applyNativeClaimVisual = async (
   chromeApi: ChromeNativeBrokerApi,
   tabId: number,
@@ -423,12 +442,18 @@ export const handleNativeBrowserBrokerCommand = async (
       inspectTab,
     });
     if (claim.ok !== true) return claim;
+    const relatedTabIds = Array.from(
+      new Set([
+        ...claim.visualCompanionTabIds,
+        ...relatedTabIdsFromClaimPayload(claim.tab.tabId, request.payload),
+      ]),
+    );
     return {
       ...claim,
       visual: await applyNativeClaimVisual(
         chromeApi,
         claim.tab.tabId,
-        claim.visualCompanionTabIds,
+        relatedTabIds,
         request.payload,
       ),
     };

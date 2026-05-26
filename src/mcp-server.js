@@ -136,6 +136,9 @@ const {
   reloadExtensionForExistingTabs,
 } = await import(compiledTsModuleUrl('mcp', 'existing-tabs-reload.js'));
 const {
+  createActivityCompanionPreparer,
+} = await import(compiledTsModuleUrl('mcp', 'activity-companion-readiness.js'));
+const {
   extensionReloadAssumedResultForError,
 } = await import(compiledTsModuleUrl('mcp', 'extension-reload-runtime.js'));
 const {
@@ -3403,6 +3406,17 @@ const normalizeWaitMs = (value, fallback, max = 30_000) => {
   return Math.max(0, Math.min(max, safe));
 };
 
+const prepareActivityCompanionForNativeExportLease = createActivityCompanionPreparer({
+  normalizeTabId,
+  normalizeWaitMs,
+  waitForActivityClient: (...args) => waitForActivityClient(...args),
+  activityClientCommandReady: (client) => activityClientCommandReady(client),
+  activateBrowserTabById: (...args) => activateBrowserTabById(...args),
+  tryNativeBrowserBrokerTabsAction,
+  summarizeClient: (client) => summarizeClient(client),
+  getActivityClients: () => getActivityClients(),
+});
+
 const normalizeExportWaitMs = (value, fallback, min = 0, max = 45 * 60_000) => {
   const parsed = Number(value ?? fallback);
   const safe = Number.isFinite(parsed) ? parsed : fallback;
@@ -4048,6 +4062,17 @@ const {
   validateNativeExportTabLeaseForJob,
 });
 
+const prepareNativeExportJobArgs = async (client, args = {}, label = TAB_CLAIM_LABELS.export) => {
+  const nativeLease = await claimNativeExportLeaseForJob(client, args, label);
+  const jobArgs = withNativeExportLease(args, nativeLease);
+  jobArgs.activityCompanion = await prepareActivityCompanionForNativeExportLease(
+    client,
+    jobArgs,
+    nativeLease,
+  );
+  return jobArgs;
+};
+
 const assertClientClaimedReadyForSession = (client, args = {}) => {
   const sessionId = normalizeSessionId(args.sessionId || args._proxySessionId);
   const sessionClaim = claimForSession(sessionId);
@@ -4486,12 +4511,15 @@ const activityClientCommandReady = (client) =>
 const waitForActivityClient = async (selector = {}, timeoutMs = BROWSER_STATUS_WAKE_WAIT_MS) => {
   const startedAt = Date.now();
   const waitLimitMs = normalizeWaitMs(timeoutMs, BROWSER_STATUS_WAKE_WAIT_MS, 120_000);
+  const selectorTabId = normalizeTabId(selector.tabId);
   while (Date.now() - startedAt <= waitLimitMs) {
     cleanupStaleClients();
     const activityClients = getActivityClients();
-    const candidates = selector.clientId
-      ? activityClients.filter((client) => client.clientId === selector.clientId)
-      : activityClients;
+    const candidates = activityClients.filter((client) => {
+      if (selector.clientId && client.clientId !== selector.clientId) return false;
+      if (selectorTabId !== null && normalizeTabId(client.tabId) !== selectorTabId) return false;
+      return true;
+    });
     const ready = candidates.find(activityClientCommandReady);
     if (ready) return ready;
     const matching = candidates.find(clientMatchesExpectedBrowserExtension);
@@ -10732,8 +10760,8 @@ const legacyRawTools = [
     call: async (args = {}) => {
       const client = requireClient(args);
       assertNoRunningBrowserExportJob(client);
-      const nativeLease = await claimNativeExportLeaseForJob(client, args, TAB_CLAIM_LABELS.export);
-      return toolTextResult(startRecentChatsExportJob(client, withNativeExportLease(args, nativeLease)));
+      const jobArgs = await prepareNativeExportJobArgs(client, args, TAB_CLAIM_LABELS.export);
+      return toolTextResult(startRecentChatsExportJob(client, jobArgs));
     },
   },
   {
@@ -10828,15 +10856,15 @@ const legacyRawTools = [
     call: async (args = {}) => {
       const client = requireClient(args);
       assertNoRunningBrowserExportJob(client);
-      const nativeLease = await claimNativeExportLeaseForJob(client, args, TAB_CLAIM_LABELS.export);
+      const jobArgs = await prepareNativeExportJobArgs(client, {
+        ...args,
+        outputDir: args.outputDir || args.vaultDir,
+        existingScanDir: args.vaultDir,
+        exportMissingOnly: true,
+        skipExisting: true,
+      }, TAB_CLAIM_LABELS.export);
       return toolTextResult(
-        startRecentChatsExportJob(client, withNativeExportLease({
-          ...args,
-          outputDir: args.outputDir || args.vaultDir,
-          existingScanDir: args.vaultDir,
-          exportMissingOnly: true,
-          skipExisting: true,
-        }, nativeLease)),
+        startRecentChatsExportJob(client, jobArgs),
       );
     },
   },
@@ -10923,16 +10951,16 @@ const legacyRawTools = [
     call: async (args = {}) => {
       const client = requireClient(args);
       assertNoRunningBrowserExportJob(client);
-      const nativeLease = await claimNativeExportLeaseForJob(client, args, TAB_CLAIM_LABELS.sync);
+      const jobArgs = await prepareNativeExportJobArgs(client, {
+        ...args,
+        outputDir: args.outputDir || args.vaultDir,
+        existingScanDir: args.vaultDir,
+        exportMissingOnly: true,
+        syncMode: true,
+        skipExisting: true,
+      }, TAB_CLAIM_LABELS.sync);
       return toolTextResult(
-        startRecentChatsExportJob(client, withNativeExportLease({
-          ...args,
-          outputDir: args.outputDir || args.vaultDir,
-          existingScanDir: args.vaultDir,
-          exportMissingOnly: true,
-          syncMode: true,
-          skipExisting: true,
-        }, nativeLease)),
+        startRecentChatsExportJob(client, jobArgs),
       );
     },
   },
@@ -11001,8 +11029,8 @@ const legacyRawTools = [
     call: async (args = {}) => {
       const client = requireClient(args);
       assertNoRunningBrowserExportJob(client);
-      const nativeLease = await claimNativeExportLeaseForJob(client, args, TAB_CLAIM_LABELS.export);
-      return toolTextResult(startDirectChatsExportJob(client, withNativeExportLease(args, nativeLease)));
+      const jobArgs = await prepareNativeExportJobArgs(client, args, TAB_CLAIM_LABELS.export);
+      return toolTextResult(startDirectChatsExportJob(client, jobArgs));
     },
   },
   {
@@ -13059,30 +13087,30 @@ const bridgeServer = createServer(async (req, res) => {
       const selector = clientSelectorFromSearchParams(url.searchParams);
       const client = await selectRecentExportClient(selector);
       assertNoRunningBrowserExportJob(client);
-      const nativeLease = await claimNativeExportLeaseForJob(client, selector, TAB_CLAIM_LABELS.export);
+      const jobArgs = await prepareNativeExportJobArgs(client, {
+        ...selector,
+        outputDir: url.searchParams.get('outputDir'),
+        resumeReportFile: url.searchParams.get('resumeReportFile') || url.searchParams.get('reportFile') || undefined,
+        ...dateImportArgsFromSearchParams(url.searchParams),
+        startIndex: url.searchParams.get('startIndex'),
+        maxChats: url.searchParams.get('maxChats') || url.searchParams.get('limit'),
+        refresh: parseOptionalBoolean(url.searchParams.get('refresh')),
+        batchSize: url.searchParams.get('batchSize') || undefined,
+        adaptiveLoad: parseOptionalBoolean(url.searchParams.get('adaptiveLoad')),
+        maxLoadMoreRounds: url.searchParams.get('maxLoadMoreRounds') || undefined,
+        loadMoreAttempts: url.searchParams.get('loadMoreAttempts') || undefined,
+        maxNoGrowthRounds: url.searchParams.get('maxNoGrowthRounds') || undefined,
+        loadMoreBrowserRounds: url.searchParams.get('loadMoreBrowserRounds') || undefined,
+        loadMoreBrowserTimeoutMs: url.searchParams.get('loadMoreBrowserTimeoutMs') || undefined,
+        loadMoreTimeoutMs: url.searchParams.get('loadMoreTimeoutMs') || undefined,
+        ...exportBrowserArgsFromSearchParams(url.searchParams),
+        skipExisting: parseOptionalBoolean(url.searchParams.get('skipExisting')),
+        autoReleaseClaim: parseOptionalBoolean(url.searchParams.get('autoReleaseClaim')),
+      }, TAB_CLAIM_LABELS.export);
       sendAgentJson(
         res,
         202,
-        startRecentChatsExportJob(client, withNativeExportLease({
-          ...selector,
-          outputDir: url.searchParams.get('outputDir'),
-          resumeReportFile: url.searchParams.get('resumeReportFile') || url.searchParams.get('reportFile') || undefined,
-          ...dateImportArgsFromSearchParams(url.searchParams),
-          startIndex: url.searchParams.get('startIndex'),
-          maxChats: url.searchParams.get('maxChats') || url.searchParams.get('limit'),
-          refresh: parseOptionalBoolean(url.searchParams.get('refresh')),
-          batchSize: url.searchParams.get('batchSize') || undefined,
-          adaptiveLoad: parseOptionalBoolean(url.searchParams.get('adaptiveLoad')),
-          maxLoadMoreRounds: url.searchParams.get('maxLoadMoreRounds') || undefined,
-          loadMoreAttempts: url.searchParams.get('loadMoreAttempts') || undefined,
-          maxNoGrowthRounds: url.searchParams.get('maxNoGrowthRounds') || undefined,
-          loadMoreBrowserRounds: url.searchParams.get('loadMoreBrowserRounds') || undefined,
-          loadMoreBrowserTimeoutMs: url.searchParams.get('loadMoreBrowserTimeoutMs') || undefined,
-          loadMoreTimeoutMs: url.searchParams.get('loadMoreTimeoutMs') || undefined,
-          ...exportBrowserArgsFromSearchParams(url.searchParams),
-          skipExisting: parseOptionalBoolean(url.searchParams.get('skipExisting')),
-          autoReleaseClaim: parseOptionalBoolean(url.searchParams.get('autoReleaseClaim')),
-        }, nativeLease)),
+        startRecentChatsExportJob(client, jobArgs),
       );
     } catch (err) {
       sendAgentError(res, 503, err);
@@ -13095,35 +13123,35 @@ const bridgeServer = createServer(async (req, res) => {
       const selector = clientSelectorFromSearchParams(url.searchParams);
       const client = await selectRecentExportClient(selector);
       assertNoRunningBrowserExportJob(client);
-      const nativeLease = await claimNativeExportLeaseForJob(client, selector, TAB_CLAIM_LABELS.export);
+      const jobArgs = await prepareNativeExportJobArgs(client, {
+        ...selector,
+        vaultDir: url.searchParams.get('vaultDir') || url.searchParams.get('existingScanDir'),
+        existingScanDir: url.searchParams.get('existingScanDir') || url.searchParams.get('vaultDir'),
+        outputDir:
+          url.searchParams.get('outputDir') ||
+          url.searchParams.get('vaultDir') ||
+          url.searchParams.get('existingScanDir') ||
+          undefined,
+        resumeReportFile: url.searchParams.get('resumeReportFile') || url.searchParams.get('reportFile') || undefined,
+        ...dateImportArgsFromSearchParams(url.searchParams),
+        exportMissingOnly: true,
+        refresh: parseOptionalBoolean(url.searchParams.get('refresh')),
+        batchSize: url.searchParams.get('batchSize') || undefined,
+        adaptiveLoad: parseOptionalBoolean(url.searchParams.get('adaptiveLoad')),
+        maxLoadMoreRounds: url.searchParams.get('maxLoadMoreRounds') || undefined,
+        loadMoreAttempts: url.searchParams.get('loadMoreAttempts') || undefined,
+        maxNoGrowthRounds: url.searchParams.get('maxNoGrowthRounds') || undefined,
+        loadMoreBrowserRounds: url.searchParams.get('loadMoreBrowserRounds') || undefined,
+        loadMoreBrowserTimeoutMs: url.searchParams.get('loadMoreBrowserTimeoutMs') || undefined,
+        loadMoreTimeoutMs: url.searchParams.get('loadMoreTimeoutMs') || undefined,
+        ...exportBrowserArgsFromSearchParams(url.searchParams),
+        skipExisting: true,
+        autoReleaseClaim: parseOptionalBoolean(url.searchParams.get('autoReleaseClaim')),
+      }, TAB_CLAIM_LABELS.export);
       sendAgentJson(
         res,
         202,
-        startRecentChatsExportJob(client, withNativeExportLease({
-          ...selector,
-          vaultDir: url.searchParams.get('vaultDir') || url.searchParams.get('existingScanDir'),
-          existingScanDir: url.searchParams.get('existingScanDir') || url.searchParams.get('vaultDir'),
-          outputDir:
-            url.searchParams.get('outputDir') ||
-            url.searchParams.get('vaultDir') ||
-            url.searchParams.get('existingScanDir') ||
-            undefined,
-          resumeReportFile: url.searchParams.get('resumeReportFile') || url.searchParams.get('reportFile') || undefined,
-          ...dateImportArgsFromSearchParams(url.searchParams),
-          exportMissingOnly: true,
-          refresh: parseOptionalBoolean(url.searchParams.get('refresh')),
-          batchSize: url.searchParams.get('batchSize') || undefined,
-          adaptiveLoad: parseOptionalBoolean(url.searchParams.get('adaptiveLoad')),
-          maxLoadMoreRounds: url.searchParams.get('maxLoadMoreRounds') || undefined,
-          loadMoreAttempts: url.searchParams.get('loadMoreAttempts') || undefined,
-          maxNoGrowthRounds: url.searchParams.get('maxNoGrowthRounds') || undefined,
-          loadMoreBrowserRounds: url.searchParams.get('loadMoreBrowserRounds') || undefined,
-          loadMoreBrowserTimeoutMs: url.searchParams.get('loadMoreBrowserTimeoutMs') || undefined,
-          loadMoreTimeoutMs: url.searchParams.get('loadMoreTimeoutMs') || undefined,
-          ...exportBrowserArgsFromSearchParams(url.searchParams),
-          skipExisting: true,
-          autoReleaseClaim: parseOptionalBoolean(url.searchParams.get('autoReleaseClaim')),
-        }, nativeLease)),
+        startRecentChatsExportJob(client, jobArgs),
       );
     } catch (err) {
       sendAgentError(res, 503, err);
@@ -13136,33 +13164,33 @@ const bridgeServer = createServer(async (req, res) => {
       const selector = clientSelectorFromSearchParams(url.searchParams);
       const client = await selectRecentExportClient(selector);
       assertNoRunningBrowserExportJob(client);
-      const nativeLease = await claimNativeExportLeaseForJob(client, selector, TAB_CLAIM_LABELS.sync);
+      const jobArgs = await prepareNativeExportJobArgs(client, {
+        ...selector,
+        vaultDir: url.searchParams.get('vaultDir'),
+        existingScanDir: url.searchParams.get('vaultDir'),
+        outputDir: url.searchParams.get('outputDir') || url.searchParams.get('vaultDir') || undefined,
+        ...dateImportArgsFromSearchParams(url.searchParams),
+        syncStateFile: url.searchParams.get('syncStateFile') || undefined,
+        resumeReportFile: url.searchParams.get('resumeReportFile') || url.searchParams.get('reportFile') || undefined,
+        exportMissingOnly: true,
+        syncMode: true,
+        refresh: parseOptionalBoolean(url.searchParams.get('refresh')),
+        batchSize: url.searchParams.get('batchSize') || undefined,
+        knownBoundaryCount: url.searchParams.get('knownBoundaryCount') || undefined,
+        maxLoadMoreRounds: url.searchParams.get('maxLoadMoreRounds') || undefined,
+        loadMoreAttempts: url.searchParams.get('loadMoreAttempts') || undefined,
+        maxNoGrowthRounds: url.searchParams.get('maxNoGrowthRounds') || undefined,
+        loadMoreBrowserRounds: url.searchParams.get('loadMoreBrowserRounds') || undefined,
+        loadMoreBrowserTimeoutMs: url.searchParams.get('loadMoreBrowserTimeoutMs') || undefined,
+        loadMoreTimeoutMs: url.searchParams.get('loadMoreTimeoutMs') || undefined,
+        ...exportBrowserArgsFromSearchParams(url.searchParams),
+        skipExisting: true,
+        autoReleaseClaim: parseOptionalBoolean(url.searchParams.get('autoReleaseClaim')),
+      }, TAB_CLAIM_LABELS.sync);
       sendAgentJson(
         res,
         202,
-        startRecentChatsExportJob(client, withNativeExportLease({
-          ...selector,
-          vaultDir: url.searchParams.get('vaultDir'),
-          existingScanDir: url.searchParams.get('vaultDir'),
-          outputDir: url.searchParams.get('outputDir') || url.searchParams.get('vaultDir') || undefined,
-          ...dateImportArgsFromSearchParams(url.searchParams),
-          syncStateFile: url.searchParams.get('syncStateFile') || undefined,
-          resumeReportFile: url.searchParams.get('resumeReportFile') || url.searchParams.get('reportFile') || undefined,
-          exportMissingOnly: true,
-          syncMode: true,
-          refresh: parseOptionalBoolean(url.searchParams.get('refresh')),
-          batchSize: url.searchParams.get('batchSize') || undefined,
-          knownBoundaryCount: url.searchParams.get('knownBoundaryCount') || undefined,
-          maxLoadMoreRounds: url.searchParams.get('maxLoadMoreRounds') || undefined,
-          loadMoreAttempts: url.searchParams.get('loadMoreAttempts') || undefined,
-          maxNoGrowthRounds: url.searchParams.get('maxNoGrowthRounds') || undefined,
-          loadMoreBrowserRounds: url.searchParams.get('loadMoreBrowserRounds') || undefined,
-          loadMoreBrowserTimeoutMs: url.searchParams.get('loadMoreBrowserTimeoutMs') || undefined,
-          loadMoreTimeoutMs: url.searchParams.get('loadMoreTimeoutMs') || undefined,
-          ...exportBrowserArgsFromSearchParams(url.searchParams),
-          skipExisting: true,
-          autoReleaseClaim: parseOptionalBoolean(url.searchParams.get('autoReleaseClaim')),
-        }, nativeLease)),
+        startRecentChatsExportJob(client, jobArgs),
       );
     } catch (err) {
       sendAgentError(res, 503, err);
@@ -13190,25 +13218,25 @@ const bridgeServer = createServer(async (req, res) => {
       };
       const client = await selectRecentExportClient(selector);
       assertNoRunningBrowserExportJob(client);
-      const nativeLease = await claimNativeExportLeaseForJob(client, selector, TAB_CLAIM_LABELS.export);
+      const jobArgs = await prepareNativeExportJobArgs(client, {
+        ...selector,
+        ...bodySelector,
+        outputDir: body.outputDir || url.searchParams.get('outputDir') || undefined,
+        ...dateImportArgsFromSearchParams(url.searchParams, body),
+        chatIds,
+        items,
+        expectedCount: body.expectedCount || url.searchParams.get('expectedCount') || undefined,
+        selectionFile: body.selectionFile || url.searchParams.get('selectionFile') || undefined,
+        delayMs: body.delayMs || url.searchParams.get('delayMs') || undefined,
+        ...exportBrowserArgsFromSearchParams(url.searchParams, body),
+        autoReleaseClaim: parseOptionalBoolean(
+          body.autoReleaseClaim ?? url.searchParams.get('autoReleaseClaim'),
+        ),
+      }, TAB_CLAIM_LABELS.export);
       sendAgentJson(
         res,
         202,
-        startDirectChatsExportJob(client, withNativeExportLease({
-          ...selector,
-          ...bodySelector,
-          outputDir: body.outputDir || url.searchParams.get('outputDir') || undefined,
-          ...dateImportArgsFromSearchParams(url.searchParams, body),
-          chatIds,
-          items,
-          expectedCount: body.expectedCount || url.searchParams.get('expectedCount') || undefined,
-          selectionFile: body.selectionFile || url.searchParams.get('selectionFile') || undefined,
-          delayMs: body.delayMs || url.searchParams.get('delayMs') || undefined,
-          ...exportBrowserArgsFromSearchParams(url.searchParams, body),
-          autoReleaseClaim: parseOptionalBoolean(
-            body.autoReleaseClaim ?? url.searchParams.get('autoReleaseClaim'),
-          ),
-        }, nativeLease)),
+        startDirectChatsExportJob(client, jobArgs),
       );
     } catch (err) {
       sendAgentError(res, 503, err);

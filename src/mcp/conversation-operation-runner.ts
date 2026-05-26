@@ -188,6 +188,10 @@ export const runConversationOperation = async ({
     if ((error as { code?: string })?.code === 'operation_cancelled' || abortSignal.aborted) {
       return cancelled(operationId, target, abortSignal, receipts);
     }
+    const errorData = (error as { data?: { dateImport?: unknown } })?.data;
+    if (errorData?.dateImport) {
+      receipts.dateImport = errorData.dateImport;
+    }
     return operationResultFromError({
       operationId,
       targetChatId: target.targetChatId,

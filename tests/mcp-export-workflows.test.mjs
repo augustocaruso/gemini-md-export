@@ -140,14 +140,21 @@ test('recent export job validates native lease before creating job', () => {
   const endpointBlock = source.match(
     /url\.pathname === '\/agent\/export-recent-chats'[\s\S]*?\n  if \(req\.method === 'GET' && url\.pathname === '\/agent\/export-missing-chats'\)/,
   )?.[0];
+  const jobArgsBlock = source.match(
+    /const prepareNativeExportJobArgs = async[\s\S]*?\n\};\n\nconst assertClientClaimedReadyForSession/,
+  )?.[0];
 
   assert.ok(endpointBlock, 'export recent endpoint deve existir');
-  assert.match(endpointBlock, /claimNativeExportLeaseForJob/);
-  assert.match(endpointBlock, /withNativeExportLease/);
+  assert.ok(jobArgsBlock, 'helper de argumentos do export deve existir');
+  assert.match(endpointBlock, /prepareNativeExportJobArgs\(client/);
+  assert.match(jobArgsBlock, /claimNativeExportLeaseForJob/);
+  assert.match(jobArgsBlock, /withNativeExportLease/);
   assert.match(nativeGateSource, /validateNativeExportTabLeaseForJob/);
   assert.ok(
-    endpointBlock.indexOf('claimNativeExportLeaseForJob') <
-      endpointBlock.indexOf('startRecentChatsExportJob'),
+    jobArgsBlock.indexOf('claimNativeExportLeaseForJob') <
+      jobArgsBlock.indexOf('withNativeExportLease') &&
+      endpointBlock.indexOf('prepareNativeExportJobArgs') <
+        endpointBlock.indexOf('startRecentChatsExportJob'),
     'lease nativa precisa ser validada antes de criar job',
   );
 });

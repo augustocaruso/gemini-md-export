@@ -366,7 +366,7 @@ export const runRecentExportConversationOperation = async (
 
           operationDateImportReceipt = dateImport.receipt;
           if (!dateImport.ok) {
-            deps.appendExportJobTrace(job, 'date_import_unresolved_saved_without_abort', {
+            deps.appendExportJobTrace(job, 'date_import_unresolved', {
               index,
               chatId: target.targetChatId,
               operationId,
@@ -374,10 +374,16 @@ export const runRecentExportConversationOperation = async (
               dateImport: dateImport.receipt || null,
               evidenceCount: Array.isArray(dateImport.evidence) ? dateImport.evidence.length : null,
             });
-            return {
-              payload,
-              receipt: dateImport.receipt || { enabled: false, status: 'unresolved' },
+            const error = new Error(
+              dateImport.message || 'Datas da conversa não foram resolvidas.',
+            );
+            (error as AnyRecord).code = dateImport.code || 'metadata_unresolved';
+            (error as AnyRecord).data = {
+              code: dateImport.code || 'metadata_unresolved',
+              dateImport: dateImport.receipt || { enabled: false, status: 'unresolved' },
+              evidence: Array.isArray(dateImport.evidence) ? dateImport.evidence : [],
             };
+            throw error;
           }
           return {
             payload: dateImport.payload,
@@ -576,7 +582,10 @@ export const runRecentExportConversationOperation = async (
     if (operationResult.status === 'failed') {
       const error = new Error(operationResult.error || 'Falha ao exportar conversa.');
       (error as AnyRecord).code = operationResult.code || 'conversation_operation_failed';
-      (error as AnyRecord).data = { receipts: operationResult.receipts || null };
+      (error as AnyRecord).data = {
+        receipts: operationResult.receipts || null,
+        dateImport: operationResult.receipts?.dateImport || null,
+      };
       throw error;
     }
     if (operationResult.status === 'cancelled') {

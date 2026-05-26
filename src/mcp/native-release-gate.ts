@@ -382,6 +382,10 @@ export const nativeBrokerReloadPayload = (args: NativeExportArgs = {}) => ({
   tabId: args.tabId ?? null,
   claimId: args.claimId || null,
   tabIds: Array.isArray(args.tabIds) ? args.tabIds : undefined,
+  relatedTabIds: Array.isArray(args.relatedTabIds) ? args.relatedTabIds : undefined,
+  visualGroupTabId: args.visualGroupTabId ?? args.groupWithTabId ?? undefined,
+  label: args.label || undefined,
+  color: args.color || undefined,
   focusWindow: args.focusWindow === true,
   reason: args.reason || undefined,
 });
