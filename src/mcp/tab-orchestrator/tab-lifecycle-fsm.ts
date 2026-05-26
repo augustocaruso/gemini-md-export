@@ -116,10 +116,38 @@ const statusForObservedUpdate = (
   return tab.status;
 };
 
-const matchesObservedIdentity = (tab: ManagedTab, evidence: RuntimeEpochEvidence): boolean => {
-  if (evidence.tabId !== null) return tab.tabId === evidence.tabId;
-  if (evidence.clientId !== null) return tab.clientId === evidence.clientId;
-  return tab.tabId === null && tab.clientId === null;
+const observedIdentityRank = (tab: ManagedTab, evidence: RuntimeEpochEvidence): number => {
+  if (evidence.tabId !== null && tab.tabId === evidence.tabId) return 2;
+  if (evidence.clientId !== null && tab.clientId === evidence.clientId && tab.tabId === null) {
+    return 1;
+  }
+  if (evidence.tabId === null && evidence.clientId !== null && tab.clientId === evidence.clientId) {
+    return 1;
+  }
+  if (
+    evidence.tabId === null &&
+    evidence.clientId === null &&
+    tab.tabId === null &&
+    tab.clientId === null
+  ) {
+    return 0;
+  }
+  return -1;
+};
+
+const findObservedIndex = (tabs: ManagedTab[], evidence: RuntimeEpochEvidence): number => {
+  let matchedIndex = -1;
+  let matchedRank = -1;
+
+  for (const [index, tab] of tabs.entries()) {
+    const rank = observedIdentityRank(tab, evidence);
+    if (rank > matchedRank) {
+      matchedIndex = index;
+      matchedRank = rank;
+    }
+  }
+
+  return matchedIndex;
 };
 
 const matchesLifecycleIdentity = (
@@ -153,9 +181,7 @@ export const reduceTabLifecycle = (
       evidence: event.evidence,
       updatedAtMs: event.nowMs,
     };
-    const existingIndex = state.tabs.findIndex((tab) =>
-      matchesObservedIdentity(tab, event.evidence),
-    );
+    const existingIndex = findObservedIndex(state.tabs, event.evidence);
     const tabs =
       existingIndex === -1
         ? [...state.tabs, observedTab]
@@ -203,6 +229,7 @@ export const reduceTabLifecycle = (
       state: {
         ...state,
         tabs: updateByLifecycleIdentity(state, event, (tab) => {
+          if (tab.leaseClaimId && event.claimId !== tab.leaseClaimId) return tab;
           const { leaseClaimId: _leaseClaimId, ...releasedTab } = tab;
           return {
             ...releasedTab,
@@ -264,12 +291,17 @@ export const allocateTabForPurpose = (
 
   if (candidates.length === 1) {
     const tab = candidates[0];
+    const tabIndex = state.tabs.indexOf(tab);
     const nextState = reserveTabLease(state, tab, request.claimId);
+    const reservedTab = nextState.tabs[tabIndex] ?? {
+      ...tab,
+      leaseClaimId: request.claimId,
+    };
     return {
       status: 'allocated',
       tabId: tab.tabId,
       clientId: tab.clientId,
-      tab,
+      tab: reservedTab,
       state: nextState,
       effects: [
         {

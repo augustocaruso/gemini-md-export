@@ -352,6 +352,7 @@ test('ready observed tab is allocated and emits tab.claim', () => {
   assert.equal(result.tabId, 7);
   assert.equal(result.clientId, 'matching-runtime');
   assert.equal(result.tab.tabId, 7);
+  assert.equal(result.tab.leaseClaimId, 'claim-7');
   assert.deepEqual(result.effects, [
     {
       type: 'tab.claim',
@@ -816,6 +817,74 @@ test('tabReleased clears lease and allows allocation again', () => {
   assert.equal(allocatedAgain.status, 'allocated');
   assert.equal(allocatedAgain.tabId, 25);
   assert.equal(allocatedAgain.state.tabs[0].leaseClaimId, 'claim-25-again');
+});
+
+test('tabReleased with wrong claimId does not clear lease and allocation still skips tab', () => {
+  const state = observedPoolWith(strongDesiredEvidence({ tabId: 26, page: { kind: 'activity' } }));
+  const allocated = allocateTabForPurpose(state, allocationRequest({ claimId: 'claim-owner' }));
+  assert.equal(allocated.status, 'allocated');
+
+  const released = reduceTabLifecycle(allocated.state, {
+    type: 'tabReleased',
+    nowMs: 1800,
+    tabId: 26,
+    claimId: 'claim-other',
+  }).state;
+
+  assert.equal(released.tabs[0].leaseClaimId, 'claim-owner');
+  assert.equal(released.tabs[0].status, 'ready');
+
+  const next = allocateTabForPurpose(released, allocationRequest({ claimId: 'claim-next' }));
+
+  assert.equal(next.status, 'unavailable');
+  assert.deepEqual(next.candidates, []);
+});
+
+test('tabReleased without claimId does not clear an active lease', () => {
+  const state = observedPoolWith(strongDesiredEvidence({ tabId: 27, page: { kind: 'activity' } }));
+  const allocated = allocateTabForPurpose(state, allocationRequest({ claimId: 'claim-owner' }));
+  assert.equal(allocated.status, 'allocated');
+
+  const released = reduceTabLifecycle(allocated.state, {
+    type: 'tabReleased',
+    nowMs: 1800,
+    tabId: 27,
+  }).state;
+
+  assert.equal(released.tabs[0].leaseClaimId, 'claim-owner');
+  assert.equal(released.tabs[0].status, 'ready');
+});
+
+test('observing same client first without tabId then with tabId merges into one tab', () => {
+  let state = initialTabPoolState({ desiredEpochId, nowMs: 1000 });
+
+  state = reduceTabLifecycle(state, {
+    type: 'tabObserved',
+    nowMs: 1400,
+    evidence: strongDesiredEvidence({
+      tabId: null,
+      clientId: 'client-gains-tab-id',
+      page: { kind: 'activity' },
+    }),
+  }).state;
+  state = reduceTabLifecycle(state, {
+    type: 'tabObserved',
+    nowMs: 1500,
+    evidence: strongDesiredEvidence({
+      tabId: 28,
+      clientId: 'client-gains-tab-id',
+      page: { kind: 'activity' },
+    }),
+  }).state;
+
+  assert.equal(state.tabs.length, 1);
+  assert.equal(state.tabs[0].tabId, 28);
+  assert.equal(state.tabs[0].clientId, 'client-gains-tab-id');
+
+  const result = allocateTabForPurpose(state, allocationRequest({ claimId: 'claim-28' }));
+
+  assert.equal(result.status, 'allocated');
+  assert.equal(result.tabId, 28);
 });
 
 test('initial recovery state shape', () => {
