@@ -179,7 +179,7 @@ test('recent export watchdog does not fail a conversation while local date impor
   );
 });
 
-test('recent export records metadata-unresolved as failure instead of saving a partial-dated file', async () => {
+test('recent export saves conversation with partial date receipt instead of failing metadata-unresolved', async () => {
   let saveCalled = false;
   const deps = createDeps({
     hasDateImportSource: () => true,
@@ -201,10 +201,8 @@ test('recent export records metadata-unresolved as failure instead of saving a p
       },
     }),
     enrichExportPayloadWithDates: async ({ payload }) => ({
-      ok: false,
+      ok: true,
       payload,
-      code: 'metadata_unresolved',
-      message: 'Exportacao abortada: datas incompletas. Nenhum arquivo foi salvo.',
       receipt: {
         enabled: true,
         status: 'partial',
@@ -216,7 +214,12 @@ test('recent export records metadata-unresolved as failure instead of saving a p
     }),
     writeExportPayloadBundle: () => {
       saveCalled = true;
-      return {};
+      return {
+        filePath: `/tmp/${target.targetChatId}.md`,
+        filename: `${target.targetChatId}.md`,
+        bytes: 123,
+        mediaFiles: [],
+      };
     },
   });
   const job = {
@@ -247,10 +250,10 @@ test('recent export records metadata-unresolved as failure instead of saving a p
   );
 
   assert.equal(result.client, client);
-  assert.equal(saveCalled, false);
-  assert.equal(successes.length, 0);
-  assert.equal(failures.length, 1);
-  assert.equal(failures[0].code, 'metadata_unresolved');
+  assert.equal(saveCalled, true);
+  assert.equal(successes.length, 1);
+  assert.equal(failures.length, 0);
+  assert.equal(successes[0].chatId, target.targetChatId);
   assert.equal(
     deps.traces.some((trace) => trace.event === 'date_import_unresolved_saved_without_abort'),
     false,

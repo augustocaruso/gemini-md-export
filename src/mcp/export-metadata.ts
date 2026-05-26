@@ -374,6 +374,15 @@ const receiptSourceFromEvidence = (
   return 'frontmatter';
 };
 
+const unresolvedReceiptSourceFromEvidence = (
+  context: ExportDateImportContext,
+  evidence: MetadataEvidence[],
+): ExportDateImportUnresolvedReceipt['source'] => {
+  const source = receiptSourceFromEvidence(context, evidence);
+  if (source === 'my-activity') return 'my-activity';
+  return context.enabled && context.source === 'my-activity' ? 'my-activity' : 'takeout';
+};
+
 const dateResolutionSummary = (
   resolution: ReturnType<typeof resolveMetadataDatesForCandidate>,
 ): ExportDateImportMatchedReceipt['dateResolution'] => ({
@@ -506,7 +515,7 @@ export const enrichExportPayloadWithMetadataDates = ({
     const unresolvedStatus = resolution.status === 'partial' ? 'partial' : 'unresolved';
     const receipt = buildUnresolvedReceipt({
       sourceFile: context.source === 'takeout' ? context.takeout.sourceFile : null,
-      source: context.source,
+      source: unresolvedReceiptSourceFromEvidence(context, evidence),
       status: unresolvedStatus,
       dateCreated: resolution.dateCreated,
       dateLastMessage: resolution.dateLastMessage,
@@ -514,14 +523,19 @@ export const enrichExportPayloadWithMetadataDates = ({
       warnings: resolution.warnings,
       dateResolution: resolutionSummary,
     });
+    const hasPartialDates = Boolean(resolution.dateCreated || resolution.dateLastMessage);
+    const updatedFrontmatter = hasPartialDates
+      ? buildCanonicalFrontmatter(note, {
+          dateCreated: resolution.dateCreated || undefined,
+          dateLastMessage: resolution.dateLastMessage || undefined,
+        })
+      : null;
     return {
-      ok: false,
-      code: 'metadata_unresolved',
-      message:
-        `Exportacao abortada: nao consegui resolver date_created/date_last_message para ${String(note.chatId)} ` +
-        `usando ${context.source === 'takeout' ? context.takeout.sourceFile : 'My Activity'}. Nenhum arquivo foi salvo.`,
+      ok: true,
+      payload: updatedFrontmatter
+        ? replaceMarkdownContent(payload, updatedFrontmatter + note.body.replace(/^\n+/, ''))
+        : payload,
       receipt,
-      evidence,
     };
   }
 

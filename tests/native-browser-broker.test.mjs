@@ -11,6 +11,7 @@ import {
   NATIVE_BROKER_WAKE_CAPABILITY,
   clientSupportsNativeBrokerWakeCommand,
   createNativeBrokerTabsActionRunner,
+  createTabClaimRelease,
   selectNativeBrokerWakeClient,
   shouldAttemptNativeBrokerWake,
 } from '../build/ts/mcp/native-release-gate.js';
@@ -247,4 +248,97 @@ test('native broker wake targets only clients that announce the wake capability'
     }),
     null,
   );
+});
+
+test('tab claim release cleans a missing server claim through the live tab before native fallback', async () => {
+  const calls = [];
+  const releaseTabClaim = createTabClaimRelease({
+    cleanupExpiredTabClaims: () => {},
+    normalizeSessionId: (sessionId) => String(sessionId || 'default-session'),
+    sessionClaims: { get: () => undefined, delete: () => calls.push(['session-delete']) },
+    tabClaims: { get: () => undefined },
+    clients: { get: () => undefined },
+    tryNativeBrowserBrokerTabsAction: async (action, args) => {
+      calls.push(['native', action, args.reason]);
+      return { ok: true, action, released: args.tabIds || [args.tabId] };
+    },
+    releaseTabClaimVisualByTabId: async (args) => {
+      calls.push(['extension-tab', args.tabId, args.claimId, args.reason]);
+      return { ok: true, releasedByTab: args.tabId };
+    },
+    summarizeTabClaims: () => [],
+    liveClientForClaim: () => null,
+    waitForContinuationClient: async () => null,
+    isLiveClient: () => false,
+    enqueueCommand: async () => null,
+    removeTabClaim: () => null,
+    summarizeTabClaim: () => null,
+    summarizeClient: () => null,
+  });
+
+  const result = await releaseTabClaim({
+    claimId: 'claim-orphan',
+    tabId: 42,
+    tabIds: [42, 99],
+    reason: 'job-complete',
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls, [
+    ['session-delete'],
+    ['extension-tab', 42, 'claim-orphan', 'job-complete'],
+    ['native', 'release', 'job-complete-native-visual'],
+  ]);
+  assert.equal(result.visual.releasedByTab, 42);
+  assert.equal(result.nativeVisual.ok, true);
+});
+
+test('tab claim release derives tab id from a live client carrying an orphan claim', async () => {
+  const calls = [];
+  const releaseTabClaim = createTabClaimRelease({
+    cleanupExpiredTabClaims: () => {},
+    normalizeSessionId: (sessionId) => String(sessionId || 'default-session'),
+    sessionClaims: { get: () => undefined, delete: () => calls.push(['session-delete']) },
+    tabClaims: { get: () => undefined },
+    clients: { get: () => undefined },
+    liveClientCarryingClaimId: (claimId) =>
+      claimId === 'claim-orphan'
+        ? {
+            clientId: 'client-42',
+            tabId: 42,
+            tabClaim: {
+              claimId,
+              visual: { tabIds: [42, 99] },
+            },
+          }
+        : null,
+    tryNativeBrowserBrokerTabsAction: async (action, args) => {
+      calls.push(['native', action, args.tabId, args.tabIds, args.reason]);
+      return { ok: true, action, released: args.tabIds || [args.tabId] };
+    },
+    releaseTabClaimVisualByTabId: async (args) => {
+      calls.push(['extension-tab', args.tabId, args.claimId, args.reason]);
+      return { ok: true, releasedByTab: args.tabId };
+    },
+    summarizeTabClaims: () => [],
+    liveClientForClaim: () => null,
+    waitForContinuationClient: async () => null,
+    isLiveClient: () => false,
+    enqueueCommand: async () => null,
+    removeTabClaim: () => null,
+    summarizeTabClaim: () => null,
+    summarizeClient: () => null,
+  });
+
+  const result = await releaseTabClaim({
+    claimId: 'claim-orphan',
+    reason: 'manual-cleanup',
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls, [
+    ['session-delete'],
+    ['extension-tab', 42, 'claim-orphan', 'manual-cleanup'],
+    ['native', 'release', 42, [42, 99], 'manual-cleanup-native-visual'],
+  ]);
 });

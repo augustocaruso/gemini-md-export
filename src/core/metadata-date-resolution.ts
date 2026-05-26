@@ -117,10 +117,33 @@ const evidenceScore = (item: { score?: number | null }): number => {
   return Number.isFinite(score) ? score : 0;
 };
 
+const duplicateTakeoutEdgeResolution = <T extends EdgeDateEvidence>(
+  items: T[],
+  strategy: 'earliest' | 'latest',
+  warningCode: string,
+  warnings: string[],
+): T | null => {
+  if (!items.length) return null;
+  const allStrongTakeout = items.every(
+    (item) =>
+      evidenceScore(item) >= 1 &&
+      item.confidence === 'strong' &&
+      (item.source === 'takeout-html' || item.source === 'takeout-json'),
+  );
+  if (!allStrongTakeout) return null;
+  warnings.push(warningCode);
+  const sorted = sortDates(items);
+  return strategy === 'earliest' ? sorted[0] || null : sorted.at(-1) || null;
+};
+
 const bestUniqueEdgeEvidence = <T extends EdgeDateEvidence>(
   items: T[],
   warningCode: string,
   warnings: string[],
+  duplicateResolution?: {
+    strategy: 'earliest' | 'latest';
+    warningCode: string;
+  },
 ): T | null => {
   if (!items.length) return null;
   const sorted = [...items].sort(
@@ -132,6 +155,15 @@ const bestUniqueEdgeEvidence = <T extends EdgeDateEvidence>(
   if (topDates.length === 1) {
     return sortDates(topItems.filter((item) => item.date === topDates[0]))[0] || null;
   }
+  const duplicateResolved = duplicateResolution
+    ? duplicateTakeoutEdgeResolution(
+        topItems,
+        duplicateResolution.strategy,
+        duplicateResolution.warningCode,
+        warnings,
+      )
+    : null;
+  if (duplicateResolved) return duplicateResolved;
   warnings.push(warningCode);
   return null;
 };
@@ -271,6 +303,10 @@ export const resolveMetadataDatesForCandidate = ({
           createdEvidence,
           'created_date_ambiguous_for_non_single_turn',
           warnings,
+          {
+            strategy: 'earliest',
+            warningCode: 'created_date_duplicate_takeout_edges_resolved_by_earliest',
+          },
         );
   const lastMessage =
     shapedCandidate.chatShape === 'single_turn'
@@ -279,6 +315,10 @@ export const resolveMetadataDatesForCandidate = ({
           lastMessageEvidence,
           'last_message_date_ambiguous_for_non_single_turn',
           warnings,
+          {
+            strategy: 'latest',
+            warningCode: 'last_message_date_duplicate_takeout_edges_resolved_by_latest',
+          },
         );
   let dateCreated = firstCreated?.date || null;
   let dateLastMessage = lastMessage?.date || null;

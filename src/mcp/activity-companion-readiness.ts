@@ -133,6 +133,132 @@ const summarizeActivityCompanionWakeError = (err: any) => ({
   error: err?.message || String(err),
 });
 
+const isRecord = (value: unknown): value is AnyRecord =>
+  typeof value === 'object' && value !== null;
+
+const copyScalar = (target: AnyRecord, source: AnyRecord, key: string) => {
+  const value = source[key];
+  if (
+    value === null ||
+    typeof value === 'string' ||
+    typeof value === 'number' ||
+    typeof value === 'boolean'
+  ) {
+    target[key] = value;
+  }
+};
+
+const tabIdArrayOrNull = (value: unknown): readonly number[] | null => {
+  if (!Array.isArray(value)) return null;
+  const tabIds = value
+    .map(positiveTabId)
+    .filter((tabId): tabId is number => tabId !== null);
+  return tabIds.length > 0 ? Array.from(new Set(tabIds)) : null;
+};
+
+const summarizeVisualResult = (visual: unknown): AnyRecord | null => {
+  if (!isRecord(visual)) return null;
+  const summary: AnyRecord = {};
+  for (const key of ['mode', 'label', 'color', 'reason']) copyScalar(summary, visual, key);
+  for (const key of ['tabId', 'groupId', 'originalGroupId']) {
+    const value = numberOrNull(visual[key]);
+    if (value !== null) summary[key] = value;
+  }
+  const tabIds = tabIdArrayOrNull(visual.tabIds);
+  if (tabIds) summary.tabIds = tabIds;
+  return Object.keys(summary).length > 0 ? summary : null;
+};
+
+const summarizeNativeActionResult = (result: unknown): AnyRecord | null => {
+  if (!isRecord(result)) return result === null || result === undefined ? null : { value: String(result) };
+  const summary: AnyRecord = {};
+  for (const key of [
+    'ok',
+    'action',
+    'source',
+    'code',
+    'error',
+    'reason',
+    'requested',
+    'reloaded',
+    'tabId',
+    'windowId',
+    'isActiveTab',
+    'claimId',
+    'releasedByTab',
+  ]) {
+    copyScalar(summary, result, key);
+  }
+  for (const key of ['tabIds', 'relatedTabIds', 'reloadedTabIds', 'released']) {
+    const tabIds = tabIdArrayOrNull(result[key]);
+    if (tabIds) summary[key] = tabIds;
+  }
+  const visual = summarizeVisualResult(result.visual);
+  if (visual) summary.visual = visual;
+  if (isRecord(result.nativeBroker)) {
+    summary.nativeBroker = {};
+    for (const key of ['ok', 'code', 'error', 'reason']) {
+      copyScalar(summary.nativeBroker, result.nativeBroker, key);
+    }
+  }
+  if (Array.isArray(result.tabs)) summary.tabCount = result.tabs.length;
+  if (Array.isArray(result.classified)) summary.classifiedCount = result.classified.length;
+  return summary;
+};
+
+const summarizeActivityCompanionClient = (
+  client: AnyRecord | null | undefined,
+  summarizeClient: (client: AnyRecord) => AnyRecord,
+): AnyRecord | null => {
+  if (!isRecord(client)) return null;
+  let rawSummary: AnyRecord;
+  try {
+    rawSummary = summarizeClient(client);
+  } catch (err) {
+    return summarizeActivityCompanionWakeError(err);
+  }
+  if (!isRecord(rawSummary)) return null;
+  const summary: AnyRecord = {};
+  for (const key of [
+    'clientId',
+    'kind',
+    'tabId',
+    'windowId',
+    'isActiveTab',
+    'extensionVersion',
+    'protocolVersion',
+    'buildStamp',
+  ]) {
+    copyScalar(summary, rawSummary, key);
+  }
+  if (isRecord(rawSummary.page)) {
+    summary.page = {};
+    for (const key of ['kind', 'url', 'title', 'chatId']) {
+      copyScalar(summary.page, rawSummary.page, key);
+    }
+  }
+  return summary;
+};
+
+const summarizeActivationResult = (
+  result: unknown,
+  summarizeClient: (client: AnyRecord) => AnyRecord,
+): AnyRecord | null => {
+  if (!isRecord(result)) return summarizeNativeActionResult(result);
+  const summary: AnyRecord = {};
+  for (const key of ['ok', 'code', 'error', 'reason', 'tabId', 'windowId']) {
+    copyScalar(summary, result, key);
+  }
+  const broker = summarizeActivityCompanionClient(result.broker, summarizeClient);
+  if (broker) summary.broker = broker;
+  const client = summarizeActivityCompanionClient(result.client, summarizeClient);
+  if (client) summary.client = client;
+  const actionResult = 'result' in result ? result.result : result;
+  const summarizedResult = summarizeNativeActionResult(actionResult);
+  if (summarizedResult) summary.result = summarizedResult;
+  return summary;
+};
+
 const claimIdFromLease = (
   lease: NativeExportLease | null | undefined,
   args: AnyRecord,
@@ -172,10 +298,11 @@ export const createActivityCompanionPreparer =
     let visualRefresh = null;
     if (companionTabIds.length === 0) {
       try {
-        companionList = await deps.tryNativeBrowserBrokerTabsAction('list', {
+        const rawCompanionList = await deps.tryNativeBrowserBrokerTabsAction('list', {
           reason: 'find-activity-companion-before-export',
         });
-        companionTabIds = activityCompanionTabIdsForNativeTabs(companionList, exportTabId);
+        companionList = summarizeNativeActionResult(rawCompanionList);
+        companionTabIds = activityCompanionTabIdsForNativeTabs(rawCompanionList, exportTabId);
         companionSource = 'native-tabs-list';
       } catch (err) {
         companionList = summarizeActivityCompanionWakeError(err);
@@ -188,14 +315,16 @@ export const createActivityCompanionPreparer =
     const companionTabId = companionTabIds[0];
     if (exportTabId !== null) {
       try {
-        visualRefresh = await deps.tryNativeBrowserBrokerTabsAction('claim', {
-          ...args,
-          tabId: exportTabId,
-          claimId: claimIdFromLease(nativeLease, args) || undefined,
-          tabIds: [exportTabId, companionTabId],
-          relatedTabIds: [companionTabId],
-          reason: 'attach-activity-companion-before-export',
-        });
+        visualRefresh = summarizeNativeActionResult(
+          await deps.tryNativeBrowserBrokerTabsAction('claim', {
+            ...args,
+            tabId: exportTabId,
+            claimId: claimIdFromLease(nativeLease, args) || undefined,
+            tabIds: [exportTabId, companionTabId],
+            relatedTabIds: [companionTabId],
+            reason: 'attach-activity-companion-before-export',
+          }),
+        );
       } catch (err) {
         visualRefresh = summarizeActivityCompanionWakeError(err);
       }
@@ -208,7 +337,7 @@ export const createActivityCompanionPreparer =
         reason: 'activity-companion-already-ready',
         source: companionSource,
         tabId: companionTabId,
-        client: deps.summarizeClient(alreadyReady),
+        client: summarizeActivityCompanionClient(alreadyReady, deps.summarizeClient),
         visualRefresh,
       };
     }
@@ -217,26 +346,31 @@ export const createActivityCompanionPreparer =
     let reload = null;
     let restore = null;
     try {
-      activation = await deps.activateBrowserTabById(
-        companionTabId,
-        {
-          ...args,
-          activateTabReason: 'wake-activity-companion-before-export',
-          focusWindow: false,
-          activateTabConfirmWaitMs: 5000,
-        },
-        null,
+      activation = summarizeActivationResult(
+        await deps.activateBrowserTabById(
+          companionTabId,
+          {
+            ...args,
+            activateTabReason: 'wake-activity-companion-before-export',
+            focusWindow: false,
+            activateTabConfirmWaitMs: 5000,
+          },
+          null,
+        ),
+        deps.summarizeClient,
       );
     } catch (err) {
       activation = summarizeActivityCompanionWakeError(err);
     }
 
     try {
-      reload = await deps.tryNativeBrowserBrokerTabsAction('reload', {
-        tabIds: [companionTabId],
-        reason: 'reload-activity-companion-before-export',
-        focusWindow: false,
-      });
+      reload = summarizeNativeActionResult(
+        await deps.tryNativeBrowserBrokerTabsAction('reload', {
+          tabIds: [companionTabId],
+          reason: 'reload-activity-companion-before-export',
+          focusWindow: false,
+        }),
+      );
     } catch (err) {
       reload = summarizeActivityCompanionWakeError(err);
     }
@@ -248,15 +382,18 @@ export const createActivityCompanionPreparer =
 
     if (exportTabId !== null) {
       try {
-        restore = await deps.activateBrowserTabById(
-          exportTabId,
-          {
-            ...args,
-            activateTabReason: 'restore-gemini-after-activity-companion',
-            focusWindow: false,
-            activateTabConfirmWaitMs: 8000,
-          },
-          client,
+        restore = summarizeActivationResult(
+          await deps.activateBrowserTabById(
+            exportTabId,
+            {
+              ...args,
+              activateTabReason: 'restore-gemini-after-activity-companion',
+              focusWindow: false,
+              activateTabConfirmWaitMs: 8000,
+            },
+            client,
+          ),
+          deps.summarizeClient,
         );
       } catch (err) {
         restore = summarizeActivityCompanionWakeError(err);
@@ -285,7 +422,7 @@ export const createActivityCompanionPreparer =
       reason: 'activity-companion-ready-after-wake',
       source: companionSource,
       tabId: companionTabId,
-      client: deps.summarizeClient(activityClient),
+      client: summarizeActivityCompanionClient(activityClient, deps.summarizeClient),
       visualRefresh,
       activation,
       reload,

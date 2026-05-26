@@ -470,6 +470,7 @@ export const createTabClaimRelease =
     releaseTabClaimVisualByTabId(args: MutableRecord): Promise<MutableRecord | null>;
     summarizeTabClaims(): unknown;
     liveClientForClaim(claim: MutableRecord): MutableRecord | null;
+    liveClientCarryingClaimId?(claimId: string): MutableRecord | null;
     waitForContinuationClient(
       client: MutableRecord,
       selector: MutableRecord,
@@ -490,24 +491,25 @@ export const createTabClaimRelease =
     const sessionId = deps.normalizeSessionId(args.sessionId || args._proxySessionId);
     const claimId = String(args.claimId || deps.sessionClaims.get(sessionId) || '');
     if (!claimId) {
-      const nativeVisual = await deps.tryNativeBrowserBrokerTabsAction('release', {
-        tabId: args.tabId,
-        claimId: args.claimId || null,
-        tabIds: args.tabIds || null,
-        reason: args.reason || 'mcp-native-release-without-server-claim',
-      });
-      if (okResult(nativeVisual)) {
-        return { ok: true, released: null, visual: nativeVisual, client: null };
-      }
       const visual = await deps.releaseTabClaimVisualByTabId({
         tabId: args.tabId,
         reason: args.reason || 'mcp-release-without-server-claim',
       });
-      if (okResult(visual)) return { ok: true, released: null, visual, client: null };
+      const nativeVisual = await deps.tryNativeBrowserBrokerTabsAction('release', {
+        tabId: args.tabId,
+        claimId: args.claimId || null,
+        tabIds: args.tabIds || null,
+        reason: `${args.reason || 'mcp-release-without-server-claim'}-native-visual`,
+      });
+      if (okResult(visual) || okResult(nativeVisual)) {
+        return { ok: true, released: null, visual, nativeVisual, client: null };
+      }
       return {
         ok: false,
         reason: 'no-claim-for-session',
         sessionId,
+        visual,
+        nativeVisual,
         claims: deps.summarizeTabClaims(),
       };
     }
@@ -515,28 +517,45 @@ export const createTabClaimRelease =
     const claim = deps.tabClaims.get(claimId);
     if (!claim) {
       deps.sessionClaims.delete(sessionId);
-      const nativeVisual = await deps.tryNativeBrowserBrokerTabsAction('release', {
-        tabId: args.tabId,
-        claimId,
-        tabIds: args.tabIds || null,
-        reason: args.reason || 'mcp-native-release-missing-server-claim',
-      });
-      if (okResult(nativeVisual)) {
-        return { ok: true, released: null, claimId, sessionId, visual: nativeVisual, client: null };
-      }
+      const orphanClient = deps.liveClientCarryingClaimId?.(claimId) || null;
+      const orphanClientRecord = orphanClient as MutableRecord | null;
+      const orphanClientClaim = (orphanClientRecord?.tabClaim ||
+        (orphanClientRecord?.summary as MutableRecord | undefined)?.tabClaim ||
+        null) as
+        | MutableRecord
+        | null;
+      const releaseTabId = args.tabId ?? orphanClientRecord?.tabId;
+      const releaseTabIds =
+        args.tabIds || (orphanClientClaim?.visual as MutableRecord | undefined)?.tabIds || null;
       const visual = await deps.releaseTabClaimVisualByTabId({
-        tabId: args.tabId,
+        tabId: releaseTabId,
         claimId,
         reason: args.reason || 'mcp-release-missing-server-claim',
       });
-      if (okResult(visual)) {
-        return { ok: true, released: null, claimId, sessionId, visual, client: null };
+      const nativeVisual = await deps.tryNativeBrowserBrokerTabsAction('release', {
+        tabId: releaseTabId,
+        claimId,
+        tabIds: releaseTabIds,
+        reason: `${args.reason || 'mcp-release-missing-server-claim'}-native-visual`,
+      });
+      if (okResult(visual) || okResult(nativeVisual)) {
+        return {
+          ok: true,
+          released: null,
+          claimId,
+          sessionId,
+          visual,
+          nativeVisual,
+          client: null,
+        };
       }
       return {
         ok: false,
         reason: 'claim-not-found',
         claimId,
         sessionId,
+        visual,
+        nativeVisual,
         claims: deps.summarizeTabClaims(),
       };
     }

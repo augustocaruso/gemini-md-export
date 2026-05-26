@@ -2434,6 +2434,17 @@ const liveClientForClaim = (claim) => {
 
 const clientTabClaim = (client) => client?.tabClaim || client?.summary?.tabClaim || null;
 
+const liveClientCarryingClaimId = (claimId) => {
+  const normalizedClaimId = String(claimId || '').trim();
+  if (!normalizedClaimId) return null;
+  return (
+    getLiveClients().find((client) => {
+      const tabClaim = clientTabClaim(client);
+      return tabClaim?.claimId && String(tabClaim.claimId) === normalizedClaimId;
+    }) || null
+  );
+};
+
 const clientCarriesClaim = (client, claim) => {
   if (!client || !claim) return false;
   const tabClaim = clientTabClaim(client);
@@ -2902,6 +2913,18 @@ const clearClientCommandTimeout = (client) => {
 const clientHasRecentCommandFailure = (client, now = Date.now()) =>
   isRecentCommandFailureBlocking(client, now, COMMAND_CHANNEL_FAILURE_COOLDOWN_MS);
 
+const commandAbortError = (type, abortSignal) => {
+  const reason = abortSignal?.reason;
+  const error =
+    reason instanceof Error
+      ? reason
+      : new Error(reason?.message || `Comando ${type} cancelado.`);
+  error.code = error.code || reason?.code || 'operation_cancelled';
+  error.commandType = type;
+  error.commandAborted = true;
+  return error;
+};
+
 const enqueueCommand = (clientId, type, args = {}, options = {}) => {
   const client = clients.get(clientId);
   if (!client) {
@@ -2921,6 +2944,12 @@ const enqueueCommand = (clientId, type, args = {}, options = {}) => {
     assertBrowserSideEffect(browserSideEffectKind, {
       explicit: browserSideEffectExplicit,
     });
+  }
+  const abortSignal = options.abortSignal;
+  if (abortSignal?.aborted) {
+    const error = commandAbortError(type, abortSignal);
+    error.commandDispatched = false;
+    throw error;
   }
   const commandArgs = markBrowserSideEffectCommandArgs(type, args, browserSideEffectExplicit);
 
@@ -2960,19 +2989,46 @@ const enqueueCommand = (clientId, type, args = {}, options = {}) => {
       type,
       dispatchedAt: null,
       delivery: null,
+      clearPendingTimers: null,
     };
+    let abortListener = null;
     const clearPendingTimers = () => {
       if (pending.timer) clearTimeout(pending.timer);
       if (pending.dispatchTimer) clearTimeout(pending.dispatchTimer);
       if (pending.staleTimer) clearInterval(pending.staleTimer);
+      if (abortSignal && abortListener) abortSignal.removeEventListener('abort', abortListener);
       pending.timer = null;
       pending.dispatchTimer = null;
       pending.staleTimer = null;
+      abortListener = null;
     };
-    const timer = setTimeout(() => {
+    pending.clearPendingTimers = clearPendingTimers;
+    const rejectPendingCommand = (error, eventType, extra = {}) => {
       pendingCommands.delete(command.id);
       removeQueuedCommand(clientId, command.id);
       clearPendingTimers();
+      recordFlightEvent(eventType, {
+        commandId: command.id,
+        clientId,
+        type,
+        dispatched: !!pending.dispatchedAt,
+        delivery: pending.delivery || null,
+        ...extra,
+      });
+      reject(error);
+    };
+    if (abortSignal) {
+      abortListener = () => {
+        const error = commandAbortError(type, abortSignal);
+        error.commandDispatched = !!pending.dispatchedAt;
+        error.delivery = pending.delivery || null;
+        rejectPendingCommand(error, 'command_aborted', {
+          code: error.code || null,
+        });
+      };
+      abortSignal.addEventListener('abort', abortListener, { once: true });
+    }
+    const timer = setTimeout(() => {
       const error = new Error(`Timeout aguardando resposta do comando ${type}.`);
       error.code = 'command_timeout';
       error.commandType = type;
@@ -2989,14 +3045,9 @@ const enqueueCommand = (clientId, type, args = {}, options = {}) => {
       if (pending.delivery === 'sse') {
         disableClientSseCommandChannel(clientId, 'command-timeout');
       }
-      recordFlightEvent('command_timeout', {
-        commandId: command.id,
-        clientId,
-        type,
-        dispatched: !!pending.dispatchedAt,
-        delivery: pending.delivery || null,
+      rejectPendingCommand(error, 'command_timeout', {
+        timeoutMs,
       });
-      reject(error);
     }, timeoutMs);
 
     pending.timer = timer;
@@ -3011,9 +3062,6 @@ const enqueueCommand = (clientId, type, args = {}, options = {}) => {
         const staleForMs = Date.now() - Number(watchedClient?.lastSeenAt || 0);
         if (staleForMs <= staleAbortMs) return;
 
-        pendingCommands.delete(command.id);
-        removeQueuedCommand(clientId, command.id);
-        clearPendingTimers();
         const error = new Error(
           `A aba do Gemini parou de responder durante ${type}. Recarregue a aba e tente novamente; nenhum arquivo foi salvo por este comando.`,
         );
@@ -3034,23 +3082,15 @@ const enqueueCommand = (clientId, type, args = {}, options = {}) => {
         if (pending.delivery === 'sse') {
           disableClientSseCommandChannel(clientId, 'client-stale-during-command');
         }
-        recordFlightEvent('command_stale_abort', {
-          commandId: command.id,
-          clientId,
-          type,
+        rejectPendingCommand(error, 'command_stale_abort', {
           staleForMs,
           staleAbortMs,
-          delivery: pending.delivery || null,
         });
-        reject(error);
       }, staleCheckIntervalMs);
     }
     if (dispatchTimeoutMs > 0) {
       pending.dispatchTimer = setTimeout(() => {
         if (pending.dispatchedAt) return;
-        pendingCommands.delete(command.id);
-        removeQueuedCommand(clientId, command.id);
-        clearPendingTimers();
         const error = new Error(
           `A aba do Gemini está conectada, mas não abriu o canal de comandos para ${type}. Recarregue a aba do Gemini e confirme que a extensão está ativa no navegador.`,
         );
@@ -3066,12 +3106,9 @@ const enqueueCommand = (clientId, type, args = {}, options = {}) => {
           dispatched: false,
           code: 'command_dispatch_timeout',
         });
-        recordFlightEvent('command_dispatch_timeout', {
-          commandId: command.id,
-          clientId,
-          type,
+        rejectPendingCommand(error, 'command_dispatch_timeout', {
+          dispatchTimeoutMs,
         });
-        reject(error);
       }, dispatchTimeoutMs);
     }
     pendingCommands.set(command.id, pending);
@@ -3084,9 +3121,13 @@ const enqueueCommand = (clientId, type, args = {}, options = {}) => {
 const resolveCommand = (commandId, result) => {
   const pending = pendingCommands.get(commandId);
   if (!pending) return false;
-  clearTimeout(pending.timer);
-  if (pending.dispatchTimer) clearTimeout(pending.dispatchTimer);
-  if (pending.staleTimer) clearInterval(pending.staleTimer);
+  if (typeof pending.clearPendingTimers === 'function') {
+    pending.clearPendingTimers();
+  } else {
+    clearTimeout(pending.timer);
+    if (pending.dispatchTimer) clearTimeout(pending.dispatchTimer);
+    if (pending.staleTimer) clearInterval(pending.staleTimer);
+  }
   pendingCommands.delete(commandId);
   const client = clients.get(pending.clientId);
   if (client) {
@@ -3972,6 +4013,7 @@ const releaseTabClaim = createTabClaimRelease({
   releaseTabClaimVisualByTabId,
   summarizeTabClaims,
   liveClientForClaim,
+  liveClientCarryingClaimId,
   waitForContinuationClient: (...args) => waitForContinuationClient(...args),
   isLiveClient,
   enqueueCommand,
@@ -4581,7 +4623,7 @@ const requireActivityClient = (selector = {}) => {
 };
 
 const ensureActivityClientForScan = async (args = {}) => {
-  const selector = { clientId: args.activityClientId || args.clientId };
+  const selector = { clientId: args.activityClientId };
   try {
     const client = requireActivityClient(selector);
     return {
@@ -4662,7 +4704,16 @@ const scanActivityWithClient = async (args = {}) => {
       };
     }
   }
-  const scanClient = claim?.clientId ? clients.get(claim.clientId) || client : client;
+  let scanClient = claim?.clientId ? clients.get(claim.clientId) || client : client;
+  let activation = null;
+  let restore = null;
+  const activityTabId = normalizeTabId(scanClient.tabId);
+  const restoreTabId = normalizeTabId(
+    args.restoreTabId ??
+      args.visualGroupTabId ??
+      args.groupWithTabId ??
+      args._exportDateImportVisualGroupTabId,
+  );
   const activityWaitMs = Number(args.waitMs || args.myActivityWaitMs || 0);
   const explicitCommandTimeoutMs = Number(
     args.activityCommandTimeoutMs ?? args.commandTimeoutMs ?? args.timeoutMs,
@@ -4674,6 +4725,30 @@ const scanActivityWithClient = async (args = {}) => {
       : 10 * 60_000;
   let result;
   try {
+    if (args.activateActivityTabBeforeScan !== false && activityTabId !== null) {
+      activation = await activateBrowserTabById(
+        scanClient.tabId,
+        {
+          ...args,
+          activateTabReason: 'wake-activity-before-scan',
+          focusWindow: false,
+          activateTabConfirmWaitMs: 8000,
+        },
+        scanClient,
+      );
+      if (activation?.client) scanClient = activation.client;
+      const activationResult = activation?.result || null;
+      if (!activationResult?.ok || activationResult.isActiveTab === false) {
+        const error = new Error(
+          activationResult?.error ||
+            activationResult?.reason ||
+            'Não consegui ativar a aba do My Activity antes de buscar as datas.',
+        );
+        error.code = activationResult?.code || 'activity_tab_activation_failed';
+        error.data = activationResult;
+        throw error;
+      }
+    }
     result = await enqueueCommand(scanClient.clientId, 'activity-scan-batch', args, {
       timeoutMs: Math.max(5000, Math.min(10 * 60_000, commandTimeoutMs)),
     });
@@ -4694,11 +4769,47 @@ const scanActivityWithClient = async (args = {}) => {
         };
       }
     }
+    if (
+      args.restoreAfterActivityScan !== false &&
+      restoreTabId !== null &&
+      restoreTabId !== activityTabId
+    ) {
+      try {
+        restore = await activateBrowserTabById(
+          restoreTabId,
+          {
+            ...args,
+            activateTabReason: 'restore-gemini-after-activity-scan',
+            focusWindow: false,
+            activateTabConfirmWaitMs: 8000,
+          },
+          null,
+        );
+      } catch (err) {
+        restore = {
+          ok: false,
+          code: err?.code || 'activity_scan_restore_failed',
+          message: err?.message || String(err),
+        };
+      }
+    }
   }
   return {
     ...result,
     client: summarizeClient(scanClient),
     browserWake,
+    activation: activation
+      ? {
+          client: activation.client ? summarizeClient(activation.client) : null,
+          result: activation.result || null,
+        }
+      : null,
+    restore: restore
+      ? {
+          client: restore.client ? summarizeClient(restore.client) : null,
+          result: restore.result || restore,
+        }
+      : null,
     tabClaim: claim,
     tabClaimWarning,
     tabClaimRelease,
@@ -6465,7 +6576,11 @@ const collectConversationItemPayloadForClient = async (client, conversation, arg
       notebookReturnMode: args.notebookReturnMode || null,
       ...hydrationArgs,
     },
-    { timeoutMs: commandTimeoutMs, staleAbortMs: exportCommandStaleAbortMs(args) },
+    {
+      timeoutMs: commandTimeoutMs,
+      staleAbortMs: exportCommandStaleAbortMs(args),
+      abortSignal: args.abortSignal,
+    },
     args,
   );
   args.onOperationProgress?.({ phase: 'browser-command-finished' });
@@ -6535,6 +6650,15 @@ const isTransientTabBusyError = (err) =>
   );
 
 const retryableConversationExportReason = (err) => {
+  if (
+    err?.commandAborted === true ||
+    err?.code === 'operation_cancelled' ||
+    err?.code === 'conversation_no_progress_timeout' ||
+    err?.code === 'conversation_cancel_requested' ||
+    err?.code === 'conversation_cancelled_after_no_progress'
+  ) {
+    return null;
+  }
   if (isTransientTabBusyError(err)) return 'tab_operation_in_progress';
   if (
     err?.code === 'client_reconnected_during_command' ||

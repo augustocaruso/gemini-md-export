@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { sanitizeAgentJsonValue, stringifyAgentPayload } from '../build/ts/mcp/agent-json.js';
+import { isCommandSseDeliveryEnabled } from '../build/ts/mcp/command-channel.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
@@ -138,7 +139,7 @@ test('recent export has per-conversation no-progress watchdog', () => {
   assert.match(operationSource, /operation_cancel_failed_after_watchdog/);
 });
 
-test('MCP usa SSE para progresso, mas exige long-poll para comandos por padrão', () => {
+test('MCP usa SSE para comandos por padrão, mantendo long-poll como prioridade quando aberto', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const contentSource = readFileSync(resolve(ROOT, 'src', 'userscript-shell.ts'), 'utf-8');
   const flushBlock = source.match(
@@ -175,6 +176,22 @@ test('MCP usa SSE para progresso, mas exige long-poll para comandos por padrão'
   assert.match(contentSource, /pollBridgeCommands\(true, \{ force: commandPollRequired \}\)/);
   assert.match(contentSource, /bridgeState\.eventsConnected && !force/);
   assert.match(contentSource, /while \(bridgeState\.started && \(!bridgeState\.eventsConnected \|\| force\)\)/);
+});
+
+test('SSE command delivery is enabled unless explicitly disabled', () => {
+  assert.equal(isCommandSseDeliveryEnabled({}), true);
+  assert.equal(isCommandSseDeliveryEnabled({ GEMINI_MCP_SSE_COMMAND_DELIVERY: '1' }), true);
+  assert.equal(isCommandSseDeliveryEnabled({ GEMINI_MCP_SSE_COMMAND_DELIVERY: 'false' }), false);
+  assert.equal(isCommandSseDeliveryEnabled({ GEMINI_MCP_SSE_COMMAND_DELIVERY: '0' }), false);
+});
+
+test('browser export command dispatch is abortable by the conversation watchdog', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  assert.match(source, /const abortSignal = options\.abortSignal/);
+  assert.match(source, /command_aborted/);
+  assert.match(source, /abortSignal:\s*args\.abortSignal/);
+  assert.match(source, /conversation_no_progress_timeout/);
+  assert.match(source, /operation_cancelled/);
 });
 
 test('MCP não envia comando de self-reload pelo heartbeat', () => {
@@ -411,16 +428,29 @@ test('MCP acorda My Activity reaproveitando aba existente antes de abrir outra',
   const ensureActivityBlock = source.match(
     /const ensureActivityClientForScan = async \(args = \{\}\) => \{[\s\S]*?\n\};\n\nconst scanActivityWithClient/,
   )?.[0] || '';
+  const scanActivityBlock = source.match(
+    /const scanActivityWithClient = async \(args = \{\}\) => \{[\s\S]*?\n\};\n\nconst tabSelectionDiagnostics/,
+  )?.[0] || '';
 
   assert.match(source, /ACTIVITY_GEMINI_URL = 'https:\/\/myactivity\.google\.com\/product\/gemini'/);
   assert.match(source, /ACTIVITY_PRE_LAUNCH_WAIT_MS/);
   assert.match(source, /const waitForActivityClient = async/);
   assert.match(source, /targetUrl:\s*ACTIVITY_GEMINI_URL/);
+  assert.match(ensureActivityBlock, /const selector = \{ clientId: args\.activityClientId \}/);
+  assert.doesNotMatch(ensureActivityBlock, /args\.activityClientId \|\| args\.clientId/);
   assert.match(source, /openIfMissing !== true/);
   assert.match(source, /reason:\s*'activity-client-already-connected'/);
   assert.match(ensureActivityBlock, /const existingClient = await waitForActivityClient/);
   assert.match(ensureActivityBlock, /args\.preLaunchWaitMs \?\? ACTIVITY_PRE_LAUNCH_WAIT_MS/);
   assert.match(ensureActivityBlock, /reason:\s*'activity-client-connected-before-launch'/);
+  assert.match(scanActivityBlock, /activateBrowserTabById\(\s*scanClient\.tabId/);
+  assert.match(scanActivityBlock, /activateTabReason:\s*'wake-activity-before-scan'/);
+  assert.match(scanActivityBlock, /focusWindow:\s*false/);
+  assert.ok(
+    scanActivityBlock.indexOf('wake-activity-before-scan') <
+      scanActivityBlock.indexOf("'activity-scan-batch'"),
+  );
+  assert.match(scanActivityBlock, /activateTabReason:\s*'restore-gemini-after-activity-scan'/);
   assert.match(source, /const launchMatchesTarget = \(launch = \{\}\) => \{[\s\S]*?return launch\.targetUrl === targetUrl;/);
   assert.doesNotMatch(source, /return !launch\.targetUrl \|\| launch\.targetUrl === targetUrl/);
   assert.ok(

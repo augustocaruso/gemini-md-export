@@ -62,6 +62,12 @@ test('activity companion preparer can attach and wake a companion found by nativ
   const calls = [];
   let waitCount = 0;
   const readyActivityClient = { clientId: 'activity-1', tabId: 99, ready: true };
+  const rawClient = {
+    clientId: 'raw-activity-activation',
+    tabId: 99,
+    eventStream: { res: {} },
+  };
+  rawClient.eventStream.res.socket = rawClient;
   const prepare = createActivityCompanionPreparer({
     normalizeTabId: (value) => {
       const parsed = Number(value);
@@ -76,7 +82,12 @@ test('activity companion preparer can attach and wake a companion found by nativ
     activityClientCommandReady: (client) => client?.ready === true,
     activateBrowserTabById: async (tabId, args) => {
       calls.push({ action: 'activate', tabId, reason: args.activateTabReason });
-      return { ok: true, tabId };
+      return {
+        ok: true,
+        broker: rawClient,
+        client: rawClient,
+        result: { ok: true, tabId, native: { socket: rawClient } },
+      };
     },
     tryNativeBrowserBrokerTabsAction: async (action, args = {}) => {
       calls.push({ action, args });
@@ -120,6 +131,9 @@ test('activity companion preparer can attach and wake a companion found by nativ
   assert.equal(result.attempted, true);
   assert.equal(result.source, 'native-tabs-list');
   assert.equal(result.tabId, 99);
+  assert.doesNotThrow(() => JSON.stringify(result));
+  assert.equal(result.activation.client.clientId, 'raw-activity-activation');
+  assert.equal(result.activation.client.eventStream, undefined);
   assert.deepEqual(
     calls.find((call) => call.action === 'claim')?.args.relatedTabIds,
     [99],

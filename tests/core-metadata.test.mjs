@@ -197,6 +197,61 @@ test('metadata date resolution não fecha multi-turn com borda empatada em datas
   assert.deepEqual(resolution.warnings, ['last_message_date_ambiguous_for_non_single_turn']);
 });
 
+test('metadata date resolution fecha duplicatas exatas do Takeout por bordas deterministicas', () => {
+  const resolution = resolveMetadataDatesForCandidate({
+    candidate: {
+      chatId: 'b8e7c075effe9457',
+      turnCount: 23,
+    },
+    evidence: [
+      {
+        chatId: 'b8e7c075effe9457',
+        source: 'takeout-html',
+        kind: 'created',
+        dateKind: 'created',
+        date: '2026-05-03T01:52:14Z',
+        score: 1,
+        confidence: 'strong',
+      },
+      {
+        chatId: 'b8e7c075effe9457',
+        source: 'takeout-html',
+        kind: 'created',
+        dateKind: 'created',
+        date: '2026-05-02T20:34:16Z',
+        score: 1,
+        confidence: 'strong',
+      },
+      {
+        chatId: 'b8e7c075effe9457',
+        source: 'takeout-html',
+        kind: 'last_message',
+        dateKind: 'last_message',
+        date: '2026-05-03T01:52:14Z',
+        score: 1,
+        confidence: 'strong',
+      },
+      {
+        chatId: 'b8e7c075effe9457',
+        source: 'takeout-html',
+        kind: 'last_message',
+        dateKind: 'last_message',
+        date: '2026-05-02T20:34:16Z',
+        score: 1,
+        confidence: 'strong',
+      },
+    ],
+  });
+
+  assert.equal(resolution.status, 'matched');
+  assert.equal(resolution.dateCreated, '2026-05-02T20:34:16Z');
+  assert.equal(resolution.dateLastMessage, '2026-05-03T01:52:14Z');
+  assert.deepEqual(resolution.warnings, [
+    'created_date_duplicate_takeout_edges_resolved_by_earliest',
+    'last_message_date_duplicate_takeout_edges_resolved_by_latest',
+  ]);
+});
+
 test('metadata date resolution ignora bordas secundarias quando a melhor evidencia e unica', () => {
   const resolution = resolveMetadataDatesForCandidate({
     candidate: {

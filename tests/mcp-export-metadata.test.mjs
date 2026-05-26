@@ -122,7 +122,7 @@ test('export metadata injeta datas do Takeout antes da escrita do Markdown', () 
   }
 });
 
-test('export metadata bloqueia escrita quando Takeout nao fecha datas completas', () => {
+test('export metadata preserva export quando Takeout fecha apenas datas parciais', () => {
   const dir = mkdtempSync(resolve(tmpdir(), 'gme-export-metadata-'));
   const takeoutPath = resolve(dir, 'Minhaatividade.html');
   writeFileSync(
@@ -141,11 +141,12 @@ test('export metadata bloqueia escrita quando Takeout nao fecha datas completas'
     const context = createExportDateImportContext({ takeoutPath });
     const result = enrichExportPayloadWithMetadataDates({ payload, context, integrity });
 
-    assert.equal(result.ok, false);
-    assert.equal(result.code, 'metadata_unresolved');
+    assert.equal(result.ok, true);
     assert.equal(result.receipt.status, 'partial');
     assert.equal(result.receipt.dateCreated, '2026-05-10T06:46:09Z');
     assert.equal(result.receipt.dateLastMessage, null);
+    assert.match(result.payload.content, /\ndate_created: 2026-05-10T06:46:09Z\n/);
+    assert.doesNotMatch(result.payload.content, /\ndate_last_message:/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
