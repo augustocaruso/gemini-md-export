@@ -1,0 +1,102 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+
+import {
+  classifyRuntimeEvidence,
+  runtimeEpochId,
+  runtimeEvidenceSatisfiesDesired,
+} from '../build/ts/mcp/tab-orchestrator/index.js';
+
+const expected = {
+  extensionVersion: '1.2.3',
+  buildStamp: '20260526-1200',
+  protocolVersion: 2,
+};
+
+test('runtime epoch id is stable for expected version/build/protocol', () => {
+  assert.equal(
+    runtimeEpochId(expected),
+    'ext:1.2.3|build:20260526-1200|protocol:2',
+  );
+});
+
+test('heartbeat-only matching runtime is weak evidence and not sufficient for command readiness', () => {
+  const evidence = classifyRuntimeEvidence({
+    client: {
+      clientId: 'heartbeat-only',
+      extensionVersion: '1.2.3',
+      buildStamp: '20260526-1200',
+      protocolVersion: 2,
+      lastSeenAt: 1000,
+      eventStreamConnected: false,
+      commandPollPending: false,
+      pendingCommandPoll: false,
+      source: 'content-script',
+      page: { kind: 'activity' },
+    },
+    expected,
+    nowMs: 1200,
+  });
+
+  assert.equal(evidence.strength, 'weak');
+  assert.equal(evidence.epochId, runtimeEpochId(expected));
+  assert.equal(
+    runtimeEvidenceSatisfiesDesired(evidence, {
+      requiredEpochId: runtimeEpochId(expected),
+      minStrength: 'strong',
+      requireCommandChannel: true,
+    }),
+    false,
+  );
+});
+
+test('persistent command channel in the expected runtime epoch is strong evidence', () => {
+  const evidence = classifyRuntimeEvidence({
+    client: {
+      clientId: 'sse-ready',
+      extensionVersion: '1.2.3',
+      buildStamp: '20260526-1200',
+      protocolVersion: 2,
+      lastSeenAt: 1000,
+      eventStreamConnected: true,
+      commandPollPending: false,
+      pendingCommandPoll: false,
+      source: 'content-script',
+      page: { kind: 'activity' },
+    },
+    expected,
+    nowMs: 1200,
+  });
+
+  assert.equal(evidence.strength, 'strong');
+  assert.equal(
+    runtimeEvidenceSatisfiesDesired(evidence, {
+      requiredEpochId: runtimeEpochId(expected),
+      minStrength: 'strong',
+      requireCommandChannel: true,
+    }),
+    true,
+  );
+});
+
+test('old build in a live heartbeat is rejected for the desired epoch', () => {
+  const evidence = classifyRuntimeEvidence({
+    client: {
+      clientId: 'old-runtime',
+      extensionVersion: '1.2.3',
+      buildStamp: '20260526-1100',
+      protocolVersion: 2,
+      lastSeenAt: 1000,
+      eventStreamConnected: true,
+      commandPollPending: false,
+      pendingCommandPoll: false,
+      source: 'content-script',
+      page: { kind: 'activity' },
+    },
+    expected,
+    nowMs: 1200,
+  });
+
+  assert.equal(evidence.strength, 'rejected');
+  assert.equal(evidence.rejectReason, 'runtime_epoch_mismatch');
+});
