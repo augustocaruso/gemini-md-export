@@ -13,6 +13,12 @@ const expected = {
   protocolVersion: 2,
 };
 
+const previousExpected = {
+  extensionVersion: '1.2.3',
+  buildStamp: '20260526-1100',
+  protocolVersion: 2,
+};
+
 test('runtime epoch id is stable for expected version/build/protocol', () => {
   assert.equal(
     runtimeEpochId(expected),
@@ -99,4 +105,99 @@ test('old build in a live heartbeat is rejected for the desired epoch', () => {
 
   assert.equal(evidence.strength, 'rejected');
   assert.equal(evidence.rejectReason, 'runtime_epoch_mismatch');
+});
+
+test('runtime evidence satisfaction always rejects epoch mismatch', () => {
+  assert.equal(
+    runtimeEvidenceSatisfiesDesired(
+      {
+        clientId: 'other-epoch',
+        tabId: 42,
+        pageKind: 'activity',
+        epochId: runtimeEpochId(expected),
+        expectedEpochId: runtimeEpochId(expected),
+        strength: 'strong',
+        hasCommandChannel: true,
+        observedAtMs: 1300,
+        ageMs: 300,
+        details: {
+          extensionVersion: '1.2.3',
+          buildStamp: '20260526-1200',
+          protocolVersion: 2,
+          lastSeenAt: 1000,
+          source: 'content-script',
+        },
+      },
+      {
+        requiredEpochId: '',
+        minStrength: 'strong',
+        requireCommandChannel: true,
+      },
+    ),
+    false,
+  );
+  assert.equal(
+    runtimeEvidenceSatisfiesDesired(
+      {
+        clientId: 'other-epoch',
+        tabId: 42,
+        pageKind: 'activity',
+        epochId: runtimeEpochId(expected),
+        expectedEpochId: runtimeEpochId(expected),
+        strength: 'strong',
+        hasCommandChannel: true,
+        observedAtMs: 1300,
+        ageMs: 300,
+        details: {
+          extensionVersion: '1.2.3',
+          buildStamp: '20260526-1200',
+          protocolVersion: 2,
+          lastSeenAt: 1000,
+          source: 'content-script',
+        },
+      },
+      {
+        requiredEpochId: runtimeEpochId(previousExpected),
+        minStrength: 'strong',
+        requireCommandChannel: true,
+      },
+    ),
+    false,
+  );
+});
+
+test('classified evidence includes tab identity, page kind, observed time, and runtime details', () => {
+  const evidence = classifyRuntimeEvidence({
+    client: {
+      clientId: 'detailed-runtime',
+      tabId: 42,
+      windowId: 7,
+      url: 'https://gemini.google.com/app',
+      extensionVersion: '1.2.3',
+      buildStamp: '20260526-1200',
+      protocolVersion: 2,
+      lastSeenAt: 1000,
+      eventStreamConnected: true,
+      commandPollPending: false,
+      pendingCommandPoll: false,
+      commandChannelStatus: 'ready',
+      source: 'content-script',
+      page: { kind: 'activity' },
+      tabClaim: { claimId: 'claim-1' },
+    },
+    expected,
+    nowMs: 1300,
+  });
+
+  assert.equal(evidence.clientId, 'detailed-runtime');
+  assert.equal(evidence.tabId, 42);
+  assert.equal(evidence.pageKind, 'activity');
+  assert.equal(evidence.observedAtMs, 1300);
+  assert.deepEqual(evidence.details, {
+    extensionVersion: '1.2.3',
+    buildStamp: '20260526-1200',
+    protocolVersion: 2,
+    lastSeenAt: 1000,
+    source: 'content-script',
+  });
 });

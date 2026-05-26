@@ -18,6 +18,18 @@ const timestampMs = (value: number | string | null | undefined): number | null =
   return Number.isFinite(timestamp) ? timestamp : null;
 };
 
+const numberOrNull = (value: number | string | null | undefined): number | null => {
+  if (value === null || value === undefined || value === '') return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+};
+
+const pageKind = (client: ObservedTabClient): string | null => {
+  const kind = client.page?.kind;
+  if (kind === null || kind === undefined || kind === '') return null;
+  return String(kind);
+};
+
 const evidenceStrengthRank = (strength: RuntimeEpochEvidence['strength']): number => {
   if (strength === 'strong') return 2;
   if (strength === 'weak') return 1;
@@ -60,10 +72,20 @@ export const classifyRuntimeEvidence = ({
   const ageMs = lastSeenAt === null ? null : nowMs - lastSeenAt;
   const baseEvidence = {
     clientId: client.clientId ? String(client.clientId) : null,
+    tabId: numberOrNull(client.tabId),
+    pageKind: pageKind(client),
     epochId,
     expectedEpochId,
     hasCommandChannel,
+    observedAtMs: nowMs,
     ageMs,
+    details: {
+      extensionVersion: client.extensionVersion ?? null,
+      buildStamp: client.buildStamp ?? null,
+      protocolVersion: client.protocolVersion ?? null,
+      lastSeenAt: client.lastSeenAt ?? null,
+      source: client.source ?? null,
+    },
   };
 
   if (epochId !== expectedEpochId) {
@@ -93,9 +115,8 @@ export const runtimeEvidenceSatisfiesDesired = (
   desired: DesiredRuntimeEvidence,
 ): boolean => {
   if (evidence.strength === 'rejected') return false;
-  if (desired.requiredEpochId && evidence.epochId !== desired.requiredEpochId) return false;
+  if (evidence.epochId !== desired.requiredEpochId) return false;
   if (desired.requireCommandChannel === true && !evidence.hasCommandChannel) return false;
 
-  const minStrength = desired.minStrength ?? 'weak';
-  return evidenceStrengthRank(evidence.strength) >= evidenceStrengthRank(minStrength);
+  return evidenceStrengthRank(evidence.strength) >= evidenceStrengthRank(desired.minStrength);
 };
