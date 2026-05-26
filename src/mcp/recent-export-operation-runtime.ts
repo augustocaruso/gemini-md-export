@@ -116,6 +116,7 @@ export const createBrowserTabWatchdogRecovery =
       waitMs: number,
     ): Promise<AnyRecord | null>;
     summarizeClient(client: AnyRecord): AnyRecord;
+    validateRecoveredClient?(client: AnyRecord): AnyRecord;
     touchExportJob(job: AnyRecord): void;
     recoveryWaitMs: number;
   }) =>
@@ -149,6 +150,7 @@ export const createBrowserTabWatchdogRecovery =
       targetChatId: context.targetChatId || null,
     });
     try {
+      const reloadStartedAt = Date.now();
       const reload = await deps.tryNativeBrowserBrokerTabsAction('reload', {
         tabId,
         claimId: job.tabClaimId || claim?.claimId || null,
@@ -161,16 +163,30 @@ export const createBrowserTabWatchdogRecovery =
               tabId,
               claimId: job.tabClaimId || claim?.claimId || null,
               sessionId: claim?.sessionId || null,
+              minRuntimeSignalAt: reloadStartedAt,
+              requireExpectedBrowserExtension: true,
+              requireCommandReady: true,
             },
             deps.recoveryWaitMs,
           )
         : null;
+      const recoveredClientReadiness = recoveredClient
+        ? deps.validateRecoveredClient?.(recoveredClient) || { ok: true }
+        : {
+            ok: false,
+            code: 'recovered_client_missing',
+            message: 'Aba recarregada, mas a extensão ainda não reconectou.',
+          };
+      const recoveryOk = reload?.ok === true && recoveredClientReadiness.ok === true;
       const result = {
-        ok: reload?.ok === true,
-        code: reload?.code || null,
+        ok: recoveryOk,
+        code: recoveryOk
+          ? reload?.code || null
+          : recoveredClientReadiness.code || reload?.code || 'recovered_client_not_ready',
         tabId,
         reload,
         recoveredClient: recoveredClient ? deps.summarizeClient(recoveredClient) : null,
+        recoveredClientReadiness,
       };
       deps.appendExportJobTrace(job, 'browser_operation_recovery_result', result);
       deps.touchExportJob(job);
@@ -284,6 +300,45 @@ export const runRecentExportConversationOperation = async (
       operationLastProgressAt = Math.max(operationLastProgressAt, progressAt);
     }
     return operationLastProgressAt;
+  };
+
+  const rebindRecoveredWatchdogClient = (recoveryResult: AnyRecord | null | undefined) => {
+    if (recoveryResult?.ok !== true) return;
+    const recoveredClientId = recoveryResult.recoveredClient?.clientId;
+    if (typeof recoveredClientId !== 'string' || !recoveredClientId) return;
+    const recoveredClient = deps.getClientById(recoveredClientId) || recoveryResult.recoveredClient;
+    if (!recoveredClient) return;
+    client =
+      deps.rebindExportJobToClient(job, recoveredClient, 'conversation-watchdog-recovery') ||
+      recoveredClient ||
+      client;
+  };
+
+  const recoverAfterNoProgressWatchdog = async (
+    decision: AnyRecord,
+    cancelResult: AnyRecord | null | undefined,
+  ) => {
+    if (decision.code !== 'conversation_no_progress_timeout') return null;
+    const recoveryResult = deps.recoverBrowserTabAfterWatchdog
+      ? await deps.recoverBrowserTabAfterWatchdog(job, decision.code, {
+          operationId,
+          targetChatId: target.targetChatId,
+          cancelResult,
+        })
+      : null;
+    rebindRecoveredWatchdogClient(recoveryResult);
+    return recoveryResult;
+  };
+
+  const errorAfterFailedWatchdogRecovery = (recoveryResult: AnyRecord | null | undefined) => {
+    const error = new Error(
+      'Não consegui recuperar a aba do navegador depois do watchdog; interrompi o lote para evitar falhas em cascata.',
+    );
+    (error as AnyRecord).code = 'operation_cancel_failed_after_watchdog';
+    (error as AnyRecord).operationId = operationId;
+    (error as AnyRecord).targetChatId = target.targetChatId;
+    (error as AnyRecord).data = { recoveryResult: recoveryResult || null };
+    return error;
   };
 
   try {
@@ -535,6 +590,7 @@ export const runRecentExportConversationOperation = async (
         operationSettlementPromise,
         deps.drainTimeoutMs,
       );
+      const recoveryResult = await recoverAfterNoProgressWatchdog(decision, cancelResult);
       if (drainResult.status === 'timeout') {
         deps.appendExportJobTrace(job, 'conversation_watchdog_drain_timeout', {
           operationId,
@@ -544,20 +600,6 @@ export const runRecentExportConversationOperation = async (
           cancelReason: cancelResult?.reason || null,
           cancelCode: cancelResult?.code || null,
         });
-        if (cancelResult?.ok === true) {
-          (watchdogError as AnyRecord).data = {
-            drainTimedOut: true,
-            cancelResult,
-          };
-          throw watchdogError;
-        }
-        const recoveryResult = deps.recoverBrowserTabAfterWatchdog
-          ? await deps.recoverBrowserTabAfterWatchdog(job, decision.code, {
-              operationId,
-              targetChatId: target.targetChatId,
-              cancelResult,
-            })
-          : null;
         if (recoveryResult?.ok === true) {
           (watchdogError as AnyRecord).data = {
             drainTimedOut: true,
@@ -566,13 +608,24 @@ export const runRecentExportConversationOperation = async (
           };
           throw watchdogError;
         }
-        const error = new Error(
-          'Não consegui confirmar o cancelamento da operação do navegador depois do watchdog; interrompi o lote para evitar conflito entre conversas.',
-        );
-        (error as AnyRecord).code = 'operation_cancel_failed_after_watchdog';
-        (error as AnyRecord).operationId = operationId;
-        (error as AnyRecord).targetChatId = target.targetChatId;
-        throw error;
+        if (cancelResult?.ok === true && decision.code !== 'conversation_no_progress_timeout') {
+          (watchdogError as AnyRecord).data = {
+            drainTimedOut: true,
+            cancelResult,
+          };
+          throw watchdogError;
+        }
+        throw errorAfterFailedWatchdogRecovery(recoveryResult);
+      }
+      if (recoveryResult?.ok === true) {
+        (watchdogError as AnyRecord).data = {
+          cancelResult,
+          recoveryResult,
+        };
+        throw watchdogError;
+      }
+      if (recoveryResult) {
+        throw errorAfterFailedWatchdogRecovery(recoveryResult);
       }
       throw watchdogError;
     }

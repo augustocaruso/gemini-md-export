@@ -46,16 +46,25 @@ test('claim companion helper picks the nearest My Activity tab in the same windo
   );
 });
 
-test('claim companion helper does not duplicate explicit related tab ids', () => {
+test('claim companion helper does not auto-add another My Activity when one is explicit', () => {
   const claimed = { id: 42, windowId: 7, index: 10 };
-  const activity = {
+  const explicitActivity = {
+    id: 98,
+    windowId: 7,
+    index: 13,
+    url: 'https://myactivity.google.com/product/gemini',
+  };
+  const nearestActivity = {
     id: 99,
     windowId: 7,
     index: 11,
     url: 'https://myactivity.google.com/product/gemini',
   };
 
-  assert.deepEqual(selectClaimVisualCompanionTabIds(claimed, [activity], [99]), [99]);
+  assert.deepEqual(
+    selectClaimVisualCompanionTabIds(claimed, [explicitActivity, nearestActivity], [98]),
+    [],
+  );
 });
 
 test('extension background auto-discovers a My Activity companion for claim visuals', () => {

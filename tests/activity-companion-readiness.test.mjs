@@ -58,6 +58,53 @@ test('activity companion helper selects nearest existing My Activity tab from na
   assert.deepEqual(activityCompanionTabIdsForNativeTabs(list, 42), [99]);
 });
 
+test('activity companion preparer does not recreate claim visual already containing My Activity', async () => {
+  const calls = [];
+  const readyActivityClient = { clientId: 'activity-1', tabId: 99, ready: true };
+  const prepare = createActivityCompanionPreparer({
+    normalizeTabId: (value) => {
+      const parsed = Number(value);
+      return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+    },
+    normalizeWaitMs: (_value, fallbackMs) => fallbackMs,
+    waitForActivityClient: async (selector) => {
+      calls.push({ action: 'wait', selector });
+      return readyActivityClient;
+    },
+    activityClientCommandReady: (client) => client?.ready === true,
+    activateBrowserTabById: async (tabId, args) => {
+      calls.push({ action: 'activate', tabId, args });
+      return { ok: true };
+    },
+    tryNativeBrowserBrokerTabsAction: async (action, args = {}) => {
+      calls.push({ action, args });
+      return { ok: true, action, args };
+    },
+    summarizeClient: (client) => ({ clientId: client.clientId, tabId: client.tabId }),
+    getActivityClients: () => [],
+  });
+
+  const result = await prepare(
+    { clientId: 'chat-1', tabId: 42 },
+    { claimId: 'claim-1' },
+    {
+      tabId: 42,
+      tab: { claimId: 'claim-1' },
+      visual: {
+        mode: 'tab-group',
+        groupId: 10,
+        tabIds: [42, 99],
+      },
+    },
+  );
+
+  assert.equal(result.reason, 'activity-companion-already-ready');
+  assert.equal(result.source, 'claim-visual');
+  assert.equal(result.tabId, 99);
+  assert.equal(calls.some((call) => call.action === 'claim'), false);
+  assert.equal(result.visualRefresh, null);
+});
+
 test('activity companion preparer can attach and wake a companion found by native list', async () => {
   const calls = [];
   let waitCount = 0;
@@ -143,4 +190,71 @@ test('activity companion preparer can attach and wake a companion found by nativ
     [42, 99],
   );
   assert.equal(calls.some((call) => call.action === 'reload'), true);
+});
+
+test('activity companion preparer waits for a post-reload My Activity client signal', async () => {
+  const calls = [];
+  const readyActivityClient = { clientId: 'activity-new', tabId: 99, ready: true };
+  const prepare = createActivityCompanionPreparer({
+    normalizeTabId: (value) => {
+      const parsed = Number(value);
+      return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+    },
+    normalizeWaitMs: (_value, fallbackMs) => fallbackMs,
+    waitForActivityClient: async (selector) => {
+      calls.push({ action: 'wait', selector });
+      return selector.minRuntimeSignalAt ? readyActivityClient : null;
+    },
+    activityClientCommandReady: (client) => client?.ready === true,
+    activateBrowserTabById: async (tabId, args) => {
+      calls.push({ action: 'activate', tabId, reason: args.activateTabReason });
+      return { ok: true, tabId };
+    },
+    tryNativeBrowserBrokerTabsAction: async (action, args = {}) => {
+      calls.push({ action, args });
+      return { ok: true, action, args };
+    },
+    summarizeClient: (client) => ({ clientId: client.clientId, tabId: client.tabId }),
+    getActivityClients: () => [],
+  });
+
+  const result = await prepare(
+    { clientId: 'chat-1', tabId: 42 },
+    { claimId: 'claim-1' },
+    {
+      tabId: 42,
+      tab: { claimId: 'claim-1' },
+      visual: {
+        mode: 'tab-group',
+        groupId: 10,
+        tabIds: [42, 99],
+      },
+    },
+  );
+
+  const postReloadWait = calls.find(
+    (call) => call.action === 'wait' && call.selector.minRuntimeSignalAt,
+  );
+  assert.equal(result.reason, 'activity-companion-ready-after-wake');
+  assert.ok(postReloadWait, 'deve ignorar cliente antigo anterior ao reload');
+  assert.equal(postReloadWait.selector.tabId, 99);
+  assert.equal(typeof postReloadWait.selector.minRuntimeSignalAt, 'number');
+  assert.equal(result.client.clientId, 'activity-new');
+});
+
+test('MCP waitForActivityClient filters stale clients from before a requested runtime signal', async () => {
+  const source = await import('node:fs/promises').then(({ readFile }) =>
+    readFile(new URL('../src/mcp-server.js', import.meta.url), 'utf8'),
+  );
+  const runtimeHelperSource = await import('node:fs/promises').then(({ readFile }) =>
+    readFile(new URL('../src/mcp/mcp-server-runtime-helpers.ts', import.meta.url), 'utf8'),
+  );
+  const waitBlock = source.match(
+    /const waitForActivityClient = async[\s\S]*?\n\};\n\nconst activityClientMissingError/,
+  )?.[0] || '';
+
+  assert.match(waitBlock, /activityClientMatchesSelector\(client, selector/);
+  assert.match(runtimeHelperSource, /minRuntimeSignalAt/);
+  assert.match(runtimeHelperSource, /clientRuntimeSignalAt/);
+  assert.match(runtimeHelperSource, /clientRuntimeSignalAt\(candidate\) >= min/);
 });

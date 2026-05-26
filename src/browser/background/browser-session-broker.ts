@@ -37,6 +37,7 @@ export type BrowserSessionBrokerOptions = Readonly<{
   inspectTab?: (tabId: number) => Promise<DebuggerTabInspection>;
   requestedTabId?: number | null;
   claimId?: string | null;
+  relatedTabIds?: readonly number[] | null;
 }>;
 
 const randomClaimId = () => {
@@ -115,12 +116,14 @@ export const getDebuggableGeminiTabs = async (
 export const visualCompanionTabIdsForClaim = (
   claimedTab: DebuggableGeminiTab,
   classified: readonly BrowserTabClassification[],
+  alreadyRelatedTabIds: readonly number[] = [],
 ): readonly number[] =>
   selectClaimVisualCompanionTabIds(
     claimedTab,
     classified
       .filter((item) => item.inspection?.pageKind === 'my_activity')
       .map((item) => item.tab),
+    alreadyRelatedTabIds,
   );
 
 export const claimDebuggableGeminiTab = async (
@@ -140,6 +143,10 @@ export const claimDebuggableGeminiTab = async (
   return {
     ok: true as const,
     tab: toClaimedDebuggableGeminiTab(candidates[0], options.claimId || randomClaimId()),
-    visualCompanionTabIds: visualCompanionTabIdsForClaim(candidates[0], listed.classified),
+    visualCompanionTabIds: visualCompanionTabIdsForClaim(
+      candidates[0],
+      listed.classified,
+      Array.isArray(options.relatedTabIds) ? options.relatedTabIds : [],
+    ),
   };
 };

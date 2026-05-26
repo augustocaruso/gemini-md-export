@@ -193,6 +193,33 @@ const chromeGetTabGroup = (
     });
   });
 
+const tabGroupId = (tab: RawBrowserTab): number | null => {
+  const groupId = Number((tab as { groupId?: unknown }).groupId);
+  return Number.isInteger(groupId) && groupId >= 0 ? groupId : null;
+};
+
+const existingManagedClaimGroupIdForTabs = async (
+  chromeApi: ChromeNativeBrokerApi,
+  tabs: readonly RawBrowserTab[],
+  tabIds: readonly number[],
+): Promise<number | null> => {
+  const targetTabs = tabIds
+    .map((tabId) => tabs.find((tab) => Number(tab.id) === tabId) || null)
+    .filter((tab): tab is RawBrowserTab => tab !== null);
+  if (targetTabs.length !== tabIds.length || targetTabs.length === 0) return null;
+  const groupIds = Array.from(
+    new Set(
+      targetTabs
+        .map(tabGroupId)
+        .filter((groupId): groupId is number => groupId !== null),
+    ),
+  );
+  if (groupIds.length !== 1) return null;
+  const groupId = groupIds[0];
+  const group = await chromeGetTabGroup(chromeApi, groupId);
+  return looksLikeManagedClaimGroupTitle(group?.title) ? groupId : null;
+};
+
 const chromeUngroupTabs = (
   chromeApi: ChromeNativeBrokerApi,
   tabIds: readonly number[],
@@ -287,6 +314,7 @@ const relatedTabIdsFromClaimPayload = (
 
 const applyNativeClaimVisual = async (
   chromeApi: ChromeNativeBrokerApi,
+  tabs: readonly RawBrowserTab[],
   tabId: number,
   relatedTabIds: readonly number[],
   payload: { label?: string | null; color?: string | null } = {},
@@ -295,12 +323,33 @@ const applyNativeClaimVisual = async (
   if (!chromeApi.tabs || !chromeApi.tabs.group || !chromeApi.tabGroups?.update) {
     return { mode: 'action-badge' as const, tabId, reason: 'tab-groups-api-unavailable' };
   }
+  const label = payload.label || 'Gemini Export';
+  const color = payload.color || 'blue';
+  const existingGroupId = await existingManagedClaimGroupIdForTabs(chromeApi, tabs, tabIds);
+  if (existingGroupId !== null) {
+    const updated = await chromeUpdateTabGroup(chromeApi, existingGroupId, { title: label, color });
+    if (!updated) {
+      return {
+        mode: 'action-badge' as const,
+        tabId,
+        groupId: existingGroupId,
+        reason: 'tab-group-update-failed',
+      };
+    }
+    return {
+      mode: 'tab-group' as const,
+      tabId,
+      tabIds: nonEmptyIntegerArray(tabIds, tabId),
+      groupId: existingGroupId,
+      label,
+      color,
+      reason: 'reused-existing-managed-claim-group',
+    };
+  }
   const groupId = Number(await chromeGroupTabs(chromeApi, tabIds));
   if (!Number.isInteger(groupId)) {
     return { mode: 'action-badge' as const, tabId, reason: 'tab-group-create-failed' };
   }
-  const label = payload.label || 'Gemini Export';
-  const color = payload.color || 'blue';
   const updated = await chromeUpdateTabGroup(chromeApi, groupId, { title: label, color });
   if (!updated) {
     return { mode: 'action-badge' as const, tabId, groupId, reason: 'tab-group-update-failed' };
@@ -439,10 +488,12 @@ export const handleNativeBrowserBrokerCommand = async (
   }
 
   if (request.command === 'tabs.claim') {
+    const explicitRelatedTabIds = relatedTabIdsFromClaimPayload(0, request.payload);
     const claim = await claimDebuggableGeminiTab(tabs, {
       requestedTabId: Number(request.payload?.tabId || 0) || null,
       claimId: request.payload?.claimId || null,
       inspectTab,
+      relatedTabIds: explicitRelatedTabIds,
     });
     if (claim.ok !== true) return claim;
     const relatedTabIds = Array.from(
@@ -455,6 +506,7 @@ export const handleNativeBrowserBrokerCommand = async (
       ...claim,
       visual: await applyNativeClaimVisual(
         chromeApi,
+        tabs,
         claim.tab.tabId,
         relatedTabIds,
         request.payload,

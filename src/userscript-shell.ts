@@ -85,6 +85,7 @@
   const SCRIPT_VERSION = '__VERSION__';
   const BUILD_STAMP = '__BUILD_STAMP__';
   const FRAME_TIMEOUT_MS = 45000;
+  const SAME_SIGNATURE_ACCEPT_GRACE_MS = 3500;
   const CONVERSATION_CONTAINER_SELECTOR = 'div.conversation-container';
   const HYDRATION_LOAD_WAIT_MS = 900;
   const HYDRATION_TOP_SETTLE_MS = 8000;
@@ -6087,6 +6088,12 @@
     const normalizedTargetChatId = stripGeminiConversationPrefix(targetChatId);
     const previousSignature = options.previousSignature || '';
     const previousChatId = stripGeminiConversationPrefix(options.previousChatId || '');
+    const sameSignatureGraceMs = Math.max(
+      0,
+      Number(options.sameSignatureGraceMs ?? SAME_SIGNATURE_ACCEPT_GRACE_MS) ||
+        SAME_SIGNATURE_ACCEPT_GRACE_MS,
+    );
+    const startedAt = Date.now();
     let lastState = null;
 
     return waitFor(
@@ -6095,6 +6102,10 @@
         const signature = conversationDomSignature(document);
         const turnCount = conversationDomTurnCount(document);
         const changedFromPrevious = !previousSignature || signature !== previousSignature;
+        const sameSignatureWaitMs = Date.now() - startedAt;
+        const acceptedSameSignature =
+          Boolean(previousSignature && !changedFromPrevious && previousChatId !== chatId) &&
+          sameSignatureWaitMs >= sameSignatureGraceMs;
         lastState = {
           chatId,
           targetChatId: normalizedTargetChatId,
@@ -6103,8 +6114,11 @@
           previousSignature,
           turnCount,
           changedFromPrevious,
+          acceptedSameSignature,
+          sameSignatureWaitMs,
           title: scrapeTitle(),
         };
+        options.onProgress?.(lastState);
 
         if (chatId !== normalizedTargetChatId) return false;
         if (!location.pathname.startsWith('/app/')) return false;
@@ -6113,7 +6127,7 @@
         // A URL do Gemini pode trocar antes do Angular substituir os turns.
         // Sem esta barreira, o export pode gravar o conteúdo do chat anterior
         // usando o chatId novo.
-        if (previousSignature && !changedFromPrevious) return false;
+        if (previousSignature && !changedFromPrevious && !acceptedSameSignature) return false;
 
         return lastState;
       },
@@ -6311,6 +6325,7 @@
           changedFromPrevious,
           title: scrapeTitle(),
         };
+        options.onProgress?.(lastState);
 
         if (!chatId || chatId === normalizedPreviousChatId) return false;
         if (!location.pathname.startsWith('/app/')) return false;
@@ -6327,7 +6342,12 @@
     });
   };
 
-  const navigateToKnownChatUrl = async (item) => {
+  const navigationWaitProgress = (options = {}) => (snapshot) => {
+    options.onNavigationProgress?.(snapshot);
+    options.setOperationPhase?.('waiting-for-chat-dom');
+  };
+
+  const navigateToKnownChatUrl = async (item, options = {}) => {
     const previousChatId = currentChatId();
     const previousSignature = conversationDomSignature(document);
     const targetChatId = normalizeExpectedChatId(item);
@@ -6366,6 +6386,7 @@
     return waitForChatToLoad(targetChatId, {
       previousChatId,
       previousSignature,
+      onProgress: navigationWaitProgress(options),
     });
   };
 
@@ -6388,7 +6409,7 @@
     });
 
     if (!element && conversationPlan.allowDirectUrlFallback) {
-      return navigateToKnownChatUrl(item);
+      return navigateToKnownChatUrl(item, options);
     }
 
     if (!element) {
@@ -6405,6 +6426,7 @@
     clickable.click();
     const navigationState = await waitForAnyChatToLoad(previousChatId, item.title, {
       previousSignature,
+      onProgress: navigationWaitProgress(options),
     });
     const chatId = currentChatId();
     if (chatId) {
@@ -6453,13 +6475,13 @@
     }
 
     if (!isSidebarOpen() && String(item.url || '').includes('/app/')) {
-      return navigateToKnownChatUrl(item);
+      return navigateToKnownChatUrl(item, options);
     }
 
     const element = getSidebarConversationById(item.id || targetChatId);
     if (!element) {
       if ((item.chatId || item.url) && String(item.url || '').includes('/app/')) {
-        return navigateToKnownChatUrl(item);
+        return navigateToKnownChatUrl(item, options);
       }
       throw new Error(`A conversa ${item.title} não está mais visível no sidebar.`);
     }
@@ -6469,6 +6491,7 @@
     return waitForChatToLoad(targetChatId, {
       previousChatId,
       previousSignature,
+      onProgress: navigationWaitProgress(options),
     });
   };
 
@@ -6521,6 +6544,7 @@
           const loaded = await waitForChatToLoad(chatId, {
             previousChatId,
             previousSignature: previousChatId && previousChatId !== chatId ? previousSignature : '',
+            onProgress: navigationWaitProgress(options),
           });
           return {
             ok: true,
@@ -6583,6 +6607,44 @@
     };
   };
 
+  const navigationChatIdMatchesPayload = (navigation, payloadChatId, expectedChatId = '') => {
+    const normalizedPayloadChatId = stripGeminiConversationPrefix(payloadChatId || '');
+    const normalizedExpectedChatId = stripGeminiConversationPrefix(expectedChatId || '');
+    if (!navigation || !normalizedPayloadChatId) return false;
+    if (normalizedExpectedChatId && normalizedExpectedChatId !== normalizedPayloadChatId) {
+      return false;
+    }
+
+    const engine = navigation.navigationEngine || {};
+    const candidateIds = [
+      navigation.chatId,
+      navigation.requestedChatId,
+      navigation.observedChatId,
+      engine.chatId,
+      engine.requestedChatId,
+      engine.observedChatId,
+    ];
+    const hasMatchingChatId = candidateIds.some(
+      (value) => stripGeminiConversationPrefix(value || '') === normalizedPayloadChatId,
+    );
+    if (!hasMatchingChatId) return false;
+
+    return (
+      navigation.ok === true ||
+      engine.ok === true ||
+      navigation.opened === true ||
+      engine.opened === true ||
+      navigation.skipped === true ||
+      navigation.reason === 'already-current' ||
+      engine.reason === 'already-current'
+    );
+  };
+
+  const navigationAllowsSameSignatureExport = (navigation, payloadChatId, expectedChatId = '') =>
+    navigation?.acceptedSameSignature === true ||
+    navigation?.navigationEngine?.acceptedSameSignature === true ||
+    navigationChatIdMatchesPayload(navigation, payloadChatId, expectedChatId);
+
   const collectExportForCurrentConversation = async (options = {}) => {
     options.setOperationPhase?.('hydrating');
     const hydrationStartedAt = Date.now();
@@ -6644,7 +6706,8 @@
       options.previousSignature &&
       options.previousChatId &&
       stripGeminiConversationPrefix(options.previousChatId) !== payload.chatId &&
-      conversationDomSignature(document) === options.previousSignature
+      conversationDomSignature(document) === options.previousSignature &&
+      !navigationAllowsSameSignatureExport(options.navigation, payload.chatId, expectedChatId)
     ) {
       throw new Error(
         'Download abortado: a URL mudou, mas o conteúdo da conversa ainda parece ser o chat anterior. Tente novamente depois que a página terminar de carregar.',
@@ -7407,6 +7470,15 @@
     updateProgressDock();
   };
 
+  const clearActiveTabOperationForTerminalMcpJob = (jobId) => {
+    const active = state.activeTabOperation;
+    if (!active || !jobId || !active.jobId || active.jobId !== jobId) return false;
+    state.completedTabOperations += 1;
+    state.activeTabOperation = null;
+    reportTabBrokerStateSoon('operation-terminal-job-cleared', { force: true });
+    return true;
+  };
+
   // --- MCP-driven progress -----------------------------------------------
   // Quando o MCP está exportando conversas pelo bridge, ele envia o
   // jobProgress no payload do /bridge/heartbeat. A aba do Gemini reaproveita
@@ -7728,6 +7800,7 @@
       state.mcpProgressCancelSinceAt = 0;
       clearMcpProgressSnapshot();
       stopProgressCreep();
+      clearActiveTabOperationForTerminalMcpJob(terminalJobId);
       void finishExportProgress();
     }
   };
@@ -10310,6 +10383,8 @@
       artifacts: (options = {}) => inspectArtifactDom(options),
       hydrateCurrentConversation: (options = {}) => hydrateConversationToTop(document, window, options),
       exportPayload: () => buildExportPayload(document, location.href),
+      collectCurrentConversationForDebug: (options = {}) =>
+        collectExportForCurrentConversation(options),
       conversationDomSignature: () => conversationDomSignature(document),
       waitForChatToLoadForDebug: (targetChatId, options = {}) =>
         waitForChatToLoad(targetChatId, options),

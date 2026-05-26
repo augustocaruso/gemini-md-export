@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { runRecentExportConversationOperation } from '../build/ts/mcp/recent-export-operation-runtime.js';
+import {
+  createBrowserTabWatchdogRecovery,
+  runRecentExportConversationOperation,
+} from '../build/ts/mcp/recent-export-operation-runtime.js';
 
 const target = {
   batchPosition: 22,
@@ -81,7 +84,9 @@ const createDeps = (overrides = {}) => {
 };
 
 test('recent export watchdog records one conversation failure when cancel is acknowledged but operation drain times out', async () => {
-  const deps = createDeps();
+  const deps = createDeps({
+    recoverBrowserTabAfterWatchdog: async () => ({ ok: true }),
+  });
   const job = {
     jobId: 'job-1',
     phase: 'exporting',
@@ -401,11 +406,18 @@ test('recent export operation aborts local date resolution after job cancel requ
 
 test('recent export watchdog reloads the tab and continues when cancel command times out', async () => {
   const recoveries = [];
+  const recoveredClient = { clientId: 'client-2', tabId: 42 };
+  let reboundReason = null;
   const deps = createDeps({
+    getClientById: (clientId) => (clientId === recoveredClient.clientId ? recoveredClient : null),
+    rebindExportJobToClient: (_job, client, reason) => {
+      reboundReason = reason;
+      return client;
+    },
     requestActiveBrowserOperationCancelForJob: async () => null,
     recoverBrowserTabAfterWatchdog: async (_job, reason, context) => {
       recoveries.push({ reason, context });
-      return { ok: true, reloaded: 1 };
+      return { ok: true, reloaded: 1, recoveredClient };
     },
   });
   const job = {
@@ -435,13 +447,65 @@ test('recent export watchdog reloads the tab and continues when cancel command t
     deps,
   );
 
-  assert.equal(result.client, client);
+  assert.equal(result.client, recoveredClient);
   assert.equal(successes.length, 0);
   assert.equal(failures.length, 1);
   assert.equal(failures[0].code, 'conversation_no_progress_timeout');
   assert.equal(recoveries.length, 1);
   assert.equal(recoveries[0].reason, 'conversation_no_progress_timeout');
   assert.equal(recoveries[0].context.operationId, 'job-1:008:f05318e93e234d75');
+  assert.equal(reboundReason, 'conversation-watchdog-recovery');
+});
+
+test('recent export watchdog recovers the tab even when the aborted operation settles quickly', async () => {
+  const recoveries = [];
+  const recoveredClient = { clientId: 'client-2', tabId: 42 };
+  const deps = createDeps({
+    downloadConversationItemWithRetry: async (_job, _client, _conversation, args) =>
+      new Promise((_resolve, reject) => {
+        args.abortSignal.addEventListener('abort', () => reject(args.abortSignal.reason), {
+          once: true,
+        });
+      }),
+    getClientById: (clientId) => (clientId === recoveredClient.clientId ? recoveredClient : null),
+    rebindExportJobToClient: (_job, client) => client,
+    requestActiveBrowserOperationCancelForJob: async () => null,
+    recoverBrowserTabAfterWatchdog: async (_job, reason, context) => {
+      recoveries.push({ reason, context });
+      return { ok: true, recoveredClient };
+    },
+  });
+  const job = {
+    jobId: 'job-1',
+    phase: 'exporting',
+    outputDir: '/tmp/export',
+    completed: 7,
+  };
+  const failures = [];
+  const successes = [];
+
+  const result = await runRecentExportConversationOperation(
+    {
+      args: {},
+      client: { clientId: 'client-1', tabId: 42 },
+      conversation: { chatId: target.targetChatId, title: target.title },
+      failures,
+      index: 8,
+      itemMetric: {},
+      job,
+      noProgressMs: 1,
+      operationId: 'job-1:008:f05318e93e234d75',
+      successes,
+      target,
+    },
+    deps,
+  );
+
+  assert.equal(result.client, recoveredClient);
+  assert.equal(successes.length, 0);
+  assert.equal(failures.length, 1);
+  assert.equal(failures[0].code, 'conversation_no_progress_timeout');
+  assert.equal(recoveries.length, 1);
 });
 
 test('recent export watchdog stops the batch when cancel and recovery both fail', async () => {
@@ -476,4 +540,92 @@ test('recent export watchdog stops the batch when cancel and recovery both fail'
       ),
     { code: 'operation_cancel_failed_after_watchdog' },
   );
+});
+
+test('browser tab recovery rejects a reconnected client that is not usable for the current runtime', async () => {
+  const traces = [];
+  const recoveredClient = {
+    clientId: 'client-old-build',
+    tabId: 42,
+    lifecycle: {
+      ok: false,
+      state: 'extension_mismatch',
+      code: 'extension_build_mismatch',
+      message: 'A extensão conectada não está no build esperado.',
+    },
+  };
+  const recover = createBrowserTabWatchdogRecovery({
+    appendExportJobTrace: (_job, event, payload = {}) => traces.push({ event, payload }),
+    getClaimById: () => ({ claimId: 'claim-1', tabId: 42, sessionId: 'session-1' }),
+    getClientById: () => ({ clientId: 'client-1', tabId: 42 }),
+    claimForClient: () => null,
+    normalizeTabId: () => 42,
+    tryNativeBrowserBrokerTabsAction: async () => ({ ok: true, action: 'reload', reloaded: 1 }),
+    waitForContinuationClient: async () => recoveredClient,
+    summarizeClient: (client) => ({
+      clientId: client.clientId,
+      tabId: client.tabId,
+      lifecycle: client.lifecycle || null,
+    }),
+    validateRecoveredClient: (client) => ({
+      ok: client.lifecycle?.ok === true,
+      code: client.lifecycle?.code || 'recovered_client_not_ready',
+      message: client.lifecycle?.message || null,
+      state: client.lifecycle?.state || null,
+    }),
+    touchExportJob: () => {},
+    recoveryWaitMs: 1,
+  });
+
+  const result = await recover(
+    { clientId: 'client-1', tabClaimId: 'claim-1' },
+    'stale_conversation_dom',
+    { operationId: 'job-1:012:8837c0ae19ce4d2e', targetChatId: '8837c0ae19ce4d2e' },
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'extension_build_mismatch');
+  assert.equal(result.reload.ok, true);
+  assert.equal(result.recoveredClient.clientId, 'client-old-build');
+  assert.equal(result.recoveredClientReadiness.ok, false);
+  assert.equal(
+    traces.some((trace) => trace.event === 'browser_operation_recovery_result'),
+    true,
+  );
+});
+
+test('browser tab recovery waits for a post-reload client signal before accepting recovery', async () => {
+  let selectorSeen = null;
+  const startedBeforeRecovery = Date.now();
+  const recover = createBrowserTabWatchdogRecovery({
+    appendExportJobTrace: () => {},
+    getClaimById: () => ({ claimId: 'claim-1', tabId: 42, sessionId: 'session-1' }),
+    getClientById: () => ({ clientId: 'client-1', tabId: 42 }),
+    claimForClient: () => null,
+    normalizeTabId: () => 42,
+    tryNativeBrowserBrokerTabsAction: async () => ({ ok: true, action: 'reload', reloaded: 1 }),
+    waitForContinuationClient: async (_client, selector) => {
+      selectorSeen = selector;
+      return { clientId: 'client-2', tabId: 42, lastSeenAt: Date.now() };
+    },
+    summarizeClient: (client) => ({ clientId: client.clientId, tabId: client.tabId }),
+    validateRecoveredClient: () => ({ ok: true }),
+    touchExportJob: () => {},
+    recoveryWaitMs: 1,
+  });
+
+  const result = await recover(
+    { clientId: 'client-1', tabClaimId: 'claim-1' },
+    'stale_conversation_dom',
+    { operationId: 'job-1:012:8837c0ae19ce4d2e', targetChatId: '8837c0ae19ce4d2e' },
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(selectorSeen.tabId, 42);
+  assert.equal(selectorSeen.claimId, 'claim-1');
+  assert.equal(selectorSeen.sessionId, 'session-1');
+  assert.equal(selectorSeen.requireExpectedBrowserExtension, true);
+  assert.equal(selectorSeen.requireCommandReady, true);
+  assert.ok(selectorSeen.minRuntimeSignalAt >= startedBeforeRecovery);
+  assert.ok(selectorSeen.minRuntimeSignalAt <= Date.now());
 });

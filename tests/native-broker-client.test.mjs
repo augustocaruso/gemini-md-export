@@ -328,6 +328,112 @@ test('native broker claim groups Gemini and My Activity in the same visual recta
   assert.equal(updatedGroups[0].groupId, 777);
 });
 
+test('native broker claim reuses an existing managed claim group instead of recreating it', async () => {
+  const grouped = [];
+  const updatedGroups = [];
+  const { api } = chromeApiForTabs({
+    tabs: [
+      {
+        id: 42,
+        windowId: 7,
+        active: true,
+        groupId: 777,
+        url: 'https://gemini.google.com/app/abc123456789',
+      },
+      {
+        id: 99,
+        windowId: 7,
+        active: false,
+        groupId: 777,
+        url: 'https://myactivity.google.com/product/gemini',
+      },
+    ],
+    hrefByTabId: {
+      42: 'https://gemini.google.com/app/abc123456789',
+      99: 'https://myactivity.google.com/product/gemini',
+    },
+  });
+  api.tabs.group = (createProperties, callback) => {
+    grouped.push(createProperties.tabIds);
+    callback(778);
+  };
+  api.tabGroups = {
+    get(groupId, callback) {
+      callback({ id: groupId, title: 'Gemini Export' });
+    },
+    update(groupId, updateProperties, callback) {
+      updatedGroups.push({ groupId, updateProperties });
+      callback({ id: groupId, ...updateProperties });
+    },
+  };
+
+  const result = await handleNativeBrowserBrokerCommand(
+    {
+      command: 'tabs.claim',
+      payload: {
+        tabId: 42,
+        claimId: 'claim-42',
+        tabIds: [42, 99],
+        relatedTabIds: [99],
+        label: 'Gemini Export',
+      },
+    },
+    api,
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.visual.mode, 'tab-group');
+  assert.equal(result.visual.reason, 'reused-existing-managed-claim-group');
+  assert.equal(result.visual.groupId, 777);
+  assert.deepEqual(result.visual.tabIds, [42, 99]);
+  assert.deepEqual(grouped, []);
+  assert.deepEqual(updatedGroups, [
+    { groupId: 777, updateProperties: { title: 'Gemini Export', color: 'blue' } },
+  ]);
+});
+
+test('native broker claim does not add a second My Activity tab when one is explicit', async () => {
+  const grouped = [];
+  const { api } = chromeApiForTabs({
+    tabs: [
+      { id: 42, windowId: 7, index: 10, active: true, url: 'https://gemini.google.com/app/abc123456789' },
+      { id: 98, windowId: 7, index: 13, active: false, url: 'https://myactivity.google.com/product/gemini' },
+      { id: 99, windowId: 7, index: 11, active: false, url: 'https://myactivity.google.com/product/gemini' },
+    ],
+    hrefByTabId: {
+      42: 'https://gemini.google.com/app/abc123456789',
+      98: 'https://myactivity.google.com/product/gemini',
+      99: 'https://myactivity.google.com/product/gemini',
+    },
+  });
+  api.tabs.group = (createProperties, callback) => {
+    grouped.push(createProperties.tabIds);
+    callback(777);
+  };
+  api.tabGroups = {
+    update(groupId, updateProperties, callback) {
+      callback({ id: groupId, ...updateProperties });
+    },
+  };
+
+  const result = await handleNativeBrowserBrokerCommand(
+    {
+      command: 'tabs.claim',
+      payload: {
+        tabId: 42,
+        claimId: 'claim-42',
+        tabIds: [42, 98],
+        relatedTabIds: [98],
+      },
+    },
+    api,
+  );
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.visual.tabIds, [42, 98]);
+  assert.deepEqual(grouped, [[42, 98]]);
+});
+
 test('native broker claim accepts string tabId from HTTP query params', async () => {
   const { api } = chromeApiForTabs({
     tabs: [
@@ -407,6 +513,64 @@ test('native broker release ungroups Gemini and My Activity from managed claim g
   assert.equal(result.released, true);
   assert.equal(result.ungrouped, 2);
   assert.deepEqual(result.ungroupedTabIds, [42, 99]);
+  assert.deepEqual(ungrouped, [[42, 99]]);
+});
+
+test('native broker release without tab id cleans orphan managed claim groups', async () => {
+  const ungrouped = [];
+  const { api } = chromeApiForTabs({
+    tabs: [
+      {
+        id: 42,
+        windowId: 7,
+        active: true,
+        groupId: 777,
+        url: 'https://gemini.google.com/app/abc123456789',
+      },
+      {
+        id: 99,
+        windowId: 7,
+        active: false,
+        groupId: 777,
+        url: 'https://myactivity.google.com/product/gemini',
+      },
+      {
+        id: 100,
+        windowId: 7,
+        active: false,
+        groupId: 778,
+        url: 'https://myactivity.google.com/product/gemini',
+      },
+    ],
+    hrefByTabId: {
+      42: 'https://gemini.google.com/app/abc123456789',
+      99: 'https://myactivity.google.com/product/gemini',
+      100: 'https://myactivity.google.com/product/gemini',
+    },
+  });
+  api.tabs.ungroup = (tabIds, callback) => {
+    ungrouped.push(tabIds);
+    callback?.();
+  };
+  api.tabGroups = {
+    get(groupId, callback) {
+      callback({
+        id: groupId,
+        title: groupId === 777 ? 'Gemini Export' : 'Pesquisa pessoal',
+      });
+    },
+  };
+
+  const result = await handleNativeBrowserBrokerCommand(
+    { command: 'tabs.release', payload: { reason: 'bridge-startup-orphan-claim-cleanup' } },
+    api,
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.released, true);
+  assert.equal(result.ungrouped, 2);
+  assert.deepEqual(result.ungroupedTabIds, [42, 99]);
+  assert.deepEqual(result.groupIds, [777]);
   assert.deepEqual(ungrouped, [[42, 99]]);
 });
 

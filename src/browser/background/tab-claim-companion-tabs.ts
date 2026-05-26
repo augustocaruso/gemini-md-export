@@ -66,8 +66,8 @@ export const selectClaimVisualCompanionTabIds = (
         tabDistance(claimedTab, left.tab) - tabDistance(claimedTab, right.tab) ||
         left.tabId - right.tabId,
     );
+  if (candidates.some((item) => alreadyRelated.has(item.tabId))) return [];
   const selected = candidates[0]?.tabId;
   if (!Number.isInteger(selected)) return [];
-  if (alreadyRelated.has(selected)) return [selected];
   return [selected];
 };

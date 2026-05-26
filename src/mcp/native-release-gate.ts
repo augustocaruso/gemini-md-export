@@ -383,6 +383,7 @@ export const nativeBrokerReloadPayload = (args: NativeExportArgs = {}) => ({
   claimId: args.claimId || null,
   tabIds: Array.isArray(args.tabIds) ? args.tabIds : undefined,
   relatedTabIds: Array.isArray(args.relatedTabIds) ? args.relatedTabIds : undefined,
+  reloadAll: args.reloadAll === true,
   visualGroupTabId: args.visualGroupTabId ?? args.groupWithTabId ?? undefined,
   label: args.label || undefined,
   color: args.color || undefined,
@@ -456,6 +457,30 @@ export const createTargetTabClientMissingAfterActivationError = ({
 const okResult = (result: unknown): result is MutableRecord =>
   typeof result === 'object' && result !== null && (result as MutableRecord).ok === true;
 
+const reloadStaleContentClaimAfterNativeRelease = async (
+  deps: {
+    tryNativeBrowserBrokerTabsAction(
+      action: string,
+      args?: MutableRecord,
+    ): Promise<MutableRecord | null>;
+  },
+  input: Readonly<{
+    extensionVisual: MutableRecord | null;
+    nativeVisual: MutableRecord | null;
+    tabId: unknown;
+    tabIds: unknown;
+    reason: string;
+  }>,
+) => {
+  if (okResult(input.extensionVisual) || !okResult(input.nativeVisual)) return null;
+  return deps.tryNativeBrowserBrokerTabsAction('reload', {
+    tabId: input.tabId,
+    tabIds: input.tabIds || null,
+    reason: `${input.reason}-stale-content-reload`,
+    focusWindow: false,
+  });
+};
+
 export const createTabClaimRelease =
   (deps: {
     cleanupExpiredTabClaims(): void;
@@ -493,7 +518,7 @@ export const createTabClaimRelease =
     if (!claimId) {
       const visual = await deps.releaseTabClaimVisualByTabId({
         tabId: args.tabId,
-        reason: args.reason || 'mcp-release-without-server-claim',
+        reason: String(args.reason || 'mcp-release-without-server-claim'),
       });
       const nativeVisual = await deps.tryNativeBrowserBrokerTabsAction('release', {
         tabId: args.tabId,
@@ -501,8 +526,15 @@ export const createTabClaimRelease =
         tabIds: args.tabIds || null,
         reason: `${args.reason || 'mcp-release-without-server-claim'}-native-visual`,
       });
+      const staleContentReload = await reloadStaleContentClaimAfterNativeRelease(deps, {
+        extensionVisual: visual,
+        nativeVisual,
+        tabId: args.tabId,
+        tabIds: args.tabIds || null,
+        reason: String(args.reason || 'mcp-release-without-server-claim'),
+      });
       if (okResult(visual) || okResult(nativeVisual)) {
-        return { ok: true, released: null, visual, nativeVisual, client: null };
+        return { ok: true, released: null, visual, nativeVisual, staleContentReload, client: null };
       }
       return {
         ok: false,
@@ -530,13 +562,20 @@ export const createTabClaimRelease =
       const visual = await deps.releaseTabClaimVisualByTabId({
         tabId: releaseTabId,
         claimId,
-        reason: args.reason || 'mcp-release-missing-server-claim',
+        reason: String(args.reason || 'mcp-release-missing-server-claim'),
       });
       const nativeVisual = await deps.tryNativeBrowserBrokerTabsAction('release', {
         tabId: releaseTabId,
         claimId,
         tabIds: releaseTabIds,
         reason: `${args.reason || 'mcp-release-missing-server-claim'}-native-visual`,
+      });
+      const staleContentReload = await reloadStaleContentClaimAfterNativeRelease(deps, {
+        extensionVisual: visual,
+        nativeVisual,
+        tabId: releaseTabId,
+        tabIds: releaseTabIds,
+        reason: String(args.reason || 'mcp-release-missing-server-claim'),
       });
       if (okResult(visual) || okResult(nativeVisual)) {
         return {
@@ -546,6 +585,7 @@ export const createTabClaimRelease =
           sessionId,
           visual,
           nativeVisual,
+          staleContentReload,
           client: null,
         };
       }
@@ -590,6 +630,19 @@ export const createTabClaimRelease =
       }
     }
 
+    const releaseVisualTabId = claim.tabId ?? args.tabId;
+    const releaseVisualTabIds = (claim.visual as MutableRecord | undefined)?.tabIds || null;
+    const releaseReason = String(args.reason || 'mcp-release');
+    const releaseNativeClaimVisual = async () => {
+      if (!Array.isArray(releaseVisualTabIds) || releaseVisualTabIds.length === 0) return null;
+      return deps.tryNativeBrowserBrokerTabsAction('release', {
+        tabId: releaseVisualTabId,
+        claimId,
+        tabIds: releaseVisualTabIds,
+        reason: `${releaseReason}-native-visual`,
+      });
+    };
+
     const releaseSucceeded = () => {
       if (!okResult(visual)) return null;
       const removed = deps.removeTabClaim(claimId);
@@ -601,9 +654,11 @@ export const createTabClaimRelease =
       };
     };
     const browserRelease = releaseSucceeded();
-    if (browserRelease) return browserRelease;
+    if (browserRelease) {
+      const nativeVisual = await releaseNativeClaimVisual();
+      return nativeVisual ? { ...browserRelease, nativeVisual } : browserRelease;
+    }
 
-    const releaseVisualTabId = claim.tabId ?? args.tabId;
     if (releaseVisualTabId !== null && releaseVisualTabId !== undefined) {
       visual = await deps.releaseTabClaimVisualByTabId({
         tabId: releaseVisualTabId,
@@ -612,16 +667,28 @@ export const createTabClaimRelease =
       });
     }
     const extensionRelease = releaseSucceeded();
-    if (extensionRelease) return extensionRelease;
+    if (extensionRelease) {
+      const nativeVisual = await releaseNativeClaimVisual();
+      return nativeVisual ? { ...extensionRelease, nativeVisual } : extensionRelease;
+    }
 
-    visual = await deps.tryNativeBrowserBrokerTabsAction('release', {
+    const extensionVisual = visual;
+    const nativeVisual = await deps.tryNativeBrowserBrokerTabsAction('release', {
       tabId: releaseVisualTabId,
       claimId,
-      tabIds: (claim.visual as MutableRecord | undefined)?.tabIds || null,
-      reason: args.reason || 'mcp-native-release',
+      tabIds: releaseVisualTabIds,
+      reason: String(args.reason || 'mcp-native-release'),
     });
+    const staleContentReload = await reloadStaleContentClaimAfterNativeRelease(deps, {
+      extensionVisual,
+      nativeVisual,
+      tabId: releaseVisualTabId,
+      tabIds: releaseVisualTabIds,
+      reason: String(args.reason || 'mcp-native-release'),
+    });
+    visual = nativeVisual;
     const nativeRelease = releaseSucceeded();
-    if (nativeRelease) return nativeRelease;
+    if (nativeRelease) return { ...nativeRelease, staleContentReload };
 
     const removed = deps.removeTabClaim(claimId);
     return {

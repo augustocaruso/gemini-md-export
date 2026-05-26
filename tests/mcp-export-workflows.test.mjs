@@ -134,6 +134,65 @@ test('MCP validates export payload before writing files', () => {
   assert.match(source, /shouldRequireNativeExportTabLease/);
 });
 
+test('recent export report preserves activity companion evidence', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const reportSource = readFileSync(resolve(ROOT, 'src', 'mcp', 'export-job-reports.ts'), 'utf-8');
+  const reportBlock = reportSource.match(
+    /export const buildRecentChatsExportReportPayload[\s\S]*?\n\}\);/,
+  )?.[0];
+
+  assert.ok(reportBlock, 'buildRecentChatsExportReport deve existir');
+  assert.match(source, /buildRecentChatsExportReportPayload/);
+  assert.match(reportBlock, /activityCompanion: job\.activityCompanion \|\| null/);
+});
+
+test('recent export does not reload the tab before retrying stale conversation DOM', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const recoveryPolicySource = readFileSync(
+    resolve(ROOT, 'src', 'mcp', 'conversation-retry-recovery.ts'),
+    'utf-8',
+  );
+  const retryBlock = source.match(
+    /const downloadConversationItemWithRetry = async[\s\S]*?\n\};\n\nconst downloadChatForClient/,
+  )?.[0];
+
+  assert.ok(retryBlock, 'downloadConversationItemWithRetry deve existir');
+  assert.doesNotMatch(source, /conversation-retry-recovery\.js/);
+  assert.doesNotMatch(retryBlock, /recoverBrowserTabAfterWatchdog\(\s*job,\s*retryReason/);
+  assert.doesNotMatch(retryBlock, /shouldRecoverTabBeforeConversationRetry\(retryReason\)/);
+  assert.match(recoveryPolicySource, /new Set<string>\(\)/);
+  assert.doesNotMatch(recoveryPolicySource, /stale_conversation_dom['"`]\s*\]/);
+});
+
+test('recent export recovery waits for a fresh matching command-ready client after reload', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const operationSource = readFileSync(
+    resolve(ROOT, 'src', 'mcp', 'recent-export-operation-runtime.ts'),
+    'utf-8',
+  );
+  const runtimeHelperSource = readFileSync(
+    resolve(ROOT, 'src', 'mcp', 'mcp-server-runtime-helpers.ts'),
+    'utf-8',
+  );
+  const waitBlock = source.match(
+    /const waitForContinuationClient = async[\s\S]*?\n\};\n\nconst enqueueCommandWithClientRecovery/,
+  )?.[0];
+
+  assert.ok(waitBlock, 'waitForContinuationClient deve existir');
+  assert.match(operationSource, /minRuntimeSignalAt: reloadStartedAt/);
+  assert.match(operationSource, /requireExpectedBrowserExtension: true/);
+  assert.match(operationSource, /requireCommandReady: true/);
+  assert.match(waitBlock, /waitForContinuationClientWithRecovery/);
+  assert.match(runtimeHelperSource, /minRuntimeSignalAt/);
+  assert.match(runtimeHelperSource, /clientRuntimeSignalAt/);
+  assert.match(waitBlock, /clientMatchesExpectedBrowserExtension/);
+  assert.match(source, /validateRecoveredBrowserClientLifecycle/);
+  assert.match(source, /getGeminiClientLifecycle/);
+  assert.match(source, /hydrateClientLifecycleFields/);
+  assert.match(source, /activeClaimableGeminiClientOptions/);
+  assert.match(runtimeHelperSource, /validateRecoveredClient\(liveCandidate\)\.ok !== true/);
+});
+
 test('recent export job validates native lease before creating job', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const nativeGateSource = readFileSync(resolve(ROOT, 'src', 'mcp', 'native-release-gate.ts'), 'utf-8');

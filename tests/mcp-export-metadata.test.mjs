@@ -355,6 +355,9 @@ test('export metadata fallback passa claim visual e espera longa para My Activit
       {
         takeout: takeoutPath,
         _exportDateImportVisualGroupTabId: 713803072,
+        activityCompanion: {
+          tabId: 713803095,
+        },
       },
       {
         claimLabel: '🔄 Sincroniza',
@@ -380,6 +383,8 @@ test('export metadata fallback passa claim visual e espera longa para My Activit
     );
 
     assert.equal(scanArgs.visualGroupTabId, 713803072);
+    assert.equal(scanArgs.activityTabId, 713803095);
+    assert.equal(scanArgs.claimVisual, false);
     assert.equal(scanArgs.waitMs, DEFAULT_EXPORT_DATE_IMPORT_ACTIVITY_WAIT_MS);
     assert.equal(scanArgs.activityCommandTimeoutMs, DEFAULT_EXPORT_DATE_IMPORT_ACTIVITY_WAIT_MS + 15_000);
     assert.equal(scanArgs.preLaunchWaitMs, DEFAULT_EXPORT_DATE_IMPORT_ACTIVITY_PRE_LAUNCH_WAIT_MS);

@@ -1205,6 +1205,24 @@ test('MCP terminal progress clears snapshot before finishing dock', async () => 
   assert.match(terminalBlock, /finishExportProgress/);
 });
 
+test('MCP terminal progress clears active operation for the finished job before hiding dock', async () => {
+  const source = await readFile(new URL('../src/userscript-shell.ts', import.meta.url), 'utf8');
+  const terminalBlock = source.match(
+    /if \(isTerminalMcpProgress\) \{[\s\S]*?\n    \}/,
+  )?.[0] || '';
+
+  assert.match(source, /const clearActiveTabOperationForTerminalMcpJob = \(jobId\) =>/);
+  assert.match(source, /active\.jobId !== jobId/);
+  assert.match(source, /state\.activeTabOperation = null/);
+  assert.match(source, /operation-terminal-job-cleared/);
+  assert.match(terminalBlock, /clearActiveTabOperationForTerminalMcpJob\(terminalJobId\)/);
+  assert.ok(
+    terminalBlock.indexOf('clearActiveTabOperationForTerminalMcpJob(terminalJobId)') <
+      terminalBlock.indexOf('finishExportProgress'),
+    'o lock precisa sumir antes do fade do dock terminal',
+  );
+});
+
 test('content script acompanha redesign lr26 sem voltar para fonte JS', async () => {
   const source = await readFile(new URL('../src/userscript-shell.ts', import.meta.url), 'utf8');
   assert.match(source, /width="20" height="20"/);
@@ -1749,6 +1767,163 @@ test('waitForChatToLoad aguarda DOM novo antes de liberar export', { timeout: 50
   window.close();
 });
 
+test('waitForChatToLoad emite progresso enquanto aguarda DOM novo', { timeout: 5000 }, async () => {
+  const oldChatId = 'aaaaaaaaaaaa';
+  const newChatId = 'bbbbbbbbbbbb';
+  const { dom, runtimeErrors } = createGeminiMediaDom(`
+    <user-query><div>pergunta antiga</div></user-query>
+    <model-response><div>resposta antiga</div></model-response>
+  `);
+  const { window } = dom;
+  const debug = await evaluateContentScript(window);
+  const previousSignature = debug.conversationDomSignature();
+  const progress = [];
+
+  window.history.replaceState({}, '', `/app/${oldChatId}`);
+  window.history.pushState({}, '', `/app/${newChatId}`);
+
+  const waitPromise = debug.waitForChatToLoadForDebug(newChatId, {
+    previousChatId: oldChatId,
+    previousSignature,
+    onProgress: (state) => progress.push(state),
+  });
+
+  await new Promise((resolve) => window.setTimeout(resolve, 450));
+  assert.ok(
+    progress.length >= 2,
+    'espera de navegacao precisa pulsar progresso para nao acionar watchdog',
+  );
+  assert.equal(progress.at(-1).chatId, newChatId);
+  assert.equal(progress.at(-1).changedFromPrevious, false);
+
+  window.document.querySelector('user-query div').textContent = 'pergunta nova';
+  window.document.querySelector('model-response div').textContent = 'resposta nova';
+
+  const state = await waitPromise;
+  assert.equal(state.chatId, newChatId);
+  assert.equal(state.changedFromPrevious, true);
+  assert.deepEqual(runtimeErrors, []);
+
+  window.close();
+});
+
+test('waitForChatToLoad aceita duplicata com mesma assinatura depois de uma graça curta', { timeout: 5000 }, async () => {
+  const oldChatId = 'aaaaaaaaaaaa';
+  const newChatId = 'bbbbbbbbbbbb';
+  const { dom, runtimeErrors } = createGeminiMediaDom(`
+    <user-query><div>pergunta importada</div></user-query>
+    <model-response><div>resposta importada</div></model-response>
+  `);
+  const { window } = dom;
+  const debug = await evaluateContentScript(window);
+  const previousSignature = debug.conversationDomSignature();
+
+  window.history.replaceState({}, '', `/app/${oldChatId}`);
+  window.history.pushState({}, '', `/app/${newChatId}`);
+
+  const startedAt = Date.now();
+  const state = await debug.waitForChatToLoadForDebug(newChatId, {
+    previousChatId: oldChatId,
+    previousSignature,
+    sameSignatureGraceMs: 120,
+  });
+
+  assert.equal(state.chatId, newChatId);
+  assert.equal(state.changedFromPrevious, false);
+  assert.equal(state.acceptedSameSignature, true);
+  assert.ok(Date.now() - startedAt >= 100);
+  assert.deepEqual(runtimeErrors, []);
+
+  window.close();
+});
+
+test('export atual aceita conversa duplicada quando a navegacao aceitou assinatura igual', { timeout: 5000 }, async () => {
+  const oldChatId = 'aaaaaaaaaaaa';
+  const newChatId = 'bbbbbbbbbbbb';
+  const { dom, runtimeErrors } = createGeminiMediaDom(`
+    <user-query><div>pergunta duplicada</div></user-query>
+    <model-response><div>resposta duplicada</div></model-response>
+  `);
+  const { window } = dom;
+  window.history.replaceState({}, '', `/app/${oldChatId}`);
+  const debug = await evaluateContentScript(window);
+  const previousSignature = debug.conversationDomSignature();
+
+  window.history.pushState({}, '', `/app/${newChatId}`);
+  const navigation = await debug.waitForChatToLoadForDebug(newChatId, {
+    previousChatId: oldChatId,
+    previousSignature,
+    sameSignatureGraceMs: 10,
+  });
+
+  assert.equal(navigation.chatId, newChatId);
+  assert.equal(navigation.changedFromPrevious, false);
+  assert.equal(navigation.acceptedSameSignature, true);
+
+  const payload = await debug.collectCurrentConversationForDebug({
+    expectedChatId: newChatId,
+    previousChatId: oldChatId,
+    previousSignature,
+    navigation,
+    hydration: {
+      loadWaitMs: 10,
+      topSettleMs: 10,
+      stallTimeoutMs: 500,
+      maxTotalMs: 1000,
+    },
+  });
+
+  assert.equal(payload.chatId, newChatId);
+  assert.match(payload.content, /pergunta duplicada/);
+  assert.deepEqual(runtimeErrors, []);
+
+  window.close();
+});
+
+test('export atual aceita conversa duplicada quando a engine confirmou o chat alvo', { timeout: 5000 }, async () => {
+  const oldChatId = 'aaaaaaaaaaaa';
+  const newChatId = 'bbbbbbbbbbbb';
+  const { dom, runtimeErrors } = createGeminiMediaDom(`
+    <user-query><div>pergunta duplicada importada</div></user-query>
+    <model-response><div>resposta duplicada importada</div></model-response>
+  `);
+  const { window } = dom;
+  window.history.replaceState({}, '', `/app/${oldChatId}`);
+  const debug = await evaluateContentScript(window);
+  const previousSignature = debug.conversationDomSignature();
+
+  window.history.pushState({}, '', `/app/${newChatId}`);
+  const payload = await debug.collectCurrentConversationForDebug({
+    expectedChatId: newChatId,
+    previousChatId: oldChatId,
+    previousSignature,
+    navigation: {
+      ok: true,
+      chatId: newChatId,
+      opened: true,
+      reason: 'opened-url',
+      navigationEngine: {
+        ok: true,
+        chatId: newChatId,
+        opened: true,
+        reason: 'opened-url',
+      },
+    },
+    hydration: {
+      loadWaitMs: 10,
+      topSettleMs: 10,
+      stallTimeoutMs: 500,
+      maxTotalMs: 1000,
+    },
+  });
+
+  assert.equal(payload.chatId, newChatId);
+  assert.match(payload.content, /pergunta duplicada importada/);
+  assert.deepEqual(runtimeErrors, []);
+
+  window.close();
+});
+
 test('hidratação não trata crescimento de layout como progresso real', async () => {
   const source = await readFile(
     new URL('../src/browser/navigation/hydration-progress.ts', import.meta.url),
@@ -1808,6 +1983,8 @@ test('content script passes operation abort signal into hydration and export col
   assert.match(getChatByIdBlock, /operationId:\s*operationContext\.operationId/);
   assert.match(conversationBlock, /setOperationPhase\?\.\('navigating'\)/);
   assert.match(getChatByIdBlock, /code:\s*err\?\.code \|\| null/);
+  assert.match(collectBlock, /navigationAllowsSameSignatureExport/);
+  assert.match(source, /const navigationChatIdMatchesPayload =/);
 });
 
 test('exportPayload ignora chat antigo escondido no DOM da rota anterior', async () => {

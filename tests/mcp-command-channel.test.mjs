@@ -4,7 +4,11 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { sanitizeAgentJsonValue, stringifyAgentPayload } from '../build/ts/mcp/agent-json.js';
-import { isCommandSseDeliveryEnabled } from '../build/ts/mcp/command-channel.js';
+import {
+  isCommandSseDeliveryEnabled,
+  shouldAbortDispatchedCommandsOnEventStreamReconnect,
+  shouldAbortPendingSseCommandsOnEventStreamReconnect,
+} from '../build/ts/mcp/command-channel.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
@@ -176,6 +180,51 @@ test('MCP usa SSE para comandos por padrão, mantendo long-poll como prioridade 
   assert.match(contentSource, /pollBridgeCommands\(true, \{ force: commandPollRequired \}\)/);
   assert.match(contentSource, /bridgeState\.eventsConnected && !force/);
   assert.match(contentSource, /while \(bridgeState\.started && \(!bridgeState\.eventsConnected \|\| force\)\)/);
+});
+
+test('MCP aborta comando despachado quando a mesma aba reabre o event stream', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const eventsBlock = source.match(
+    /url\.pathname === '\/bridge\/events'[\s\S]*?if \(req\.method === 'POST' && url\.pathname === '\/bridge\/snapshot'\)/,
+  )?.[0] || '';
+
+  assert.equal(
+    shouldAbortDispatchedCommandsOnEventStreamReconnect({
+      existingEventStreamUsable: true,
+      hasDispatchedPendingCommand: true,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldAbortDispatchedCommandsOnEventStreamReconnect({
+      existingEventStreamUsable: false,
+      hasDispatchedPendingCommand: true,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldAbortPendingSseCommandsOnEventStreamReconnect({
+      existingEventStreamUsable: true,
+      hasDispatchedSsePendingCommand: true,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldAbortPendingSseCommandsOnEventStreamReconnect({
+      existingEventStreamUsable: false,
+      hasDispatchedSsePendingCommand: true,
+    }),
+    false,
+  );
+  assert.match(source, /hasDispatchedPendingCommandForClient/);
+  assert.match(source, /abortPendingCommandsAfterEventStreamReconnect/);
+  assert.match(eventsBlock, /shouldAbortDispatchedCommandsOnEventStreamReconnect/);
+  assert.match(eventsBlock, /abortPendingCommandsForClient/);
+  assert.ok(
+    eventsBlock.indexOf('abortPendingCommandsAfterEventStreamReconnect') <
+      eventsBlock.indexOf('closeEventStream(client)'),
+    'comando pendente precisa ser abortado antes de substituir o stream antigo',
+  );
 });
 
 test('SSE command delivery is enabled unless explicitly disabled', () => {
@@ -357,6 +406,10 @@ test('MCP permite cliente My Activity sem liberar endpoints de escrita', () => {
 
 test('MCP nao escolhe cliente My Activity de build antigo apos reload da extensao', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const runtimeHelperSource = readFileSync(
+    resolve(ROOT, 'src', 'mcp', 'mcp-server-runtime-helpers.ts'),
+    'utf-8',
+  );
   const buildHealthBlock = source.match(
     /const buildBridgeHealth = \(client, now = Date\.now\(\)\) => \{[\s\S]*?return \{[\s\S]*?\n  \};\n\};/,
   )?.[0] || '';
@@ -373,7 +426,13 @@ test('MCP nao escolhe cliente My Activity de build antigo apos reload da extensa
   assert.match(getActivityClientsBlock, /Number\(clientMatchesExpectedBrowserExtension\(b\)\)/);
   assert.match(getActivityClientsBlock, /Number\(clientMatchesExpectedBrowserExtension\(a\)\)/);
   assert.match(source, /activity_client_version_mismatch/);
-  assert.match(requireActivityClientBlock, /const matchingClients = activityClients\.filter\(clientMatchesExpectedBrowserExtension\)/);
+  assert.match(runtimeHelperSource, /reload-activity-client-version-mismatch/);
+  assert.match(runtimeHelperSource, /tryNativeBrowserBrokerTabsAction\('reload'/);
+  assert.match(runtimeHelperSource, /const selectorTabId = deps\.normalizeTabId\(selector\.tabId\)/);
+  assert.match(requireActivityClientBlock, /const selectedActivityClients = activityClients\.filter/);
+  assert.match(source, /activityClientMatchesSelector\(client, \{ tabId: selector\.tabId \}/);
+  assert.match(runtimeHelperSource, /normalizeTabId\(client\.tabId\) !== selectorTabId/);
+  assert.match(requireActivityClientBlock, /const matchingClients = selectedActivityClients\.filter\(clientMatchesExpectedBrowserExtension\)/);
   assert.match(requireActivityClientBlock, /if \(selected && clientMatchesExpectedBrowserExtension\(selected\)\) return selected/);
   assert.match(requireActivityClientBlock, /if \(selected\) throw activityClientVersionMismatchError\(\[selected\]\)/);
   assert.match(requireActivityClientBlock, /matchingClients\.find/);
@@ -436,7 +495,7 @@ test('MCP acorda My Activity reaproveitando aba existente antes de abrir outra',
   assert.match(source, /ACTIVITY_PRE_LAUNCH_WAIT_MS/);
   assert.match(source, /const waitForActivityClient = async/);
   assert.match(source, /targetUrl:\s*ACTIVITY_GEMINI_URL/);
-  assert.match(ensureActivityBlock, /const selector = \{ clientId: args\.activityClientId \}/);
+  assert.match(ensureActivityBlock, /const selector = \{ clientId: args\.activityClientId, tabId: args\.activityTabId \}/);
   assert.doesNotMatch(ensureActivityBlock, /args\.activityClientId \|\| args\.clientId/);
   assert.match(source, /openIfMissing !== true/);
   assert.match(source, /reason:\s*'activity-client-already-connected'/);
@@ -703,6 +762,31 @@ test('browser readiness expõe status estruturado do native broker', () => {
   assert.match(nativeGateSource, /nativeBrokerStatus\.available !== true/);
 });
 
+test('browser readiness and reload endpoints defer extension reload while export job is active', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const runtimeHelperSource = readFileSync(
+    resolve(ROOT, 'src', 'mcp', 'mcp-server-runtime-helpers.ts'),
+    'utf-8',
+  );
+  const readyBlock = source.match(
+    /const buildLightweightBrowserReady = async \(args = \{\}\) => \{[\s\S]*?\n\};\n\nconst normalizeLimit/,
+  )?.[0] || '';
+  const ensureBlock = source.match(
+    /const ensureBrowserExtensionReady = \(args = \{\}, options = \{\}\) => \{[\s\S]*?\n\};\n\nconst selectorHasExplicitTabTarget/,
+  )?.[0] || '';
+  const reloadBlock = source.match(
+    /const reloadGeminiTabs = async \(args = \{\}\) => \{[\s\S]*?\n\};\n\nconst legacyRawTools/,
+  )?.[0] || '';
+
+  assert.match(source, /activeExportJobReloadError/);
+  assert.match(runtimeHelperSource, /extension_reload_deferred_active_export_job/);
+  assert.match(ensureBlock, /activeExportJobReloadError\('extension-reload'\)/);
+  assert.match(readyBlock, /activeReloadBlockedByJobs/);
+  assert.match(readyBlock, /allowReload:\s*args\.allowReload === true && !activeReloadBlockedByJobs/);
+  assert.match(reloadBlock, /activeExportJobReloadResult\('tab-reload'\)/);
+  assert.match(runtimeHelperSource, /browser_reload_deferred_active_export_job/);
+});
+
 test('MCP acorda native broker pelo service worker antes de declarar socket morto', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const nativeGateSource = readFileSync(resolve(ROOT, 'src', 'mcp', 'native-release-gate.ts'), 'utf-8');
@@ -731,6 +815,9 @@ test('reload de abas existentes pode atualizar extensao sem abrir navegador', ()
   const reloadBlock = source.match(
     /const reloadGeminiTabs = async \(args = \{\}\) => \{[\s\S]*?\n\};\n\nconst legacyRawTools/,
   )?.[0];
+  const cliReloadRequestBlock = cliSource.match(
+    /const requestExistingTabsReloadFromCli = async[\s\S]*?\n\};\n\nconst reloadExistingTabsFromCli/,
+  )?.[0];
   const cliReloadBlock = cliSource.match(
     /const reloadExistingTabsFromCli = async[\s\S]*?\n\};\n\nconst readyWithCliWake/,
   )?.[0];
@@ -739,15 +826,16 @@ test('reload de abas existentes pode atualizar extensao sem abrir navegador', ()
   )?.[0];
 
   assert.ok(reloadBlock, 'reloadGeminiTabs deve existir');
+  assert.ok(cliReloadRequestBlock, 'requestExistingTabsReloadFromCli deve existir');
   assert.ok(cliReloadBlock, 'reloadExistingTabsFromCli deve existir');
   assert.ok(wakeDecisionBlock, 'shouldWakeBrowserForReady deve existir');
   assert.match(reloadBlock, /reloadExtensionForExistingTabs/);
   assert.doesNotMatch(reloadBlock, /launchChromeForGemini/);
   assert.match(runtimeSource, /allowLaunchChrome:\s*false/);
   assert.match(runtimeSource, /allowReload:\s*args\.allowReload === true/);
-  assert.match(cliReloadBlock, /action:\s*'reload'/);
-  assert.match(cliReloadBlock, /openIfMissing:\s*false/);
-  assert.match(cliReloadBlock, /allowReload:\s*true/);
+  assert.match(cliReloadRequestBlock, /action:\s*'reload'/);
+  assert.match(cliReloadRequestBlock, /openIfMissing:\s*false/);
+  assert.match(cliReloadRequestBlock, /allowReload:\s*true/);
   assert.match(wakeDecisionBlock, /issue === 'no_selectable_gemini_tab'[\s\S]*connected <= 0/);
 });
 

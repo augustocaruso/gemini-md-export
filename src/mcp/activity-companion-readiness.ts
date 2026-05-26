@@ -313,7 +313,7 @@ export const createActivityCompanionPreparer =
     }
 
     const companionTabId = companionTabIds[0];
-    if (exportTabId !== null) {
+    if (exportTabId !== null && companionSource !== 'claim-visual') {
       try {
         visualRefresh = summarizeNativeActionResult(
           await deps.tryNativeBrowserBrokerTabsAction('claim', {
@@ -363,6 +363,7 @@ export const createActivityCompanionPreparer =
       activation = summarizeActivityCompanionWakeError(err);
     }
 
+    const reloadStartedAt = Date.now();
     try {
       reload = summarizeNativeActionResult(
         await deps.tryNativeBrowserBrokerTabsAction('reload', {
@@ -376,7 +377,7 @@ export const createActivityCompanionPreparer =
     }
 
     const activityClient = await deps.waitForActivityClient(
-      { tabId: companionTabId },
+      { tabId: companionTabId, minRuntimeSignalAt: reloadStartedAt },
       activityCompanionWakeWaitMs(args, deps.normalizeWaitMs),
     );
 

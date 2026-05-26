@@ -34,12 +34,16 @@ import {
   buildExportJobProgressViewModel,
   buildProgressViewModel,
 } from '../build/ts/core/progress-view-model.js';
-import { shouldReloadExistingTabsForReady } from '../build/ts/cli/browser-ready-policy.js';
+import {
+  shouldReloadAllExistingTabsForReady,
+  shouldReloadExistingTabsForReady,
+} from '../build/ts/cli/browser-ready-policy.js';
 import { buildBridgeOnlyChildEnv } from '../build/ts/mcp/browser-runtime-env.js';
 
 const DEFAULT_BRIDGE_URL = 'http://127.0.0.1:47283';
 const DEFAULT_POLL_MS = 1200;
 const DEFAULT_READY_WAIT_MS = 30_000;
+const DEFAULT_EXPORT_READY_WAIT_MS = 75_000;
 const DEFAULT_READY_REQUEST_TIMEOUT_MS = 60_000;
 const DEFAULT_EXISTING_TAB_RECONNECT_GRACE_MS = 8_000;
 const DEFAULT_FAST_BROWSER_DIAGNOSTIC_MS = 2_000;
@@ -185,7 +189,7 @@ const commonOptionHelp = () => [
   '  --no-self-heal           Nao tentar auto-recuperacao da extensao.',
   '  --allow-reload           Permite reload da extensao e abas ja existentes; nao abre abas novas.',
   '  --allow-http-browser-fallback  Diagnostico: permite fallback legado por content script quando native broker falha.',
-  '  --no-reload              Nao pedir reload da extensao. Default.',
+  '  --no-reload              Nao pedir reload da extensao. Em export/sync, desliga a autocura.',
   '  --no-color               Desliga ANSI.',
   '  --help, -h               Mostra ajuda.',
   '  --version, -v            Mostra versao.',
@@ -871,6 +875,8 @@ const parseArgs = (argv) => {
       focusWindow: false,
       selfHeal: true,
       allowReload: false,
+      allowReloadExplicit: false,
+      readyWaitMsExplicit: false,
       format: 'auto',
       help: firstArgIsHelp,
       version: firstArgIsVersion,
@@ -939,7 +945,10 @@ const parseArgs = (argv) => {
       out.flags.bridgeStartWaitMs = Math.max(500, Number(value()) || 6000);
     else if (arg === '--bridge-keep-alive-ms')
       out.flags.bridgeKeepAliveMs = Math.max(1000, Number(value()) || 15 * 60_000);
-    else if (arg === '--ready-wait-ms') out.flags.readyWaitMs = Math.max(0, Number(value()) || 0);
+    else if (arg === '--ready-wait-ms') {
+      out.flags.readyWaitMs = Math.max(0, Number(value()) || 0);
+      out.flags.readyWaitMsExplicit = true;
+    }
     else if (arg === '--timeout-ms') out.flags.timeoutMs = Math.max(1000, Number(value()) || DEFAULT_TIMEOUT_MS);
     else if (arg === '--browser') out.flags.browser = normalizeBrowserKey(value());
     else if (arg === '--profile-directory') out.flags.profileDirectory = value();
@@ -1015,9 +1024,15 @@ const parseArgs = (argv) => {
     else if (arg === '--focus-window') out.flags.focusWindow = true;
     else if (arg === '--no-focus-window') out.flags.focusWindow = false;
     else if (arg === '--no-self-heal') out.flags.selfHeal = false;
-    else if (arg === '--allow-reload') out.flags.allowReload = true;
+    else if (arg === '--allow-reload') {
+      out.flags.allowReload = true;
+      out.flags.allowReloadExplicit = true;
+    }
     else if (arg === '--allow-http-browser-fallback') out.flags.allowHttpBrowserFallback = true;
-    else if (arg === '--no-reload') out.flags.allowReload = false;
+    else if (arg === '--no-reload') {
+      out.flags.allowReload = false;
+      out.flags.allowReloadExplicit = true;
+    }
     else if (arg.startsWith('-')) throw new Error(`Opcao desconhecida: ${arg}`);
     else out.positionals.push(arg);
   }
@@ -1595,6 +1610,41 @@ const createStaleBridgeError = (health, mismatch, details = {}) => {
   return err;
 };
 
+const bridgeActiveJobCount = (health = {}) => {
+  const candidates = [
+    health?.idleLifecycle?.activeJobCount,
+    health?.exportJobs?.activeCount,
+    health?.jobs?.activeCount,
+    health?.activeJobCount,
+  ];
+  for (const value of candidates) {
+    const number = Number(value);
+    if (Number.isFinite(number) && number > 0) return number;
+  }
+  return 0;
+};
+
+const createActiveExportBridgeError = (health, mismatch = null, details = {}) => {
+  const activeCount = bridgeActiveJobCount(health);
+  const processInfo = bridgeProcessInfo(health);
+  const pid = processInfo.pid ? ` PID ${processInfo.pid}` : '';
+  const reason = mismatch ? `${staleBridgeMessage(mismatch, { safe: true })}\n` : '';
+  const plural = activeCount === 1 ? 'export ativo' : 'exports ativos';
+  const err = new Error(
+    `${reason}Bridge local${pid} tem ${activeCount} ${plural}. ` +
+      'Nao vou reiniciar esse processo automaticamente para nao perder o job em andamento. ' +
+      'Aguarde terminar ou cancele o job antes de atualizar a bridge.',
+  );
+  err.code = 'stale_bridge_active_export_job';
+  err.data = {
+    bridge: health,
+    mismatch,
+    activeJobCount: activeCount,
+    ...details,
+  };
+  return err;
+};
+
 const bridgeBrowserControlProblem = (health = {}) => {
   if (health?.browserControl?.authorized === true) return null;
   return {
@@ -1717,6 +1767,9 @@ const startFreshBridgeOnly = async (flags, ui, firstError = null) => {
 };
 
 const recoverStaleBridge = async (flags, ui, health, mismatch) => {
+  if (bridgeActiveJobCount(health) > 0) {
+    throw createActiveExportBridgeError(health, mismatch);
+  }
   const safe = isSafeStaleBridgeTarget(health, mismatch);
   if (!flags.startBridge || !localBridgeAddress(flags.bridgeUrl) || !safe) {
     throw createStaleBridgeError(health, mismatch, { safe });
@@ -1745,6 +1798,9 @@ const recoverStaleBridge = async (flags, ui, health, mismatch) => {
 };
 
 const recoverBrowserControlBridge = async (flags, ui, health, problem) => {
+  if (bridgeActiveJobCount(health) > 0) {
+    throw createActiveExportBridgeError(health, null, { problem });
+  }
   const safe =
     flags.startBridge &&
     localBridgeAddress(flags.bridgeUrl) &&
@@ -2703,13 +2759,25 @@ const wakeBrowserFromCli = async (flags, ui, ready) => {
   return launch;
 };
 
-const reloadExistingTabsFromCli = async (bridgeUrl, flags, ui, ready = {}) => {
-  setWaitNote(ui, 'Recarregando extensão e abas existentes', {
-    issue: ready.blockingIssue || null,
-  });
-  if (shouldWriteInlineStatus(ui)) {
-    ui.stdout.write('Recarregando extensão e abas existentes...\n');
-  }
+const RETRYABLE_EXISTING_TABS_RELOAD_CODES = new Set([
+  'extension_request_timeout',
+  'native_broker_probe_timeout',
+  'native_broker_ready_timeout',
+  'bridge_timeout',
+]);
+
+const existingTabsReloadCode = (result = {}) =>
+  result?.code ||
+  result?.nativeBroker?.code ||
+  result?.nativeBroker?.error?.code ||
+  result?.error?.code ||
+  null;
+
+const shouldRetryExistingTabsReload = (result = {}) =>
+  result?.ok !== true &&
+  RETRYABLE_EXISTING_TABS_RELOAD_CODES.has(String(existingTabsReloadCode(result) || ''));
+
+const requestExistingTabsReloadFromCli = async (bridgeUrl, flags, ready = {}) => {
   try {
     return await requestJson(
       bridgeUrl,
@@ -2717,6 +2785,7 @@ const reloadExistingTabsFromCli = async (bridgeUrl, flags, ui, ready = {}) => {
         action: 'reload',
         openIfMissing: false,
         allowReload: true,
+        reloadAll: shouldReloadAllExistingTabsForReady(ready, flags),
         delayMs: flags.delayMs,
       }),
       { timeoutMs: 45_000 },
@@ -2728,6 +2797,31 @@ const reloadExistingTabsFromCli = async (bridgeUrl, flags, ui, ready = {}) => {
       code: err?.code || null,
     };
   }
+};
+
+const reloadExistingTabsFromCli = async (bridgeUrl, flags, ui, ready = {}) => {
+  setWaitNote(ui, 'Recarregando extensão e abas existentes', {
+    issue: ready.blockingIssue || null,
+  });
+  if (shouldWriteInlineStatus(ui)) {
+    ui.stdout.write('Recarregando extensão e abas existentes...\n');
+  }
+  const firstAttempt = await requestExistingTabsReloadFromCli(bridgeUrl, flags, ready);
+  if (!shouldRetryExistingTabsReload(firstAttempt)) return firstAttempt;
+
+  setWaitNote(ui, 'Repetindo reload das abas existentes', {
+    issue: existingTabsReloadCode(firstAttempt),
+  });
+  await sleep(500);
+  const retry = await requestExistingTabsReloadFromCli(bridgeUrl, flags, ready);
+  if (retry && typeof retry === 'object') {
+    return {
+      ...retry,
+      retryAttempted: true,
+      firstAttempt,
+    };
+  }
+  return retry;
 };
 
 const readyWithCliWake = async (bridgeUrl, flags, ui) => {
@@ -3334,6 +3428,10 @@ const attachJobContextToErrorMessage = (err, job = {}) => {
 
 const runSync = async (parsed, streams = {}) => {
   const flags = { ...parsed.flags };
+  if (flags.allowReloadExplicit !== true) flags.allowReload = true;
+  if (flags.readyWaitMsExplicit !== true) {
+    flags.readyWaitMs = Math.max(Number(flags.readyWaitMs || 0), DEFAULT_EXPORT_READY_WAIT_MS);
+  }
   if (!flags.vaultDir && parsed.positionals[0]) flags.vaultDir = parsed.positionals[0];
   if (!flags.vaultDir && !flags.resumeReportFile) {
     throw usageError('Informe vaultDir ou --resume-report-file.');
@@ -4129,6 +4227,10 @@ const runChats = async (parsed, streams = {}) => {
 const runExport = async (parsed, streams = {}) => {
   const subcommand = parsed.positionals[0];
   const flags = { ...parsed.flags };
+  if (flags.allowReloadExplicit !== true) flags.allowReload = true;
+  if (flags.readyWaitMsExplicit !== true) {
+    flags.readyWaitMs = Math.max(Number(flags.readyWaitMs || 0), DEFAULT_EXPORT_READY_WAIT_MS);
+  }
   const isSelectedExport = subcommand === 'selected' || subcommand === 'reexport';
   if (!['recent', 'missing', 'resume', 'selected', 'reexport', 'notebook'].includes(subcommand)) {
     throw usageError('Uso: gemini-md-export export recent|missing|resume|selected|reexport|notebook ...');
@@ -4512,7 +4614,7 @@ const runParsedCommand = (parsed, streams = {}) => {
 const exitCodeForError = (err) =>
   err.code === 'usage'
     ? EXIT.USAGE
-    : err.code === 'export_job_in_progress'
+    : err.code === 'export_job_in_progress' || err.code === 'stale_bridge_active_export_job'
       ? EXIT.MANUAL_ACTION
     : err.code === 'extension_unready'
       ? EXIT.EXTENSION_UNREADY

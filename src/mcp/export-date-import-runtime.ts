@@ -316,6 +316,8 @@ export const buildExportDateImportBatchEvidenceWithActivityFallback = async (
       openIfMissing: args.openMyActivityIfMissing !== false && args.openIfMissing !== false,
       openDetails: false,
       claimLabel: args.claimLabel || options.claimLabel,
+      activityTabId: args.activityTabId ?? args.activityCompanion?.tabId,
+      claimVisual: args.claimVisual ?? (args.activityCompanion?.tabId ? false : undefined),
       visualGroupTabId:
         args.visualGroupTabId ?? args.groupWithTabId ?? args._exportDateImportVisualGroupTabId,
       waitMs: activityWaitMs,

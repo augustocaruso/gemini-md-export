@@ -50,11 +50,29 @@ const connectedClientCountFromReady = (ready: ReadySnapshot): number => {
   return Array.isArray(ready.connectedClients) ? ready.connectedClients.length : 0;
 };
 
+const nativeBrokerDebuggableTabs = (ready: ReadySnapshot) => {
+  const tabs = ready.nativeBroker?.response?.result?.tabs;
+  if (!Array.isArray(tabs)) return null;
+  return tabs.filter((item) => item?.state === 'debuggable');
+};
+
 const nativeBrokerCanReloadExistingTab = (ready: ReadySnapshot): boolean => {
   if (ready.nativeBroker?.available !== true) return false;
-  const tabs = ready.nativeBroker.response?.result?.tabs;
+  const tabs = nativeBrokerDebuggableTabs(ready);
   if (!Array.isArray(tabs)) return true;
-  return tabs.some((item) => item?.state === 'debuggable' && item.tab?.active === true);
+  return tabs.length > 0;
+};
+
+export const shouldReloadAllExistingTabsForReady = (
+  ready: ReadySnapshot = {},
+  flags: BrowserFlags = {},
+): boolean => {
+  if (flags.allowReload !== true || ready.ready === true) return false;
+  if (String(ready.blockingIssue || '') !== 'no_connected_clients') return false;
+  if (ready.nativeBroker?.available !== true) return false;
+  const tabs = nativeBrokerDebuggableTabs(ready);
+  if (!Array.isArray(tabs) || tabs.length === 0) return false;
+  return !tabs.some((item) => item.tab?.active === true);
 };
 
 export const shouldReloadExistingTabsForReady = (

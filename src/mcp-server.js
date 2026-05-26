@@ -121,6 +121,27 @@ const {
   saveDeferredDateImportExports,
 } = await import(compiledTsModuleUrl('mcp', 'export-job-recording.js'));
 const {
+  markExportJobFinishedForReport,
+} = await import(compiledTsModuleUrl('mcp', 'export-job-finalization.js'));
+const {
+  normalizeDirectReexportSelection,
+} = await import(compiledTsModuleUrl('mcp', 'direct-reexport-selection.js'));
+const {
+  buildDirectChatsExportReportPayload,
+  buildRecentChatsExportReportPayload,
+} = await import(compiledTsModuleUrl('mcp', 'export-job-reports.js'));
+const {
+  abortPendingCommandsAfterEventStreamReconnect,
+  activityClientMatchesSelector,
+  buildActiveExportJobReloadErrorInfo,
+  buildActiveExportJobReloadResult,
+  cleanupOrphanNativeClaimVisualsOnStartup,
+  recoverActivityClientAfterVersionMismatch,
+  validateRecoveredBrowserClientLifecycle,
+  waitForContinuationClientWithRecovery,
+  tryNativeTabClaimVisual,
+} = await import(compiledTsModuleUrl('mcp', 'mcp-server-runtime-helpers.js'));
+const {
   buildExportBatchTargets,
   buildOperationId,
 } = await import(compiledTsModuleUrl('mcp', 'export-operation-contracts.js'));
@@ -190,6 +211,7 @@ const {
 } = await import(compiledTsModuleUrl('mcp', 'tab-runtime.js'));
 const {
   isCommandSseDeliveryEnabled,
+  shouldAbortDispatchedCommandsOnEventStreamReconnect,
 } = await import(compiledTsModuleUrl('mcp', 'command-channel.js'));
 const {
   isAllowedBridgeOrigin,
@@ -697,6 +719,18 @@ const waitForBridgeStartup = async (timeoutMs = 1000) => {
 
 const activeExportJobs = () =>
   Array.from(exportJobs.values()).filter((job) => !isTerminalExportJobStatus(job.status));
+
+const activeExportJobReloadError = (kind = 'browser-reload') => {
+  const info = buildActiveExportJobReloadErrorInfo(activeExportJobs(), kind);
+  if (!info) return null;
+  const err = new Error(info.message);
+  err.code = info.code;
+  err.data = info.data;
+  return err;
+};
+
+const activeExportJobReloadResult = (kind = 'browser-reload') =>
+  buildActiveExportJobReloadResult(activeExportJobs(), kind);
 
 const touchBridgeActivity = () => {
   lastBridgeActivityAt = Date.now();
@@ -2275,6 +2309,11 @@ const removeClient = (clientId) => {
 const hasPendingCommandForClient = (clientId) =>
   Array.from(pendingCommands.values()).some((pending) => pending.clientId === clientId);
 
+const hasDispatchedPendingCommandForClient = (clientId) =>
+  Array.from(pendingCommands.values()).some(
+    (pending) => pending.clientId === clientId && !!pending.dispatchedAt,
+  );
+
 const cleanupStaleClients = () => {
   const now = Date.now();
   for (const [clientId, client] of clients.entries()) {
@@ -3622,6 +3661,8 @@ const ensureBrowserExtensionReady = (args = {}, options = {}) => {
   const allowLaunchChrome = options.allowLaunchChrome === true;
   const allowReload = options.allowReload === true;
   if (allowReload) {
+    const blockedByActiveJob = activeExportJobReloadError('extension-reload');
+    if (blockedByActiveJob) throw blockedByActiveJob;
     assertBrowserSideEffect('extension-reload', { explicit: true });
   }
   return ensureChromeExtensionReady(
@@ -3950,23 +3991,30 @@ const claimTabForClient = async (client, args = {}, options = {}) => {
         )
       : ready.client || requestedClient;
 
-  const visual = await enqueueCommand(
-    readyClient.clientId,
-    'claim-tab',
-    {
-      claimId,
-      sessionId,
-      label,
-      color,
-      expiresAt: new Date(expiresAtMs).toISOString(),
-      visualGroupTabId: normalizeTabId(args.visualGroupTabId ?? args.groupWithTabId),
-    },
-    {
-      timeoutMs: 10_000,
-      dispatchTimeoutMs: 5000,
-      browserSideEffectExplicit: true,
-    },
+  let visual = await tryNativeTabClaimVisual(
+    { readyClient, claimId, label, color, args },
+    { normalizeTabId, tryNativeBrowserBrokerTabsAction, isTabClaimReceipt },
   );
+
+  if (!visual) {
+    visual = await enqueueCommand(
+      readyClient.clientId,
+      'claim-tab',
+      {
+        claimId,
+        sessionId,
+        label,
+        color,
+        expiresAt: new Date(expiresAtMs).toISOString(),
+        visualGroupTabId: normalizeTabId(args.visualGroupTabId ?? args.groupWithTabId),
+      },
+      {
+        timeoutMs: 10_000,
+        dispatchTimeoutMs: 5000,
+        browserSideEffectExplicit: true,
+      },
+    );
+  }
 
   if (!isTabClaimReceipt(visual)) {
     const error = new Error('Não consegui marcar a aba no navegador.');
@@ -4254,6 +4302,8 @@ const buildLightweightBrowserReady = async (args = {}) => {
   const nativeBrokerStatus = await probeNativeBrowserBrokerStatus({ allowWake: true });
 
   if (args.selfHeal === true) {
+    const activeReloadBlockedByJobs =
+      args.allowReload === true && activeExportJobs().length > 0;
     try {
       const ready = await ensureBrowserExtensionReady(
         {
@@ -4261,7 +4311,7 @@ const buildLightweightBrowserReady = async (args = {}) => {
         },
         {
           allowLaunchChrome: args.wakeBrowser === true,
-          allowReload: args.allowReload === true,
+          allowReload: args.allowReload === true && !activeReloadBlockedByJobs,
           config: {
             initialConnectTimeoutMs: normalizeWaitMs(args.initialWaitMs, 1000),
             reloadTimeoutMs: normalizeReloadWaitMs(args.reloadWaitMs, 30_000),
@@ -4277,6 +4327,12 @@ const buildLightweightBrowserReady = async (args = {}) => {
         client: summarizeClient(ready.client),
         info: ready.info || null,
       };
+      if (activeReloadBlockedByJobs) {
+        selfHeal.reloadDeferred = {
+          code: 'extension_reload_deferred_active_export_job',
+          activeJobCount: activeExportJobs().length,
+        };
+      }
     } catch (err) {
       selfHeal = {
         attempted: true,
@@ -4474,6 +4530,14 @@ const hydrateClientLifecycleFields = (client) => {
   return client;
 };
 
+const validateRecoveredBrowserClient = (client) => {
+  return validateRecoveredBrowserClientLifecycle(client, {
+    getGeminiClientLifecycle,
+    hydrateClientLifecycleFields,
+    activeClaimableGeminiClientOptions,
+  });
+};
+
 const lifecycleSummaryForClient = (client, overrides = {}) => {
   const lifecycle = getGeminiClientLifecycle(
     hydrateClientLifecycleFields(client),
@@ -4553,15 +4617,12 @@ const activityClientCommandReady = (client) =>
 const waitForActivityClient = async (selector = {}, timeoutMs = BROWSER_STATUS_WAKE_WAIT_MS) => {
   const startedAt = Date.now();
   const waitLimitMs = normalizeWaitMs(timeoutMs, BROWSER_STATUS_WAKE_WAIT_MS, 120_000);
-  const selectorTabId = normalizeTabId(selector.tabId);
   while (Date.now() - startedAt <= waitLimitMs) {
     cleanupStaleClients();
     const activityClients = getActivityClients();
-    const candidates = activityClients.filter((client) => {
-      if (selector.clientId && client.clientId !== selector.clientId) return false;
-      if (selectorTabId !== null && normalizeTabId(client.tabId) !== selectorTabId) return false;
-      return true;
-    });
+    const candidates = activityClients.filter((client) =>
+      activityClientMatchesSelector(client, selector, { normalizeTabId }),
+    );
     const ready = candidates.find(activityClientCommandReady);
     if (ready) return ready;
     const matching = candidates.find(clientMatchesExpectedBrowserExtension);
@@ -4601,15 +4662,18 @@ const activityClientVersionMismatchError = (activityClients = []) => {
 const requireActivityClient = (selector = {}) => {
   cleanupStaleClients();
   const activityClients = getActivityClients();
-  const matchingClients = activityClients.filter(clientMatchesExpectedBrowserExtension);
+  const selectedActivityClients = activityClients.filter((client) =>
+    activityClientMatchesSelector(client, { tabId: selector.tabId }, { normalizeTabId }),
+  );
+  const matchingClients = selectedActivityClients.filter(clientMatchesExpectedBrowserExtension);
   if (selector.clientId) {
     const selected = activityClients.find((client) => client.clientId === selector.clientId);
     if (selected && clientMatchesExpectedBrowserExtension(selected)) return selected;
     if (selected) throw activityClientVersionMismatchError([selected]);
     throw activityClientMissingError();
   }
-  if (activityClients.length > 0 && matchingClients.length === 0) {
-    throw activityClientVersionMismatchError(activityClients);
+  if (selectedActivityClients.length > 0 && matchingClients.length === 0) {
+    throw activityClientVersionMismatchError(selectedActivityClients);
   }
   const ready = matchingClients.find(
     (client) =>
@@ -4623,7 +4687,7 @@ const requireActivityClient = (selector = {}) => {
 };
 
 const ensureActivityClientForScan = async (args = {}) => {
-  const selector = { clientId: args.activityClientId };
+  const selector = { clientId: args.activityClientId, tabId: args.activityTabId };
   try {
     const client = requireActivityClient(selector);
     return {
@@ -4634,6 +4698,14 @@ const ensureActivityClientForScan = async (args = {}) => {
       },
     };
   } catch (err) {
+    const recovery = await recoverActivityClientAfterVersionMismatch(
+      { err, args, selector },
+      { normalizeTabId, tryNativeBrowserBrokerTabsAction, waitForActivityClient },
+    );
+    if (recovery.handled) {
+      if (recovery.client) return { client: recovery.client, browserWake: recovery.browserWake };
+      throw err;
+    }
     if (err?.code !== 'activity_client_missing' || args.openIfMissing !== true) {
       throw err;
     }
@@ -6835,15 +6907,17 @@ const resolveContinuationClient = (client, args = {}) => {
 };
 
 const waitForContinuationClient = async (client, args = {}, waitMs = RECENT_CHATS_CLIENT_RECOVERY_WAIT_MS) => {
-  const startedAt = Date.now();
-  let recovered = resolveContinuationClient(client, args);
-  if (recovered?.clientId && isLiveClient(clients.get(recovered.clientId))) return recovered;
-  while (Date.now() - startedAt < waitMs) {
-    await sleep(500);
-    recovered = resolveContinuationClient(client, args);
-    if (recovered?.clientId && isLiveClient(clients.get(recovered.clientId))) return recovered;
-  }
-  return recovered;
+  return waitForContinuationClientWithRecovery(
+    { client, args, waitMs },
+    {
+      clientsGet: (clientId) => clients.get(clientId),
+      resolveContinuationClient,
+      isLiveClient,
+      clientMatchesExpectedBrowserExtension,
+      validateRecoveredClient: validateRecoveredBrowserClient,
+      sleep,
+    },
+  );
 };
 
 const enqueueCommandWithClientRecovery = async (
@@ -8395,81 +8469,20 @@ const setClientJobProgressAndNotify = (client, payload) => {
   }
 };
 
-const buildRecentChatsExportReport = (job, client, successes, failures) => ({
-  job: {
-    jobId: job.jobId,
-    type: job.type,
-    status: job.status,
-    phase: job.phase,
-    ...recentChatsExportScope(job),
-    createdAt: job.createdAt,
-    updatedAt: job.updatedAt,
-    finishedAt: job.finishedAt || null,
-    cancelRequested: job.cancelRequested,
-    cancelledAt: job.cancelledAt || null,
-  },
-  client: summarizeClient(client),
-  outputDir: job.outputDir,
-  startIndex: job.startIndex,
-  exportAll: job.exportAll,
-  maxChats: job.maxChats,
-  loadedCount: job.loadedCount,
-  requested: job.requested,
-  completed: job.completed,
-  successCount: successes.length,
-  failureCount: failures.length,
-  skippedCount: job.skippedCount || 0,
-  skipExisting: job.skipExisting === true,
-  exportMissingOnly: job.exportMissingOnly === true,
-  syncMode: job.syncMode === true,
-  syncStateFile: job.syncStateFile || null,
-  syncState: job.syncState || null,
-  syncBoundary: job.syncBoundary || null,
-  syncStateUpdate: job.syncStateUpdate || null,
-  existingScanDir: job.existingScanDir || null,
-  vaultScan: job.vaultScan || null,
-  dateImport: job.dateImport || { enabled: false, source: 'none' },
-  webConversationCount: job.webConversationCount ?? null,
-  existingVaultCount: job.existingVaultCount ?? 0,
-  missingCount: job.missingCount ?? null,
-  reachedEnd: job.reachedEnd,
-  truncated: job.truncated,
-  loadWarning: job.loadWarning || null,
-  loadMoreRoundsCompleted: job.loadMoreRoundsCompleted || 0,
-  loadMoreTimedOut: job.loadMoreTimedOut === true,
-  loadMoreTrace: Array.isArray(job.loadMoreTrace) ? job.loadMoreTrace : [],
-  metrics: summarizeExportJobMetrics(job, client, { includeConversations: true }),
-  tabClaimWarning: job.tabClaimWarning || null,
-  tabSession: summarizeTabSession(job.tabSession),
-  trace: summarizeJobTrace(job.trace),
-  progressMessage: exportJobProgressMessage(job),
-  decisionSummary: exportJobDecisionSummary(job),
-  nextAction: exportJobNextAction(job),
-  current: job.current || null,
-  successes,
-  skippedExisting: Array.isArray(job.skippedExisting) ? job.skippedExisting : [],
-  resume: job.resume
-    ? {
-        enabled: true,
-        reportFile: job.resume.reportFile,
-        reportFilename: job.resume.reportFilename,
-        previousJobId: job.resume.previousJobId,
-        previousStatus: job.resume.previousStatus,
-        previousUpdatedAt: job.resume.previousUpdatedAt,
-        previousFinishedAt: job.resume.previousFinishedAt,
-        previousExistingScanDir: job.resume.previousExistingScanDir,
-        previousSuccessCount: job.resume.previousSuccessCount,
-        previousSkippedCount: job.resume.previousSkippedCount,
-        previousFailureCount: job.resume.previousFailureCount,
-        previousCounters: job.resume.previousCounters,
-        completedChatIds: [...job.resume.completedChatIds],
-        previousFailures: job.resume.previousFailures,
-        resumedCompletedCount: job.resumedCompletedCount || 0,
-        remainingAfterResume: job.remainingAfterResume ?? null,
-      }
-    : { enabled: false },
-  failures,
+const reportBuilderDeps = () => ({
+  summarizeClient,
+  summarizeExportJobMetrics,
+  summarizeTabSession,
+  summarizeJobTrace,
+  exportJobProgressMessage,
+  exportJobDecisionSummary,
+  exportJobNextAction,
+  recentChatsExportScope,
+  directChatsExportScope,
 });
+
+const buildRecentChatsExportReport = (job, client, successes, failures) =>
+  buildRecentChatsExportReportPayload(job, client, successes, failures, reportBuilderDeps());
 
 const persistRecentChatsExportReport = (job, client, successes, failures) => {
   if (!job.reportFile) {
@@ -8485,177 +8498,8 @@ const persistRecentChatsExportReport = (job, client, successes, failures) => {
   overwriteExportReport(job.reportFile, buildRecentChatsExportReport(job, client, successes, failures));
 };
 
-const normalizeDirectReexportSelection = (args = {}) => {
-  const rawItems = [];
-  if (Array.isArray(args.chatIds)) {
-    for (const chatId of args.chatIds) rawItems.push({ chatId });
-  }
-  if (Array.isArray(args.items)) {
-    for (const item of args.items) rawItems.push(item);
-  }
-  if (args.chatId) rawItems.push({ chatId: args.chatId, title: args.title });
-
-  if (rawItems.length === 0) {
-    throw new Error('Informe chatIds ou items para reexportar.');
-  }
-  if (rawItems.length > DIRECT_REEXPORT_MAX_ITEMS) {
-    throw new Error(`Muitos chats em um job; limite atual: ${DIRECT_REEXPORT_MAX_ITEMS}.`);
-  }
-
-  const seen = new Set();
-  const normalized = [];
-  const duplicates = [];
-  for (const raw of rawItems) {
-    const item = typeof raw === 'string' ? { chatId: raw } : raw || {};
-    const idLike = item.chatId || item.id || '';
-    const chatId =
-      extractChatIdFromUrl(item.url) ||
-      extractChatIdFromUrl(idLike) ||
-      stripGeminiPrefix(idLike);
-    if (!/^[a-f0-9]{12,}$/i.test(chatId || '')) {
-      throw new Error(`chatId inválido para reexportação: ${String(item.chatId || item.url || item.id || raw)}`);
-    }
-
-    const key = chatId.toLowerCase();
-    if (seen.has(key)) {
-      duplicates.push(key);
-      continue;
-    }
-    seen.add(key);
-
-    const title = String(item.title || item.label || chatId).slice(0, 240);
-    normalized.push({
-      id: key,
-      chatId: key,
-      title,
-      url: `https://gemini.google.com/app/${key}`,
-      current: false,
-      source: item.source || 'direct-url',
-      request: {
-        title,
-        sourcePath: item.sourcePath || item.path || null,
-        originalIndex: item.listedIndex || item.index || normalized.length + 1,
-      },
-    });
-  }
-
-  if (normalized.length === 0) {
-    throw new Error('Nenhum chatId único válido para reexportar.');
-  }
-
-  const expectedCount = args.expectedCount === undefined || args.expectedCount === null || args.expectedCount === ''
-    ? null
-    : Number(args.expectedCount);
-  if (expectedCount !== null) {
-    if (!Number.isInteger(expectedCount) || expectedCount <= 0) {
-      const err = new Error('expectedCount precisa ser um inteiro positivo.');
-      err.code = 'reexport_invalid_expected_count';
-      throw err;
-    }
-    if (normalized.length !== expectedCount) {
-      const err = new Error(
-        `A seleção recebida tem ${normalized.length} chatId(s) único(s), mas expectedCount=${expectedCount}.`,
-      );
-      err.code = 'reexport_selection_mismatch';
-      err.data = {
-        expectedCount,
-        inputCount: rawItems.length,
-        uniqueCount: normalized.length,
-        duplicateCount: duplicates.length,
-        duplicateChatIds: duplicates.slice(0, 20),
-      };
-      throw err;
-    }
-  }
-
-  return {
-    items: normalized,
-    inputCount: rawItems.length,
-    uniqueCount: normalized.length,
-    duplicateCount: duplicates.length,
-    duplicateChatIds: duplicates,
-    expectedCount,
-    selectionFile: args.selectionFile || null,
-  };
-};
-
-const normalizeDirectReexportItems = (args = {}) =>
-  normalizeDirectReexportSelection(args).items;
-
-const buildDirectChatsExportReport = (job, client, successes, failures) => ({
-  job: {
-    jobId: job.jobId,
-    type: job.type,
-    status: job.status,
-    phase: job.phase,
-    ...directChatsExportScope(job),
-    createdAt: job.createdAt,
-    updatedAt: job.updatedAt,
-    finishedAt: job.finishedAt || null,
-    cancelRequested: job.cancelRequested,
-    cancelledAt: job.cancelledAt || null,
-  },
-  client: summarizeClient(client),
-  outputDir: job.outputDir,
-  inputCount: job.inputCount,
-  expectedCount: job.expectedCount ?? null,
-  uniqueCount: job.uniqueCount ?? job.requested,
-  duplicateCount: job.duplicateCount || 0,
-  duplicateChatIds: Array.isArray(job.duplicateChatIds) ? job.duplicateChatIds : [],
-  selectionFile: job.selectionFile || null,
-  requested: job.requested,
-  completed: job.completed,
-  successCount: successes.length,
-  failureCount: failures.length,
-  delayMs: job.delayMs,
-  metrics: summarizeExportJobMetrics(job, client, { includeConversations: true }),
-  dateImport: job.dateImport || { enabled: false, source: 'none' },
-  activityCompanion: job.activityCompanion || null,
-  tabClaimWarning: job.tabClaimWarning || null,
-  tabSession: summarizeTabSession(job.tabSession),
-  trace: summarizeJobTrace(job.trace),
-  progressMessage: exportJobProgressMessage(job),
-  decisionSummary: exportJobDecisionSummary(job),
-  nextAction: exportJobNextAction(job),
-  current: job.current || null,
-  items: job.items.map((item, index) => ({
-    index: index + 1,
-    chatId: item.chatId,
-    title: item.title || null,
-    sourcePath: item.request?.sourcePath || null,
-    url: item.url,
-  })),
-  pendingItems: Array.isArray(job.pendingItems)
-    ? job.pendingItems.map((item) => ({
-        index: item.request?.originalIndex ?? null,
-        chatId: item.chatId,
-        title: item.title || null,
-        sourcePath: item.request?.sourcePath || null,
-        url: item.url,
-      }))
-    : [],
-  resume: job.resume
-    ? {
-        enabled: true,
-        reportFile: job.resume.reportFile,
-        reportFilename: job.resume.reportFilename,
-        previousJobId: job.resume.previousJobId,
-        previousStatus: job.resume.previousStatus,
-        previousUpdatedAt: job.resume.previousUpdatedAt,
-        previousFinishedAt: job.resume.previousFinishedAt,
-        previousSelectionFile: job.resume.previousSelectionFile,
-        previousSuccessCount: job.resume.previousSuccessCount,
-        previousFailureCount: job.resume.previousFailureCount,
-        previousCounters: job.resume.previousCounters,
-        completedChatIds: [...job.resume.completedChatIds],
-        previousFailures: job.resume.previousFailures,
-        resumedCompletedCount: job.resumedCompletedCount || 0,
-        remainingAfterResume: job.remainingAfterResume ?? null,
-      }
-    : { enabled: false },
-  successes,
-  failures,
-});
+const buildDirectChatsExportReport = (job, client, successes, failures) =>
+  buildDirectChatsExportReportPayload(job, client, successes, failures, reportBuilderDeps());
 
 const persistDirectChatsExportReport = (job, client, successes, failures) => {
   if (!job.reportFile) {
@@ -8935,6 +8779,7 @@ const recoverBrowserTabAfterWatchdog = createBrowserTabWatchdogRecovery({
   tryNativeBrowserBrokerTabsAction,
   waitForContinuationClient,
   summarizeClient,
+  validateRecoveredClient: validateRecoveredBrowserClient,
   touchExportJob,
   recoveryWaitMs: RECENT_CHATS_CLIENT_RECOVERY_WAIT_MS,
 });
@@ -9436,13 +9281,11 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
       // Se nem o relatório de falha puder ser gravado, o status em memória ainda explica o erro.
     }
   } finally {
-    job.current = null;
-    job.batchPosition = null;
-    job.batchTotal = null;
-    job.historyIndex = null;
-    job.operationId = null;
-    job.finishedAt = new Date().toISOString();
-    touchExportJob(job);
+    markExportJobFinishedForReport(job, {
+      clearFields: ['current', 'batchPosition', 'batchTotal', 'historyIndex', 'operationId'],
+      appendTrace: appendExportJobTrace,
+      touch: touchExportJob,
+    });
     try {
       maybeUpdateSyncState(job, client, failures);
     } catch (err) {
@@ -9717,9 +9560,11 @@ const runDirectChatsExportJob = async (job, client, args = {}) => {
       // O status em memória ainda mostra a falha se o relatório não puder ser gravado.
     }
   } finally {
-    job.current = null;
-    job.finishedAt = new Date().toISOString();
-    touchExportJob(job);
+    markExportJobFinishedForReport(job, {
+      clearFields: ['current'],
+      appendTrace: appendExportJobTrace,
+      touch: touchExportJob,
+    });
     const finalReportStartedAt = Date.now();
     try {
       persistDirectChatsExportReport(job, client, successes, failures);
@@ -9761,7 +9606,7 @@ const startDirectChatsExportJob = (client, args = {}) => {
   assertNoRunningBrowserExportJob(client);
   assertClientClaimedReadyForSession(client, args);
 
-  const selection = normalizeDirectReexportSelection(args);
+  const selection = normalizeDirectReexportSelection(args, { maxItems: DIRECT_REEXPORT_MAX_ITEMS });
   const items = selection.items;
   const resumeReportFile = args.resumeReportFile || args.reportFile || null;
   const resume = resumeReportFile ? loadDirectChatsResumeCheckpoint(resumeReportFile) : null;
@@ -9934,6 +9779,8 @@ const reloadGeminiTabs = async (args = {}) => {
   assertBrowserSideEffect('tab-reload', {
     explicit: args.explicit === true || args.intent === 'tab_management' || args.diagnostic === true,
   });
+  const activeReloadBlocked = activeExportJobReloadResult('tab-reload');
+  if (activeReloadBlocked) return activeReloadBlocked;
   const delayMs = Math.max(0, Math.min(10_000, Number(args.delayMs || 500)));
   const nativeReload = await tryNativeBrowserBrokerTabsAction('reload', args);
   await attachContentScriptSelfHealToNativeReload(nativeReload, args, tryNativeBrowserBrokerTabsAction);
@@ -11462,6 +11309,10 @@ const legacyRawTools = [
           maximum: 10000,
           description: 'Atraso antes do reload no fallback por aba. Default: 500.',
         },
+        reloadAll: {
+          type: 'boolean',
+          description: 'Quando true, recarrega todas as abas Gemini já abertas pelo native broker.',
+        },
       },
       additionalProperties: false,
     },
@@ -12858,6 +12709,7 @@ const bridgeServer = createServer(async (req, res) => {
         openIfMissing: parseOptionalBoolean(url.searchParams.get('openIfMissing')),
         waitMs: url.searchParams.get('waitMs') || undefined,
         allowReload: parseOptionalBoolean(url.searchParams.get('allowReload')),
+        reloadAll: parseOptionalBoolean(url.searchParams.get('reloadAll')),
         delayMs: url.searchParams.get('delayMs') || undefined,
       };
       if (action === 'claim') {
@@ -13660,6 +13512,7 @@ const bridgeServer = createServer(async (req, res) => {
       const result = await reloadGeminiTabs({
         ...clientSelectorFromSearchParams(url.searchParams),
         delayMs: url.searchParams.has('delayMs') ? Number(url.searchParams.get('delayMs')) : undefined,
+        reloadAll: parseOptionalBoolean(url.searchParams.get('reloadAll')),
         reason: url.searchParams.get('reason') || 'agent-endpoint',
       });
       sendAgentJson(res, result.ok ? 200 : 503, result);
@@ -13768,6 +13621,14 @@ const bridgeServer = createServer(async (req, res) => {
         buildStamp: url.searchParams.get('buildStamp') || undefined,
         tabClaim,
       });
+      abortPendingCommandsAfterEventStreamReconnect(
+        {
+          client,
+          clientEventStreamUsable: clientEventStreamUsable(client),
+          hasDispatchedPendingCommand: hasDispatchedPendingCommandForClient(client.clientId),
+        },
+        { shouldAbortDispatchedCommandsOnEventStreamReconnect, abortPendingCommandsForClient },
+      );
       closeEventStream(client);
       res.writeHead(200, sseHeaders(req));
       res.write(': connected\n\n');
@@ -13965,6 +13826,10 @@ const startBridgeHttpServer = () => {
       browserControl: BROWSER_CONTROL_RUNTIME,
       idleLifecycle: bridgeIdleLifecycleSnapshot(),
     });
+    void cleanupOrphanNativeClaimVisualsOnStartup(
+      { bridgeRole, shouldUseNativeBrowserBroker: shouldUseNativeBrowserBroker() },
+      { tryNativeBrowserBrokerTabsAction, recordFlightEvent },
+    );
     scheduleIdleShutdownCheck();
   });
 };
@@ -13985,6 +13850,12 @@ const shutdown = (reason, exitCode = 0) => {
   if (shuttingDown) return;
   shuttingDown = true;
   if (reason) log(reason);
+  recordFlightEvent('bridge_shutdown', {
+    reason: reason || null,
+    exitCode,
+    bridgeRole,
+    idleLifecycle: bridgeIdleLifecycleSnapshot(),
+  });
   if (idleShutdownTimer) {
     clearTimeout(idleShutdownTimer);
     idleShutdownTimer = null;

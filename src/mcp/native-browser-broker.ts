@@ -38,6 +38,9 @@ const numberPayload = (payload: unknown, key: string, fallback: number): number 
 const nativeRequestTimeoutMs = (request: NativeBrokerRequest): number =>
   numberPayload(request.payload, 'timeoutMs', 5000);
 
+export const nativeBrowserBrokerIpcTimeoutMs = (request: NativeBrokerRequest): number =>
+  nativeRequestTimeoutMs(request) + 1500;
+
 export const shouldUseNativeBrowserBroker = ({
   disabled = process.env.GEMINI_MD_EXPORT_NATIVE_BROKER === 'disabled',
 }: {
@@ -87,7 +90,9 @@ export const canFallbackFromNativeBrowserBrokerFailure = (
 export const createNativeBrowserBrokerClient = ({
   path = process.env.GEMINI_MD_EXPORT_NATIVE_BROKER_IPC || defaultBrokerIpcPath(),
   request = (nativeRequest: NativeBrokerRequest) =>
-    requestBrokerIpc(path, nativeRequest, { timeoutMs: nativeRequestTimeoutMs(nativeRequest) }),
+    requestBrokerIpc(path, nativeRequest, {
+      timeoutMs: nativeBrowserBrokerIpcTimeoutMs(nativeRequest),
+    }),
 }: NativeBrowserBrokerClientOptions = {}) => {
   const call = async (
     command: NativeBrowserBrokerCommand,

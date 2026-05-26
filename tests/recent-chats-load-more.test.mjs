@@ -360,7 +360,13 @@ test('recent export builds operation targets with batch and history positions', 
   assert.match(block, /job\.historyIndex = target\.historyIndex/);
   assert.match(block, /job\.operationId = operationId/);
   assert.match(operationSource, /operationId,\s*jobId: job\.jobId,\s*targetChatId: target\.targetChatId,/);
-  assert.match(block, /job\.current = null;\s*job\.batchPosition = null;\s*job\.batchTotal = null;\s*job\.historyIndex = null;\s*job\.operationId = null;/);
+  assert.match(block, /markExportJobFinishedForReport\(job, \{/);
+  assert.match(block, /clearFields: \['current', 'batchPosition', 'batchTotal', 'historyIndex', 'operationId'\]/);
+  const finalizationSource = readFileSync(
+    resolve(ROOT, 'src', 'mcp', 'export-job-finalization.ts'),
+    'utf-8',
+  );
+  assert.match(finalizationSource, /for \(const field of options\.clearFields \|\| \[\]\) \{\s*job\[field\] = null;/);
   assert.match(collectBlock, /operationId: args\.operationId \|\| null/);
   assert.match(collectBlock, /jobId: args\.jobId \|\| null/);
   assert.match(collectBlock, /targetChatId: args\.targetChatId \|\| normalizeConversationChatId\(conversation\) \|\| null/);
@@ -485,11 +491,12 @@ test('export all incompleto vira aviso em vez de sucesso silencioso', () => {
 
 test('job status diferencia lote parcial de historico inteiro verificado', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const reportSource = readFileSync(resolve(ROOT, 'src', 'mcp', 'export-job-reports.ts'), 'utf-8');
   assert.match(source, /const recentChatsExportScope = \(job\) =>/);
   assert.match(source, /scope:\s*fullHistoryRequested \? 'all-history' : 'partial'/);
   assert.match(source, /fullHistoryVerified/);
   assert.match(source, /partialLimit/);
-  assert.match(source, /\.\.\.recentChatsExportScope\(job\)/);
+  assert.match(reportSource, /\.\.\.deps\.recentChatsExportScope\(job\)/);
   assert.match(source, /loadMoreTrace/);
 });
 
@@ -687,6 +694,7 @@ test('export total pula arquivos existentes por padrão', () => {
 
 test('export total consegue retomar a partir do relatório incremental', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const reportSource = readFileSync(resolve(ROOT, 'src', 'mcp', 'export-job-reports.ts'), 'utf-8');
   const jobBlock = source.match(
     /const runRecentChatsExportJob = async[\s\S]*?\nconst startRecentChatsExportJob/,
   )?.[0];
@@ -705,7 +713,7 @@ test('export total consegue retomar a partir do relatório incremental', () => {
   assert.match(jobBlock, /remainingAfterResume/);
   assert.match(jobBlock, /!resumedCompletedChatIds\.has\(chatId\)/);
   assert.match(jobBlock, /job\.completed = resumedCompletedCount \+ i \+ 1/);
-  assert.match(source, /previousFailures: job\.resume\.previousFailures/);
+  assert.match(reportSource, /previousFailures: job\.resume\.previousFailures/);
 });
 
 test('export missing cruza histórico completo com exports raw no vault', () => {
@@ -828,6 +836,10 @@ test('recent export loop delegates one item to conversation operation runner', (
 
 test('reexport de chatIds conhecidos roda como job em background', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const selectionSource = readFileSync(
+    resolve(ROOT, 'src', 'mcp', 'direct-reexport-selection.ts'),
+    'utf-8',
+  );
   const jobBlock = source.match(
     /const runDirectChatsExportJob = async[\s\S]*?\nconst startDirectChatsExportJob/,
   )?.[0];
@@ -835,7 +847,9 @@ test('reexport de chatIds conhecidos roda como job em background', () => {
   assert.match(source, /name: 'gemini_reexport_chats'/);
   assert.match(source, /const startDirectChatsExportJob = \(client, args = \{\}\) =>/);
   assert.match(source, /const runDirectChatsExportJob = async/);
-  assert.match(source, /extractChatIdFromUrl\(idLike\)/);
+  assert.match(source, /normalizeDirectReexportSelection\(args/);
+  assert.match(selectionSource, /parseChatId\(idLike\)/);
+  assert.match(selectionSource, /canonicalGeminiChatUrl\(chatId\)/);
   assert.match(source, /writeExportReport\(\s*'direct-chats'/);
   assert.match(source, /findRunningBrowserExportJob\(client\)/);
   assert.match(source, /DIRECT_REEXPORT_RETRY_LIMIT/);
@@ -878,9 +892,9 @@ test('reexport direto retoma pelo relatório sem baixar tudo de novo', () => {
 });
 
 test('reexport direto preserva origem sidebar para navegação SPA', () => {
-  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp', 'direct-reexport-selection.ts'), 'utf-8');
   const normalizeBlock = source.match(
-    /const normalizeDirectReexportSelection = \(args = \{\}\) => \{[\s\S]*?\nconst normalizeDirectReexportItems/,
+    /export const normalizeDirectReexportSelection = \([\s\S]*?\n\};/,
   )?.[0];
   assert.ok(normalizeBlock, 'normalizeDirectReexportSelection deve existir');
   assert.match(normalizeBlock, /source: item\.source \|\| 'direct-url'/);

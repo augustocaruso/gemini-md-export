@@ -133,10 +133,11 @@ const waitForChildExit = async (child, timeoutMs = 3000) => {
   ]);
 };
 
-const spawnFakeOldBridge = async (port) => {
+const spawnFakeOldBridge = async (port, healthPatch = {}) => {
   const code = `
     import { createServer } from 'node:http';
     const port = Number(process.env.GME_FAKE_BRIDGE_PORT);
+    const healthPatch = JSON.parse(process.env.GME_FAKE_BRIDGE_HEALTH_PATCH || '{}');
     const server = createServer((req, res) => {
       const url = new URL(req.url || '/', 'http://127.0.0.1');
       if (url.pathname === '/healthz') {
@@ -154,7 +155,8 @@ const spawnFakeOldBridge = async (port) => {
             argv: [process.execPath, process.cwd() + '/src/mcp-server.js'],
             root: process.cwd(),
             cwd: process.cwd()
-          }
+          },
+          ...healthPatch
         }));
         return;
       }
@@ -175,6 +177,7 @@ const spawnFakeOldBridge = async (port) => {
     env: {
       ...process.env,
       GME_FAKE_BRIDGE_PORT: String(port),
+      GME_FAKE_BRIDGE_HEALTH_PATCH: JSON.stringify(healthPatch),
     },
   });
   await waitForHealth(`http://127.0.0.1:${port}`);
@@ -933,7 +936,7 @@ test('CLI substitui bridge antiga segura por bridge atual antes de seguir', asyn
         '--ready-wait-ms',
         '0',
         '--bridge-start-wait-ms',
-        '5000',
+        '10000',
       ],
       { stdout, stderr },
     );
@@ -958,6 +961,53 @@ test('CLI substitui bridge antiga segura por bridge atual antes de seguir', asyn
         // Process may already have exited.
       }
     }
+    if (isPidAlive(oldBridge.pid)) {
+      try {
+        process.kill(oldBridge.pid, 'SIGTERM');
+      } catch {
+        // Process may already have exited.
+      }
+    }
+    await sleep(150);
+  }
+});
+
+test('CLI nao substitui bridge antiga enquanto ha export ativo', async () => {
+  const port = await getFreePort();
+  const bridgeUrl = `http://127.0.0.1:${port}`;
+  const oldBridge = await spawnFakeOldBridge(port, {
+    idleLifecycle: {
+      activeJobCount: 1,
+      blockedBy: ['active_job'],
+    },
+  });
+  const stdout = captureStream();
+  const stderr = captureStream();
+
+  try {
+    await assert.rejects(
+      () =>
+        main(
+          [
+            'chats',
+            'count',
+            '--bridge-url',
+            bridgeUrl,
+            '--plain',
+            '--no-wake',
+            '--bridge-start-wait-ms',
+            '1000',
+          ],
+          { stdout, stderr },
+        ),
+      /tem 1 export ativo.*Nao vou reiniciar/s,
+    );
+    assert.equal(isPidAlive(oldBridge.pid), true);
+    const health = await waitForHealth(bridgeUrl);
+    assert.equal(health.pid, oldBridge.pid);
+    assert.doesNotMatch(stdout.text(), /Reiniciando bridge local/);
+    assert.equal(stderr.text(), '');
+  } finally {
     if (isPidAlive(oldBridge.pid)) {
       try {
         process.kill(oldBridge.pid, 'SIGTERM');
@@ -2247,7 +2297,7 @@ test('CLI browser status recarrega abas existentes quando build da extensao dive
           return;
         }
         sendJson(res, 404, { error: `not found: ${url.pathname}` });
-      }, async (bridgeUrl) => {
+      }, async (bridgeUrl, requests) => {
         const stdout = captureStream();
         const stderr = captureStream();
         const run = await main(
@@ -2355,7 +2405,7 @@ test('CLI browser status recarrega aba existente depois que self-heal derruba co
           return;
         }
         sendJson(res, 404, { error: `not found: ${url.pathname}` });
-      }, async (bridgeUrl) => {
+      }, async (bridgeUrl, requests) => {
         const stdout = captureStream();
         const stderr = captureStream();
         const run = await main(
@@ -2459,7 +2509,7 @@ test('CLI browser status recarrega aba Gemini ativa via native broker quando nao
           return;
         }
         sendJson(res, 404, { error: `not found: ${url.pathname}` });
-      }, async (bridgeUrl) => {
+      }, async (bridgeUrl, requests) => {
         const stdout = captureStream();
         const stderr = captureStream();
         const run = await main(
@@ -2482,6 +2532,337 @@ test('CLI browser status recarrega aba Gemini ativa via native broker quando nao
         assert.equal(reloadRequested, true);
         assert.equal(run.result.existingTabsReload?.mode, 'native-broker');
         assert.equal(run.result.existingTabsReload?.reloaded, 1);
+        const reloadRequest = requests.find(
+          (item) => item.pathname === '/agent/tabs' && item.searchParams.get('action') === 'reload',
+        );
+        assert.equal(reloadRequest?.searchParams.get('reloadAll'), 'false');
+      });
+    },
+  );
+});
+
+test('CLI browser status recarrega abas Gemini inativas via native broker sem abrir outra aba', async () => {
+  let reloadRequested = false;
+  await withEnv(
+    {
+      GEMINI_MD_EXPORT_CLI_BROWSER_LAUNCH_DRY_RUN: 'true',
+      GEMINI_MD_EXPORT_EXISTING_TAB_GRACE_MS: '0',
+    },
+    async () => {
+      await withServer((req, res, url) => {
+        if (url.pathname === '/agent/ready') {
+          sendJson(
+            res,
+            200,
+            reloadRequested
+              ? {
+                  ready: true,
+                  mode: 'post-reload',
+                  connectedClientCount: 1,
+                  selectableTabCount: 1,
+                  commandReadyClientCount: 1,
+                }
+              : {
+                  ready: false,
+                  blockingIssue: 'no_connected_clients',
+                  mode: 'hot',
+                  connectedClientCount: 0,
+                  selectableTabCount: 0,
+                  commandReadyClientCount: 0,
+                  nativeBroker: {
+                    configured: true,
+                    available: true,
+                    response: {
+                      result: {
+                        tabs: [
+                          {
+                            state: 'debuggable',
+                            tab: {
+                              id: 101,
+                              active: false,
+                              url: 'https://gemini.google.com/app',
+                            },
+                          },
+                          {
+                            state: 'debuggable',
+                            tab: {
+                              id: 102,
+                              active: false,
+                              url: 'https://gemini.google.com/app/f05318e93e234d75',
+                            },
+                          },
+                        ],
+                      },
+                    },
+                  },
+                },
+          );
+          return;
+        }
+        if (url.pathname === '/agent/tabs' && url.searchParams.get('action') === 'reload') {
+          reloadRequested = true;
+          assert.equal(url.searchParams.get('reloadAll'), 'true');
+          sendJson(res, 200, {
+            ok: true,
+            action: 'reload',
+            reloaded: 2,
+            mode: 'native-broker',
+          });
+          return;
+        }
+        if (url.pathname === '/agent/clients') {
+          sendJson(res, 200, {
+            mcp: { bridgeRole: 'primary' },
+            connectedClients: [],
+          });
+          return;
+        }
+        sendJson(res, 404, { error: `not found: ${url.pathname}` });
+      }, async (bridgeUrl) => {
+        const stdout = captureStream();
+        const stderr = captureStream();
+        const run = await main(
+          [
+            'browser',
+            'status',
+            '--bridge-url',
+            bridgeUrl,
+            '--plain',
+            '--wake',
+            '--allow-reload',
+            '--ready-wait-ms',
+            '50',
+          ],
+          { stdout, stderr },
+        );
+
+        assert.equal(run.exitCode, 0);
+        assert.equal(stderr.text(), '');
+        assert.doesNotMatch(stdout.text(), /Abrindo Gemini Web em background/);
+        assert.equal(reloadRequested, true);
+        assert.equal(run.result.existingTabsReload?.mode, 'native-broker');
+        assert.equal(run.result.existingTabsReload?.reloaded, 2);
+      });
+    },
+  );
+});
+
+test('CLI browser status repete reload nativo quando a primeira chamada expira', async () => {
+  let reloadAttempts = 0;
+  await withEnv(
+    {
+      GEMINI_MD_EXPORT_CLI_BROWSER_LAUNCH_DRY_RUN: 'true',
+      GEMINI_MD_EXPORT_EXISTING_TAB_GRACE_MS: '0',
+    },
+    async () => {
+      await withServer((req, res, url) => {
+        if (url.pathname === '/agent/ready') {
+          sendJson(
+            res,
+            200,
+            reloadAttempts >= 2
+              ? {
+                  ready: true,
+                  mode: 'post-reload-retry',
+                  connectedClientCount: 1,
+                  selectableTabCount: 1,
+                  commandReadyClientCount: 1,
+                }
+              : {
+                  ready: false,
+                  blockingIssue: 'no_connected_clients',
+                  mode: 'hot',
+                  connectedClientCount: 0,
+                  selectableTabCount: 0,
+                  commandReadyClientCount: 0,
+                  nativeBroker: {
+                    configured: true,
+                    available: true,
+                    response: {
+                      result: {
+                        tabs: [
+                          {
+                            state: 'debuggable',
+                            tab: {
+                              id: 101,
+                              active: false,
+                              url: 'https://gemini.google.com/app',
+                            },
+                          },
+                        ],
+                      },
+                    },
+                  },
+                },
+          );
+          return;
+        }
+        if (url.pathname === '/agent/tabs' && url.searchParams.get('action') === 'reload') {
+          reloadAttempts += 1;
+          if (reloadAttempts === 1) {
+            sendJson(res, 200, {
+              ok: false,
+              action: 'reload',
+              code: 'extension_request_timeout',
+              error: 'service worker ainda reconectando',
+            });
+            return;
+          }
+          sendJson(res, 200, {
+            ok: true,
+            action: 'reload',
+            reloaded: 1,
+            mode: 'native-broker',
+          });
+          return;
+        }
+        if (url.pathname === '/agent/clients') {
+          sendJson(res, 200, {
+            mcp: { bridgeRole: 'primary' },
+            connectedClients: [],
+          });
+          return;
+        }
+        sendJson(res, 404, { error: `not found: ${url.pathname}` });
+      }, async (bridgeUrl) => {
+        const stdout = captureStream();
+        const stderr = captureStream();
+        const run = await main(
+          [
+            'browser',
+            'status',
+            '--bridge-url',
+            bridgeUrl,
+            '--plain',
+            '--wake',
+            '--allow-reload',
+            '--ready-wait-ms',
+            '50',
+          ],
+          { stdout, stderr },
+        );
+
+        assert.equal(run.exitCode, 0);
+        assert.equal(stderr.text(), '');
+        assert.doesNotMatch(stdout.text(), /Abrindo Gemini Web em background/);
+        assert.equal(reloadAttempts, 2);
+        assert.equal(run.result.existingTabsReload?.retryAttempted, true);
+        assert.equal(run.result.existingTabsReload?.firstAttempt?.code, 'extension_request_timeout');
+        assert.equal(run.result.existingTabsReload?.reloaded, 1);
+      });
+    },
+  );
+});
+
+test('CLI export recent recarrega abas existentes automaticamente antes de iniciar job', async () => {
+  let reloadRequested = false;
+  let exportStarted = false;
+  await withEnv(
+    {
+      GEMINI_MD_EXPORT_CLI_BROWSER_LAUNCH_DRY_RUN: 'true',
+      GEMINI_MD_EXPORT_EXISTING_TAB_GRACE_MS: '0',
+    },
+    async () => {
+      await withServer((req, res, url) => {
+        if (url.pathname === '/agent/ready') {
+          sendJson(
+            res,
+            200,
+            reloadRequested
+              ? {
+                  ready: true,
+                  mode: 'post-reload',
+                  connectedClientCount: 1,
+                  selectableTabCount: 1,
+                  commandReadyClientCount: 1,
+                }
+              : {
+                  ready: false,
+                  blockingIssue: 'no_connected_clients',
+                  mode: 'hot',
+                  connectedClientCount: 0,
+                  selectableTabCount: 0,
+                  commandReadyClientCount: 0,
+                  nativeBroker: {
+                    configured: true,
+                    available: true,
+                    response: {
+                      result: {
+                        tabs: [
+                          {
+                            state: 'debuggable',
+                            tab: {
+                              id: 101,
+                              active: true,
+                              url: 'https://gemini.google.com/app',
+                            },
+                          },
+                        ],
+                      },
+                    },
+                  },
+                },
+          );
+          return;
+        }
+        if (url.pathname === '/agent/tabs' && url.searchParams.get('action') === 'reload') {
+          reloadRequested = true;
+          sendJson(res, 200, {
+            ok: true,
+            action: 'reload',
+            reloaded: 1,
+            mode: 'native-broker',
+          });
+          return;
+        }
+        if (url.pathname === '/agent/export-recent-chats') {
+          exportStarted = true;
+          sendJson(res, 200, {
+            jobId: 'job-1',
+            status: 'completed',
+            phase: 'done',
+            successCount: 1,
+            failureCount: 0,
+            completed: 1,
+            requested: 1,
+            outputDir: '/tmp/gemini-md-export-test',
+          });
+          return;
+        }
+        sendJson(res, 404, { error: `not found: ${url.pathname}` });
+      }, async (bridgeUrl, requests) => {
+        const stdout = captureStream();
+        const stderr = captureStream();
+        const run = await main(
+          [
+            'export',
+            'recent',
+            '--bridge-url',
+            bridgeUrl,
+            '--plain',
+            '--no-wake',
+            '--max-chats',
+            '1',
+            '--output-dir',
+            '/tmp/gemini-md-export-test',
+          ],
+          { stdout, stderr },
+        );
+
+        assert.equal(run.exitCode, 0);
+        assert.equal(stderr.text(), '');
+        assert.equal(reloadRequested, true);
+        assert.equal(exportStarted, true);
+        const readyRequests = requests.filter((item) => item.pathname === '/agent/ready');
+        assert.equal(readyRequests[0]?.searchParams.get('allowReload'), 'true');
+        const reloadRequest = requests.find(
+          (item) => item.pathname === '/agent/tabs' && item.searchParams.get('action') === 'reload',
+        );
+        assert.equal(reloadRequest?.searchParams.get('allowReload'), 'true');
+        const postReloadReady = readyRequests.find(
+          (item) => item.searchParams.get('waitMs') === '75000',
+        );
+        assert.ok(postReloadReady, 'export deve aguardar uma janela maior depois de reload automático');
       });
     },
   );
