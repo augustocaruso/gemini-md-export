@@ -67,8 +67,14 @@ export const recordConversationExportSuccess = (
   job.successCount = successes.length;
   deps.recordJobCounter(job, 'mediaFiles', result.mediaFileCount || 0);
   deps.recordJobCounter(job, 'mediaWarnings', result.mediaFailureCount || 0);
-  if (result.dateImport?.enabled && result.dateImport.status === 'matched') {
-    deps.recordJobCounter(job, 'dateImportMatched');
+  if (result.dateImport?.enabled) {
+    if (result.dateImport.status === 'matched') {
+      deps.recordJobCounter(job, 'dateImportMatched');
+    } else if (result.dateImport.status === 'partial') {
+      deps.recordJobCounter(job, 'dateImportPartial');
+    } else if (result.dateImport.status === 'unresolved') {
+      deps.recordJobCounter(job, 'dateImportUnresolved');
+    }
   }
   deps.recordJobCounter(
     job,

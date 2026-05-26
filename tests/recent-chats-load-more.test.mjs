@@ -634,6 +634,8 @@ test('export missing oferece UX guiada para importação completa do vault', () 
   assert.match(summaryBlock, /missingInVault/);
   assert.match(summaryBlock, /downloadedNow/);
   assert.match(summaryBlock, /mediaWarnings/);
+  assert.match(summaryBlock, /dateImportPending/);
+  assert.match(summaryBlock, /metadataDateWarnings/);
   assert.match(summaryBlock, /resumeCommand/);
   assert.match(source, /exportJobResumeCommand/);
   assert.match(source, /gemini_export_missing_chats/);

@@ -465,8 +465,9 @@ Para importar o histórico inteiro para um vault, prefira
 Gemini Web, cruza com os exports raw já existentes no vault e baixa somente o
 que falta. O status e o relatório
 incluem `progressMessage`, `decisionSummary` e `nextAction`, com totais vistos
-no Gemini, já existentes no vault, baixados agora, warnings de mídia, falhas,
-caminho do relatório e comando pronto para retomar.
+no Gemini, já existentes no vault, baixados agora, warnings de mídia, datas
+pendentes do Takeout/My Activity, falhas, caminho do relatório e comando pronto
+para retomar.
 
 Depois que o vault já foi sincronizado uma vez, use
 `gemini-md-export sync "/caminho/do/vault" --plain` para o fluxo incremental

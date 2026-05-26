@@ -131,6 +131,10 @@ const {
   buildRecentChatsExportReportPayload,
 } = await import(compiledTsModuleUrl('mcp', 'export-job-reports.js'));
 const {
+  dateImportIssueCountsForJob,
+  metadataDateWarningsForJob,
+} = await import(compiledTsModuleUrl('mcp', 'export-job-date-summary.js'));
+const {
   abortPendingCommandsAfterEventStreamReconnect,
   activityClientMatchesSelector,
   buildActiveExportJobReloadErrorInfo,
@@ -8412,6 +8416,8 @@ const exportJobDecisionSummary = (job) => {
       : directChatsExportScope(job);
   const terminal = isTerminalExportJobStatus(job.status);
   const mediaWarnings = mediaWarningCountForJob(job);
+  const dateImportPending = dateImportIssueCountsForJob(job);
+  const metadataDateWarnings = metadataDateWarningsForJob(job);
   const warnings = [];
   if (job.loadWarning) warnings.push(job.loadWarning);
   if (job.refreshError) warnings.push(`Falha ao atualizar o sidebar: ${job.refreshError}`);
@@ -8423,6 +8429,7 @@ const exportJobDecisionSummary = (job) => {
       `${mediaWarnings} mídia${mediaWarnings === 1 ? '' : 's'} ficaram com warning no Markdown.`,
     );
   }
+  warnings.push(...metadataDateWarnings);
   if (job.failureCount > 0) {
     warnings.push(`${job.failureCount} conversa${job.failureCount === 1 ? '' : 's'} falharam.`);
   }
@@ -8445,6 +8452,7 @@ const exportJobDecisionSummary = (job) => {
       downloadedInReport: job.successCount || 0,
       skipped: job.skippedCount || 0,
       mediaWarnings,
+      dateImport: dateImportPending,
       failed: job.failureCount || 0,
     },
     sync: job.syncMode
