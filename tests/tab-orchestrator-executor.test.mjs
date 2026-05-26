@@ -97,6 +97,7 @@ test('all effect types dispatch to matching adapter method', async () => {
 
 test('adapter error is captured and subsequent effects still run', async () => {
   const failure = new Error('reload failed');
+  failure.code = 'RELOAD_FAILED';
   const { adapter, calls } = createRecordingAdapter({
     reloadTab: async (effect) => {
       calls.push({ method: 'reloadTab', effect });
@@ -121,12 +122,88 @@ test('adapter error is captured and subsequent effects still run', async () => {
     {
       effect: effects.reloadTab,
       ok: false,
-      error: failure,
+      error: {
+        name: 'Error',
+        message: 'reload failed',
+        code: 'RELOAD_FAILED',
+      },
     },
     {
       effect: effects.claimTab,
       ok: true,
       result: { method: 'claimTab', type: effects.claimTab.type },
+    },
+  ]);
+});
+
+test('thrown Error returns serializable error with name and message', async () => {
+  const failure = new TypeError('runtime epoch unavailable');
+  const { adapter } = createRecordingAdapter({
+    waitForRuntimeEpoch: async () => {
+      throw failure;
+    },
+  });
+
+  const report = await executeTabOrchestratorEffects([effects.waitForEpoch], adapter);
+
+  assert.deepEqual(report.executed, [
+    {
+      effect: effects.waitForEpoch,
+      ok: false,
+      error: {
+        name: 'TypeError',
+        message: 'runtime epoch unavailable',
+      },
+    },
+  ]);
+  assert.match(JSON.stringify(report), /runtime epoch unavailable/);
+});
+
+test('thrown string and object return useful messages and do not break execution', async () => {
+  const { adapter, calls } = createRecordingAdapter({
+    openBrowser: async (effect) => {
+      calls.push({ method: 'openBrowser', effect });
+      throw 'browser refused';
+    },
+    reloadTab: async (effect) => {
+      calls.push({ method: 'reloadTab', effect });
+      throw { message: 'tab missing', code: 'TAB_MISSING' };
+    },
+  });
+  const orderedEffects = [
+    effects.openBrowser,
+    effects.reloadTab,
+    effects.recordDiagnostic,
+  ];
+
+  const report = await executeTabOrchestratorEffects(orderedEffects, adapter);
+
+  assert.equal(report.status, 'completed_with_errors');
+  assert.deepEqual(
+    calls.map((call) => call.method),
+    ['openBrowser', 'reloadTab', 'recordDiagnostic'],
+  );
+  assert.deepEqual(report.executed, [
+    {
+      effect: effects.openBrowser,
+      ok: false,
+      error: { message: 'browser refused' },
+    },
+    {
+      effect: effects.reloadTab,
+      ok: false,
+      error: {
+        message: 'tab missing',
+        code: 'TAB_MISSING',
+      },
+    },
+    {
+      effect: effects.recordDiagnostic,
+      ok: true,
+      result: {
+        method: 'recordDiagnostic',
+        type: effects.recordDiagnostic.type,
+      },
     },
   ]);
 });
