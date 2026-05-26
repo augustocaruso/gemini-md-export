@@ -21,6 +21,8 @@ export type RuntimeRecoveryState = {
   updatedAtMs: number;
   attempts: number;
   rejectedEvidenceCount: number;
+  backoffMs: number;
+  deadlineAtMs?: number;
   lastReason?: string;
 };
 
@@ -52,13 +54,14 @@ export const initialRecoveryState = ({
   updatedAtMs: nowMs,
   attempts: 0,
   rejectedEvidenceCount: 0,
+  backoffMs: RUNTIME_EPOCH_TIMEOUT_MS,
 });
 
 const waitForEpochEffect = (state: RuntimeRecoveryState, reason: string): TabOrchestratorEffect => ({
   type: 'runtime.waitForEpoch',
   reason,
   epochId: state.desiredEpochId,
-  timeoutMs: RUNTIME_EPOCH_TIMEOUT_MS,
+  timeoutMs: state.backoffMs,
 });
 
 const selfHealEffect = (reason: string): TabOrchestratorEffect => ({
@@ -85,18 +88,38 @@ const runtimeEvidenceIsReady = (state: RuntimeRecoveryState, evidence: RuntimeEp
     requireCommandChannel: true,
   });
 
+const terminalStatuses: ReadonlySet<RuntimeRecoveryStatus> = new Set([
+  'ready',
+  'quarantined',
+  'failed',
+]);
+
+const isTerminalState = (state: RuntimeRecoveryState): boolean => terminalStatuses.has(state.status);
+
+const withWaitDeadline = (
+  state: RuntimeRecoveryState,
+  nowMs: number,
+): RuntimeRecoveryState => ({
+  ...state,
+  deadlineAtMs: nowMs + state.backoffMs,
+});
+
 export const reduceRuntimeRecovery = (
   state: RuntimeRecoveryState,
   event: RuntimeRecoveryEvent,
 ): RuntimeRecoveryTransition => {
+  if (isTerminalState(state)) {
+    return { state, effects: [] };
+  }
+
   if (event.type === 'reloadRequested') {
-    const nextState: RuntimeRecoveryState = {
+    const nextState = withWaitDeadline({
       ...state,
       status: 'reload_requested',
       updatedAtMs: event.nowMs,
       attempts: state.attempts + 1,
       lastReason: event.reason,
-    };
+    }, event.nowMs);
     return {
       state: nextState,
       effects: [
@@ -108,12 +131,12 @@ export const reduceRuntimeRecovery = (
 
   if (event.type === 'extensionContextInvalidated') {
     const reason = 'extension_context_invalidated';
-    const nextState: RuntimeRecoveryState = {
+    const nextState = withWaitDeadline({
       ...state,
       status: 'awaiting_runtime_epoch',
       updatedAtMs: event.nowMs,
       lastReason: reason,
-    };
+    }, event.nowMs);
     return {
       state: nextState,
       effects: [waitForEpochEffect(nextState, reason), selfHealEffect(reason)],
@@ -149,6 +172,10 @@ export const reduceRuntimeRecovery = (
   if (event.type === 'timeout') {
     const reason = 'runtime_epoch_timeout';
 
+    if (state.status === 'idle' || state.deadlineAtMs === undefined || event.nowMs < state.deadlineAtMs) {
+      return { state, effects: [] };
+    }
+
     if (state.attempts >= MAX_RECOVERY_ATTEMPTS || state.rejectedEvidenceCount >= MAX_REJECTED_EVIDENCE) {
       return {
         state: {
@@ -161,13 +188,13 @@ export const reduceRuntimeRecovery = (
       };
     }
 
-    const nextState: RuntimeRecoveryState = {
+    const nextState = withWaitDeadline({
       ...state,
       status: 'awaiting_runtime_epoch',
       updatedAtMs: event.nowMs,
       attempts: state.attempts + 1,
       lastReason: reason,
-    };
+    }, event.nowMs);
     return {
       state: nextState,
       effects: [selfHealEffect(reason), waitForEpochEffect(nextState, reason)],

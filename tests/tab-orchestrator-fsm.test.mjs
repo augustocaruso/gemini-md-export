@@ -307,6 +307,7 @@ test('initial recovery state shape', () => {
     updatedAtMs: 1000,
     attempts: 0,
     rejectedEvidenceCount: 0,
+    backoffMs: 8000,
   });
 });
 
@@ -326,6 +327,8 @@ test('reloadRequested separates reload request from runtime readiness and emits 
     updatedAtMs: 1100,
     attempts: 1,
     rejectedEvidenceCount: 0,
+    deadlineAtMs: 9100,
+    backoffMs: 8000,
     lastReason: 'extension_updated',
   });
   assert.deepEqual(transition.effects, [
@@ -356,6 +359,7 @@ test('extension context invalidated moves recovery to awaiting runtime epoch and
   assert.equal(transition.state.lastReason, 'extension_context_invalidated');
   assert.equal(transition.state.updatedAtMs, 1200);
   assert.equal(transition.state.attempts, 1);
+  assert.equal(transition.state.deadlineAtMs, 9200);
   assert.deepEqual(transition.effects, [
     {
       type: 'runtime.waitForEpoch',
@@ -454,6 +458,57 @@ test('strong evidence for desired epoch completes recovery with no effects', () 
   assert.deepEqual(transition.effects, []);
 });
 
+test('stale or weak evidence after ready keeps ready and emits no effects', () => {
+  const ready = reduceRuntimeRecovery(
+    reduceRuntimeRecovery(initialRecoveryState({ desiredEpochId, nowMs: 1000 }), {
+      type: 'reloadRequested',
+      nowMs: 1100,
+      reason: 'extension_updated',
+    }).state,
+    {
+      type: 'runtimeEvidenceObserved',
+      nowMs: 1200,
+      evidence: strongDesiredEvidence(),
+    },
+  ).state;
+  const weakEvidence = classifyRuntimeEvidence({
+    client: matchingClient(),
+    expected,
+    nowMs: 1300,
+  });
+
+  const transition = reduceRuntimeRecovery(ready, {
+    type: 'runtimeEvidenceObserved',
+    nowMs: 1300,
+    evidence: weakEvidence,
+  });
+
+  assert.deepEqual(transition.state, ready);
+  assert.deepEqual(transition.effects, []);
+});
+
+test('timeout from idle keeps idle and emits no effects', () => {
+  const idle = initialRecoveryState({ desiredEpochId, nowMs: 1000 });
+
+  const transition = reduceRuntimeRecovery(idle, { type: 'timeout', nowMs: 9000 });
+
+  assert.deepEqual(transition.state, idle);
+  assert.deepEqual(transition.effects, []);
+});
+
+test('early timeout before deadline does not retry', () => {
+  const state = reduceRuntimeRecovery(initialRecoveryState({ desiredEpochId, nowMs: 1000 }), {
+    type: 'reloadRequested',
+    nowMs: 1100,
+    reason: 'extension_updated',
+  }).state;
+
+  const transition = reduceRuntimeRecovery(state, { type: 'timeout', nowMs: 9000 });
+
+  assert.deepEqual(transition.state, state);
+  assert.deepEqual(transition.effects, []);
+});
+
 test('timeout retries first, then quarantines after attempts threshold', () => {
   const state = reduceRuntimeRecovery(initialRecoveryState({ desiredEpochId, nowMs: 1000 }), {
     type: 'reloadRequested',
@@ -466,6 +521,7 @@ test('timeout retries first, then quarantines after attempts threshold', () => {
   assert.equal(retry.state.status, 'awaiting_runtime_epoch');
   assert.equal(retry.state.attempts, 2);
   assert.equal(retry.state.lastReason, 'runtime_epoch_timeout');
+  assert.equal(retry.state.deadlineAtMs, 17_100);
   assert.deepEqual(retry.effects, [
     {
       type: 'serviceWorker.selfHeal',
@@ -485,6 +541,40 @@ test('timeout retries first, then quarantines after attempts threshold', () => {
   assert.equal(quarantine.state.status, 'quarantined');
   assert.equal(quarantine.state.attempts, 2);
   assert.deepEqual(quarantine.effects, [
+    {
+      type: 'diagnostic.record',
+      reason: 'runtime_epoch_timeout',
+      code: 'runtime_epoch_timeout',
+      severity: 'error',
+    },
+  ]);
+});
+
+test('timeout at deadline quarantines after rejected evidence threshold', () => {
+  let state = reduceRuntimeRecovery(initialRecoveryState({ desiredEpochId, nowMs: 1000 }), {
+    type: 'reloadRequested',
+    nowMs: 1100,
+    reason: 'extension_updated',
+  }).state;
+  const weakEvidence = classifyRuntimeEvidence({
+    client: matchingClient(),
+    expected,
+    nowMs: 1200,
+  });
+
+  for (const nowMs of [1200, 1300, 1400]) {
+    state = reduceRuntimeRecovery(state, {
+      type: 'runtimeEvidenceObserved',
+      nowMs,
+      evidence: weakEvidence,
+    }).state;
+  }
+
+  const transition = reduceRuntimeRecovery(state, { type: 'timeout', nowMs: 9100 });
+
+  assert.equal(transition.state.status, 'quarantined');
+  assert.equal(transition.state.rejectedEvidenceCount, 3);
+  assert.deepEqual(transition.effects, [
     {
       type: 'diagnostic.record',
       reason: 'runtime_epoch_timeout',
@@ -517,4 +607,43 @@ test('manualAbort fails with diagnostic', () => {
       severity: 'error',
     },
   ]);
+});
+
+test('events after quarantined keep quarantined and emit no effects', () => {
+  const state = {
+    ...initialRecoveryState({ desiredEpochId, nowMs: 1000 }),
+    status: 'quarantined',
+    updatedAtMs: 9100,
+    attempts: 2,
+    deadlineAtMs: 9100,
+    lastReason: 'runtime_epoch_timeout',
+  };
+
+  for (const event of [
+    { type: 'reloadRequested', nowMs: 9200, reason: 'retry_again' },
+    { type: 'runtimeEvidenceObserved', nowMs: 9300, evidence: strongDesiredEvidence() },
+    { type: 'timeout', nowMs: 9400 },
+    { type: 'manualAbort', nowMs: 9500, reason: 'operator_cancelled' },
+  ]) {
+    const transition = reduceRuntimeRecovery(state, event);
+    assert.deepEqual(transition.state, state);
+    assert.deepEqual(transition.effects, []);
+  }
+});
+
+test('reloadRequested after failed keeps failed and emits no effects', () => {
+  const failed = reduceRuntimeRecovery(initialRecoveryState({ desiredEpochId, nowMs: 1000 }), {
+    type: 'manualAbort',
+    nowMs: 1100,
+    reason: 'operator_cancelled',
+  }).state;
+
+  const transition = reduceRuntimeRecovery(failed, {
+    type: 'reloadRequested',
+    nowMs: 1200,
+    reason: 'extension_updated',
+  });
+
+  assert.deepEqual(transition.state, failed);
+  assert.deepEqual(transition.effects, []);
 });
