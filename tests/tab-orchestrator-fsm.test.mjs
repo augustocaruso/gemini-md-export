@@ -6,6 +6,7 @@ import {
   allocateTabForPurpose,
   initialTabPoolState,
   initialRecoveryState,
+  planTabOrchestration,
   reduceTabLifecycle,
   reduceRuntimeRecovery,
   runtimeEpochId,
@@ -1315,4 +1316,179 @@ test('reloadRequested after failed keeps failed and emits no effects', () => {
 
   assert.deepEqual(transition.state, failed);
   assert.deepEqual(transition.effects, []);
+});
+
+const orchestrationRequest = (overrides = {}) => ({
+  mode: 'activity_scan',
+  expected,
+  nowMs: 2000,
+  desiredPageKind: 'activity',
+  purpose: 'my_activity_scan',
+  claimId: 'claim-orchestrator-1',
+  clients: [],
+  allowCreate: false,
+  ...overrides,
+});
+
+test('activity scan plan blocks stale runtime and emits recovery effects', () => {
+  const result = planTabOrchestration(
+    orchestrationRequest({
+      clients: [
+        matchingClient({
+          clientId: 'old-activity',
+          tabId: 1,
+          buildStamp: '20260526-1100',
+          lastSeenAt: 1900,
+          eventStreamConnected: true,
+          page: { kind: 'activity' },
+        }),
+      ],
+    }),
+  );
+
+  assert.equal(result.ready, false);
+  assert.equal(result.blocker?.code, 'runtime_epoch_not_ready');
+  assert.equal(
+    result.effects.some((effect) => effect.type === 'diagnostic.record'),
+    true,
+  );
+  assert.equal(result.diagnostics.recoveryStatus, 'awaiting_runtime_epoch');
+});
+
+test('diagnostic mode reports weak heartbeat as command channel not ready', () => {
+  const result = planTabOrchestration(
+    orchestrationRequest({
+      mode: 'diagnostic',
+      purpose: 'gemini_ready',
+      clients: [
+        matchingClient({
+          clientId: 'weak-activity',
+          tabId: 2,
+          lastSeenAt: 1900,
+          eventStreamConnected: false,
+          page: { kind: 'activity' },
+        }),
+      ],
+    }),
+  );
+
+  assert.equal(result.ready, false);
+  assert.equal(result.blocker?.code, 'command_channel_not_ready');
+  assert.equal(result.evidence[0].strength, 'weak');
+});
+
+test('strong matching activity runtime allocates and returns leased state', () => {
+  const result = planTabOrchestration(
+    orchestrationRequest({
+      claimId: 'claim-activity-ready',
+      clients: [
+        matchingClient({
+          clientId: 'activity-ready',
+          tabId: 3,
+          lastSeenAt: 1900,
+          eventStreamConnected: true,
+          page: { kind: 'activity' },
+        }),
+      ],
+    }),
+  );
+
+  assert.equal(result.ready, true);
+  assert.equal(result.blocker, null);
+  assert.deepEqual(result.selected, { tabId: 3, clientId: 'activity-ready' });
+  assert.equal(result.state.tabs[0].leaseClaimId, 'claim-activity-ready');
+  assert.deepEqual(result.effects, [
+    {
+      type: 'tab.claim',
+      reason: 'my_activity_scan',
+      tabId: 3,
+      claimId: 'claim-activity-ready',
+    },
+  ]);
+});
+
+test('ambiguous matching tabs return ambiguous blocker and diagnostic effect', () => {
+  const result = planTabOrchestration(
+    orchestrationRequest({
+      clients: [
+        matchingClient({
+          clientId: 'activity-ready-a',
+          tabId: 4,
+          lastSeenAt: 1900,
+          eventStreamConnected: true,
+          page: { kind: 'activity' },
+        }),
+        matchingClient({
+          clientId: 'activity-ready-b',
+          tabId: 5,
+          lastSeenAt: 1900,
+          eventStreamConnected: true,
+          page: { kind: 'activity' },
+        }),
+      ],
+    }),
+  );
+
+  assert.equal(result.ready, false);
+  assert.equal(result.blocker?.code, 'ambiguous_tabs');
+  assert.equal(result.effects[0].type, 'diagnostic.record');
+  assert.equal(result.effects[0].code, 'ambiguous_tab_allocation');
+});
+
+test('job_safe mode does not open browser even when create is allowed', () => {
+  const result = planTabOrchestration(
+    orchestrationRequest({
+      mode: 'job_safe',
+      purpose: 'background_export',
+      allowCreate: true,
+      createUrl: 'https://gemini.google.com/app',
+    }),
+  );
+
+  assert.equal(result.ready, false);
+  assert.equal(result.blocker?.code, 'no_ready_tab_for_purpose');
+  assert.equal(result.effects.some((effect) => effect.type === 'browser.open'), false);
+});
+
+test('interactive mode with no tab and allowCreate emits browser open', () => {
+  const result = planTabOrchestration(
+    orchestrationRequest({
+      mode: 'interactive',
+      purpose: 'open_gemini',
+      allowCreate: true,
+      createUrl: 'https://gemini.google.com/app',
+    }),
+  );
+
+  assert.equal(result.ready, false);
+  assert.equal(result.blocker?.code, 'no_ready_tab_for_purpose');
+  assert.deepEqual(result.effects, [
+    {
+      type: 'browser.open',
+      reason: 'open_gemini',
+      url: 'https://gemini.google.com/app',
+      pageKind: 'activity',
+    },
+  ]);
+});
+
+test('old build heartbeat produces runtime epoch blocker and never ready', () => {
+  const result = planTabOrchestration(
+    orchestrationRequest({
+      clients: [
+        matchingClient({
+          clientId: 'old-build',
+          tabId: 6,
+          buildStamp: '20260526-1100',
+          lastSeenAt: 1900,
+          eventStreamConnected: false,
+          page: { kind: 'activity' },
+        }),
+      ],
+    }),
+  );
+
+  assert.equal(result.ready, false);
+  assert.equal(result.blocker?.code, 'runtime_epoch_not_ready');
+  assert.equal(result.selected, undefined);
 });
