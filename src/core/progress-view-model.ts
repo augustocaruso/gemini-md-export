@@ -87,7 +87,8 @@ const finiteNumber = (value: unknown, fallback = 0): number => {
   return Number.isFinite(parsed) ? parsed : fallback;
 };
 
-const clamp = (value: number, min: number, max: number): number => Math.max(min, Math.min(max, value));
+const clamp = (value: number, min: number, max: number): number =>
+  Math.max(min, Math.min(max, value));
 
 const normalizeStatus = (status: unknown): ProgressStatus => {
   if (
@@ -184,7 +185,11 @@ export const buildProgressViewModel = (input: ProgressViewInput): ProgressViewMo
   const baseCurrent =
     status === 'completed' || status === 'completed_with_errors'
       ? total
-      : clamp(finiteNumber(input.current ?? input.completed, 0), 0, total || Number.MAX_SAFE_INTEGER);
+      : clamp(
+          finiteNumber(input.current ?? input.completed, 0),
+          0,
+          total || Number.MAX_SAFE_INTEGER,
+        );
   const current = mode === 'determinate' ? clamp(baseCurrent, 0, total) : Math.max(0, baseCurrent);
   const displayCurrent =
     input.displayCurrent == null
@@ -198,7 +203,10 @@ export const buildProgressViewModel = (input: ProgressViewInput): ProgressViewMo
       : mode === 'determinate'
         ? clamp(finiteNumber(input.barCurrent, current), 0, total)
         : Math.max(0, finiteNumber(input.barCurrent, current));
-  const percent = input.percent == null ? percentFor({ status, current, total, mode }) : clamp(finiteNumber(input.percent, 0), 0, 100);
+  const percent =
+    input.percent == null
+      ? percentFor({ status, current, total, mode })
+      : clamp(finiteNumber(input.percent, 0), 0, 100);
   const displayPercent =
     input.displayPercent == null
       ? percent
@@ -249,7 +257,10 @@ const jobTotals = (job: Record<string, any>): Required<ProgressCounts> => {
   });
 };
 
-const loadedConversationCount = (job: Record<string, any>, counts: Required<ProgressCounts>): number | null => {
+const loadedConversationCount = (
+  job: Record<string, any>,
+  counts: Required<ProgressCounts>,
+): number | null => {
   for (const value of [
     job.knownLoadedCount,
     job.minimumKnownCount,
@@ -263,7 +274,10 @@ const loadedConversationCount = (job: Record<string, any>, counts: Required<Prog
   return null;
 };
 
-const indeterminateCountLabel = (job: Record<string, any>, counts: Required<ProgressCounts>): string => {
+const indeterminateCountLabel = (
+  job: Record<string, any>,
+  counts: Required<ProgressCounts>,
+): string => {
   const loaded = loadedConversationCount(job, counts);
   if (loaded !== null && loaded > 0) return `${loaded} encontradas`;
   if (job.tuiKind === 'count') return 'procurando conversas';
@@ -272,7 +286,10 @@ const indeterminateCountLabel = (job: Record<string, any>, counts: Required<Prog
 
 export const buildExportJobProgressViewModel = (job: Record<string, any>): ProgressViewModel => {
   const counts = jobTotals(job);
-  const fallbackTotal = finiteNumber(job.requested ?? job.missingCount ?? job.webConversationCount, 0);
+  const fallbackTotal = finiteNumber(
+    job.requested ?? job.missingCount ?? job.webConversationCount,
+    0,
+  );
   const batchPosition = operationBatchPosition(job);
   const total = operationBatchTotal(job, fallbackTotal);
   const status = normalizeStatus(job.status);
@@ -283,9 +300,13 @@ export const buildExportJobProgressViewModel = (job: Record<string, any>): Progr
   const currentIndex = Math.max(0, finiteNumber(job.current?.index ?? job.position, 0));
   const mode =
     total > 0 &&
-    !['queued', 'loading-history', 'scanning-vault', 'loading-metadata', 'resolving-metadata'].includes(
-      String(phase || ''),
-    )
+    ![
+      'queued',
+      'loading-history',
+      'scanning-vault',
+      'loading-metadata',
+      'resolving-metadata',
+    ].includes(String(phase || ''))
       ? 'determinate'
       : 'indeterminate';
   const current = total > 0 ? (successfulTerminal ? total : Math.min(completed, total)) : completed;
@@ -306,7 +327,10 @@ export const buildExportJobProgressViewModel = (job: Record<string, any>): Progr
       ? { title: job.current.title || null, chatId: job.current.chatId || null }
       : null;
   const label = stripLegacyProgressCount(
-    job.operationMessage || job.progressMessage || job.decisionSummary?.headline || 'Sincronizando...',
+    job.operationMessage ||
+      job.progressMessage ||
+      job.decisionSummary?.headline ||
+      'Sincronizando...',
   );
 
   return buildProgressViewModel({
@@ -353,7 +377,9 @@ export const buildGuiExportProgressViewModel = (progress: Record<string, any>): 
     counts: { failed: progress.errorCount ?? 0 },
   });
 
-export const buildActivityProgressViewModel = (progress: Record<string, any>): ProgressViewModel => {
+export const buildActivityProgressViewModel = (
+  progress: Record<string, any>,
+): ProgressViewModel => {
   const candidateTotal = Math.max(0, finiteNumber(progress.candidateTotal, 0));
   const resolved = Math.max(0, finiteNumber(progress.resolvedCount, 0));
   const scanned = Math.max(0, finiteNumber(progress.scannedCardCount, 0));
@@ -365,7 +391,8 @@ export const buildActivityProgressViewModel = (progress: Record<string, any>): P
   let label = `${scanned} itens lidos`;
   if (status === 'completed') label = 'Todas as datas encontradas';
   else if (rawStatus === 'completed' && pending > 0) label = `${pending} pendente(s)`;
-  else if (status === 'failed') label = rawStatus === 'completed' && pending > 0 ? `${pending} pendente(s)` : 'Falhou';
+  else if (status === 'failed')
+    label = rawStatus === 'completed' && pending > 0 ? `${pending} pendente(s)` : 'Falhou';
   else if (loaded > scanned) label = `${scanned} itens lidos · ${loaded} carregados`;
   const total = candidateTotal > 0 ? candidateTotal : maxCards;
   const current = candidateTotal > 0 ? Math.min(resolved, candidateTotal) : scanned;
@@ -378,7 +405,8 @@ export const buildActivityProgressViewModel = (progress: Record<string, any>): P
     label,
     current,
     total,
-    countLabel: candidateTotal > 0 ? `${Math.min(resolved, candidateTotal)} de ${candidateTotal}` : '',
+    countLabel:
+      candidateTotal > 0 ? `${Math.min(resolved, candidateTotal)} de ${candidateTotal}` : '',
   });
 };
 
@@ -402,7 +430,8 @@ export const buildFixVaultProgressViewModel = ({
     countLabel: `${current}/${total}`,
   });
 
-const ordinalFor = (view: ProgressViewModel): number => Math.max(view.displayCurrent, view.current, view.barCurrent);
+const ordinalFor = (view: ProgressViewModel): number =>
+  Math.max(view.displayCurrent, view.current, view.barCurrent);
 
 export const mergeProgressViewModel = (
   previous: ProgressViewModel | null | undefined,
@@ -445,7 +474,10 @@ const shouldRunProgressCreep = (view: ProgressViewModel): boolean => {
 
 export const progressCreepCeiling = (view: ProgressViewModel): number => {
   if (!shouldRunProgressCreep(view)) return view.percent;
-  const next = Math.min(100, ((Math.min(view.current + 1, view.total) / safeDeterminateTotal(view.total)) * 100));
+  const next = Math.min(
+    100,
+    (Math.min(view.current + 1, view.total) / safeDeterminateTotal(view.total)) * 100,
+  );
   return view.percent + (next - view.percent) * 0.85;
 };
 

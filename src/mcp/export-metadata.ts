@@ -1,20 +1,17 @@
-import { basename, resolve } from 'node:path';
 import { homedir } from 'node:os';
+import { basename, resolve } from 'node:path';
 import { buildMarkdownChatNote } from '../core/markdown-note.js';
-import {
-  groupMetadataEvidence,
-  type GroupedMetadataEvidence,
-} from '../core/metadata-evidence.js';
 import {
   metadataCandidateHasCompleteResolvedDates,
   resolveMetadataDatesForCandidate,
 } from '../core/metadata-date-resolution.js';
+import { type GroupedMetadataEvidence, groupMetadataEvidence } from '../core/metadata-evidence.js';
 import type { IsoDateTime, MetadataEvidence } from '../core/types.js';
 import { buildCanonicalFrontmatter } from '../core/yaml.js';
 import {
+  type LoadedTakeoutSource,
   loadTakeoutSource,
   matchTakeoutSource,
-  type LoadedTakeoutSource,
   type TakeoutCandidate,
 } from '../takeout/takeout-adapter.js';
 import type { BrowserExportPayload, McpExportValidation } from './export-workflows.js';
@@ -148,7 +145,8 @@ const replaceMarkdownContent = (
   return next;
 };
 
-const sourcePath = (value: string): string => resolve(String(value).replace(/^~(?=\/|$)/, homedir()));
+const sourcePath = (value: string): string =>
+  resolve(String(value).replace(/^~(?=\/|$)/, homedir()));
 
 export const createExportDateImportContext = ({
   takeoutPath = '',
@@ -186,9 +184,7 @@ export const createExportDateImportContext = ({
   };
 };
 
-export const summarizeExportDateImportContext = (
-  context: ExportDateImportContext,
-) => {
+export const summarizeExportDateImportContext = (context: ExportDateImportContext) => {
   if (!context.enabled) {
     return {
       enabled: false,
@@ -275,7 +271,8 @@ export const buildExportDateImportActivityScanCandidates = ({
     const parsed = noteAndCandidateForPayload(entry);
     if (!parsed) continue;
     const { note, candidate } = parsed;
-    const matched = groupedByKey?.get(entry.key) || groupedByKey?.get(candidate.chatId.toLowerCase());
+    const matched =
+      groupedByKey?.get(entry.key) || groupedByKey?.get(candidate.chatId.toLowerCase());
     const complete = metadataCandidateHasCompleteResolvedDates(
       {
         chatId: candidate.chatId,

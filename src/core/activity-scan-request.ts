@@ -19,7 +19,9 @@ export type MetadataActivityScanRequest = {
   fetchImpl?: typeof fetch;
 };
 
-export const metadataActivityScanTimeoutMs = (value = process.env.GEMINI_MD_EXPORT_ACTIVITY_SCAN_TIMEOUT_MS) => {
+export const metadataActivityScanTimeoutMs = (
+  value = process.env.GEMINI_MD_EXPORT_ACTIVITY_SCAN_TIMEOUT_MS,
+) => {
   const configured = Number(value || 90000);
   return Number.isFinite(configured) && configured > 0 ? Math.max(1000, configured) : 90000;
 };
@@ -57,7 +59,9 @@ export const requestMetadataActivityScan = async ({
     const text = await response.text();
     const payload = text ? JSON.parse(text) : {};
     if (!response.ok || payload.ok === false) {
-      const err = new Error(payload.nextAction || payload.error || `Bridge retornou HTTP ${response.status}`);
+      const err = new Error(
+        payload.nextAction || payload.error || `Bridge retornou HTTP ${response.status}`,
+      );
       Object.assign(err, { code: payload.code || null });
       throw err;
     }

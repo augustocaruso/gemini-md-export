@@ -85,9 +85,7 @@ export const GEMINI_LR26_NATIVE_STYLE_PROFILE: GeminiNativeStyleProfile = {
   },
 };
 
-const cloneNativeStyleProfile = (
-  profile: GeminiNativeStyleProfile,
-): GeminiNativeStyleProfile => ({
+const cloneNativeStyleProfile = (profile: GeminiNativeStyleProfile): GeminiNativeStyleProfile => ({
   name: profile.name,
   version: profile.version,
   source: profile.source,

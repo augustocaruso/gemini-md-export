@@ -1,16 +1,16 @@
 import { basename } from 'node:path';
+import type { MetadataEvidence } from '../core/types.js';
 import {
   buildExportDateImportActivityScanCandidates,
   buildExportDateImportBatchEvidence,
   createExportDateImportContext,
-  enrichExportPayloadWithMetadataDates,
-  mergeExportDateImportBatchEvidenceWithMatches,
-  summarizeExportDateImportContext,
   type ExportDateImportBatchEntry,
   type ExportDateImportBatchEvidence,
   type ExportDateImportContext,
+  enrichExportPayloadWithMetadataDates,
+  mergeExportDateImportBatchEvidenceWithMatches,
+  summarizeExportDateImportContext,
 } from './export-metadata.js';
-import type { MetadataEvidence } from '../core/types.js';
 
 type RuntimeArgs = Record<string, any>;
 type ActivityScanner = (args: RuntimeArgs) => Promise<RuntimeArgs>;
@@ -22,11 +22,7 @@ type SaveCollectedConversationPayload = (
 export const DEFAULT_EXPORT_DATE_IMPORT_ACTIVITY_WAIT_MS = 45_000;
 export const DEFAULT_EXPORT_DATE_IMPORT_ACTIVITY_PRE_LAUNCH_WAIT_MS = 8_000;
 
-const normalizePositiveTimeoutMs = (
-  value: unknown,
-  fallback: number,
-  max = 120_000,
-): number => {
+const normalizePositiveTimeoutMs = (value: unknown, fallback: number, max = 120_000): number => {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
   return Math.min(Math.floor(parsed), max);
@@ -43,6 +39,39 @@ const dateImportActivityPreLaunchWaitMs = (args: RuntimeArgs = {}): number =>
     args.activityPreLaunchWaitMs ?? args.myActivityPreLaunchWaitMs ?? args.preLaunchWaitMs,
     DEFAULT_EXPORT_DATE_IMPORT_ACTIVITY_PRE_LAUNCH_WAIT_MS,
   );
+
+const operationCancelledError = (signal: AbortSignal): Error => {
+  const reason = signal.reason;
+  const message =
+    typeof reason === 'string'
+      ? reason
+      : typeof reason?.message === 'string'
+        ? reason.message
+        : 'operation_cancelled';
+  const error = new Error(message);
+  (error as Error & { code?: string }).code = 'operation_cancelled';
+  return error;
+};
+
+const throwIfAborted = (signal?: AbortSignal | null) => {
+  if (signal?.aborted) throw operationCancelledError(signal);
+};
+
+const abortable = async <T>(promise: Promise<T>, signal?: AbortSignal | null): Promise<T> => {
+  throwIfAborted(signal);
+  if (!signal) return promise;
+  let onAbort: (() => void) | null = null;
+  const abortPromise = new Promise<never>((_, reject) => {
+    onAbort = () => reject(operationCancelledError(signal));
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  promise.catch(() => {});
+  try {
+    return await Promise.race([promise, abortPromise]);
+  } finally {
+    if (onAbort) signal.removeEventListener('abort', onAbort);
+  }
+};
 
 export const dateImportToolProperties = () => ({
   takeout: {
@@ -201,8 +230,16 @@ export const saveCollectedConversationPayloadRuntime = async (
   return {
     client: deps.summarizeClient(collected.activeClient),
     conversation: collected.result.conversation || collected.conversation,
-    chatId: integrity.snapshot.chatId || collected.result.payload?.chatId || collected.conversation.chatId || null,
-    title: integrity.snapshot.title || collected.result.payload?.title || collected.conversation.title || null,
+    chatId:
+      integrity.snapshot.chatId ||
+      collected.result.payload?.chatId ||
+      collected.conversation.chatId ||
+      null,
+    title:
+      integrity.snapshot.title ||
+      collected.result.payload?.title ||
+      collected.conversation.title ||
+      null,
     turns: integrity.assistantTurnCount,
     hydration: collected.result.payload?.hydration || null,
     returnedToOriginal: collected.result.returnedToOriginal ?? null,
@@ -269,18 +306,25 @@ export const buildExportDateImportBatchEvidenceWithActivityFallback = async (
   });
   if (candidates.length === 0) return batch;
 
-  const activity = await options.scanActivity({
-    ...args,
-    candidates,
-    resume: args._exportDateImportActivityCheckpoint || null,
-    openIfMissing: args.openMyActivityIfMissing !== false && args.openIfMissing !== false,
-    openDetails: false,
-    claimLabel: args.claimLabel || options.claimLabel,
-    visualGroupTabId:
-      args.visualGroupTabId ?? args.groupWithTabId ?? args._exportDateImportVisualGroupTabId,
-    waitMs: dateImportActivityWaitMs(args),
-    preLaunchWaitMs: dateImportActivityPreLaunchWaitMs(args),
-  });
+  throwIfAborted(args.abortSignal);
+  const activityWaitMs = dateImportActivityWaitMs(args);
+  const activity = await abortable(
+    options.scanActivity({
+      ...args,
+      candidates,
+      resume: args._exportDateImportActivityCheckpoint || null,
+      openIfMissing: args.openMyActivityIfMissing !== false && args.openIfMissing !== false,
+      openDetails: false,
+      claimLabel: args.claimLabel || options.claimLabel,
+      visualGroupTabId:
+        args.visualGroupTabId ?? args.groupWithTabId ?? args._exportDateImportVisualGroupTabId,
+      waitMs: activityWaitMs,
+      activityCommandTimeoutMs: args.activityCommandTimeoutMs ?? activityWaitMs + 15_000,
+      preLaunchWaitMs: dateImportActivityPreLaunchWaitMs(args),
+    }),
+    args.abortSignal,
+  );
+  throwIfAborted(args.abortSignal);
   const matches = Array.isArray(activity.matches) ? activity.matches : [];
   args._exportDateImportActivityCheckpoint =
     activity.checkpoint || args._exportDateImportActivityCheckpoint || null;

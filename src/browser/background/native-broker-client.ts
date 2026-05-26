@@ -6,6 +6,8 @@ import {
   type RawBrowserTab,
 } from './browser-session-broker.js';
 import { inspectTabWithDebugger } from './chrome-debugger-controller.js';
+import { looksLikeManagedClaimGroupTitle } from './tab-claim-managed-group.js';
+import { trackedTabIdsForClaimRelease } from './tab-claim-release.js';
 
 type ChromeRuntimePort = Readonly<{
   onMessage: { addListener(listener: (message: unknown) => void): void };
@@ -30,8 +32,22 @@ type ChromeNativeBrokerApi = Readonly<{
       createProperties: { tabIds: number[]; groupId?: number },
       callback?: (groupId?: number) => void,
     ): void;
+    ungroup?(tabIds: number | number[], callback?: () => void): void;
+    update?(
+      tabId: number,
+      updateProperties: { active?: boolean },
+      callback?: (tab?: RawBrowserTab) => void,
+    ): void;
+  };
+  windows?: {
+    update?(
+      windowId: number,
+      updateProperties: { focused?: boolean },
+      callback?: (window?: unknown) => void,
+    ): void;
   };
   tabGroups?: {
+    get?(groupId: number, callback?: (group?: { id?: number; title?: string }) => void): void;
     update?(
       groupId: number,
       updateProperties: { title?: string; color?: string },
@@ -52,13 +68,34 @@ type ChromeNativeBrokerApi = Readonly<{
 
 export type NativeBrowserBrokerCommand = Readonly<{
   id?: string;
-  command: 'tabs.list' | 'tabs.status' | 'tabs.claim' | 'tabs.release' | 'tabs.reload';
+  command:
+    | 'tabs.list'
+    | 'tabs.status'
+    | 'tabs.claim'
+    | 'tabs.release'
+    | 'tabs.activate'
+    | 'tabs.reload'
+    | 'extension.status'
+    | 'extension.selfHealContentScripts'
+    | 'extension.reloadSelf';
   payload?: {
     tabId?: number | null;
     claimId?: string | null;
     label?: string | null;
     color?: string | null;
+    reloadAll?: boolean | null;
+    reason?: string | null;
+    force?: boolean | null;
+    focusWindow?: boolean | null;
+    timeoutMs?: number | null;
+    tabIds?: readonly unknown[] | null;
   };
+}>;
+
+type NativeBrowserBrokerRuntimeActions = Readonly<{
+  extensionStatus?: () => unknown;
+  selfHealContentScripts?: (payload: NativeBrowserBrokerCommand['payload']) => Promise<unknown>;
+  reloadSelf?: (payload: NativeBrowserBrokerCommand['payload']) => Promise<unknown>;
 }>;
 
 const managedTabQueryUrls = [
@@ -134,6 +171,89 @@ const chromeUpdateTabGroup = (
     });
   });
 
+const chromeGetTabGroup = (
+  chromeApi: ChromeNativeBrokerApi,
+  groupId: number,
+): Promise<{ id?: number; title?: string } | null> =>
+  new Promise((resolve) => {
+    if (!chromeApi.tabGroups?.get || !Number.isInteger(groupId) || groupId < 0) {
+      resolve(null);
+      return;
+    }
+    chromeApi.tabGroups.get(groupId, (group) => {
+      const message = chromeApi.runtime?.lastError?.message;
+      if (message || !group) {
+        resolve(null);
+        return;
+      }
+      resolve(group);
+    });
+  });
+
+const chromeUngroupTabs = (
+  chromeApi: ChromeNativeBrokerApi,
+  tabIds: readonly number[],
+): Promise<{ ok: true } | { ok: false; error: string }> =>
+  new Promise((resolve) => {
+    if (!chromeApi.tabs?.ungroup) {
+      resolve({ ok: false, error: 'chrome_tabs_ungroup_unavailable' });
+      return;
+    }
+    const clean = Array.from(new Set(tabIds)).filter(
+      (tabId) => Number.isInteger(tabId) && tabId > 0,
+    );
+    if (clean.length === 0) {
+      resolve({ ok: true });
+      return;
+    }
+    chromeApi.tabs.ungroup(clean, () => {
+      const message = chromeApi.runtime?.lastError?.message;
+      if (message) {
+        resolve({ ok: false, error: message });
+        return;
+      }
+      resolve({ ok: true });
+    });
+  });
+
+const chromeUpdateTabActive = (
+  chromeApi: ChromeNativeBrokerApi,
+  tabId: number,
+): Promise<{ ok: true; tab: RawBrowserTab | null } | { ok: false; error: string }> =>
+  new Promise((resolve) => {
+    if (!chromeApi.tabs?.update) {
+      resolve({ ok: false, error: 'chrome_tabs_update_unavailable' });
+      return;
+    }
+    chromeApi.tabs.update(tabId, { active: true }, (tab) => {
+      const message = chromeApi.runtime?.lastError?.message;
+      if (message) {
+        resolve({ ok: false, error: message });
+        return;
+      }
+      resolve({ ok: true, tab: tab || null });
+    });
+  });
+
+const chromeFocusWindow = (
+  chromeApi: ChromeNativeBrokerApi,
+  windowId: number,
+): Promise<{ ok: true } | { ok: false; error: string }> =>
+  new Promise((resolve) => {
+    if (!chromeApi.windows?.update || !Number.isInteger(windowId) || windowId <= 0) {
+      resolve({ ok: true });
+      return;
+    }
+    chromeApi.windows.update(windowId, { focused: true }, () => {
+      const message = chromeApi.runtime?.lastError?.message;
+      if (message) {
+        resolve({ ok: false, error: message });
+        return;
+      }
+      resolve({ ok: true });
+    });
+  });
+
 const nonEmptyIntegerArray = (
   values: readonly number[],
   fallback: number,
@@ -173,10 +293,122 @@ const applyNativeClaimVisual = async (
   };
 };
 
+const releaseNativeClaimVisual = async (
+  chromeApi: ChromeNativeBrokerApi,
+  tabs: readonly RawBrowserTab[],
+  payload: NativeBrowserBrokerCommand['payload'] = {},
+) => {
+  const primaryTabId = Number(payload?.tabId || 0);
+  const explicitTabIds = trackedTabIdsForClaimRelease(primaryTabId, {
+    tabIds: payload?.tabIds,
+  });
+  const candidateGroupIds = Array.from(
+    new Set(
+      tabs
+        .filter((tab) =>
+          explicitTabIds.length > 0 ? explicitTabIds.includes(Number(tab.id)) : true,
+        )
+        .map((tab) => Number((tab as { groupId?: unknown }).groupId))
+        .filter((groupId) => Number.isInteger(groupId) && groupId >= 0),
+    ),
+  );
+
+  const managedGroupIds: number[] = [];
+  for (const groupId of candidateGroupIds) {
+    const group = await chromeGetTabGroup(chromeApi, groupId);
+    if (looksLikeManagedClaimGroupTitle(group?.title)) managedGroupIds.push(groupId);
+  }
+
+  const tabIdsToUngroup = tabs
+    .filter((tab) => managedGroupIds.includes(Number((tab as { groupId?: unknown }).groupId)))
+    .map((tab) => Number(tab.id))
+    .filter((tabId) => Number.isInteger(tabId) && tabId > 0);
+
+  const ungrouped = await chromeUngroupTabs(chromeApi, tabIdsToUngroup);
+  return {
+    ok: ungrouped.ok,
+    released: ungrouped.ok,
+    claimId: payload?.claimId || null,
+    ungrouped: ungrouped.ok ? tabIdsToUngroup.length : 0,
+    ungroupedTabIds: ungrouped.ok ? Array.from(new Set(tabIdsToUngroup)) : [],
+    groupIds: managedGroupIds,
+    error: ungrouped.ok ? null : ungrouped.error,
+    code: ungrouped.ok ? null : 'native_tab_claim_release_failed',
+  };
+};
+
+const activateNativeBrowserTab = async (
+  chromeApi: ChromeNativeBrokerApi,
+  tabs: readonly RawBrowserTab[],
+  payload: NativeBrowserBrokerCommand['payload'] = {},
+) => {
+  const tabId = Number(payload?.tabId || 0);
+  if (!Number.isInteger(tabId) || tabId <= 0) {
+    return { ok: false as const, code: 'tab_id_required', error: 'tabId required' };
+  }
+  const tab = tabs.find((item) => Number(item.id) === tabId) || null;
+  if (!tab) {
+    return { ok: false as const, code: 'tab_not_found', error: 'Tab not found', tabId };
+  }
+
+  const activated = await chromeUpdateTabActive(chromeApi, tabId);
+  if (!activated.ok) {
+    return {
+      ok: false as const,
+      code: 'native_tab_activation_failed',
+      error: activated.error,
+      tabId,
+    };
+  }
+  const shouldFocusWindow = payload?.focusWindow === true;
+  const focus = shouldFocusWindow ? await chromeFocusWindow(chromeApi, Number(tab.windowId)) : null;
+  return {
+    ok: true as const,
+    activated: true,
+    tabId,
+    windowId: Number(tab.windowId) || null,
+    isActiveTab: true,
+    focusWindow: shouldFocusWindow,
+    focusOk: focus ? focus.ok : null,
+    focusError: focus && !focus.ok ? focus.error : null,
+    tab: activated.tab || tab,
+  };
+};
+
 export const handleNativeBrowserBrokerCommand = async (
   request: NativeBrowserBrokerCommand,
   chromeApi: ChromeNativeBrokerApi = globalChrome() || {},
+  runtimeActions: NativeBrowserBrokerRuntimeActions = {},
 ) => {
+  if (request.command === 'extension.status') {
+    return (
+      runtimeActions.extensionStatus?.() ?? {
+        ok: false as const,
+        code: 'extension_status_unavailable',
+      }
+    );
+  }
+
+  if (request.command === 'extension.selfHealContentScripts') {
+    if (!runtimeActions.selfHealContentScripts) {
+      return {
+        ok: false as const,
+        code: 'extension_self_heal_unavailable',
+      };
+    }
+    return runtimeActions.selfHealContentScripts(request.payload || {});
+  }
+
+  if (request.command === 'extension.reloadSelf') {
+    if (!runtimeActions.reloadSelf) {
+      return {
+        ok: false as const,
+        code: 'extension_reload_unavailable',
+      };
+    }
+    return runtimeActions.reloadSelf(request.payload || {});
+  }
+
   const tabs = await queryManagedTabs(chromeApi);
   const inspectTab = inspectWith(chromeApi);
 
@@ -186,7 +418,7 @@ export const handleNativeBrowserBrokerCommand = async (
 
   if (request.command === 'tabs.claim') {
     const claim = await claimDebuggableGeminiTab(tabs, {
-      requestedTabId: request.payload?.tabId || null,
+      requestedTabId: Number(request.payload?.tabId || 0) || null,
       claimId: request.payload?.claimId || null,
       inspectTab,
     });
@@ -202,19 +434,54 @@ export const handleNativeBrowserBrokerCommand = async (
     };
   }
 
+  if (request.command === 'tabs.release') {
+    return releaseNativeClaimVisual(chromeApi, tabs, request.payload || {});
+  }
+
+  if (request.command === 'tabs.activate') {
+    return activateNativeBrowserTab(chromeApi, tabs, request.payload || {});
+  }
+
   if (request.command === 'tabs.reload') {
     const listed = await getDebuggableGeminiTabs(tabs, { inspectTab });
     const requestedTabId = Number(request.payload?.tabId || 0);
-    const targets = requestedTabId
-      ? listed.tabs.filter((tab) => tab.tabId === requestedTabId)
-      : listed.tabs;
+    const explicitTabIds = trackedTabIdsForClaimRelease(requestedTabId, {
+      tabIds: request.payload?.tabIds,
+    });
+    const reloadAll = request.payload?.reloadAll === true;
+    const explicitTargets =
+      explicitTabIds.length > 0
+        ? tabs
+            .filter((tab) => explicitTabIds.includes(Number(tab.id)))
+            .map((tab) => ({ ...tab, tabId: Number(tab.id) }))
+        : [];
+    const targets =
+      explicitTabIds.length > 0
+        ? explicitTargets
+        : reloadAll
+          ? listed.tabs
+          : listed.tabs.filter((tab) => tab.active === true);
 
     if (targets.length === 0) {
       return {
         ok: false as const,
-        code: 'no_existing_gemini_tabs',
+        code:
+          explicitTabIds.length > 0
+            ? 'no_requested_tabs'
+            : listed.tabs.length === 0
+              ? 'no_existing_gemini_tabs'
+              : 'no_active_gemini_tab',
         reloaded: 0,
         tabs: listed.tabs,
+        classified: listed.classified,
+      };
+    }
+    if (explicitTabIds.length === 0 && !requestedTabId && !reloadAll && targets.length > 1) {
+      return {
+        ok: false as const,
+        code: 'ambiguous_active_gemini_tabs',
+        reloaded: 0,
+        tabs: targets,
         classified: listed.classified,
       };
     }
@@ -256,7 +523,11 @@ const isBrowserBrokerCommand = (
   command === 'tabs.status' ||
   command === 'tabs.claim' ||
   command === 'tabs.release' ||
-  command === 'tabs.reload';
+  command === 'tabs.activate' ||
+  command === 'tabs.reload' ||
+  command === 'extension.status' ||
+  command === 'extension.selfHealContentScripts' ||
+  command === 'extension.reloadSelf';
 
 const unsupportedCommandResponse = (
   request: Pick<NativeBrokerRequest, 'id'>,
@@ -275,22 +546,34 @@ export const createNativeBrokerPort = ({
   chromeApi = globalChrome() || {},
   hostName,
   onStatus,
+  runtimeActions = {},
 }: {
   chromeApi?: ChromeNativeBrokerApi;
   hostName: string;
   onStatus?: (status: unknown) => void;
+  runtimeActions?: NativeBrowserBrokerRuntimeActions;
 }) => {
   let port: ChromeRuntimePort | null = null;
+  let readyPromise: Promise<unknown> | null = null;
+  let settleReady: ((status: unknown) => void) | null = null;
 
   const connect = () => {
     if (!chromeApi.runtime?.connectNative) {
       throw new Error('native_messaging_unavailable');
     }
 
+    const helloId = `extension-${Date.now()}`;
+    readyPromise = new Promise((resolve) => {
+      settleReady = resolve;
+    });
     port = chromeApi.runtime.connectNative(hostName);
     port.onMessage.addListener((message: unknown) => {
       if (isBrokerResponse(message)) {
         onStatus?.({ ok: message.ok, response: message });
+        if (message.id === helloId) {
+          settleReady?.({ ok: message.ok, response: message });
+          settleReady = null;
+        }
         return;
       }
 
@@ -307,6 +590,7 @@ export const createNativeBrokerPort = ({
           payload: request.payload as NativeBrowserBrokerCommand['payload'],
         },
         chromeApi,
+        runtimeActions,
       ).then(
         (result) => {
           const response: NativeBrokerResponse = { id: request.id, ok: true, result };
@@ -334,11 +618,18 @@ export const createNativeBrokerPort = ({
         code: 'native_broker_disconnected',
         error: chromeApi.runtime?.lastError?.message || null,
       });
+      settleReady?.({
+        ok: false,
+        code: 'native_broker_disconnected',
+        error: chromeApi.runtime?.lastError?.message || null,
+      });
+      settleReady = null;
+      readyPromise = null;
       port = null;
     });
 
     port.postMessage({
-      id: `extension-${Date.now()}`,
+      id: helloId,
       protocolVersion: 1,
       command: 'extension.hello',
       payload: { source: 'extension-background' },
@@ -349,8 +640,26 @@ export const createNativeBrokerPort = ({
 
   return {
     ensureConnected: () => port || connect(),
+    ensureReady: ({ timeoutMs = 2500 } = {}) => {
+      const connectedPort = port || connect();
+      void connectedPort;
+      const timeout = new Promise((resolve) => {
+        setTimeout(
+          () =>
+            resolve({
+              ok: false,
+              code: 'native_broker_ready_timeout',
+              timeoutMs,
+            }),
+          timeoutMs,
+        );
+      });
+      return Promise.race([readyPromise || Promise.resolve({ ok: true }), timeout]);
+    },
     disconnect: () => {
       port?.disconnect?.();
+      settleReady = null;
+      readyPromise = null;
       port = null;
     },
   };

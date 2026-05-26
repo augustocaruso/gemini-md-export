@@ -290,11 +290,13 @@ export const resolveMetadataDatesForCandidate = ({
     const explicitEdgeDates = Array.from(new Set(explicitEdges.map((item) => item.date)));
     const unknownDates = Array.from(new Set(sortDates(unknownEvidence).map((item) => item.date)));
     if (explicitEdgeDates.length === 1) {
-      singleTurnSharedEvidence = explicitEdges.find((item) => item.date === explicitEdgeDates[0]) || null;
+      singleTurnSharedEvidence =
+        explicitEdges.find((item) => item.date === explicitEdgeDates[0]) || null;
       if (!dateCreated) dateCreated = explicitEdgeDates[0];
       if (!dateLastMessage) dateLastMessage = explicitEdgeDates[0];
     } else if (unknownDates.length === 1 && explicitEdgeDates.length === 0) {
-      singleTurnSharedEvidence = unknownEvidence.find((item) => item.date === unknownDates[0]) || null;
+      singleTurnSharedEvidence =
+        unknownEvidence.find((item) => item.date === unknownDates[0]) || null;
       if (!dateCreated) dateCreated = unknownDates[0];
       if (!dateLastMessage) dateLastMessage = unknownDates[0];
       unknownEvidencePolicy = 'used_for_single_turn';
@@ -367,14 +369,17 @@ export const metadataCandidateHasCompleteResolvedDates = (
     | undefined,
 ): boolean => {
   const matchHasEvidence = Boolean((match?.evidence || []).length);
-  return resolveMetadataDatesForCandidate({
-    candidate,
-    evidence: match?.evidence || [],
-    existingDates: {
-      dateCreated: candidate.dateCreated || (!matchHasEvidence ? match?.dateCreated : null),
-      dateLastMessage: candidate.dateLastMessage || (!matchHasEvidence ? match?.dateLastMessage : null),
-    },
-  }).status === 'matched';
+  return (
+    resolveMetadataDatesForCandidate({
+      candidate,
+      evidence: match?.evidence || [],
+      existingDates: {
+        dateCreated: candidate.dateCreated || (!matchHasEvidence ? match?.dateCreated : null),
+        dateLastMessage:
+          candidate.dateLastMessage || (!matchHasEvidence ? match?.dateLastMessage : null),
+      },
+    }).status === 'matched'
+  );
 };
 
 export const filterCandidatesMissingResolvedMetadataDates = <

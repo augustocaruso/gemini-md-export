@@ -7,7 +7,15 @@ import {
 
 type NativeBrowserBrokerCommand = Extract<
   NativeBrokerCommand,
-  'tabs.list' | 'tabs.status' | 'tabs.claim' | 'tabs.release' | 'tabs.reload'
+  | 'tabs.list'
+  | 'tabs.status'
+  | 'tabs.claim'
+  | 'tabs.release'
+  | 'tabs.activate'
+  | 'tabs.reload'
+  | 'extension.status'
+  | 'extension.selfHealContentScripts'
+  | 'extension.reloadSelf'
 >;
 
 type NativeBrowserBrokerOptions = Readonly<{
@@ -18,6 +26,17 @@ type NativeBrowserBrokerClientOptions = Readonly<{
   path?: string;
   request?: (request: NativeBrokerRequest) => Promise<unknown>;
 }>;
+
+const DEFAULT_EXTENSION_SELF_HEAL_TIMEOUT_MS = 30_000;
+
+const numberPayload = (payload: unknown, key: string, fallback: number): number => {
+  if (!payload || typeof payload !== 'object') return fallback;
+  const value = Number((payload as Record<string, unknown>)[key]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+};
+
+const nativeRequestTimeoutMs = (request: NativeBrokerRequest): number =>
+  numberPayload(request.payload, 'timeoutMs', 5000);
 
 export const shouldUseNativeBrowserBroker = ({
   disabled = process.env.GEMINI_MD_EXPORT_NATIVE_BROKER === 'disabled',
@@ -67,7 +86,8 @@ export const canFallbackFromNativeBrowserBrokerFailure = (
 
 export const createNativeBrowserBrokerClient = ({
   path = process.env.GEMINI_MD_EXPORT_NATIVE_BROKER_IPC || defaultBrokerIpcPath(),
-  request = (nativeRequest: NativeBrokerRequest) => requestBrokerIpc(path, nativeRequest),
+  request = (nativeRequest: NativeBrokerRequest) =>
+    requestBrokerIpc(path, nativeRequest, { timeoutMs: nativeRequestTimeoutMs(nativeRequest) }),
 }: NativeBrowserBrokerClientOptions = {}) => {
   const call = async (
     command: NativeBrowserBrokerCommand,
@@ -93,7 +113,24 @@ export const createNativeBrowserBrokerClient = ({
       call('tabs.claim', payload, options),
     release: (payload: Record<string, unknown> = {}, options: NativeBrowserBrokerOptions = {}) =>
       call('tabs.release', payload, options),
+    activate: (payload: Record<string, unknown> = {}, options: NativeBrowserBrokerOptions = {}) =>
+      call('tabs.activate', payload, options),
     reload: (payload: Record<string, unknown> = {}, options: NativeBrowserBrokerOptions = {}) =>
       call('tabs.reload', payload, options),
+    extensionStatus: (options: NativeBrowserBrokerOptions = {}) =>
+      call('extension.status', {}, options),
+    selfHealContentScripts: (
+      payload: Record<string, unknown> = {},
+      options: NativeBrowserBrokerOptions = {},
+    ) =>
+      call(
+        'extension.selfHealContentScripts',
+        { timeoutMs: DEFAULT_EXTENSION_SELF_HEAL_TIMEOUT_MS, ...payload },
+        options,
+      ),
+    reloadExtensionSelf: (
+      payload: Record<string, unknown> = {},
+      options: NativeBrowserBrokerOptions = {},
+    ) => call('extension.reloadSelf', payload, options),
   };
 };

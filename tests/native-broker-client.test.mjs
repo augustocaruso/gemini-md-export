@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  createNativeBrokerPort,
   handleNativeBrowserBrokerCommand,
 } from '../build/ts/browser/background/native-broker-client.js';
 
@@ -42,14 +43,16 @@ const chromeApiForTabs = ({ tabs, hrefByTabId, reloadError = null }) => {
   return { api, reloaded };
 };
 
-test('native broker reloads existing Gemini tabs without content-script clients', async () => {
+test('native broker reloads the active Gemini tab without content-script clients', async () => {
   const { api, reloaded } = chromeApiForTabs({
     tabs: [
       { id: 42, windowId: 7, active: false, url: 'https://gemini.google.com/app' },
+      { id: 43, windowId: 7, active: true, url: 'https://gemini.google.com/app/abc123456789' },
       { id: 99, windowId: 7, active: true, url: 'https://myactivity.google.com/product/gemini' },
     ],
     hrefByTabId: {
       42: 'https://gemini.google.com/app',
+      43: 'https://gemini.google.com/app/abc123456789',
       99: 'https://myactivity.google.com/product/gemini',
     },
   });
@@ -61,8 +64,8 @@ test('native broker reloads existing Gemini tabs without content-script clients'
 
   assert.equal(result.ok, true);
   assert.equal(result.reloaded, 1);
-  assert.deepEqual(result.reloadedTabIds, [42]);
-  assert.deepEqual(reloaded, [42]);
+  assert.deepEqual(result.reloadedTabIds, [43]);
+  assert.deepEqual(reloaded, [43]);
 });
 
 test('native broker reports no_existing_gemini_tabs without opening a tab', async () => {
@@ -80,6 +83,212 @@ test('native broker reports no_existing_gemini_tabs without opening a tab', asyn
   assert.equal(result.code, 'no_existing_gemini_tabs');
   assert.equal(result.reloaded, 0);
   assert.deepEqual(reloaded, []);
+});
+
+test('native broker refuses broad reload when no Gemini tab is active', async () => {
+  const { api, reloaded } = chromeApiForTabs({
+    tabs: [
+      { id: 42, windowId: 7, active: false, url: 'https://gemini.google.com/app' },
+      { id: 43, windowId: 7, active: false, url: 'https://gemini.google.com/app/abc123456789' },
+      { id: 99, windowId: 7, active: true, url: 'https://myactivity.google.com/product/gemini' },
+    ],
+    hrefByTabId: {
+      42: 'https://gemini.google.com/app',
+      43: 'https://gemini.google.com/app/abc123456789',
+      99: 'https://myactivity.google.com/product/gemini',
+    },
+  });
+
+  const result = await handleNativeBrowserBrokerCommand(
+    { command: 'tabs.reload', payload: {} },
+    api,
+  );
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'no_active_gemini_tab');
+  assert.equal(result.reloaded, 0);
+  assert.deepEqual(reloaded, []);
+});
+
+test('native broker reloads an explicit tab target even when it is inactive', async () => {
+  const { api, reloaded } = chromeApiForTabs({
+    tabs: [
+      { id: 42, windowId: 7, active: false, url: 'https://gemini.google.com/app' },
+      { id: 99, windowId: 7, active: true, url: 'https://myactivity.google.com/product/gemini' },
+    ],
+    hrefByTabId: {
+      42: 'https://gemini.google.com/app',
+      99: 'https://myactivity.google.com/product/gemini',
+    },
+  });
+
+  const result = await handleNativeBrowserBrokerCommand(
+    { command: 'tabs.reload', payload: { tabId: 42 } },
+    api,
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.reloaded, 1);
+  assert.deepEqual(result.reloadedTabIds, [42]);
+  assert.deepEqual(reloaded, [42]);
+});
+
+test('native broker reloads explicit Gemini and My Activity tab ids together', async () => {
+  const { api, reloaded } = chromeApiForTabs({
+    tabs: [
+      { id: 42, windowId: 7, active: false, url: 'https://gemini.google.com/app/abc123456789' },
+      { id: 99, windowId: 7, active: false, url: 'https://myactivity.google.com/product/gemini' },
+      { id: 100, windowId: 7, active: true, url: 'https://gemini.google.com/app/def123456789' },
+    ],
+    hrefByTabId: {
+      42: 'https://gemini.google.com/app/abc123456789',
+      99: 'https://myactivity.google.com/product/gemini',
+      100: 'https://gemini.google.com/app/def123456789',
+    },
+  });
+
+  const result = await handleNativeBrowserBrokerCommand(
+    { command: 'tabs.reload', payload: { tabIds: [42, 99] } },
+    api,
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.requested, 2);
+  assert.equal(result.reloaded, 2);
+  assert.deepEqual(result.reloadedTabIds, [42, 99]);
+  assert.deepEqual(reloaded, [42, 99]);
+});
+
+test('native broker activates an existing Gemini tab without opening another tab', async () => {
+  const updated = [];
+  const focused = [];
+  const { api } = chromeApiForTabs({
+    tabs: [
+      { id: 42, windowId: 7, active: false, url: 'https://gemini.google.com/app/abc123456789' },
+      { id: 99, windowId: 7, active: true, url: 'https://myactivity.google.com/product/gemini' },
+    ],
+    hrefByTabId: {
+      42: 'https://gemini.google.com/app/abc123456789',
+      99: 'https://myactivity.google.com/product/gemini',
+    },
+  });
+  api.tabs.update = (tabId, updateProperties, callback) => {
+    updated.push({ tabId, updateProperties });
+    callback?.({ id: tabId, windowId: 7, active: updateProperties.active });
+  };
+  api.windows = {
+    update(windowId, updateProperties, callback) {
+      focused.push({ windowId, updateProperties });
+      callback?.({ id: windowId, focused: updateProperties.focused });
+    },
+  };
+
+  const result = await handleNativeBrowserBrokerCommand(
+    { command: 'tabs.activate', payload: { tabId: 42, focusWindow: true } },
+    api,
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.activated, true);
+  assert.equal(result.tabId, 42);
+  assert.equal(result.isActiveTab, true);
+  assert.deepEqual(updated, [{ tabId: 42, updateProperties: { active: true } }]);
+  assert.deepEqual(focused, [{ windowId: 7, updateProperties: { focused: true } }]);
+});
+
+test('native broker port routes tabs.activate instead of rejecting it as unsupported', async () => {
+  const posted = [];
+  let onMessage = null;
+  const { api } = chromeApiForTabs({
+    tabs: [
+      { id: 42, windowId: 7, active: false, url: 'https://gemini.google.com/app/abc123456789' },
+    ],
+    hrefByTabId: {
+      42: 'https://gemini.google.com/app/abc123456789',
+    },
+  });
+  api.tabs.update = (tabId, updateProperties, callback) => {
+    callback?.({ id: tabId, windowId: 7, active: updateProperties.active });
+  };
+  api.runtime.connectNative = () => ({
+    onMessage: {
+      addListener(listener) {
+        onMessage = listener;
+      },
+    },
+    onDisconnect: {
+      addListener() {},
+    },
+    postMessage(message) {
+      posted.push(message);
+    },
+    disconnect() {},
+  });
+
+  const port = createNativeBrokerPort({ chromeApi: api, hostName: 'gemini-md-export-native' });
+  port.ensureConnected();
+  onMessage({
+    id: 'activate-42',
+    protocolVersion: 1,
+    command: 'tabs.activate',
+    payload: { tabId: 42, focusWindow: false },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const response = posted.find((message) => message.id === 'activate-42');
+  assert.equal(response.ok, true);
+  assert.equal(response.result.activated, true);
+  assert.equal(response.result.tabId, 42);
+});
+
+test('native broker exposes extension status through runtime actions', async () => {
+  const result = await handleNativeBrowserBrokerCommand(
+    { command: 'extension.status', payload: {} },
+    { runtime: { lastError: null } },
+    {
+      extensionStatus: () => ({
+        ok: true,
+        runtime: {
+          extensionVersion: '0.8.54',
+          buildStamp: '20260526-0330',
+        },
+        contentSelfHeal: {
+          status: 'ok',
+        },
+      }),
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.runtime.buildStamp, '20260526-0330');
+  assert.equal(result.contentSelfHeal.status, 'ok');
+});
+
+test('native broker can ask the service worker to self-heal managed content scripts', async () => {
+  const calls = [];
+  const result = await handleNativeBrowserBrokerCommand(
+    {
+      command: 'extension.selfHealContentScripts',
+      payload: { reason: 'release-gate', force: true },
+    },
+    { runtime: { lastError: null } },
+    {
+      selfHealContentScripts: async (payload) => {
+        calls.push(payload);
+        return {
+          ok: true,
+          status: 'ok',
+          current: 1,
+          injected: 1,
+          failed: 0,
+        };
+      },
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.injected, 1);
+  assert.deepEqual(calls, [{ reason: 'release-gate', force: true }]);
 });
 
 test('native broker claim groups Gemini and My Activity in the same visual rectangle', async () => {
@@ -117,4 +326,178 @@ test('native broker claim groups Gemini and My Activity in the same visual recta
   assert.deepEqual(result.visual.tabIds, [42, 99]);
   assert.deepEqual(grouped, [[42, 99]]);
   assert.equal(updatedGroups[0].groupId, 777);
+});
+
+test('native broker claim accepts string tabId from HTTP query params', async () => {
+  const { api } = chromeApiForTabs({
+    tabs: [
+      { id: 42, windowId: 7, active: true, url: 'https://gemini.google.com/app/abc123456789' },
+      { id: 99, windowId: 7, active: false, url: 'https://myactivity.google.com/product/gemini' },
+    ],
+    hrefByTabId: {
+      42: 'https://gemini.google.com/app/abc123456789',
+      99: 'https://myactivity.google.com/product/gemini',
+    },
+  });
+  api.tabs.group = (_createProperties, callback) => callback(777);
+  api.tabGroups = {
+    update(groupId, updateProperties, callback) {
+      callback({ id: groupId, ...updateProperties });
+    },
+  };
+
+  const result = await handleNativeBrowserBrokerCommand(
+    { command: 'tabs.claim', payload: { tabId: '42', claimId: 'claim-42' } },
+    api,
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.tab.tabId, 42);
+  assert.equal(result.tab.claimId, 'claim-42');
+});
+
+test('native broker release ungroups Gemini and My Activity from managed claim group', async () => {
+  const ungrouped = [];
+  const { api } = chromeApiForTabs({
+    tabs: [
+      {
+        id: 42,
+        windowId: 7,
+        active: true,
+        groupId: 777,
+        url: 'https://gemini.google.com/app/abc123456789',
+      },
+      {
+        id: 99,
+        windowId: 7,
+        active: false,
+        groupId: 777,
+        url: 'https://myactivity.google.com/product/gemini',
+      },
+      {
+        id: 100,
+        windowId: 7,
+        active: false,
+        groupId: -1,
+        url: 'https://myactivity.google.com/product/gemini',
+      },
+    ],
+    hrefByTabId: {
+      42: 'https://gemini.google.com/app/abc123456789',
+      99: 'https://myactivity.google.com/product/gemini',
+      100: 'https://myactivity.google.com/product/gemini',
+    },
+  });
+  api.tabs.ungroup = (tabIds, callback) => {
+    ungrouped.push(tabIds);
+    callback?.();
+  };
+  api.tabGroups = {
+    get(groupId, callback) {
+      callback({ id: groupId, title: 'Export 30' });
+    },
+  };
+
+  const result = await handleNativeBrowserBrokerCommand(
+    { command: 'tabs.release', payload: { tabId: 42, claimId: 'claim-42' } },
+    api,
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.released, true);
+  assert.equal(result.ungrouped, 2);
+  assert.deepEqual(result.ungroupedTabIds, [42, 99]);
+  assert.deepEqual(ungrouped, [[42, 99]]);
+});
+
+test('native broker release can target companion tab ids without a primary tab id', async () => {
+  const ungrouped = [];
+  const { api } = chromeApiForTabs({
+    tabs: [
+      {
+        id: 42,
+        windowId: 7,
+        active: true,
+        groupId: -1,
+        url: 'https://gemini.google.com/app/abc123456789',
+      },
+      {
+        id: 99,
+        windowId: 7,
+        active: false,
+        groupId: 777,
+        url: 'https://myactivity.google.com/product/gemini',
+      },
+    ],
+    hrefByTabId: {
+      42: 'https://gemini.google.com/app/abc123456789',
+      99: 'https://myactivity.google.com/product/gemini',
+    },
+  });
+  api.tabs.ungroup = (tabIds, callback) => {
+    ungrouped.push(tabIds);
+    callback?.();
+  };
+  api.tabGroups = {
+    get(groupId, callback) {
+      callback({ id: groupId, title: 'Export 30' });
+    },
+  };
+
+  const result = await handleNativeBrowserBrokerCommand(
+    { command: 'tabs.release', payload: { claimId: 'claim-42', tabIds: [42, 99] } },
+    api,
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.released, true);
+  assert.equal(result.ungrouped, 1);
+  assert.deepEqual(result.ungroupedTabIds, [99]);
+  assert.deepEqual(ungrouped, [[99]]);
+});
+
+test('native broker release leaves user tab groups alone', async () => {
+  const ungrouped = [];
+  const { api } = chromeApiForTabs({
+    tabs: [
+      {
+        id: 42,
+        windowId: 7,
+        active: true,
+        groupId: 777,
+        url: 'https://gemini.google.com/app/abc123456789',
+      },
+      {
+        id: 99,
+        windowId: 7,
+        active: false,
+        groupId: 777,
+        url: 'https://myactivity.google.com/product/gemini',
+      },
+    ],
+    hrefByTabId: {
+      42: 'https://gemini.google.com/app/abc123456789',
+      99: 'https://myactivity.google.com/product/gemini',
+    },
+  });
+  api.tabs.ungroup = (tabIds, callback) => {
+    ungrouped.push(tabIds);
+    callback?.();
+  };
+  api.tabGroups = {
+    get(groupId, callback) {
+      callback({ id: groupId, title: 'Pesquisa pessoal' });
+    },
+  };
+
+  const result = await handleNativeBrowserBrokerCommand(
+    { command: 'tabs.release', payload: { tabId: 42, claimId: 'claim-42' } },
+    api,
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.released, true);
+  assert.equal(result.ungrouped, 0);
+  assert.deepEqual(result.ungroupedTabIds, []);
+  assert.deepEqual(ungrouped, []);
 });

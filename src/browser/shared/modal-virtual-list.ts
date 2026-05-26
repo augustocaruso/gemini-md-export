@@ -30,8 +30,7 @@ export const computeModalVirtualScrollRange = ({
   const measuredHeight = Math.max(0, modalFiniteNumber(scrollHeight));
   const viewportHeight = Math.max(0, modalFiniteNumber(clientHeight));
   const estimatedHeight =
-    Math.max(0, modalFiniteNumber(virtualItemCount)) *
-    Math.max(0, modalFiniteNumber(itemHeight));
+    Math.max(0, modalFiniteNumber(virtualItemCount)) * Math.max(0, modalFiniteNumber(itemHeight));
   const effectiveHeight = Math.max(measuredHeight, estimatedHeight);
   return Math.max(0, effectiveHeight - viewportHeight);
 };

@@ -3,17 +3,14 @@ import type {
   ConversationOperationTerminalResult,
   ExportBatchTarget,
 } from './export-operation-contracts.js';
+import { matchingActiveBrowserOperationProgressAt } from './export-operation-lock.js';
 import { evaluateConversationOperationWatchdog } from './export-operation-watchdog.js';
 
 type AnyRecord = Record<string, any>;
 
 export type RecentExportOperationDeps = {
   appendExportJobTrace(job: AnyRecord, event: string, payload?: AnyRecord): void;
-  broadcastRecentChatsJobProgress(
-    job: AnyRecord,
-    client: AnyRecord,
-    progress?: AnyRecord,
-  ): void;
+  broadcastRecentChatsJobProgress(job: AnyRecord, client: AnyRecord, progress?: AnyRecord): void;
   buildConversationExportFailure(input: AnyRecord): AnyRecord;
   buildConversationExportSuccess(input: AnyRecord): AnyRecord;
   buildExportDateImportBatchEvidenceForPayloads(
@@ -31,12 +28,18 @@ export type RecentExportOperationDeps = {
   exportJobRecordingDeps: AnyRecord;
   getClientById(clientId: string): AnyRecord | null;
   hasDateImportSource(args?: AnyRecord): boolean;
+  localPhaseProgressIntervalMs?: number;
   rebindExportJobToClient(job: AnyRecord, client: AnyRecord, reason?: string): AnyRecord | null;
   recordConversationExportFailure(input: AnyRecord, deps: AnyRecord): void;
   recordConversationExportSuccess(input: AnyRecord, deps: AnyRecord): void;
   requestActiveBrowserOperationCancelForJob(
     job: AnyRecord,
     reason?: string,
+  ): Promise<AnyRecord | null> | AnyRecord | null;
+  recoverBrowserTabAfterWatchdog?(
+    job: AnyRecord,
+    reason?: string,
+    context?: AnyRecord,
   ): Promise<AnyRecord | null> | AnyRecord | null;
   summarizeClient(client: AnyRecord): AnyRecord;
   touchExportJob(job: AnyRecord): void;
@@ -80,6 +83,111 @@ const errorFromIntegrity = (integrity: AnyRecord): Error => {
   return error;
 };
 
+export const abortActiveConversationOperationForJob = (
+  job: AnyRecord,
+  reason = 'job-cancel',
+  deps: Pick<RecentExportOperationDeps, 'appendExportJobTrace' | 'touchExportJob'>,
+): boolean => {
+  const controller = job?.__activeConversationAbortController;
+  if (!controller || controller.signal?.aborted) return false;
+  const error = new Error(reason);
+  (error as AnyRecord).code = 'conversation_cancel_requested';
+  (error as AnyRecord).operationId = job.__activeConversationOperationId || job.operationId || null;
+  controller.abort(error);
+  deps.appendExportJobTrace(job, 'conversation_operation_abort_requested', {
+    reason,
+    operationId: (error as AnyRecord).operationId,
+  });
+  deps.touchExportJob(job);
+  return true;
+};
+
+export const createBrowserTabWatchdogRecovery =
+  (deps: {
+    appendExportJobTrace(job: AnyRecord, event: string, payload?: AnyRecord): void;
+    getClaimById(claimId: unknown): AnyRecord | null;
+    getClientById(clientId: unknown): AnyRecord | null;
+    claimForClient(client: AnyRecord | null): AnyRecord | null;
+    normalizeTabId(tabId: unknown): number | null;
+    tryNativeBrowserBrokerTabsAction(action: string, args?: AnyRecord): Promise<AnyRecord | null>;
+    waitForContinuationClient(
+      client: AnyRecord,
+      selector: AnyRecord,
+      waitMs: number,
+    ): Promise<AnyRecord | null>;
+    summarizeClient(client: AnyRecord): AnyRecord;
+    touchExportJob(job: AnyRecord): void;
+    recoveryWaitMs: number;
+  }) =>
+  async (
+    job: AnyRecord,
+    reason = 'conversation-watchdog',
+    context: AnyRecord = {},
+  ): Promise<AnyRecord> => {
+    const client = deps.getClientById(job?.clientId);
+    const claim = job?.tabClaimId
+      ? deps.getClaimById(job.tabClaimId)
+      : client
+        ? deps.claimForClient(client)
+        : null;
+    const tabId = deps.normalizeTabId(claim?.tabId ?? client?.tabId ?? job?.tabId);
+    if (!job || tabId === null) {
+      deps.appendExportJobTrace(job, 'browser_operation_recovery_skipped', {
+        reason,
+        code: 'missing-tab-id',
+        operationId: context.operationId || null,
+        targetChatId: context.targetChatId || null,
+      });
+      return { ok: false, code: 'missing-tab-id' };
+    }
+
+    deps.appendExportJobTrace(job, 'browser_operation_recovery_requested', {
+      reason,
+      tabId,
+      claimId: job.tabClaimId || claim?.claimId || null,
+      operationId: context.operationId || null,
+      targetChatId: context.targetChatId || null,
+    });
+    try {
+      const reload = await deps.tryNativeBrowserBrokerTabsAction('reload', {
+        tabId,
+        claimId: job.tabClaimId || claim?.claimId || null,
+        reason: `watchdog-${reason}`,
+      });
+      const recoveredClient = reload?.ok
+        ? await deps.waitForContinuationClient(
+            client || { tabId },
+            {
+              tabId,
+              claimId: job.tabClaimId || claim?.claimId || null,
+              sessionId: claim?.sessionId || null,
+            },
+            deps.recoveryWaitMs,
+          )
+        : null;
+      const result = {
+        ok: reload?.ok === true,
+        code: reload?.code || null,
+        tabId,
+        reload,
+        recoveredClient: recoveredClient ? deps.summarizeClient(recoveredClient) : null,
+      };
+      deps.appendExportJobTrace(job, 'browser_operation_recovery_result', result);
+      deps.touchExportJob(job);
+      return result;
+    } catch (err: any) {
+      const result = {
+        ok: false,
+        code: err?.code || null,
+        error: err?.message || String(err),
+        tabId,
+      };
+      deps.appendExportJobTrace(job, 'browser_operation_recovery_failed', result);
+      deps.touchExportJob(job);
+      return result;
+    }
+  };
+
 const savedMediaBytes = (saved: AnyRecord): number =>
   Array.isArray(saved.mediaFiles)
     ? saved.mediaFiles.reduce((sum: number, file: AnyRecord) => sum + Number(file.bytes || 0), 0)
@@ -119,6 +227,21 @@ export const runRecentExportConversationOperation = async (
   let operationCollected: AnyRecord | null = null;
   let operationDateImportReceipt: AnyRecord | null = null;
   let operationSavedResult: AnyRecord | null = null;
+  let browserLastProgressAt: number | null = null;
+  Object.defineProperties(job, {
+    __activeConversationAbortController: {
+      configurable: true,
+      enumerable: false,
+      value: operationAbortController,
+      writable: true,
+    },
+    __activeConversationOperationId: {
+      configurable: true,
+      enumerable: false,
+      value: operationId,
+      writable: true,
+    },
+  });
 
   const markOperationProgress = (snapshot: AnyRecord = {}) => {
     operationLastProgressAt = Number(snapshot.lastProgressAt || Date.now());
@@ -149,6 +272,20 @@ export const runRecentExportConversationOperation = async (
     });
   };
 
+  const latestOperationLastProgressAt = () => {
+    const refreshedClient = client?.clientId ? deps.getClientById(String(client.clientId)) : null;
+    const progressAt = matchingActiveBrowserOperationProgressAt(
+      refreshedClient || client,
+      operationId,
+    );
+    if (progressAt !== null) {
+      browserLastProgressAt =
+        browserLastProgressAt === null ? progressAt : Math.max(browserLastProgressAt, progressAt);
+      operationLastProgressAt = Math.max(operationLastProgressAt, progressAt);
+    }
+    return operationLastProgressAt;
+  };
+
   try {
     const operationPromise = runConversationOperation({
       jobId: job.jobId,
@@ -157,18 +294,24 @@ export const runRecentExportConversationOperation = async (
       abortSignal: operationAbortController.signal,
       progressSink: markOperationProgress,
       deps: {
+        localPhaseProgressIntervalMs: deps.localPhaseProgressIntervalMs,
         download: async () => {
-          const collected = await deps.downloadConversationItemWithRetry(job, client, conversation, {
-            ...args,
-            outputDir: job.outputDir,
-            collectOnly: true,
-            returnToOriginal: false,
-            operationId,
-            jobId: job.jobId,
-            targetChatId: target.targetChatId,
-            abortSignal: operationAbortController.signal,
-            onOperationProgress: markOperationProgress,
-          });
+          const collected = await deps.downloadConversationItemWithRetry(
+            job,
+            client,
+            conversation,
+            {
+              ...args,
+              outputDir: job.outputDir,
+              collectOnly: true,
+              returnToOriginal: false,
+              operationId,
+              jobId: job.jobId,
+              targetChatId: target.targetChatId,
+              abortSignal: operationAbortController.signal,
+              onOperationProgress: markOperationProgress,
+            },
+          );
           operationCollected = collected;
           return {
             payload: collected.result?.payload || {},
@@ -328,13 +471,21 @@ export const runRecentExportConversationOperation = async (
       const watchdogIntervalMs = Math.max(500, Math.min(2000, Math.floor(noProgressMs / 4)));
       watchdogTimer = setInterval(() => {
         if (watchdogTriggered) return;
-        const decision = evaluateConversationOperationWatchdog({
-          operationId,
-          now: Date.now(),
-          lastProgressAt: operationLastProgressAt,
-          noProgressMs,
-          cancelRequested: job.cancelRequested === true,
-        });
+        const decision =
+          job.cancelRequested === true
+            ? {
+                action: 'cancel',
+                elapsedMs: 0,
+                code: 'conversation_cancel_requested',
+                message: 'Cancelamento solicitado.',
+              }
+            : evaluateConversationOperationWatchdog({
+                operationId,
+                now: Date.now(),
+                lastProgressAt: latestOperationLastProgressAt(),
+                noProgressMs,
+                cancelRequested: false,
+              });
         if (decision.action === 'continue') return;
         watchdogTriggered = true;
         if (watchdogTimer) clearInterval(watchdogTimer);
@@ -355,14 +506,24 @@ export const runRecentExportConversationOperation = async (
       (watchdogError as AnyRecord).operationId = operationId;
       (watchdogError as AnyRecord).targetChatId = target.targetChatId;
       operationAbortController.abort(watchdogError);
-      deps.appendExportJobTrace(job, 'conversation_no_progress_watchdog', {
-        code: decision.code,
-        timeoutCode: 'conversation_no_progress_timeout',
-        operationId,
-        targetChatId: target.targetChatId,
-        elapsedMs: decision.elapsedMs,
-        noProgressMs,
-      });
+      deps.appendExportJobTrace(
+        job,
+        decision.code === 'conversation_cancel_requested'
+          ? 'conversation_cancel_requested'
+          : 'conversation_no_progress_watchdog',
+        {
+          code: decision.code,
+          timeoutCode: 'conversation_no_progress_timeout',
+          operationId,
+          targetChatId: target.targetChatId,
+          elapsedMs: decision.elapsedMs,
+          noProgressMs,
+          lastProgressAt: new Date(operationLastProgressAt).toISOString(),
+          browserLastProgressAt: browserLastProgressAt
+            ? new Date(browserLastProgressAt).toISOString()
+            : null,
+        },
+      );
       const cancelResult = await deps.requestActiveBrowserOperationCancelForJob(job, decision.code);
       const drainResult = await drainTimedOutConversationOperation(
         operationSettlementPromise,
@@ -381,6 +542,21 @@ export const runRecentExportConversationOperation = async (
           (watchdogError as AnyRecord).data = {
             drainTimedOut: true,
             cancelResult,
+          };
+          throw watchdogError;
+        }
+        const recoveryResult = deps.recoverBrowserTabAfterWatchdog
+          ? await deps.recoverBrowserTabAfterWatchdog(job, decision.code, {
+              operationId,
+              targetChatId: target.targetChatId,
+              cancelResult,
+            })
+          : null;
+        if (recoveryResult?.ok === true) {
+          (watchdogError as AnyRecord).data = {
+            drainTimedOut: true,
+            cancelResult,
+            recoveryResult,
           };
           throw watchdogError;
         }
@@ -424,8 +600,11 @@ export const runRecentExportConversationOperation = async (
       historyIndex: target.historyIndex,
       receipts: operationResult.receipts || savedResult.receipts || null,
     };
-    const resultClient = result.client?.clientId ? deps.getClientById(result.client.clientId) : null;
-    if (resultClient) client = deps.rebindExportJobToClient(job, resultClient, 'conversation-download') || client;
+    const resultClient = result.client?.clientId
+      ? deps.getClientById(result.client.clientId)
+      : null;
+    if (resultClient)
+      client = deps.rebindExportJobToClient(job, resultClient, 'conversation-download') || client;
     const success = {
       ...deps.buildConversationExportSuccess({ index, conversation, result }),
       operationId,
@@ -449,10 +628,13 @@ export const runRecentExportConversationOperation = async (
       { job, failures, itemMetric, failure, err },
       deps.exportJobRecordingDeps,
     );
-    if (
-      err?.code === 'operation_cancel_failed_after_watchdog'
-    ) {
+    if (err?.code === 'operation_cancel_failed_after_watchdog') {
       throw err;
+    }
+  } finally {
+    if (job.__activeConversationOperationId === operationId) {
+      delete job.__activeConversationAbortController;
+      delete job.__activeConversationOperationId;
     }
   }
 

@@ -8,6 +8,12 @@ export type AssumedExtensionReloadResult = Readonly<{
 
 const errorMessage = (err: unknown): string => {
   if (err instanceof Error) return err.message;
+  if (err && typeof err === 'object') {
+    const record = err as Record<string, unknown>;
+    for (const key of ['message', 'error', 'detail']) {
+      if (typeof record[key] === 'string' && record[key]) return record[key];
+    }
+  }
   return String(err || '');
 };
 

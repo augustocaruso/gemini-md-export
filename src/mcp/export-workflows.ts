@@ -1,7 +1,7 @@
 import { canonicalGeminiChatUrl, parseChatId } from '../core/chat-id.js';
+import { portableIsoSeconds } from '../core/date.js';
 import { assistantTurnCount, sectionsForRole } from '../core/markdown-note.js';
 import { hashText } from '../core/text-hash.js';
-import { portableIsoSeconds } from '../core/date.js';
 import type {
   BlockedResult,
   ChatId,
@@ -45,7 +45,12 @@ export type McpExportValidation =
   | BlockedResult;
 
 export const validateExportTabLease = (tab: unknown) => {
-  const value = tab as { claimId?: unknown; tabId?: unknown; url?: unknown } | null;
+  const value = tab as {
+    claimId?: unknown;
+    tabId?: unknown;
+    url?: unknown;
+    visual?: unknown;
+  } | null;
   const tabId = Number(value?.tabId);
   const url = stringValue(value?.url);
   const claimId = stringValue(value?.claimId);
@@ -54,7 +59,18 @@ export const validateExportTabLease = (tab: unknown) => {
       code: 'claimed_debuggable_tab_required',
     });
   }
-  return { claimId, tabId, url };
+  return { claimId, tabId, url, visual: value?.visual || null };
+};
+
+export const exportTabLeaseFromNativeClaimResult = (result: unknown) => {
+  const value = result as {
+    tab?: Record<string, unknown> | null;
+    visual?: unknown;
+  } | null;
+  return {
+    ...(value?.tab || (value as Record<string, unknown> | null) || {}),
+    visual: value?.visual || value?.tab?.visual || null,
+  };
 };
 
 const markdownContentOf = (payload: BrowserExportPayload = {}): string => {

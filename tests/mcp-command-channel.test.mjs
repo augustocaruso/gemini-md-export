@@ -75,9 +75,16 @@ test('MCP aborta export se a aba para de enviar heartbeat durante comando pesado
 
 test('MCP propaga cancelamento de job para operação ativa no navegador', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const operationSource = readFileSync(
+    resolve(ROOT, 'src', 'mcp', 'recent-export-operation-runtime.ts'),
+    'utf-8',
+  );
   const contentSource = readFileSync(resolve(ROOT, 'src', 'userscript-shell.ts'), 'utf-8');
 
   assert.match(source, /requestActiveBrowserOperationCancelForJob/);
+  assert.match(source, /abortActiveConversationOperationForJob/);
+  assert.match(operationSource, /conversation_operation_abort_requested/);
+  assert.match(source, /abortActiveConversationOperationForJob\(job, reason, recentExportOperationDeps\)/);
   assert.match(source, /'cancel-active-operation'/);
   assert.match(source, /browser_operation_cancel_requested/);
   assert.match(source, /browser_operation_cancel_result/);
@@ -112,6 +119,8 @@ test('recent export has per-conversation no-progress watchdog', () => {
   assert.match(operationSource, /evaluateConversationOperationWatchdog/);
   assert.match(operationSource, /conversation_no_progress_timeout/);
   assert.match(operationSource, /const operationAbortController = new AbortController\(\)/);
+  assert.match(operationSource, /__activeConversationAbortController/);
+  assert.match(operationSource, /enumerable:\s*false/);
   assert.match(operationSource, /abortSignal: operationAbortController\.signal/);
   assert.match(operationSource, /operationAbortController\.abort\(watchdogError\)/);
   assert.match(operationSource, /status: 'watchdog'/);
@@ -125,6 +134,7 @@ test('recent export has per-conversation no-progress watchdog', () => {
   assert.match(source, /const assertConversationOperationNotAborted = \(args = \{\}\) =>/);
   assert.match(source, /operation_cancelled/);
   assert.match(operationSource, /conversation_watchdog_drain_timeout/);
+  assert.match(operationSource, /recoverBrowserTabAfterWatchdog/);
   assert.match(operationSource, /operation_cancel_failed_after_watchdog/);
 });
 
@@ -222,7 +232,7 @@ test('MCP reavalia build stamp esperado em runtime para auto-reload', () => {
   assert.match(source, /createExpectedChromeExtensionInfo/);
   assert.match(runtimeInfoSource, /export const readCurrentBridgeVersion/);
   assert.match(runtimeInfoSource, /const currentBridgeVersion = readCurrentBridgeVersion\(\{ root, bridgeVersion \}\)/);
-  assert.match(runtimeInfoSource, /\.gemini', 'extensions', 'gemini-md-export'/);
+  assert.match(runtimeInfoSource, /\.gemini'[\s\S]*'extensions'[\s\S]*'gemini-md-export'/);
   assert.match(runtimeInfoSource, /buildStamp: detectExpectedBrowserBuildStamp\(options\)/);
   assert.match(runtimeInfoSource, /Object\.defineProperty\(info, key,[\s\S]*get: \(\) => snapshot\(\)\[key\]/);
   assert.doesNotMatch(source, /buildStamp:\s*detectExpectedBrowserBuildStamp\(\),\n\};/);
@@ -312,6 +322,8 @@ test('MCP permite cliente My Activity sem liberar endpoints de escrita', () => {
   assert.match(source, /claimTabForClient\(client,[\s\S]*TAB_CLAIM_LABELS\.count/);
   assert.match(source, /buildActivityClaimAffinity/);
   assert.match(reloadContractsSource, /existingGeminiSessionClaim\?\.claimId/);
+  assert.match(source, /shouldApplyActivityClaimVisual/);
+  assert.match(source, /activityClaimAffinity\.joinsExistingGeminiClaim !== true/);
   assert.match(source, /visualGroupTabId: activityClaimAffinity\.visualGroupTabId/);
   assert.match(source, /releaseTabClaim\(\{[\s\S]*activity-scan-complete/);
   assert.match(source, /activity_client_missing/);
@@ -353,6 +365,7 @@ test('MCP nao escolhe cliente My Activity de build antigo apos reload da extensa
 
 test('MCP só reivindica abas Gemini ativas por contrato TS', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const tabRuntimeSource = readFileSync(resolve(ROOT, 'src', 'mcp', 'tab-runtime.ts'), 'utf-8');
   const selectClaimableBlock = source.match(
     /const selectClaimableClient = async \(args = \{\}\) => \{[\s\S]*?\n\};\n\nconst claimTabForClient/,
   )?.[0] || '';
@@ -367,6 +380,7 @@ test('MCP só reivindica abas Gemini ativas por contrato TS', () => {
   assert.match(source, /getActiveClaimableGeminiClients/);
   assert.match(source, /assertActiveClaimableGeminiClient/);
   assert.match(source, /activateBrowserTabWithCdp/);
+  assert.match(tabRuntimeSource, /tryNativeBrowserBrokerTabsAction\('activate'/);
   assert.match(source, /activateRuntimeExtensionClientWithCdp/);
   assert.match(source, /buildRuntimeCdpControlSnapshot/);
   assert.doesNotMatch(source, /const cdpUrlForArgs/);
@@ -558,7 +572,7 @@ test('MCP implementa afinidade confiável por claim de aba', () => {
   assert.match(backgroundSource, /TAB_CLAIM_DEFAULT_LABEL = '✨ Em uso'/);
   assert.match(backgroundSource, /TAB_CLAIM_BADGE_TEXT = '✓'/);
   assert.match(backgroundSource, /Array\.from\([\s\S]*String\(value \|\| ''\)[\s\S]*\.replace/);
-  assert.match(backgroundSource, /MANAGED_TAB_CLAIM_GROUP_TITLE_RE/);
+  assert.match(backgroundSource, /looksLikeManagedClaimGroupTitle/);
   assert.match(backgroundSource, /summarizeTabBrokerRegistry/);
   assert.match(backgroundSource, /message\?\.type === 'gemini-md-export\/tab-broker-update'/);
   assert.match(backgroundSource, /requestedTabId/);
@@ -600,6 +614,25 @@ test('MCP prefere native browser broker antes de fallback por heartbeat', () => 
   assert.doesNotMatch(source, /lastHeartbeatAt[^\n]+claimGeminiTabForClient/);
 });
 
+test('MCP libera claim viva pelo service worker antes do fallback nativo', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp', 'native-release-gate.ts'), 'utf-8');
+  const block =
+    source.match(/export const createTabClaimRelease[\s\S]*?\nexport const createAutoTabClaimReleaseForJob/)?.[0] ||
+    '';
+  const liveClaimReleaseBlock =
+    block.match(/let visual:[\s\S]*?const nativeRelease = releaseSucceeded\(\);/)?.[0] || '';
+
+  assert.ok(block, 'createTabClaimRelease deve existir');
+  assert.match(liveClaimReleaseBlock, /'release-tab-claim'/);
+  assert.match(liveClaimReleaseBlock, /releaseTabClaimVisualByTabId/);
+  assert.match(liveClaimReleaseBlock, /tryNativeBrowserBrokerTabsAction\('release'/);
+  assert.ok(
+    liveClaimReleaseBlock.indexOf("'release-tab-claim'") <
+      liveClaimReleaseBlock.indexOf("deps.tryNativeBrowserBrokerTabsAction('release'"),
+    'release de claim viva deve usar storage da extensao antes do fallback nativo',
+  );
+});
+
 test('browser_status diagnostica e tenta self-heal sem depender do guard wrapper', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const statusBlock = source.match(
@@ -633,11 +666,32 @@ test('browser readiness expõe status estruturado do native broker', () => {
   )?.[0];
 
   assert.ok(readyBlock, 'buildLightweightBrowserReady deve existir');
-  assert.match(source, /const probeNativeBrowserBrokerStatus = async/);
-  assert.match(readyBlock, /const nativeBrokerStatus = await probeNativeBrowserBrokerStatus\(\)/);
+  assert.match(source, /createNativeBrokerStatusProbe\(/);
+  assert.match(readyBlock, /const nativeBrokerStatus = await probeNativeBrowserBrokerStatus\(\{\s*allowWake:\s*true/);
   assert.match(readyBlock, /nativeBroker:\s*nativeBrokerStatus/);
   assert.match(readyBlock, /nativeBrokerBlockingIssueForReady/);
   assert.match(nativeGateSource, /nativeBrokerStatus\.available !== true/);
+});
+
+test('MCP acorda native broker pelo service worker antes de declarar socket morto', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const nativeGateSource = readFileSync(resolve(ROOT, 'src', 'mcp', 'native-release-gate.ts'), 'utf-8');
+  const probeBlock = source.match(
+    /const probeNativeBrowserBrokerStatus = createNativeBrokerStatusProbe\([\s\S]*?\n\);/,
+  )?.[0] || '';
+  const readyBlock = source.match(
+    /const buildLightweightBrowserReady = async \(args = \{\}\) => \{[\s\S]*?\n\};\n\nconst normalizeLimit/,
+  )?.[0] || '';
+
+  assert.match(nativeGateSource, /shouldAttemptNativeBrokerWake/);
+  assert.match(nativeGateSource, /createNativeBrokerWakeController/);
+  assert.match(nativeGateSource, /clientSupportsNativeBrokerWakeCommand/);
+  assert.match(nativeGateSource, /wakeNativeBrowserBrokerViaExtension/);
+  assert.match(nativeGateSource, /enqueueNativeBrokerWakeCommand/);
+  assert.match(nativeGateSource, /reason:\s*'mcp-native-broker-wake'/);
+  assert.match(source, /createNativeBrokerStatusProbe\(/);
+  assert.match(probeBlock, /enqueueCommand/);
+  assert.match(readyBlock, /probeNativeBrowserBrokerStatus\(\{\s*allowWake:\s*true/);
 });
 
 test('reload de abas existentes pode atualizar extensao sem abrir navegador', () => {
@@ -673,15 +727,28 @@ test('reload de abas usa native broker antes de depender de clientes vivos', () 
   const reloadBlock = source.match(
     /const reloadGeminiTabs = async \(args = \{\}\) => \{[\s\S]*?\n\};\n\nconst legacyRawTools/,
   )?.[0];
+  const nativeReloadBlock =
+    nativeGateSource.match(/export const attachContentScriptSelfHealToNativeReload[\s\S]*?\nexport const noConnectedClientsForReloadResult/)?.[0] ||
+    '';
 
   assert.ok(reloadBlock, 'reloadGeminiTabs deve existir');
   assert.match(reloadBlock, /tryNativeBrowserBrokerTabsAction\('reload', args\)/);
+  assert.match(reloadBlock, /attachContentScriptSelfHealToNativeReload/);
+  assert.match(nativeReloadBlock, /reloadedTabIds/);
+  assert.match(nativeReloadBlock, /tabIds:\s*reloadedTabIds\.length > 0 \? reloadedTabIds : args\.tabIds/);
+  assert.match(nativeReloadBlock, /runTabsAction\('selfHealContentScripts'/);
+  assert.ok(
+    reloadBlock.indexOf("tryNativeBrowserBrokerTabsAction('reload', args)") <
+      reloadBlock.indexOf('attachContentScriptSelfHealToNativeReload'),
+    'self-heal nativo deve rodar depois do reload nativo',
+  );
   assert.ok(
     reloadBlock.indexOf("tryNativeBrowserBrokerTabsAction('reload', args)") <
       reloadBlock.indexOf('const liveClients = getLiveClients()'),
     'native broker precisa rodar antes de getLiveClients',
   );
   assert.match(nativeGateSource, /nativeBrowserBroker\.reload/);
+  assert.match(nativeGateSource, /nativeBrowserBroker\.selfHealContentScripts/);
 });
 
 test('self-reload trata Extension context invalidated como reload em andamento', () => {
@@ -692,6 +759,7 @@ test('self-reload trata Extension context invalidated como reload em andamento',
 
   assert.ok(reloadClientBlock, 'reloadChromeExtensionForClient deve existir');
   assert.match(source, /extensionReloadAssumedResultForError/);
+  assert.match(reloadClientBlock, /extensionReloadAssumedResultForError\(result\)/);
   assert.match(reloadClientBlock, /extensionReloadAssumedResultForError\(err\)/);
   assert.match(reloadClientBlock, /return assumedReload/);
 });

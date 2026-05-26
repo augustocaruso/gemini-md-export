@@ -87,6 +87,24 @@ test('export workflow rejects unclaimed native broker tabs', async () => {
   );
 });
 
+test('export workflow preserves native claim visual tabs for deterministic release', async () => {
+  const { validateExportTabLease } = await loadModule();
+
+  const lease = validateExportTabLease({
+    claimId: 'claim-1',
+    tabId: 42,
+    url: 'https://gemini.google.com/app/abc123456789',
+    visual: {
+      mode: 'tab-group',
+      tabId: 42,
+      tabIds: [42, 99],
+      groupId: 777,
+    },
+  });
+
+  assert.deepEqual(lease.visual.tabIds, [42, 99]);
+});
+
 test('MCP validates export payload before writing files', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const dateImportRuntimeSource = readFileSync(

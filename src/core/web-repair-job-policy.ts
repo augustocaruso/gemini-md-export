@@ -29,9 +29,7 @@ export type WebRepairUnavailable = {
 export const isGeminiWebChatUnavailableFailure = (failure: WebRepairFailureLike): boolean => {
   const error = String(failure?.error || '');
   return (
-    /Timeout aguardando chat\b/i.test(error) &&
-    /chat=nenhum/i.test(error) &&
-    /turns=0/i.test(error)
+    /Timeout aguardando chat\b/i.test(error) && /chat=nenhum/i.test(error) && /turns=0/i.test(error)
   );
 };
 
@@ -49,8 +47,7 @@ export const webRepairUnavailableFromJobStatus = (
 
   return {
     code: 'gemini_web_chats_unavailable',
-    message:
-      'O Gemini Web desta conta nao abriu os primeiros chats que precisavam de reparo.',
+    message: 'O Gemini Web desta conta nao abriu os primeiros chats que precisavam de reparo.',
     nextAction:
       'Use uma sessao do navegador logada na conta dona desses chats ou repare esses raw exports por outra fonte antes de escrever datas.',
     checkedFailures: checked.length,
@@ -73,8 +70,7 @@ export const webRepairStalledFromJobStatus = (
   const chatId = String(status.current.chatId);
   return {
     code: 'gemini_web_repair_stalled',
-    message:
-      'O reparo pelo Gemini Web ficou sem progresso no primeiro chat suspeito.',
+    message: 'O reparo pelo Gemini Web ficou sem progresso no primeiro chat suspeito.',
     nextAction:
       'Verifique se a aba Gemini desta conta consegue abrir esse chat; o fluxo bloqueou antes de escrever datas.',
     checkedFailures: 0,
@@ -102,7 +98,9 @@ type WebRepairTargetOptions = {
 };
 
 export const webRepairHasExplicitTarget = (options: WebRepairTargetOptions): boolean =>
-  Boolean(options.claimId || options.clientId || options.tabId !== null && options.tabId !== undefined);
+  Boolean(
+    options.claimId || options.clientId || (options.tabId !== null && options.tabId !== undefined),
+  );
 
 export const buildWebRepairExplicitTargetStatus = (options: WebRepairTargetOptions) => ({
   ready: true,

@@ -2,6 +2,7 @@ import {
   type DebuggerTabInspection,
   inspectTabWithDebugger,
 } from './chrome-debugger-controller.js';
+import { selectClaimVisualCompanionTabIds } from './tab-claim-companion-tabs.js';
 
 const INSPECTABLE_BROWSER_TAB: unique symbol = Symbol('InspectableBrowserTab');
 const DEBUGGABLE_GEMINI_TAB: unique symbol = Symbol('DebuggableGeminiTab');
@@ -10,6 +11,7 @@ const CLAIMED_DEBUGGABLE_GEMINI_TAB: unique symbol = Symbol('ClaimedDebuggableGe
 export type RawBrowserTab = Readonly<{
   id?: number;
   windowId?: number;
+  index?: number;
   active?: boolean;
   url?: string;
   title?: string;
@@ -114,19 +116,12 @@ export const visualCompanionTabIdsForClaim = (
   claimedTab: DebuggableGeminiTab,
   classified: readonly BrowserTabClassification[],
 ): readonly number[] =>
-  classified
-    .filter((item) => item.inspection?.pageKind === 'my_activity')
-    .filter((item) => {
-      const companionWindowId = Number(item.tab.windowId);
-      const claimedWindowId = Number(claimedTab.windowId);
-      return (
-        !Number.isInteger(companionWindowId) ||
-        !Number.isInteger(claimedWindowId) ||
-        companionWindowId === claimedWindowId
-      );
-    })
-    .map((item) => Number(item.tab.id))
-    .filter((tabId) => Number.isInteger(tabId) && tabId !== claimedTab.tabId);
+  selectClaimVisualCompanionTabIds(
+    claimedTab,
+    classified
+      .filter((item) => item.inspection?.pageKind === 'my_activity')
+      .map((item) => item.tab),
+  );
 
 export const claimDebuggableGeminiTab = async (
   tabs: readonly RawBrowserTab[],

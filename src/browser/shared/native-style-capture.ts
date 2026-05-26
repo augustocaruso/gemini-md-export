@@ -108,7 +108,8 @@ const stateEntries = (target: NativeElementTarget): Array<[string, NativeStyleSt
 
 export const sanitizeNativeStyleCaptureManifest = (
   manifest: NativeStyleCaptureManifest,
-): NativeStyleCaptureManifest => stripForbiddenFields(cloneJson(manifest)) as NativeStyleCaptureManifest;
+): NativeStyleCaptureManifest =>
+  stripForbiddenFields(cloneJson(manifest)) as NativeStyleCaptureManifest;
 
 export const validateNativeStyleCaptureManifest = (
   manifest: unknown,

@@ -20,6 +20,54 @@ const finiteNonNegativeMs = (value: number, fallback = 0): number => {
 const hasOperationIdFilter = (operationId: string | null | undefined): operationId is string =>
   operationId !== null && operationId !== undefined;
 
+type UnknownRecord = Record<string, unknown>;
+
+const isRecord = (value: unknown): value is UnknownRecord =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+
+const recordAt = (value: unknown, key: string): UnknownRecord | null => {
+  if (!isRecord(value)) return null;
+  return isRecord(value[key]) ? (value[key] as UnknownRecord) : null;
+};
+
+const timestampMsFromUnknown = (value: unknown): number | null => {
+  if (typeof value === 'number') return isFiniteNonNegativeMs(value) ? value : null;
+  if (typeof value !== 'string') return null;
+  const parsed = Date.parse(value);
+  return isFiniteNonNegativeMs(parsed) ? parsed : null;
+};
+
+const activeBrowserOperationCandidates = (client: unknown): UnknownRecord[] => {
+  if (!isRecord(client)) return [];
+  const metrics = recordAt(client, 'metrics');
+  const summary = recordAt(client, 'summary');
+  const summaryMetrics = recordAt(summary, 'metrics');
+  const page = recordAt(client, 'page');
+  return [
+    recordAt(recordAt(metrics, 'tabOperation'), 'active'),
+    recordAt(recordAt(summaryMetrics, 'tabOperation'), 'active'),
+    recordAt(client, 'activeTabOperation'),
+    recordAt(summary, 'activeTabOperation'),
+    recordAt(page, 'activeTabOperation'),
+  ].filter((candidate): candidate is UnknownRecord => Boolean(candidate));
+};
+
+export const matchingActiveBrowserOperationProgressAt = (
+  client: unknown,
+  operationId: string | null | undefined,
+): number | null => {
+  if (typeof operationId !== 'string' || operationId.length <= 0) return null;
+  let latestProgressAt: number | null = null;
+  for (const active of activeBrowserOperationCandidates(client)) {
+    if (active.operationId !== operationId) continue;
+    const progressAt = timestampMsFromUnknown(active.lastProgressAt);
+    if (progressAt === null) continue;
+    latestProgressAt =
+      latestProgressAt === null ? progressAt : Math.max(latestProgressAt, progressAt);
+  }
+  return latestProgressAt;
+};
+
 const sanitizeActiveTabOperationState = (
   active: ActiveTabOperationState,
 ): ActiveTabOperationState => {

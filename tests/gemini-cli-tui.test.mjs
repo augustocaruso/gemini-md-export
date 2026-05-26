@@ -2105,7 +2105,7 @@ test('CLI sync acorda Gemini Web pela propria CLI antes de exportar quando --wak
   }
 });
 
-test('CLI browser status recarrega abas existentes antes de abrir navegador durante reload', async () => {
+test('CLI browser status nao recarrega varias abas quando falta aba Gemini ativa', async () => {
   let reloadRequested = false;
   await withEnv(
     {
@@ -2181,18 +2181,17 @@ test('CLI browser status recarrega abas existentes antes de abrir navegador dura
           { stdout, stderr },
         );
 
-        assert.equal(run.exitCode, 0);
+        assert.equal(run.exitCode, 4);
         assert.doesNotMatch(stdout.text(), /Abrindo Gemini Web em background/);
         assert.equal(stderr.text(), '');
         const reloadRequest = requests.find(
           (item) => item.pathname === '/agent/tabs' && item.searchParams.get('action') === 'reload',
         );
-        assert.ok(reloadRequest, 'CLI deve pedir reload de abas existentes');
-        assert.equal(reloadRequest.searchParams.get('openIfMissing'), 'false');
-        assert.equal(reloadRequest.searchParams.get('allowReload'), 'true');
+        assert.equal(reloadRequest, undefined);
         const readyRequests = requests.filter((item) => item.pathname === '/agent/ready');
         assert.equal(readyRequests.every((item) => item.searchParams.get('wakeBrowser') === 'false'), true);
-        assert.equal(run.result.existingTabsReload?.reloaded, 1);
+        assert.equal(run.result.existingTabsReload, null);
+        assert.equal(run.result.blockingIssue, 'no_selectable_gemini_tab');
       });
     },
   );
@@ -2270,6 +2269,218 @@ test('CLI browser status recarrega abas existentes quando build da extensao dive
         assert.doesNotMatch(stdout.text(), /Abrindo Gemini Web em background/);
         assert.equal(stderr.text(), '');
         assert.equal(reloadRequested, true);
+        assert.equal(run.result.existingTabsReload?.reloaded, 1);
+      });
+    },
+  );
+});
+
+test('CLI browser status recarrega aba existente depois que self-heal derruba content scripts', async () => {
+  let reloadRequested = false;
+  await withEnv(
+    {
+      GEMINI_MD_EXPORT_CLI_BROWSER_LAUNCH_DRY_RUN: 'true',
+      GEMINI_MD_EXPORT_EXISTING_TAB_GRACE_MS: '0',
+    },
+    async () => {
+      await withServer((req, res, url) => {
+        if (url.pathname === '/agent/ready') {
+          sendJson(
+            res,
+            200,
+            reloadRequested
+              ? {
+                  ready: true,
+                  mode: 'post-update',
+                  connectedClientCount: 1,
+                  selectableTabCount: 1,
+                  commandReadyClientCount: 1,
+                }
+              : {
+                  ready: false,
+                  blockingIssue: 'no_connected_clients',
+                  mode: 'hot',
+                  connectedClientCount: 0,
+                  selectableTabCount: 0,
+                  commandReadyClientCount: 0,
+                  extensionReadiness: {
+                    reload: {
+                      attempted: true,
+                      attempts: 1,
+                      worked: true,
+                    },
+                  },
+                  selfHeal: {
+                    attempted: true,
+                    ok: true,
+                    reloadAttempts: 1,
+                  },
+                  nativeBroker: {
+                    configured: true,
+                    available: true,
+                    response: {
+                      result: {
+                        tabs: [
+                          {
+                            state: 'debuggable',
+                            tab: {
+                              id: 101,
+                              active: true,
+                              url: 'https://gemini.google.com/app',
+                            },
+                          },
+                        ],
+                      },
+                    },
+                  },
+                },
+          );
+          return;
+        }
+        if (url.pathname === '/agent/tabs' && url.searchParams.get('action') === 'reload') {
+          reloadRequested = true;
+          sendJson(res, 200, {
+            ok: true,
+            action: 'reload',
+            reloaded: 1,
+            mode: 'native-broker',
+          });
+          return;
+        }
+        if (url.pathname === '/agent/clients') {
+          sendJson(res, 200, {
+            mcp: { bridgeRole: 'primary' },
+            connectedClients: [],
+          });
+          return;
+        }
+        sendJson(res, 404, { error: `not found: ${url.pathname}` });
+      }, async (bridgeUrl) => {
+        const stdout = captureStream();
+        const stderr = captureStream();
+        const run = await main(
+          [
+            'browser',
+            'status',
+            '--bridge-url',
+            bridgeUrl,
+            '--plain',
+            '--wake',
+            '--allow-reload',
+            '--ready-wait-ms',
+            '50',
+          ],
+          { stdout, stderr },
+        );
+
+        assert.equal(run.exitCode, 0);
+        assert.equal(stderr.text(), '');
+        assert.equal(reloadRequested, true);
+        assert.equal(run.result.existingTabsReload?.mode, 'native-broker');
+        assert.equal(run.result.existingTabsReload?.reloaded, 1);
+      });
+    },
+  );
+});
+
+test('CLI browser status recarrega aba Gemini ativa via native broker quando nao ha content scripts', async () => {
+  let reloadRequested = false;
+  await withEnv(
+    {
+      GEMINI_MD_EXPORT_CLI_BROWSER_LAUNCH_DRY_RUN: 'true',
+      GEMINI_MD_EXPORT_EXISTING_TAB_GRACE_MS: '0',
+    },
+    async () => {
+      await withServer((req, res, url) => {
+        if (url.pathname === '/agent/ready') {
+          sendJson(
+            res,
+            200,
+            reloadRequested
+              ? {
+                  ready: true,
+                  mode: 'post-reload',
+                  connectedClientCount: 1,
+                  selectableTabCount: 1,
+                  commandReadyClientCount: 1,
+                }
+              : {
+                  ready: false,
+                  blockingIssue: 'no_connected_clients',
+                  mode: 'hot',
+                  connectedClientCount: 0,
+                  selectableTabCount: 0,
+                  commandReadyClientCount: 0,
+                  nativeBroker: {
+                    configured: true,
+                    available: true,
+                    response: {
+                      result: {
+                        tabs: [
+                          {
+                            state: 'debuggable',
+                            tab: {
+                              id: 101,
+                              active: true,
+                              url: 'https://gemini.google.com/app',
+                            },
+                          },
+                          {
+                            state: 'debuggable',
+                            tab: {
+                              id: 102,
+                              active: false,
+                              url: 'https://gemini.google.com/app/f05318e93e234d75',
+                            },
+                          },
+                        ],
+                      },
+                    },
+                  },
+                },
+          );
+          return;
+        }
+        if (url.pathname === '/agent/tabs' && url.searchParams.get('action') === 'reload') {
+          reloadRequested = true;
+          sendJson(res, 200, {
+            ok: true,
+            action: 'reload',
+            reloaded: 1,
+            mode: 'native-broker',
+          });
+          return;
+        }
+        if (url.pathname === '/agent/clients') {
+          sendJson(res, 200, {
+            mcp: { bridgeRole: 'primary' },
+            connectedClients: [],
+          });
+          return;
+        }
+        sendJson(res, 404, { error: `not found: ${url.pathname}` });
+      }, async (bridgeUrl) => {
+        const stdout = captureStream();
+        const stderr = captureStream();
+        const run = await main(
+          [
+            'browser',
+            'status',
+            '--bridge-url',
+            bridgeUrl,
+            '--plain',
+            '--wake',
+            '--allow-reload',
+            '--ready-wait-ms',
+            '50',
+          ],
+          { stdout, stderr },
+        );
+
+        assert.equal(run.exitCode, 0);
+        assert.equal(stderr.text(), '');
+        assert.equal(reloadRequested, true);
+        assert.equal(run.result.existingTabsReload?.mode, 'native-broker');
         assert.equal(run.result.existingTabsReload?.reloaded, 1);
       });
     },

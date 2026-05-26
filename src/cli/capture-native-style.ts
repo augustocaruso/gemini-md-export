@@ -3,11 +3,11 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import {
+  type NativeStyleCaptureManifest,
+  type NativeStyleStateName,
   nativeStyleProfileFromCapture,
   sanitizeNativeStyleCaptureManifest,
   validateNativeStyleCaptureManifest,
-  type NativeStyleCaptureManifest,
-  type NativeStyleStateName,
 } from '../browser/shared/native-style-capture.js';
 
 type CaptureArgs = {
@@ -286,7 +286,10 @@ const visibleElementForSelectors = async (
 ): Promise<{ locator: MinimalLocator; selector: string }> => {
   for (const selector of selectors) {
     const locator = page.locator(selector).first();
-    const count = await page.locator(selector).count().catch(() => 0);
+    const count = await page
+      .locator(selector)
+      .count()
+      .catch(() => 0);
     if (count <= 0) continue;
     const visible = await locator.isVisible().catch(() => false);
     if (visible) return { locator, selector };
@@ -307,7 +310,11 @@ const releaseState = async (
   locator: MinimalLocator,
   state: NativeStyleStateName,
 ): Promise<void> => {
-  if (state === 'pressed') await locator.page().mouse.up().catch(() => {});
+  if (state === 'pressed')
+    await locator
+      .page()
+      .mouse.up()
+      .catch(() => {});
 };
 
 const computedToken = async (
@@ -329,11 +336,16 @@ const importPlaywright = async (): Promise<MinimalPlaywright> => {
     ) => Promise<MinimalPlaywright>;
     return await dynamicImport('playwright');
   } catch {
-    throw new Error('Playwright is required for live capture. Use --fixture <path> --check without Playwright.');
+    throw new Error(
+      'Playwright is required for live capture. Use --fixture <path> --check without Playwright.',
+    );
   }
 };
 
-const captureLive = async ({ url, out }: Pick<CaptureArgs, 'url' | 'out'>): Promise<CaptureResult> => {
+const captureLive = async ({
+  url,
+  out,
+}: Pick<CaptureArgs, 'url' | 'out'>): Promise<CaptureResult> => {
   if (!out) throw new Error('--out is required for live capture');
   const playwright = await importPlaywright();
 

@@ -66,8 +66,7 @@ type CommandResultCacheEntry = {
   lastError?: string | null;
 };
 
-export const RESUMABLE_BRIDGE_COMMAND_STORAGE_KEY =
-  'gemini-md-export.pendingBridgeCommand.v1';
+export const RESUMABLE_BRIDGE_COMMAND_STORAGE_KEY = 'gemini-md-export.pendingBridgeCommand.v1';
 const RESUMABLE_BRIDGE_COMMAND_MAX_AGE_MS = 5 * 60_000;
 const RESUMABLE_BRIDGE_COMMAND_TYPES = new Set(['get-chat-by-id']);
 

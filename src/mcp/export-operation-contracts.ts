@@ -205,8 +205,7 @@ export const operationResultFromError = ({
   receipts?: Record<string, unknown>;
 }): ConversationOperationTerminalResult => {
   const err = error as { message?: unknown; code?: unknown };
-  const code =
-    typeof err?.code === 'string' ? err.code : 'conversation_operation_failed';
+  const code = typeof err?.code === 'string' ? err.code : 'conversation_operation_failed';
   const message = typeof err?.message === 'string' ? err.message : String(error);
   return {
     status: 'failed',

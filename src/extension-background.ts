@@ -11,6 +11,13 @@ import {
   managedTabsReloadRuntimeKey,
 } from './browser/background/managed-tabs-reload-policy.js';
 import { createNativeBrokerPort } from './browser/background/native-broker-client.js';
+import { selectClaimVisualCompanionTabIds } from './browser/background/tab-claim-companion-tabs.js';
+import { looksLikeManagedClaimGroupTitle } from './browser/background/tab-claim-managed-group.js';
+import {
+  storedManagedClaimGroupIdForRelease,
+  trackedTabIdsForClaimRelease,
+  trackedTabIdsForOwnedClaimRelease,
+} from './browser/background/tab-claim-release.js';
 import { activateTabWithDebugger } from './browser/shared/chrome-debugger.js';
 
 const EXTENSION_PROTOCOL_VERSION = Number('__EXTENSION_PROTOCOL_VERSION__');
@@ -60,8 +67,6 @@ const TAB_CLAIM_COLORS = new Set([
 const TAB_CLAIM_DEFAULT_LABEL = '✨ Em uso';
 const TAB_CLAIM_BADGE_TEXT = '✓';
 const CLAIM_LABEL_MAX_GRAPHEMES = 16;
-const MANAGED_TAB_CLAIM_GROUP_TITLE_RE =
-  /^(?:GME(?:\s|$)|✨ Em uso$|🔎 Conferindo$|📥 Exportando$|🔄 Sincroniza$)/iu;
 const contentScriptSelfHealCooldowns = new Map();
 const managedTabSelfHealTimers = new Map();
 let lastContentScriptSelfHeal = null;
@@ -82,6 +87,35 @@ const nativeBrokerPort = createNativeBrokerPort({
       nativeBroker: status,
       checkedAt: new Date().toISOString(),
     };
+  },
+  runtimeActions: {
+    extensionStatus: () => extensionInfo(),
+    selfHealContentScripts: (payload = {}) =>
+      selfHealGeminiTabs({
+        reason: payload.reason || 'native-broker-self-heal',
+        force: payload.force !== false,
+        tabId: payload.tabId,
+        tabIds: payload.tabIds,
+        maxTabs: payload.maxTabs,
+      }),
+    reloadSelf: async (payload = {}) => {
+      const reason = payload.reason || 'native-broker-reload-self';
+      await storageSet({
+        reason,
+        requestedAt: new Date().toISOString(),
+        source: 'native-broker',
+      });
+      await cleanupStaleTabClaimVisuals(reason);
+      setTimeout(() => {
+        chrome.runtime.reload();
+      }, 300);
+      return {
+        ok: true,
+        reloading: true,
+        reason,
+        runtime: currentRuntimeInfo(),
+      };
+    },
   },
 });
 
@@ -222,9 +256,6 @@ const scheduleTabClaimExpiryAlarm = (tabId, expiresAtMs) => {
   return { ok: true, tabId, when: expiresAtMs };
 };
 
-const looksLikeManagedClaimGroupTitle = (title) =>
-  MANAGED_TAB_CLAIM_GROUP_TITLE_RE.test(String(title || '').trim());
-
 const releaseTrackedTabClaimByTabId = async (
   tabId,
   { claimId = null, reason = 'background-release' } = {},
@@ -248,18 +279,13 @@ const releaseTrackedTabClaimByTabId = async (
   clearTabClaimExpiryTimer(tabId);
   await clearTabClaimExpiryAlarm(tabId);
   const tab = await chromeGetTab(tabId);
-  let groupId = Number.isInteger(existing?.groupId) ? existing.groupId : null;
-  let shouldUngroup =
-    existing?.mode === 'tab-group' &&
-    existing.originalGroupId === TAB_GROUP_NONE &&
-    Number.isInteger(tab?.groupId) &&
-    (tab.groupId === existing.groupId || !Number.isInteger(existing.groupId));
-  if (
-    !shouldUngroup &&
-    !existing &&
-    Number.isInteger(tab?.groupId) &&
-    tab.groupId !== TAB_GROUP_NONE
-  ) {
+  const releaseTabIds = trackedTabIdsForOwnedClaimRelease(tabId, existing, claims);
+  const protectedTabIds = trackedTabIdsForClaimRelease(tabId, existing).filter(
+    (releaseTabId) => !releaseTabIds.includes(releaseTabId),
+  );
+  let groupId = storedManagedClaimGroupIdForRelease(existing);
+  let shouldUngroup = Number.isInteger(groupId);
+  if (!shouldUngroup && Number.isInteger(tab?.groupId) && tab.groupId !== TAB_GROUP_NONE) {
     const group = await chromeGetTabGroup(tab.groupId);
     if (looksLikeManagedClaimGroupTitle(group?.title)) {
       shouldUngroup = true;
@@ -269,17 +295,44 @@ const releaseTrackedTabClaimByTabId = async (
 
   let visual = { mode: existing?.mode || 'none', tabId, groupId, released: false, reason };
   if (shouldUngroup) {
-    const ungrouped = await chromeUngroupTab(tabId);
+    const ungroupResults = [];
+    for (const releaseTabId of releaseTabIds) {
+      const releaseTab = await chromeGetTab(releaseTabId);
+      if (
+        Number.isInteger(groupId) &&
+        Number.isInteger(releaseTab?.groupId) &&
+        releaseTab.groupId !== groupId
+      ) {
+        continue;
+      }
+      ungroupResults.push(await chromeUngroupTab(releaseTabId));
+    }
+    const ungrouped = {
+      ok: ungroupResults.length > 0 && ungroupResults.every((item) => item.ok),
+      reason: ungroupResults.find((item) => item.reason)?.reason || reason,
+    };
     visual = {
       mode: 'tab-group',
       tabId,
+      tabIds: releaseTabIds,
       groupId,
       released: ungrouped.ok,
       reason: ungrouped.reason || reason,
     };
+    const protectedClaim = protectedTabIds
+      .map((protectedTabId) => claims[String(protectedTabId)] || null)
+      .find((claim) => claim?.mode === 'tab-group' && claim.groupId === groupId);
+    if (protectedClaim?.label || protectedClaim?.color) {
+      await chromeUpdateTabGroup(groupId, {
+        ...(protectedClaim.label ? { title: protectedClaim.label } : {}),
+        ...(protectedClaim.color ? { color: protectedClaim.color } : {}),
+      });
+    }
   }
 
-  await clearActionBadge(tabId);
+  for (const releaseTabId of releaseTabIds) {
+    await clearActionBadge(releaseTabId);
+  }
   delete claims[key];
   await setTrackedTabClaims(claims);
   return {
@@ -516,6 +569,16 @@ const chromeQueryManagedContentTabs = () =>
 
 const chromeQueryGeminiTabs = chromeQueryManagedContentTabs;
 
+const queryActivityCompanionTabsForClaim = async (claimedTab, requestedRelatedTabIds = []) => {
+  const listed = await chromeQueryManagedContentTabs();
+  if (!listed.ok) return [];
+  return selectClaimVisualCompanionTabIds(
+    claimedTab || {},
+    Array.isArray(listed.tabs) ? listed.tabs : [],
+    requestedRelatedTabIds,
+  );
+};
+
 const chromeSendTabMessage = (tabId, message, { timeoutMs = 1500 } = {}) =>
   new Promise((resolve) => {
     if (!chrome.tabs?.sendMessage || !Number.isInteger(tabId)) {
@@ -553,6 +616,37 @@ const pingContentScript = (tabId, { timeoutMs = 1500 } = {}) =>
     },
     { timeoutMs },
   );
+
+const normalizeTabIdList = (value) => {
+  const values = Array.isArray(value)
+    ? value
+    : value === undefined || value === null
+      ? []
+      : [value];
+  return Array.from(
+    new Set(
+      values.map((item) => Number(item)).filter((item) => Number.isInteger(item) && item > 0),
+    ),
+  );
+};
+
+const selectContentScriptSelfHealTabs = (
+  tabs = [],
+  { tabId = null, tabIds = null, maxTabs = null } = {},
+) => {
+  const requestedIds = new Set([...normalizeTabIdList(tabIds), ...normalizeTabIdList(tabId)]);
+  const selected =
+    requestedIds.size > 0
+      ? tabs.filter((tab) => requestedIds.has(Number(tab?.id)))
+      : Array.isArray(tabs)
+        ? tabs
+        : [];
+  const limit = Number(maxTabs);
+  if (requestedIds.size === 0 && Number.isFinite(limit) && limit > 0) {
+    return selected.slice(0, limit);
+  }
+  return selected;
+};
 
 const activateSenderTab = async (message, sender = {}) => {
   const requestedTabId = Number(message.tabId);
@@ -741,7 +835,13 @@ const ensureContentScriptForTab = async (tab, options = {}) => {
   };
 };
 
-const selfHealGeminiTabs = async ({ reason = 'self-heal', force = false } = {}) => {
+const selfHealGeminiTabs = async ({
+  reason = 'self-heal',
+  force = false,
+  tabId = null,
+  tabIds = null,
+  maxTabs = null,
+} = {}) => {
   const startedAt = Date.now();
   const queried = await chromeQueryGeminiTabs();
   if (!queried.ok) {
@@ -755,8 +855,9 @@ const selfHealGeminiTabs = async ({ reason = 'self-heal', force = false } = {}) 
     return lastContentScriptSelfHeal;
   }
 
+  const targetTabs = selectContentScriptSelfHealTabs(queried.tabs, { tabId, tabIds, maxTabs });
   const results = [];
-  for (const tab of queried.tabs) {
+  for (const tab of targetTabs) {
     results.push(await ensureContentScriptForTab(tab, { reason, force }));
   }
 
@@ -769,7 +870,10 @@ const selfHealGeminiTabs = async ({ reason = 'self-heal', force = false } = {}) 
     status: failed === 0 ? 'ok' : 'partial',
     at: new Date().toISOString(),
     durationMs: Math.max(0, Date.now() - startedAt),
-    tabCount: queried.tabs.length,
+    tabCount: targetTabs.length,
+    totalManagedTabCount: queried.tabs.length,
+    skippedManagedTabCount: Math.max(0, queried.tabs.length - targetTabs.length),
+    targetTabIds: targetTabs.map((tab) => tab?.id).filter(Number.isInteger),
     current,
     injected,
     failed,
@@ -919,13 +1023,38 @@ const ensureNativeBrokerPort = ({ reason = 'manual' } = {}) => {
   }
 };
 
-const probeNativeHost = async ({
+const ensureNativeBrokerReady = async ({
   reason = 'manual',
   timeoutMs = NATIVE_HOST_REQUEST_TIMEOUT_MS,
 } = {}) => {
+  try {
+    const response = await nativeBrokerPort.ensureReady({ timeoutMs });
+    return {
+      ...(response || { ok: false, code: 'native_broker_ready_empty_response' }),
+      reason,
+      connected: response?.ok === true,
+    };
+  } catch (err) {
+    return { ok: false, reason, error: err?.message || String(err) };
+  }
+};
+
+const probeNativeHost = async ({
+  reason = 'manual',
+  timeoutMs = NATIVE_HOST_REQUEST_TIMEOUT_MS,
+  brokerOnly = false,
+} = {}) => {
   const startedAt = Date.now();
-  const nativeBroker = ensureNativeBrokerPort({ reason });
-  const result = await nativeHostRequest('ping', {}, { timeoutMs });
+  const nativeBroker = brokerOnly
+    ? await ensureNativeBrokerReady({ reason, timeoutMs })
+    : ensureNativeBrokerPort({ reason });
+  const result = brokerOnly
+    ? {
+        ok: nativeBroker?.ok === true,
+        code: nativeBroker?.ok === true ? null : nativeBroker?.code || 'native_broker_not_ready',
+        brokerOnly: true,
+      }
+    : await nativeHostRequest('ping', {}, { timeoutMs });
   lastNativeHostProbe = {
     ...result,
     nativeBroker,
@@ -1186,18 +1315,23 @@ const cleanupStaleTabClaimVisuals = async (reason = 'stale-claim-cleanup') => {
     clearTabClaimExpiryTimer(tabId);
     await clearTabClaimExpiryAlarm(tabId);
 
-    const tab = await chromeGetTab(tabId);
-    if (tab && claim?.mode === 'tab-group' && claim.originalGroupId === TAB_GROUP_NONE) {
-      const stillOurGroup =
-        Number.isInteger(claim.groupId) &&
-        Number.isInteger(tab.groupId) &&
-        tab.groupId === claim.groupId;
-      if (stillOurGroup) {
-        await chromeUngroupTab(tabId);
+    const releaseTabIds = trackedTabIdsForClaimRelease(tabId, claim);
+    if (claim?.mode === 'tab-group' && claim.originalGroupId === TAB_GROUP_NONE) {
+      for (const releaseTabId of releaseTabIds) {
+        const tab = await chromeGetTab(releaseTabId);
+        const stillOurGroup =
+          Number.isInteger(claim.groupId) &&
+          Number.isInteger(tab?.groupId) &&
+          tab.groupId === claim.groupId;
+        if (stillOurGroup) {
+          await chromeUngroupTab(releaseTabId);
+        }
       }
     }
-    if (tab) {
-      await clearActionBadge(tabId);
+    for (const releaseTabId of releaseTabIds) {
+      if (await chromeGetTab(releaseTabId)) {
+        await clearActionBadge(releaseTabId);
+      }
     }
     delete claims[key];
     cleaned += 1;
@@ -1228,8 +1362,13 @@ const applyTabClaim = async (message, sender = {}) => {
     ...(Array.isArray(message.relatedTabIds) ? message.relatedTabIds : []),
     ...(Number.isInteger(visualGroupTabId) ? [visualGroupTabId] : []),
   ];
+  const companionRelatedTabIds = await queryActivityCompanionTabsForClaim(
+    tab || sender.tab || { id: tabId },
+    requestedRelatedTabIds,
+  );
+  const relatedTabIdsForClaim = [...requestedRelatedTabIds, ...companionRelatedTabIds];
   const relatedTabs = [];
-  for (const relatedTabId of Array.from(new Set(requestedRelatedTabIds.map(Number)))) {
+  for (const relatedTabId of Array.from(new Set(relatedTabIdsForClaim.map(Number)))) {
     if (!Number.isInteger(relatedTabId) || relatedTabId === tabId) continue;
     const relatedTab = await chromeGetTab(relatedTabId);
     const relatedUrl = relatedTab?.url || relatedTab?.pendingUrl || '';
@@ -1267,8 +1406,8 @@ const applyTabClaim = async (message, sender = {}) => {
   const managedAnchorGroupId =
     currentGroupIsManaged && currentGroupId !== TAB_GROUP_NONE
       ? currentGroupId
-      : relatedGroupStates.find((item) => item.managed && item.groupId !== TAB_GROUP_NONE)
-          ?.groupId ?? null;
+      : (relatedGroupStates.find((item) => item.managed && item.groupId !== TAB_GROUP_NONE)
+          ?.groupId ?? null);
   const targetTabIds = Array.from(
     new Set([tabId, ...relatedTabs.map((relatedTab) => relatedTab.id)].filter(Number.isInteger)),
   );
@@ -1294,12 +1433,13 @@ const applyTabClaim = async (message, sender = {}) => {
     const targetGroupId =
       managedAnchorGroupId ?? (alreadyOurGroup || orphanedManagedGroup ? currentGroupId : null);
     const blockedByUserGroup =
-      (currentGroupId !== TAB_GROUP_NONE && !alreadyOurGroup && !orphanedManagedGroup && !currentGroupIsManaged) ||
+      (currentGroupId !== TAB_GROUP_NONE &&
+        !alreadyOurGroup &&
+        !orphanedManagedGroup &&
+        !currentGroupIsManaged) ||
       relatedGroupStates.some(
         (item) =>
-          item.groupId !== TAB_GROUP_NONE &&
-          item.groupId !== targetGroupId &&
-          !item.managed,
+          item.groupId !== TAB_GROUP_NONE && item.groupId !== targetGroupId && !item.managed,
       );
     if (!blockedByUserGroup) {
       const tabIdsToGroup = targetGroupId
@@ -1332,10 +1472,10 @@ const applyTabClaim = async (message, sender = {}) => {
             reason: targetGroupId
               ? 'joined-existing-claim-group'
               : alreadyOurGroup
-              ? 'updated-existing-claim-group'
-              : orphanedManagedGroup
-                ? 'reclaimed-managed-claim-group'
-                : 'created-tab-group',
+                ? 'updated-existing-claim-group'
+                : orphanedManagedGroup
+                  ? 'reclaimed-managed-claim-group'
+                  : 'created-tab-group',
           };
         } else {
           if (!targetGroupId && !alreadyOurGroup && !orphanedManagedGroup) {
@@ -2107,6 +2247,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         probeNativeHost({
           reason: message.reason || 'content-script',
           timeoutMs: message.timeoutMs || NATIVE_HOST_REQUEST_TIMEOUT_MS,
+          brokerOnly: message.brokerOnly === true,
         }),
       )
       .then(sendResponse);

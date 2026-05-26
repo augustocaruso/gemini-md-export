@@ -54,7 +54,7 @@ export const normalizeComparableText = (value: unknown): string =>
     .toLowerCase();
 
 export type MetadataNeedle = {
-    kind: 'created' | 'last_message' | 'assistant' | 'title';
+  kind: 'created' | 'last_message' | 'assistant' | 'title';
   text: string;
   comparable: string;
   weight: number;
@@ -157,7 +157,11 @@ export const candidateNeedles = (
     'full_text',
     firstAssistantPromptRequirement,
   );
-  addAssistantFragments('created', candidate.scoring.firstAssistant, firstAssistantPromptRequirement);
+  addAssistantFragments(
+    'created',
+    candidate.scoring.firstAssistant,
+    firstAssistantPromptRequirement,
+  );
   add(
     'last_message',
     candidate.scoring.lastAssistant,
@@ -165,8 +169,13 @@ export const candidateNeedles = (
     'full_text',
     lastAssistantPromptRequirement,
   );
-  addAssistantFragments('last_message', candidate.scoring.lastAssistant, lastAssistantPromptRequirement);
-  for (const sample of candidate.scoring.assistantSamples || []) add('assistant', sample, 0.42, 'full_text');
+  addAssistantFragments(
+    'last_message',
+    candidate.scoring.lastAssistant,
+    lastAssistantPromptRequirement,
+  );
+  for (const sample of candidate.scoring.assistantSamples || [])
+    add('assistant', sample, 0.42, 'full_text');
   return needles;
 };
 
@@ -206,7 +215,8 @@ export const scoreMetadataEvidence = (
   const titleHits = hits.filter((hit) => hit.kind === 'title');
   const hasLongPrompt = promptHits.some((hit) => hit.length >= 48);
   if (!promptHits.length && (!titleHits.length || !assistantHits.length)) return null;
-  if (promptHits.length && !hasLongPrompt && !assistantHits.length && !titleHits.length) return null;
+  if (promptHits.length && !hasLongPrompt && !assistantHits.length && !titleHits.length)
+    return null;
   const kinds = new Set(promptHits.map((hit) => hit.kind));
   const kind = kinds.size === 1 ? Array.from(kinds)[0] : 'unknown';
   return {

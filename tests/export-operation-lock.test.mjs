@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   finishActiveTabOperation,
+  matchingActiveBrowserOperationProgressAt,
   reapStaleActiveTabOperation,
   requestActiveTabOperationCancel,
   startActiveTabOperation,
@@ -211,4 +212,39 @@ test('progress timestamps are monotonic across clock skew', () => {
   assert.equal(result.reaped, false);
   assert.equal(result.active.operationId, 'op-1');
   assert.equal(result.receipt, null);
+});
+
+test('matching active browser operation progress is read from heartbeat metrics', () => {
+  const client = {
+    metrics: {
+      tabOperation: {
+        active: {
+          operationId: 'op-1',
+          phase: 'hydrating',
+          lastProgressAt: '2026-05-26T04:08:12.345Z',
+        },
+      },
+    },
+  };
+
+  assert.equal(
+    matchingActiveBrowserOperationProgressAt(client, 'op-1'),
+    Date.parse('2026-05-26T04:08:12.345Z'),
+  );
+  assert.equal(matchingActiveBrowserOperationProgressAt(client, 'other'), null);
+});
+
+test('matching active browser operation progress ignores summaries without explicit progress', () => {
+  const client = {
+    metrics: {
+      tabOperation: {
+        active: {
+          operationId: 'op-1',
+          startedAt: '2026-05-26T04:08:00.000Z',
+        },
+      },
+    },
+  };
+
+  assert.equal(matchingActiveBrowserOperationProgressAt(client, 'op-1'), null);
 });

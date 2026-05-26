@@ -161,10 +161,7 @@ export const buildFixVaultCombinedReport = ({
 }): FixVaultReport => {
   const diagnosisUsable = diagnosisExitIsUsable(diagnosisExitCode);
   const ok =
-    repairExitCode === 0 &&
-    diagnosisUsable &&
-    webRepairExitCode === 0 &&
-    metadataExitCode === 0;
+    repairExitCode === 0 && diagnosisUsable && webRepairExitCode === 0 && metadataExitCode === 0;
   return {
     schema: 'gemini-md-export.fix-vault-report.v1',
     generatedAt,
@@ -180,7 +177,12 @@ export const buildFixVaultCombinedReport = ({
       },
       {
         name: 'metadata-diagnosis',
-        status: diagnosisExitCode === 0 ? 'completed' : diagnosisExitCode === FIX_VAULT_MANUAL_ACTION_EXIT_CODE ? 'blocked' : 'failed',
+        status:
+          diagnosisExitCode === 0
+            ? 'completed'
+            : diagnosisExitCode === FIX_VAULT_MANUAL_ACTION_EXIT_CODE
+              ? 'blocked'
+              : 'failed',
         exitCode: diagnosisExitCode,
         reportPath: metadataDiagnosisReportPath,
       },
@@ -199,14 +201,23 @@ export const buildFixVaultCombinedReport = ({
       },
       {
         name: 'metadata-backfill',
-        status: metadataExitCode === 0 ? 'completed' : metadataExitCode === FIX_VAULT_MANUAL_ACTION_EXIT_CODE ? 'blocked' : 'failed',
+        status:
+          metadataExitCode === 0
+            ? 'completed'
+            : metadataExitCode === FIX_VAULT_MANUAL_ACTION_EXIT_CODE
+              ? 'blocked'
+              : 'failed',
         exitCode: metadataExitCode,
         reportPath: metadataReportPath,
       },
       {
         name: 'vault-validation',
         status: ok ? 'completed' : 'blocked',
-        exitCode: repairExitCode || (diagnosisUsable ? 0 : diagnosisExitCode) || webRepairExitCode || metadataExitCode,
+        exitCode:
+          repairExitCode ||
+          (diagnosisUsable ? 0 : diagnosisExitCode) ||
+          webRepairExitCode ||
+          metadataExitCode,
       },
     ],
     reports: {

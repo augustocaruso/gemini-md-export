@@ -44,7 +44,7 @@ export const sharedComputeProgressMilestone = (
   });
   return {
     base: view.percent,
-    next: Math.min(100, ((Math.min(view.current + 1, view.total) / Math.max(1, view.total)) * 100)),
+    next: Math.min(100, (Math.min(view.current + 1, view.total) / Math.max(1, view.total)) * 100),
   };
 };
 

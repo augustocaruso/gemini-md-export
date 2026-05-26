@@ -204,7 +204,21 @@ const boolPayload = (payload: Record<string, unknown>, key: string, fallback = f
   return typeof value === 'boolean' ? value : fallback;
 };
 
-const isTabBrokerCommand = (command: unknown) => String(command || '').startsWith('tabs.');
+const brokerRequestTimeoutMs = (
+  request: Pick<NativeBrokerRequest, 'payload'>,
+  fallback = 5000,
+): number => {
+  const payload =
+    request.payload && typeof request.payload === 'object'
+      ? (request.payload as Record<string, unknown>)
+      : {};
+  return numberPayload(payload, 'timeoutMs', fallback);
+};
+
+const isExtensionBrokerCommand = (command: unknown) => {
+  const value = String(command || '');
+  return value.startsWith('tabs.') || value.startsWith('extension.');
+};
 
 const handleCommand = async (
   message: NativeHostCommand,
@@ -344,9 +358,9 @@ export const startNativeHostRuntime = (options: NativeHostRuntimeOptions = {}): 
   const handleBrokerIpcRequest = async (
     request: NativeBrokerRequest,
   ): Promise<NativeBrokerResponse> => {
-    if (isTabBrokerCommand(request.command)) {
+    if (isExtensionBrokerCommand(request.command)) {
       try {
-        return await sendToExtension(request);
+        return await sendToExtension(request, brokerRequestTimeoutMs(request));
       } catch (err) {
         const code =
           err instanceof Error && err.message === 'extension_request_timeout'
@@ -354,7 +368,7 @@ export const startNativeHostRuntime = (options: NativeHostRuntimeOptions = {}): 
             : 'extension_unavailable';
         const message =
           code === 'extension_request_timeout'
-            ? 'A extensao nao respondeu ao comando de aba a tempo.'
+            ? 'A extensao nao respondeu ao comando a tempo.'
             : 'A extensao ainda nao abriu a porta nativa do broker.';
         return nativeBrokerError(request, code, message, {
           retryable: true,

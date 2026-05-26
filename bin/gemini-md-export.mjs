@@ -34,6 +34,7 @@ import {
   buildExportJobProgressViewModel,
   buildProgressViewModel,
 } from '../build/ts/core/progress-view-model.js';
+import { shouldReloadExistingTabsForReady } from '../build/ts/cli/browser-ready-policy.js';
 import { buildBridgeOnlyChildEnv } from '../build/ts/mcp/browser-runtime-env.js';
 
 const DEFAULT_BRIDGE_URL = 'http://127.0.0.1:47283';
@@ -2700,21 +2701,6 @@ const wakeBrowserFromCli = async (flags, ui, ready) => {
     lastFailureAt: launch.error || launch.reason ? Date.now() : null,
   });
   return launch;
-};
-
-const shouldReloadExistingTabsForReady = (ready = {}, flags = {}) => {
-  if (flags.allowReload !== true || ready.ready === true) return false;
-  const connected = connectedClientCountFromReady(ready);
-  if (connected <= 0) return false;
-  const issue = String(ready.blockingIssue || '');
-  return [
-    'extension_version_mismatch',
-    'extension_protocol_mismatch',
-    'extension_build_mismatch',
-    'no_selectable_gemini_tab',
-    'no_active_claimable_gemini_tab',
-    'command_channel_not_ready',
-  ].includes(issue);
 };
 
 const reloadExistingTabsFromCli = async (bridgeUrl, flags, ui, ready = {}) => {

@@ -1145,6 +1145,19 @@ test('content script falha comandos de lista quando nao consegue expor o sidebar
   assert.doesNotMatch(source, /await ensureSidebarOpen\(\);\n\s*await sleep\(DEFAULT_LOAD_MORE_OPTIONS\.ensureSidebarDelayMs\);\n\s*\}\n\s*return \{\n\s*ok: true,\n\s*conversations:/);
 });
 
+test('content script expõe comando leve para acordar o native broker', async () => {
+  const source = await readFile(new URL('../src/userscript-shell.ts', import.meta.url), 'utf8');
+  const commandBlock = source.match(
+    /if \(command\.type === 'ensure-native-broker'\) \{[\s\S]*?\n    \}/,
+  )?.[0] || '';
+
+  assert.match(commandBlock, /gemini-md-export\/native-host-health/);
+  assert.match(source, /native-broker-wake-v1/);
+  assert.match(commandBlock, /reason:\s*command\.args\?\.reason \|\| 'mcp-native-broker-wake'/);
+  assert.match(commandBlock, /timeoutMs:\s*command\.args\?\.timeoutMs \|\| NATIVE_BROKER_WAKE_TIMEOUT_MS/);
+  assert.match(commandBlock, /extensionSendMessageWithRetry/);
+});
+
 test('content script mantém dock MCP durante navegação e sem prefixo de fase', async () => {
   const source = await readFile(new URL('../src/userscript-shell.ts', import.meta.url), 'utf8');
   assert.match(source, /MCP_PROGRESS_SESSION_STORAGE_KEY/);
@@ -1164,6 +1177,8 @@ test('content script mantém dock MCP durante navegação e sem prefixo de fase'
   assert.match(source, /UI_TECHNICAL_COPY_RE/);
   assert.match(source, /Baixando conversa selecionada/);
   assert.match(source, /\$\{current\} de \$\{total\}/);
+  assert.doesNotMatch(source, /Baixando conversa\$\{count\}/);
+  assert.doesNotMatch(source, /Exportando conversa do caderno\$\{count\}/);
   assert.doesNotMatch(source, /phasePrefix/);
   assert.doesNotMatch(source, /labelEl\.textContent = `\$\{.*phase.*:/);
   assert.doesNotMatch(source, /MCP exportando conversas/);
@@ -1173,16 +1188,18 @@ test('content script mantém dock MCP durante navegação e sem prefixo de fase'
 test('MCP terminal progress clears snapshot before finishing dock', async () => {
   const source = await readFile(new URL('../src/userscript-shell.ts', import.meta.url), 'utf8');
   const terminalBlock = source.match(
-    /if \(jobProgress\.status && TERMINAL_MCP_STATUSES\.has\(jobProgress\.status\)\) \{[\s\S]*?\n    \}/,
+    /if \(isTerminalMcpProgress\) \{[\s\S]*?\n    \}/,
   )?.[0] || '';
 
   assert.match(source, /mcpTerminalProgressSeenAt/);
   assert.match(source, /mcpTerminalProgressJobId/);
-  assert.match(source, /const terminalJobId = jobProgress\.jobId \|\| state\.mcpProgressJobId \|\| null/);
-  assert.match(source, /state\.mcpTerminalProgressJobId === terminalJobId/);
-  assert.match(source, /PROGRESS_MIN_VISIBLE_MS \+ 1500/);
+  assert.match(source, /mcpTerminalProgressSignature/);
+  assert.match(source, /buildMcpTerminalProgressSignature/);
+  assert.match(source, /const isTerminalMcpProgress = Boolean/);
+  assert.match(source, /state\.mcpTerminalProgressSignature === terminalProgressSignature/);
   assert.match(terminalBlock, /state\.mcpTerminalProgressSeenAt/);
   assert.match(terminalBlock, /state\.mcpTerminalProgressJobId = terminalJobId/);
+  assert.match(terminalBlock, /state\.mcpTerminalProgressSignature = terminalProgressSignature/);
   assert.match(terminalBlock, /clearMcpProgressSnapshot\(\)/);
   assert.match(terminalBlock, /stopProgressCreep\(\)/);
   assert.match(terminalBlock, /finishExportProgress/);
@@ -1236,9 +1253,10 @@ test('content script renderiza progresso selecionado sem jargão tecnico', { tim
 
   assert.equal(first.title, 'Baixando conversas');
   assert.equal(first.count, '1 de 10');
-  assert.equal(first.label, 'Baixando conversa selecionada (1 de 10): f4b75e8dfa21cdc8');
+  assert.equal(first.label, 'Baixando conversa selecionada: f4b75e8dfa21cdc8');
   assert.equal(first.barWidth, '0%');
   assert.doesNotMatch(first.label, /MCP|reexportando/);
+  assert.doesNotMatch(first.label, /\b1 de 10\b/);
 
   const second = debug.showProgressForDebug({
     jobId: 'job-ux-progress',
@@ -1259,10 +1277,11 @@ test('content script renderiza progresso selecionado sem jargão tecnico', { tim
   assert.equal(second.count, '2 de 10 · 1 erro');
   assert.equal(
     second.label,
-    'Baixando conversa selecionada (2 de 10): Usando OpenCode com ChatGPT Plus',
+    'Baixando conversa selecionada: Usando OpenCode com ChatGPT Plus',
   );
   assert.equal(second.barWidth, '10%');
   assert.doesNotMatch(second.label, /MCP|reexportando/);
+  assert.doesNotMatch(second.label, /\b2 de 10\b/);
 
   const stale = debug.showProgressForDebug({
     jobId: 'job-ux-progress',
@@ -1281,7 +1300,7 @@ test('content script renderiza progresso selecionado sem jargão tecnico', { tim
   assert.equal(stale.count, '2 de 10 · 1 erro');
   assert.equal(
     stale.label,
-    'Baixando conversa selecionada (2 de 10): Usando OpenCode com ChatGPT Plus',
+    'Baixando conversa selecionada: Usando OpenCode com ChatGPT Plus',
   );
   assert.equal(stale.barWidth, '10%');
 
@@ -1300,7 +1319,7 @@ test('content script renderiza progresso selecionado sem jargão tecnico', { tim
   });
 
   assert.equal(third.count, '3 de 10 · 1 erro');
-  assert.equal(third.label, 'Baixando conversa selecionada (3 de 10): Configuração conjunta');
+  assert.equal(third.label, 'Baixando conversa selecionada: Configuração conjunta');
   assert.equal(third.barWidth, '20%');
 
   const lastStarted = debug.showProgressForDebug({
@@ -1320,7 +1339,7 @@ test('content script renderiza progresso selecionado sem jargão tecnico', { tim
   assert.equal(lastStarted.count, '10 de 10');
   assert.equal(
     lastStarted.label,
-    'Baixando conversa selecionada (10 de 10): Novas Funções Multimodais do Gemini',
+    'Baixando conversa selecionada: Novas Funções Multimodais do Gemini',
   );
   assert.equal(lastStarted.barWidth, '90%');
 
@@ -1339,6 +1358,51 @@ test('content script renderiza progresso selecionado sem jargão tecnico', { tim
   assert.equal(done.count, '10 de 10');
   assert.equal(done.label, 'Concluído');
   assert.equal(done.barWidth, '100%');
+  assert.deepEqual(runtimeErrors, []);
+
+  window.close();
+});
+
+test('content script nao reabre dock para replay terminal do mesmo job MCP', { timeout: 6000 }, async () => {
+  const { dom, runtimeErrors } = createGeminiSidebarDom(['f4b75e8dfa21cdc8']);
+  const { window } = dom;
+  const debug = await evaluateContentScript(window);
+  const dockId = 'gm-md-export-modern-progress-dock';
+  const terminalProgress = {
+    jobId: 'job-terminal-replay',
+    kind: 'recent-export',
+    workflow: 'recent-export',
+    status: 'completed',
+    phase: 'done',
+    total: 30,
+    current: 30,
+    completed: 30,
+    label: 'Concluido',
+    updatedAt: 1700000000000,
+  };
+
+  debug.showProgressForDebug({
+    ...terminalProgress,
+    status: 'running',
+    phase: 'exporting',
+    current: 29,
+    completed: 29,
+    position: 30,
+    label: 'Baixando conversa selecionada',
+  });
+  debug.showProgressForDebug(terminalProgress);
+
+  const dock = window.document.getElementById(dockId);
+  assert.ok(dock);
+  assert.equal(dock.hidden, false);
+
+  await new Promise((resolve) => window.setTimeout(resolve, 2700));
+  assert.equal(dock.hidden, true);
+  assert.equal(dock.style.display, 'none');
+
+  debug.showProgressForDebug(terminalProgress);
+  assert.equal(dock.hidden, true);
+  assert.equal(dock.style.display, 'none');
   assert.deepEqual(runtimeErrors, []);
 
   window.close();

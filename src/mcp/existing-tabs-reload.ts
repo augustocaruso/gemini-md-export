@@ -106,10 +106,13 @@ export const normalizePositiveIntegerOrNull = (
 };
 
 export const previousWebConversationCountForResumeReport = (
-  report: {
-    webConversationCount?: unknown;
-    resume?: { previousCounters?: { webConversationCount?: unknown } | null } | null;
-  } | null | undefined,
+  report:
+    | {
+        webConversationCount?: unknown;
+        resume?: { previousCounters?: { webConversationCount?: unknown } | null } | null;
+      }
+    | null
+    | undefined,
   max: number,
 ): number | null =>
   normalizePositiveIntegerOrNull(report?.resume?.previousCounters?.webConversationCount, max) ??

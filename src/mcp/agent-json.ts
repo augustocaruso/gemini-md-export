@@ -1,4 +1,9 @@
-const SAFE_CONSTRUCTOR_NAMES = new Set(['Socket', 'HTTPParser', 'IncomingMessage', 'ServerResponse']);
+const SAFE_CONSTRUCTOR_NAMES = new Set([
+  'Socket',
+  'HTTPParser',
+  'IncomingMessage',
+  'ServerResponse',
+]);
 
 export const sanitizeAgentJsonValue = (
   value: unknown,

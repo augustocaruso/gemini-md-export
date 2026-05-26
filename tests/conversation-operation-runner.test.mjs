@@ -120,6 +120,78 @@ test('conversation operation saves after download, date resolution and writer', 
   ]);
 });
 
+test('conversation operation reports progress while local date resolution is still running', async () => {
+  const progress = [];
+  const result = await runConversationOperation({
+    jobId: 'job-1',
+    operationId: 'job-1:001:aaa111aaa111',
+    target,
+    progressSink: (snapshot) => progress.push(snapshot),
+    abortSignal: new AbortController().signal,
+    deps: {
+      localPhaseProgressIntervalMs: 5,
+      download: async () => ({
+        payload: { chatId: 'aaa111aaa111', content: '# ok' },
+        receipts: { navigation: { ok: true } },
+      }),
+      resolveDates: async ({ payload }) => {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        return {
+          payload: { ...payload, dateCreated: '2026-05-01T00:00:00Z' },
+          receipt: { status: 'matched', source: 'takeout' },
+        };
+      },
+      save: async ({ payload }) => ({
+        filePath: `/tmp/${payload.chatId}.md`,
+        bytes: 12,
+        receipt: { status: 'saved' },
+      }),
+    },
+  });
+
+  assert.equal(result.status, 'saved');
+  assert.ok(
+    progress.filter((snapshot) => snapshot.phase === 'resolving_dates').length >= 2,
+    'date resolution should keep the operation watchdog informed',
+  );
+});
+
+test('conversation operation reports progress while local save is still running', async () => {
+  const progress = [];
+  const result = await runConversationOperation({
+    jobId: 'job-1',
+    operationId: 'job-1:001:aaa111aaa111',
+    target,
+    progressSink: (snapshot) => progress.push(snapshot),
+    abortSignal: new AbortController().signal,
+    deps: {
+      localPhaseProgressIntervalMs: 5,
+      download: async () => ({
+        payload: { chatId: 'aaa111aaa111', content: '# ok' },
+        receipts: { navigation: { ok: true } },
+      }),
+      resolveDates: async ({ payload }) => ({
+        payload: { ...payload, dateCreated: '2026-05-01T00:00:00Z' },
+        receipt: { status: 'matched', source: 'takeout' },
+      }),
+      save: async ({ payload }) => {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        return {
+          filePath: `/tmp/${payload.chatId}.md`,
+          bytes: 12,
+          receipt: { status: 'saved' },
+        };
+      },
+    },
+  });
+
+  assert.equal(result.status, 'saved');
+  assert.ok(
+    progress.filter((snapshot) => snapshot.phase === 'saving').length >= 2,
+    'save should keep the operation watchdog informed',
+  );
+});
+
 test('conversation operation fails before save when payload chat id does not match target', async () => {
   const calls = [];
   const result = await runConversationOperation({
@@ -214,6 +286,41 @@ test('conversation operation cancels after download and skips date resolution an
   assert.equal(result.reason, 'after-download');
   assert.deepEqual(result.receipts, { download: { navigation: { ok: true } } });
   assert.deepEqual(calls, ['download']);
+});
+
+test('conversation operation cancels while local date resolution is still pending', async () => {
+  const controller = new AbortController();
+  const calls = [];
+  const resultPromise = runOperation({
+    abortSignal: controller.signal,
+    deps: createDeps({
+      download: async () => {
+        calls.push('download');
+        return {
+          payload: { chatId: target.targetChatId, content: '# ok' },
+          receipts: { navigation: { ok: true } },
+        };
+      },
+      resolveDates: async () => {
+        calls.push('resolveDates');
+        await new Promise(() => {});
+      },
+      save: async () => {
+        calls.push('save');
+        return { filePath: '/tmp/nope.md', receipt: {} };
+      },
+    }),
+  });
+  setTimeout(() => controller.abort('during-dates'), 20);
+
+  const result = await Promise.race([
+    resultPromise,
+    new Promise((resolve) => setTimeout(() => resolve({ status: 'test-timeout' }), 200)),
+  ]);
+
+  assert.equal(result.status, 'cancelled');
+  assert.equal(result.reason, 'during-dates');
+  assert.deepEqual(calls, ['download', 'resolveDates']);
 });
 
 test('conversation operation cancels after date resolution and skips save', async () => {

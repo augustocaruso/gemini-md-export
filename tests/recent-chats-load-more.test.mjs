@@ -147,6 +147,7 @@ test('load more parcial tem budget maior que abertura atrasada do sidebar', () =
 
 test('contagem longa aplica claim visual temporaria na aba', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const nativeGateSource = readFileSync(resolve(ROOT, 'src', 'mcp', 'native-release-gate.ts'), 'utf-8');
   const block = source.match(
     /url\.pathname === '\/agent\/recent-chats'[\s\S]*?\n  if \(req\.method === 'GET' && url\.pathname === '\/agent\/export-recent-chats'\)/,
   )?.[0];
@@ -155,16 +156,19 @@ test('contagem longa aplica claim visual temporaria na aba', () => {
   assert.match(block, /const temporaryClaimArgs = \{ \.\.\.args \}/);
   assert.match(block, /ensureTabClaimForJob\(\s*client,\s*temporaryClaimArgs,\s*args\.countOnly \? TAB_CLAIM_LABELS\.count : TAB_CLAIM_LABELS\.list/);
   assert.match(block, /claimVisibleAtMs = claim \? Date\.now\(\) : null/);
+  assert.match(block, /preexistingClaimId/);
+  assert.match(block, /hasExplicitClaimId/);
+  assert.match(block, /ownsTemporaryClaim/);
   assert.match(block, /waitForTabClaimMinimumVisibility\(claimVisibleAtMs, args\)/);
   assert.match(block, /temporaryClaimArgs\.ttlMs/);
   assert.match(block, /operationArgs/);
   assert.match(block, /claimId: claim\.claimId/);
-  assert.match(block, /releaseClaimOnOperationEnd: shouldAutoReleaseTabClaim\(args\)/);
+  assert.match(block, /releaseClaimOnOperationEnd: shouldReleaseTemporaryClaim/);
   assert.match(block, /releaseClaimReason: 'recent-chats-load-more-finished'/);
   assert.match(block, /recent-chats-list-finished/);
   assert.match(block, /tabClaimRelease/);
-  assert.match(source, /waitForContinuationClient\(\s*\{\s*clientId: claim\.clientId/);
-  assert.match(source, /claimId,\s*tabId: claim\.tabId/);
+  assert.match(nativeGateSource, /waitForContinuationClient\(\s*\{\s*clientId: claim\.clientId/);
+  assert.match(nativeGateSource, /\{\s*claimId,\s*tabId: claim\.tabId/);
   assert.match(source, /Math\.min\(COMMAND_TIMEOUT_MS, browserTimeoutMs \+ 15_000\)/);
   assert.match(source, /releaseClaimOnSlowOperationMs/);
 });
@@ -277,7 +281,11 @@ test('export recente passa claim visual Gemini para fallback My Activity de data
   assert.match(runtimeSource, /DEFAULT_EXPORT_DATE_IMPORT_ACTIVITY_WAIT_MS = 45_000/);
   assert.match(runtimeSource, /DEFAULT_EXPORT_DATE_IMPORT_ACTIVITY_PRE_LAUNCH_WAIT_MS = 8_000/);
   assert.match(runtimeSource, /visualGroupTabId:[\s\S]*args\._exportDateImportVisualGroupTabId/);
-  assert.match(runtimeSource, /waitMs: dateImportActivityWaitMs\(args\)/);
+  assert.match(runtimeSource, /const activityWaitMs = dateImportActivityWaitMs\(args\)/);
+  assert.match(runtimeSource, /waitMs: activityWaitMs/);
+  assert.match(runtimeSource, /activityCommandTimeoutMs:[\s\S]*activityWaitMs \+ 15_000/);
+  assert.match(runtimeSource, /abortable\(\s*options\.scanActivity/);
+  assert.match(runtimeSource, /throwIfAborted\(args\.abortSignal\)/);
   assert.match(runtimeSource, /preLaunchWaitMs: dateImportActivityPreLaunchWaitMs\(args\)/);
 });
 
@@ -402,6 +410,7 @@ test('ativacao automatica de aba limita brokers possivelmente obsoletos', () => 
 
 test('export all incompleto vira aviso em vez de sucesso silencioso', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const nativeGateSource = readFileSync(resolve(ROOT, 'src', 'mcp', 'native-release-gate.ts'), 'utf-8');
   const block = source.match(
     /const runRecentChatsExportJob = async[\s\S]*?\nconst startRecentChatsExportJob/,
   )?.[0];
@@ -413,8 +422,11 @@ test('export all incompleto vira aviso em vez de sucesso silencioso', () => {
   assert.match(block, /Nao consegui confirmar que cheguei ao fim do historico do Gemini/);
   assert.match(block, /failures\.length > 0 \|\| job\.truncated \|\| job\.loadMoreTimedOut/);
   assert.match(block, /completed_with_errors/);
-  assert.match(source, /const autoReleaseTabClaimForJob = async/);
+  assert.match(source, /const autoReleaseTabClaimForJob = createAutoTabClaimReleaseForJob/);
   assert.match(source, /await autoReleaseTabClaimForJob\(job, `job-\$\{job\.status \|\| 'finished'\}`\)/);
+  assert.match(nativeGateSource, /tryNativeBrowserBrokerTabsAction\('release'/);
+  assert.match(nativeGateSource, /job\.nativeExportLease[\s\S]*?\.tabIds/);
+  assert.match(nativeGateSource, /job\.nativeTabClaimRelease = await deps\.tryNativeBrowserBrokerTabsAction\('release'/);
   assert.match(source, /tabClaimRelease/);
   assert.match(source, /autoReleaseTabClaim/);
 });
@@ -723,7 +735,10 @@ test('export recente faz retry para aba ocupada antes de registrar falha', () =>
   assert.match(source, /conversation_not_ready/);
   assert.match(source, /const downloadConversationItemWithRetry = async/);
   assert.match(source, /RECENT_CHATS_TRANSIENT_BUSY_RETRY_LIMIT/);
-  assert.match(operationSource, /downloadConversationItemWithRetry\(job, client, conversation/);
+  assert.match(
+    operationSource,
+    /downloadConversationItemWithRetry\(\s*job,\s*client,\s*conversation/,
+  );
   assert.match(jobBlock, /const key = normalizeConversationChatId\(conversation\);/);
   assert.doesNotMatch(
     jobBlock,

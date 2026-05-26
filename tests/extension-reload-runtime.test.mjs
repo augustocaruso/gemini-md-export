@@ -19,6 +19,19 @@ test('erro de contexto invalidado conta como reload automatico em andamento', ()
   });
 });
 
+test('resultado de comando com contexto invalidado tambem conta como reload em andamento', () => {
+  const result = { ok: false, error: 'Extension context invalidated.' };
+
+  assert.equal(isExtensionContextInvalidatedError(result), true);
+  assert.deepEqual(extensionReloadAssumedResultForError(result), {
+    ok: true,
+    reloading: true,
+    assumed: true,
+    reason: 'extension-context-invalidated',
+    detail: 'Extension context invalidated.',
+  });
+});
+
 test('erro comum nao e convertido em reload assumido', () => {
   const error = new Error('tab_operation_in_progress');
 

@@ -501,6 +501,7 @@
   const BRIDGE_HEARTBEAT_PING_MS = 30000;
   const TAB_BROKER_REPORT_MIN_MS = 3000;
   const NATIVE_BRIDGE_TRANSPORT_COOLDOWN_MS = 60_000;
+  const NATIVE_BROKER_WAKE_TIMEOUT_MS = 5000;
   const BRIDGE_SNAPSHOT_MIN_INTERVAL_MS = 1200;
   const BRIDGE_SNAPSHOT_MAX_INTERVAL_MS = 30000;
   const BRIDGE_PROTOCOL_CAPABILITIES = [
@@ -510,6 +511,7 @@
     'command-result-retry-v1',
     'tab-backpressure-v1',
     'tab-claim-v1',
+    'native-broker-wake-v1',
   ];
   const MODAL_VIRTUALIZATION_THRESHOLD = 120;
   const MODAL_VIRTUAL_ITEM_HEIGHT = 78;
@@ -605,6 +607,7 @@
     mcpProgressCancelSinceAt: 0,
     mcpTerminalProgressSeenAt: 0,
     mcpTerminalProgressJobId: null,
+    mcpTerminalProgressSignature: null,
     mcpProgressWatchdogTimer: 0,
     isLoadingMore: false,
     loadMoreFailures: 0,
@@ -4549,7 +4552,9 @@
       targetChatId: active.targetChatId || null,
       phase: active.phase || null,
       startedAt: new Date(active.startedAt).toISOString(),
+      lastProgressAt: active.lastProgressAt ? new Date(active.lastProgressAt).toISOString() : null,
       elapsedMs: Date.now() - active.startedAt,
+      lastProgressElapsedMs: Date.now() - (active.lastProgressAt || active.startedAt),
       cancelRequestedAt: active.cancelRequestedAt
         ? new Date(active.cancelRequestedAt).toISOString()
         : null,
@@ -5313,6 +5318,30 @@
       if (response?.buildStamp) bridgeState.buildStamp = response.buildStamp;
       return {
         ...(response || { ok: false, reason: 'empty-extension-info-response' }),
+        contentScript: true,
+        serviceWorker: response?.ok === true,
+        attempts: ping.attempts,
+      };
+    }
+
+    if (command.type === 'ensure-native-broker') {
+      const timeoutMs = command.args?.timeoutMs || NATIVE_BROKER_WAKE_TIMEOUT_MS;
+      const ping = await extensionSendMessageWithRetry(
+        {
+          type: 'gemini-md-export/native-host-health',
+          reason: command.args?.reason || 'mcp-native-broker-wake',
+          timeoutMs: command.args?.timeoutMs || NATIVE_BROKER_WAKE_TIMEOUT_MS,
+          brokerOnly: true,
+        },
+        {
+          timeoutMs: Math.max(NATIVE_BROKER_WAKE_TIMEOUT_MS + 1500, Number(timeoutMs) + 1500),
+          attempts: 2,
+          retryDelayMs: 250,
+        },
+      );
+      const response = ping.response;
+      return {
+        ...(response || { ok: false, reason: 'empty-native-broker-wake-response' }),
         contentScript: true,
         serviceWorker: response?.ok === true,
         attempts: ping.attempts,
@@ -7111,9 +7140,6 @@
 
   const humanProgressLabelFor = (progress) => {
     if (progress?.sourceKind && progress?.label) return progress.label;
-    const total = Math.max(progress?.total || 1, 1);
-    const current = progressDisplayCurrent(progress);
-    const count = current > 0 && total > 1 ? ` (${current} de ${total})` : '';
     const item = safeProgressItemLabel(progress);
     const flow = progress?.workflow || progress?.kind || '';
     const status = progress?.status || '';
@@ -7131,15 +7157,15 @@
 
     if (phase === 'exporting') {
       if (flow === 'direct-chats-export' || flow === 'direct-reexport') {
-        return `Baixando conversa selecionada${count}: ${item}`;
+        return `Baixando conversa selecionada: ${item}`;
       }
       if (flow === 'notebook-export') {
-        return `Exportando conversa do caderno${count}: ${item}`;
+        return `Exportando conversa do caderno: ${item}`;
       }
       if (flow === 'vault-incremental-sync') {
-        return `Baixando conversa nova${count}: ${item}`;
+        return `Baixando conversa nova: ${item}`;
       }
-      return `Baixando conversa${count}: ${item}`;
+      return `Baixando conversa: ${item}`;
     }
 
     const fallback = String(progress?.label || '').trim();
@@ -7394,6 +7420,30 @@
     'cancelled',
   ]);
 
+  const mcpTerminalSignaturePart = (value) =>
+    value === null || value === undefined ? '' : String(value).replace(/[|\r\n]/g, ' ');
+
+  const buildMcpTerminalProgressSignature = (jobProgress, fallbackJobId = null) => {
+    if (!jobProgress || typeof jobProgress !== 'object') return null;
+    const status = jobProgress.status || '';
+    if (!TERMINAL_MCP_STATUSES.has(status)) return null;
+    const jobId = jobProgress.jobId || fallbackJobId || null;
+    if (jobId) return `job:${jobId}:${status}`;
+    return [
+      'snapshot',
+      status,
+      jobProgress.kind || '',
+      jobProgress.workflow || jobProgress.kind || '',
+      jobProgress.total ?? '',
+      jobProgress.current ?? '',
+      jobProgress.completed ?? '',
+      jobProgress.position ?? '',
+      jobProgress.updatedAt ?? '',
+      jobProgress.title || '',
+      jobProgress.chatId || jobProgress.currentChatId || '',
+    ].map(mcpTerminalSignaturePart).join('|');
+  };
+
   const stopMcpProgressWatchdog = () => {
     if (state.mcpProgressWatchdogTimer) {
       clearInterval(state.mcpProgressWatchdogTimer);
@@ -7598,14 +7648,23 @@
     }
 
     if (jobProgress.source && jobProgress.source !== 'mcp') return;
-    const terminalJobId = jobProgress.jobId || state.mcpProgressJobId || null;
+    const isTerminalMcpProgress = Boolean(
+      jobProgress.status && TERMINAL_MCP_STATUSES.has(jobProgress.status),
+    );
+    const terminalJobId = isTerminalMcpProgress
+      ? jobProgress.jobId || state.mcpProgressJobId || null
+      : null;
+    const terminalProgressSignature = isTerminalMcpProgress
+      ? buildMcpTerminalProgressSignature(jobProgress, state.mcpProgressJobId)
+      : null;
     if (
-      jobProgress.status &&
-      TERMINAL_MCP_STATUSES.has(jobProgress.status) &&
-      state.mcpTerminalProgressJobId === terminalJobId &&
-      Date.now() - (state.mcpTerminalProgressSeenAt || 0) < PROGRESS_MIN_VISIBLE_MS + 1500
+      terminalProgressSignature &&
+      state.mcpTerminalProgressSignature === terminalProgressSignature
     ) {
       return;
+    }
+    if (!isTerminalMcpProgress) {
+      state.mcpTerminalProgressSignature = null;
     }
     state.mcpProgressLastSeenAt = Date.now();
     noteMcpProgressStatus(jobProgress.status);
@@ -7656,12 +7715,13 @@
       updateProgressDock();
     }
 
-    if (jobProgress.status && TERMINAL_MCP_STATUSES.has(jobProgress.status)) {
+    if (isTerminalMcpProgress) {
       // Terminal: anima 100% + shimmer off + fade-out, mantendo a sensação
       // de "concluído" antes de esconder.
       stopMcpProgressWatchdog();
       state.mcpTerminalProgressSeenAt = Date.now();
       state.mcpTerminalProgressJobId = terminalJobId;
+      state.mcpTerminalProgressSignature = terminalProgressSignature || null;
       state.mcpProgressActive = false;
       state.mcpProgressJobId = null;
       state.mcpProgressLastSeenAt = 0;

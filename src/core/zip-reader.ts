@@ -21,10 +21,7 @@ const findEndOfCentralDirectoryOffset = (buffer: Buffer): number => {
   throw new Error('ZIP invalido: diretorio central nao encontrado.');
 };
 
-const inflateZipEntry = (
-  compressed: Buffer,
-  method: ZipEntry['compressionMethod'],
-): Buffer => {
+const inflateZipEntry = (compressed: Buffer, method: ZipEntry['compressionMethod']): Buffer => {
   if (method === 0) return Buffer.from(compressed);
   if (method === 8) return inflateRawSync(compressed);
   throw new Error(`ZIP usa compressao nao suportada: ${method}.`);

@@ -26,6 +26,7 @@ type SaveResult = {
 };
 
 type OperationDeps = {
+  localPhaseProgressIntervalMs?: number;
   now?: () => number;
   download: (args: {
     target: ExportBatchTarget;
@@ -81,6 +82,18 @@ const throwIfAborted = (signal: AbortSignal) => {
   throw error;
 };
 
+const abortError = (signal: AbortSignal) => {
+  const error = new Error(abortReason(signal));
+  (error as Error & { code?: string }).code = 'operation_cancelled';
+  return error;
+};
+
+const normalizeLocalPhaseProgressIntervalMs = (value: unknown): number => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 5000;
+  return Math.min(Math.floor(parsed), 15000);
+};
+
 export const runConversationOperation = async ({
   jobId,
   operationId,
@@ -103,6 +116,35 @@ export const runConversationOperation = async ({
         now: now(),
       }),
     );
+  const abortableWork = async <T>(work: () => Promise<T>): Promise<T> => {
+    throwIfAborted(abortSignal);
+    let onAbort: (() => void) | null = null;
+    const abortPromise = new Promise<never>((_resolve, reject) => {
+      onAbort = () => reject(abortError(abortSignal));
+      abortSignal.addEventListener('abort', onAbort, { once: true });
+    });
+    const workPromise = work();
+    workPromise.catch(() => {});
+    try {
+      return await Promise.race([workPromise, abortPromise]);
+    } finally {
+      if (onAbort) abortSignal.removeEventListener('abort', onAbort);
+    }
+  };
+  const withLocalPhaseProgress = async <T>(
+    phase: string,
+    message: string,
+    work: () => Promise<T>,
+  ): Promise<T> => {
+    progress(phase, message);
+    const heartbeatMs = normalizeLocalPhaseProgressIntervalMs(deps.localPhaseProgressIntervalMs);
+    const timer = setInterval(() => progress(phase, message), heartbeatMs);
+    try {
+      return await abortableWork(work);
+    } finally {
+      clearInterval(timer);
+    }
+  };
 
   try {
     if (abortSignal.aborted) return cancelled(operationId, target, abortSignal, receipts);
@@ -121,13 +163,17 @@ export const runConversationOperation = async ({
       throw error;
     }
 
-    progress('resolving_dates', 'Conferindo datas da conversa');
-    const dated = await deps.resolveDates({ target, payload, operationId, abortSignal });
+    const dated = await withLocalPhaseProgress(
+      'resolving_dates',
+      'Conferindo datas da conversa',
+      () => deps.resolveDates({ target, payload, operationId, abortSignal }),
+    );
     receipts.dateImport = dated.receipt;
     throwIfAborted(abortSignal);
 
-    progress('saving', 'Salvando Markdown');
-    const saved = await deps.save({ target, payload: dated.payload, operationId, abortSignal });
+    const saved = await withLocalPhaseProgress('saving', 'Salvando Markdown', () =>
+      deps.save({ target, payload: dated.payload, operationId, abortSignal }),
+    );
     receipts.save = saved.receipt || {};
     throwIfAborted(abortSignal);
 

@@ -29,8 +29,7 @@ export type LocalDoctorStatus = Readonly<{
   nextAction: string;
 }>;
 
-const STATIC_RELATIVE_IMPORT_RE =
-  /\bimport\s+(?:[^'"]+\s+from\s+)?['"](\.[^'"]+)['"]/g;
+const STATIC_RELATIVE_IMPORT_RE = /\bimport\s+(?:[^'"]+\s+from\s+)?['"](\.[^'"]+)['"]/g;
 
 const staticRelativeImports = (source: string): string[] =>
   Array.from(source.matchAll(STATIC_RELATIVE_IMPORT_RE)).map((match) => match[1] ?? '');

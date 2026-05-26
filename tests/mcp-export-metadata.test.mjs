@@ -380,6 +380,7 @@ test('export metadata fallback passa claim visual e espera longa para My Activit
 
     assert.equal(scanArgs.visualGroupTabId, 713803072);
     assert.equal(scanArgs.waitMs, DEFAULT_EXPORT_DATE_IMPORT_ACTIVITY_WAIT_MS);
+    assert.equal(scanArgs.activityCommandTimeoutMs, DEFAULT_EXPORT_DATE_IMPORT_ACTIVITY_WAIT_MS + 15_000);
     assert.equal(scanArgs.preLaunchWaitMs, DEFAULT_EXPORT_DATE_IMPORT_ACTIVITY_PRE_LAUNCH_WAIT_MS);
     assert.equal(scanArgs.openIfMissing, true);
     assert.equal(scanArgs.openDetails, false);
@@ -398,4 +399,28 @@ test('export metadata fallback passa claim visual e espera longa para My Activit
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('export metadata fallback aborta espera de My Activity com AbortSignal', async () => {
+  const controller = new AbortController();
+  const integrity = validateMcpExportPayloadBeforeWrite(payload, {
+    expectedChatId: 'b8e7c075effe9457',
+  });
+  const entries = [{ key: 'b8e7c075effe9457', payload, integrity }];
+  setTimeout(() => controller.abort('cancelado-no-teste'), 20);
+
+  await assert.rejects(
+    () =>
+      buildExportDateImportBatchEvidenceWithActivityFallback(
+        entries,
+        {
+          useMyActivity: true,
+          abortSignal: controller.signal,
+        },
+        {
+          scanActivity: async () => new Promise(() => {}),
+        },
+      ),
+    { code: 'operation_cancelled', message: 'cancelado-no-teste' },
+  );
 });

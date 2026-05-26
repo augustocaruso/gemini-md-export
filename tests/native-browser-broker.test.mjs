@@ -7,6 +7,13 @@ import {
   nativeBrowserBrokerFailureCode,
   shouldUseNativeBrowserBroker,
 } from '../build/ts/mcp/native-browser-broker.js';
+import {
+  NATIVE_BROKER_WAKE_CAPABILITY,
+  clientSupportsNativeBrokerWakeCommand,
+  createNativeBrokerTabsActionRunner,
+  selectNativeBrokerWakeClient,
+  shouldAttemptNativeBrokerWake,
+} from '../build/ts/mcp/native-release-gate.js';
 
 test('native broker is preferred unless explicitly disabled', () => {
   assert.equal(shouldUseNativeBrowserBroker({ disabled: false }), true);
@@ -94,4 +101,150 @@ test('native broker client sends tabs.reload with target payload', async () => {
   assert.equal(calls.length, 1);
   assert.equal(calls[0].command, 'tabs.reload');
   assert.deepEqual(calls[0].payload, { tabId: 42, claimId: 'claim-42' });
+});
+
+test('native broker client sends extension self-heal command', async () => {
+  const calls = [];
+  const client = createNativeBrowserBrokerClient({
+    request: async (request) => {
+      calls.push(request);
+      return { id: request.id, ok: true, result: { ok: true, injected: 1 } };
+    },
+  });
+
+  const response = await client.selfHealContentScripts({ reason: 'release-gate', force: true });
+
+  assert.equal(response.ok, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, 'extension.selfHealContentScripts');
+  assert.deepEqual(calls[0].payload, {
+    reason: 'release-gate',
+    force: true,
+    timeoutMs: 30_000,
+  });
+});
+
+test('native broker self-heal runner forwards targeted tab ids', async () => {
+  const calls = [];
+  const runner = createNativeBrokerTabsActionRunner({
+    shouldUseNativeBrowserBroker: () => true,
+    nativeBrowserBroker: {
+      selfHealContentScripts: async (payload, options) => {
+        calls.push({ payload, options });
+        return { id: 'heal-1', ok: true, result: { ok: true, current: 1 } };
+      },
+    },
+    nativeBrowserBrokerToolResult: (response, action) => ({
+      action,
+      ...(response.result || {}),
+    }),
+  });
+
+  const response = await runner('selfHealContentScripts', {
+    reason: 'post-reload',
+    force: true,
+    tabIds: [42],
+    allowHttpBrowserFallback: true,
+  });
+
+  assert.equal(response.action, 'selfHealContentScripts');
+  assert.deepEqual(calls, [
+    {
+      payload: {
+        reason: 'post-reload',
+        force: true,
+        tabIds: [42],
+      },
+      options: { allowFallback: true },
+    },
+  ]);
+});
+
+test('native broker wake is attempted only for recoverable unavailable states with a live client', () => {
+  assert.equal(
+    shouldAttemptNativeBrokerWake({
+      nativeBrokerStatus: {
+        configured: true,
+        available: false,
+        code: 'native_broker_unavailable',
+        message: 'connect ECONNREFUSED /tmp/gemini-md-export-native-broker.sock',
+      },
+      liveClientCount: 1,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldAttemptNativeBrokerWake({
+      nativeBrokerStatus: {
+        configured: true,
+        available: false,
+        code: 'native_broker_disconnected',
+        message: 'Native host has exited.',
+      },
+      liveClientCount: 1,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldAttemptNativeBrokerWake({
+      nativeBrokerStatus: {
+        configured: true,
+        available: true,
+        code: null,
+        message: 'Native broker conectado.',
+      },
+      liveClientCount: 1,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldAttemptNativeBrokerWake({
+      nativeBrokerStatus: {
+        configured: true,
+        available: false,
+        code: 'native_broker_unavailable',
+        message: 'connect ECONNREFUSED /tmp/gemini-md-export-native-broker.sock',
+      },
+      liveClientCount: 0,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldAttemptNativeBrokerWake({
+      nativeBrokerStatus: {
+        configured: false,
+        available: false,
+        code: 'native_broker_disabled',
+        message: 'Native broker desativado por configuracao.',
+      },
+      liveClientCount: 1,
+    }),
+    false,
+  );
+});
+
+test('native broker wake targets only clients that announce the wake capability', () => {
+  const clients = [
+    { clientId: 'smoke', capabilities: ['snapshot', 'events'] },
+    { clientId: 'real', capabilities: ['snapshot', NATIVE_BROKER_WAKE_CAPABILITY] },
+  ];
+
+  assert.equal(clientSupportsNativeBrokerWakeCommand(clients[0]), false);
+  assert.equal(clientSupportsNativeBrokerWakeCommand(clients[1]), true);
+  assert.equal(
+    selectNativeBrokerWakeClient({
+      clients,
+      clientMatchesExpectedBrowserExtension: (client) => client.clientId === 'real',
+      commandChannelReadyForClient: () => true,
+    })?.clientId,
+    'real',
+  );
+  assert.equal(
+    selectNativeBrokerWakeClient({
+      clients: [clients[0]],
+      clientMatchesExpectedBrowserExtension: () => true,
+      commandChannelReadyForClient: () => true,
+    }),
+    null,
+  );
 });

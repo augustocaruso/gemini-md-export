@@ -75,8 +75,16 @@ export const recordConversationExportSuccess = (
     'savedBytes',
     (result.bytes || 0) + (result.metrics?.counters?.savedMediaBytes || 0),
   );
-  deps.recordJobCounter(job, 'browserTimeouts', deps.browserTimeoutCountFromConversationMetrics(result.metrics));
-  deps.recordJobCounter(job, 'assetTimeouts', deps.assetTimeoutCountFromConversationMetrics(result.metrics));
+  deps.recordJobCounter(
+    job,
+    'browserTimeouts',
+    deps.browserTimeoutCountFromConversationMetrics(result.metrics),
+  );
+  deps.recordJobCounter(
+    job,
+    'assetTimeouts',
+    deps.assetTimeoutCountFromConversationMetrics(result.metrics),
+  );
   deps.finishConversationMetric(job, itemMetric, 'success', {
     chatId: result.chatId,
     filename: result.filename,
@@ -144,7 +152,8 @@ const prepareDeferredDateImportSaves = async (
   { job, client, successes, failures, deferredSaves, args, persist, broadcast }: AnyRecord,
   deps: ExportJobRecordingDeps,
 ): Promise<boolean> => {
-  if (!deps.hasDateImportSource(args) || deferredSaves.length === 0 || job.cancelRequested) return false;
+  if (!deps.hasDateImportSource(args) || deferredSaves.length === 0 || job.cancelRequested)
+    return false;
   job.phase = 'resolving-metadata';
   job.current = null;
   deps.touchExportJob(job);
@@ -179,7 +188,12 @@ export const saveDeferredDateImportExports = async (
   const shouldSave = await prepareDeferredDateImportSaves(input, deps);
   if (!shouldSave) return client;
   try {
-    for (const { index, conversation, itemMetric, collected } of input.deferredSaves as DeferredDateImportSave[]) {
+    for (const {
+      index,
+      conversation,
+      itemMetric,
+      collected,
+    } of input.deferredSaves as DeferredDateImportSave[]) {
       input.job.current = {
         index,
         title: conversation.title || null,
@@ -193,13 +207,22 @@ export const saveDeferredDateImportExports = async (
           ...input.args,
           outputDir: input.job.outputDir,
         });
-        const resultClient = result.client?.clientId ? deps.getClientById(result.client.clientId) : null;
-        if (resultClient) client = deps.rebindExportJobToClient(input.job, resultClient, 'conversation-save');
+        const resultClient = result.client?.clientId
+          ? deps.getClientById(result.client.clientId)
+          : null;
+        if (resultClient)
+          client = deps.rebindExportJobToClient(input.job, resultClient, 'conversation-save');
         const success = buildConversationExportSuccess({ index, conversation, result });
-        recordConversationExportSuccess({ job: input.job, successes: input.successes, itemMetric, success, result }, deps);
+        recordConversationExportSuccess(
+          { job: input.job, successes: input.successes, itemMetric, success, result },
+          deps,
+        );
       } catch (err: any) {
         const failure = buildConversationExportFailure({ index, conversation, err });
-        recordConversationExportFailure({ job: input.job, failures: input.failures, itemMetric, failure, err }, deps);
+        recordConversationExportFailure(
+          { job: input.job, failures: input.failures, itemMetric, failure, err },
+          deps,
+        );
       } finally {
         deps.touchExportJob(input.job);
         input.persist(input.job, client, input.successes, input.failures);

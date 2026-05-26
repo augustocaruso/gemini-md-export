@@ -2,7 +2,7 @@
   "schema": "gemini-md-export.javascript-surface-budget.v3",
   "maxTotalSyntaxNodes": 148849,
   "syntaxNodes": {
-    "bin/gemini-md-export-native-host.mjs": 3,
+    "bin/gemini-md-export-native-host.mjs": 5,
     "bin/gemini-md-export.mjs": 27858,
     "debug/tampermonkey-probe.user.js": 212,
     "gemini-cli-extension/scripts/chat-metadata-backfill.mjs": 1923,

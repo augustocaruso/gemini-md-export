@@ -48,6 +48,27 @@ test('native host responde ping no protocolo length-prefixed do Chrome', async (
   child.stdin.end();
 });
 
+test('native host launcher does not depend on GUI app PATH to find Node', async () => {
+  const child = spawn(resolve(ROOT, 'bin', 'gemini-md-export-native-host.mjs'), {
+    cwd: ROOT,
+    env: {
+      HOME: process.env.HOME,
+      PATH: '/usr/bin:/bin:/usr/sbin:/sbin',
+      GEMINI_MD_EXPORT_NODE: process.execPath,
+    },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+  child.stdin.write(encodeNativeMessage({ id: 'launcher-path', command: 'ping' }));
+
+  const [chunk] = await once(child.stdout, 'data');
+  const response = decodeFirstNativeMessage(chunk);
+  assert.equal(response.id, 'launcher-path');
+  assert.equal(response.ok, true);
+  assert.equal(response.transport, 'nativeMessaging');
+
+  child.stdin.end();
+});
+
 test('native host one-shot command does not bind the browser broker IPC socket', async () => {
   const tmp = mkdtempSync(resolve(tmpdir(), 'gme-native-oneshot-'));
   const brokerIpcPath = resolve(tmp, 'broker.sock');
@@ -137,6 +158,20 @@ test('service worker opens persistent native broker port and exposes tab command
   assert.match(brokerSource, /applyNativeClaimVisual/);
 });
 
+test('native broker wake waits for persistent hello without opening a second ping port', () => {
+  const backgroundSource = readFileSync(resolve(ROOT, 'src', 'extension-background.ts'), 'utf-8');
+  const brokerSource = readFileSync(
+    resolve(ROOT, 'src', 'browser', 'background', 'native-broker-client.ts'),
+    'utf-8',
+  );
+  const contentSource = readFileSync(resolve(ROOT, 'src', 'userscript-shell.ts'), 'utf-8');
+
+  assert.match(brokerSource, /ensureReady/);
+  assert.match(backgroundSource, /ensureNativeBrokerReady/);
+  assert.match(backgroundSource, /brokerOnly/);
+  assert.match(contentSource, /brokerOnly:\s*true/);
+});
+
 test('service worker abre native broker no startup antes do self-heal de abas', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'extension-background.ts'), 'utf-8');
   const startBlock =
@@ -161,7 +196,10 @@ test('native host forwards local ipc requests to the extension port', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'native', 'native-host-runtime.ts'), 'utf-8');
   assert.match(source, /pendingExtensionRequests/);
   assert.match(source, /sendToExtension/);
+  assert.match(source, /brokerRequestTimeoutMs/);
+  assert.match(source, /sendToExtension\(request,\s*brokerRequestTimeoutMs\(request\)\)/);
   assert.match(source, /extension\.hello/);
+  assert.match(source, /startsWith\('extension\.'\)/);
   assert.match(source, /extension_unavailable/);
 });
 

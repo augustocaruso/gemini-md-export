@@ -3,7 +3,10 @@ import type {
   FixVaultReport,
   FixVaultStepTuple,
 } from '../src/core/fix-vault-contract.js';
-import { FIX_VAULT_PROGRESS_MESSAGES, FIX_VAULT_STEP_ORDER } from '../src/core/fix-vault-contract.js';
+import {
+  FIX_VAULT_PROGRESS_MESSAGES,
+  FIX_VAULT_STEP_ORDER,
+} from '../src/core/fix-vault-contract.js';
 
 const orderedSteps = [
   {

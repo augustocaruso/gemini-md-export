@@ -140,6 +140,60 @@ export const resolveActivatedTargetClient = <T extends BrowserTabTargetClient>({
   return null;
 };
 
+export const activateBrowserTabWithNativeBroker = async <TClient extends BrowserTabTargetClient>({
+  tabId,
+  args = {},
+  preferredClient = null,
+  tryNativeBrowserBrokerTabsAction,
+  waitForActivatedBrowserTabById,
+  liveClientForBrowserTabId,
+}: {
+  readonly tabId: number;
+  readonly args?: Record<string, any>;
+  readonly preferredClient?: TClient | null;
+  readonly tryNativeBrowserBrokerTabsAction: (
+    action: string,
+    args?: Record<string, any>,
+  ) => Promise<Record<string, any> | null>;
+  readonly waitForActivatedBrowserTabById: (
+    tabId: number,
+    args?: Record<string, any>,
+  ) => Promise<TClient | null>;
+  readonly liveClientForBrowserTabId: (tabId: number) => TClient | null;
+}): Promise<Record<string, any> | null> => {
+  const nativeActivation = await tryNativeBrowserBrokerTabsAction('activate', {
+    tabId,
+    reason: args.activateTabReason || 'export',
+    focusWindow: args.focusWindow === true,
+    allowHttpBrowserFallback: true,
+  });
+  if (!nativeActivation?.ok) return null;
+  const confirmedClient = resolveActivatedTargetClient({
+    targetTabId: tabId,
+    activeClient: await waitForActivatedBrowserTabById(tabId, args),
+    liveClient: liveClientForBrowserTabId(tabId),
+    preferredClient,
+  });
+  if (confirmedClient) {
+    (confirmedClient as TClient & { isActiveTab?: boolean }).isActiveTab = true;
+  }
+  return {
+    broker: null,
+    client: confirmedClient || preferredClient,
+    result: {
+      ok: true,
+      mode: 'native-browser-broker',
+      tabId,
+      windowId:
+        (confirmedClient as Record<string, any> | null)?.windowId ??
+        (preferredClient as Record<string, any> | null)?.windowId ??
+        null,
+      isActiveTab: true,
+      native: nativeActivation,
+    },
+  };
+};
+
 export const clientHasLiveRuntimeEvidence = (
   client: BrowserClientRuntimeEvidence,
   options: BrowserClientRuntimeEvidenceOptions,

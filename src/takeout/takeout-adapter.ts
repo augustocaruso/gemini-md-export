@@ -180,7 +180,9 @@ const TAKEOUT_MONTHS_EN = new Map<string, number>([
 ]);
 
 const parseTakeoutZoneOffsetMinutes = (zoneText: unknown): number | null => {
-  const zone = String(zoneText || '').trim().toUpperCase();
+  const zone = String(zoneText || '')
+    .trim()
+    .toUpperCase();
   if (zone === 'BRT') return -180;
   if (zone === 'UTC' || zone === 'GMT') return 0;
   const gmtOffset = zone.match(/^(?:GMT|UTC)?([+-])(\d{1,2})(?::?(\d{2}))?$/);
@@ -236,8 +238,18 @@ export const parseTakeoutDate = (text: unknown): string | null => {
     /([A-Za-z]{3,9})\s+(\d{1,2}),\s+(\d{4}),\s+(\d{1,2}):(\d{2}):(\d{2})\s+(AM|PM)?\s*(GMT|UTC)?([+-]\d{1,2}:?\d{2})?/i,
   );
   if (!enMatch) return null;
-  const [, monthText, dayText, yearText, hourText, minuteText, secondText, meridiemText, zonePrefix, offsetText] =
-    enMatch;
+  const [
+    ,
+    monthText,
+    dayText,
+    yearText,
+    hourText,
+    minuteText,
+    secondText,
+    meridiemText,
+    zonePrefix,
+    offsetText,
+  ] = enMatch;
   const month = TAKEOUT_MONTHS_EN.get(monthText.toLowerCase());
   const offsetMinutes = parseTakeoutZoneOffsetMinutes(`${zonePrefix || 'GMT'}${offsetText || ''}`);
   if (!month || offsetMinutes === null) return null;
@@ -310,7 +322,9 @@ const collectTakeoutObjects = (value: unknown, out: Record<string, unknown>[] = 
 
 const matchTakeoutHtmlItems = (items: TakeoutItem[], candidates: TakeoutCandidate[]) => {
   const matches: MetadataEvidence[] = [];
-  const candidateByChatId = new Map(candidates.map((candidate) => [candidate.chatId.toLowerCase(), candidate]));
+  const candidateByChatId = new Map(
+    candidates.map((candidate) => [candidate.chatId.toLowerCase(), candidate]),
+  );
   const textMatcher = buildTakeoutTextMatcher(candidates);
   for (const item of items) {
     if (item.chatId && candidateByChatId.has(item.chatId)) {
@@ -363,7 +377,8 @@ const preferExactPromptTakeoutMatches = (matches: MetadataEvidence[]): MetadataE
           .filter(Boolean),
       ),
     );
-    if (supportedDates.length === 1) assistantSupportedExactDateByChatKind.set(key, supportedDates[0] as string);
+    if (supportedDates.length === 1)
+      assistantSupportedExactDateByChatKind.set(key, supportedDates[0] as string);
   }
   if (!exactPromptKindsByChatId.size) return matches;
   return matches.filter((match) => {
@@ -410,11 +425,7 @@ const dedupeTakeoutEvidence = (matches: MetadataEvidence[]): MetadataEvidence[] 
 const edgeRefsForCandidate = (candidate: TakeoutCandidate): TakeoutEdgeRef[] => {
   if (!Number.isFinite(candidate.turnCount) || Number(candidate.turnCount) <= 1) return [];
   const refs: TakeoutEdgeRef[] = [];
-  const add = (
-    kind: TakeoutEdgeRef['kind'],
-    prompt: unknown,
-    assistantText: unknown,
-  ) => {
+  const add = (kind: TakeoutEdgeRef['kind'], prompt: unknown, assistantText: unknown) => {
     const text = sampleText(prompt, 500);
     const comparable = normalizeComparableText(text);
     if (comparable.length < 8) return;
@@ -476,7 +487,9 @@ const matchTakeoutCandidateEdges = (
   );
   const hitsByChatEdge = new Map<string, TakeoutEdgeHit[]>();
   for (const item of items) {
-    const patterns = new Set(automaton.search(item.promptComparableText).map((match) => match.value));
+    const patterns = new Set(
+      automaton.search(item.promptComparableText).map((match) => match.value),
+    );
     for (const pattern of patterns) {
       for (const edge of edgeRefsByPattern.get(pattern) || []) {
         const promptMatch = item.promptComparableText === edge.comparable ? 'exact' : 'contains';
@@ -512,10 +525,7 @@ const matchTakeoutCandidateEdges = (
       dateKind: picked.edge.kind,
       confidence: 'strong',
       date: picked.item.date as MetadataEvidence['date'],
-      score:
-        picked.promptMatch === 'exact' || picked.assistantSupported
-          ? 1
-          : 0.92,
+      score: picked.promptMatch === 'exact' || picked.assistantSupported ? 1 : 0.92,
       textHash: picked.item.textHash,
       sampleHash: hashText(`${picked.edge.kind}:${picked.edge.comparable}`),
       sampleLength: picked.item.sampleLength,
@@ -530,10 +540,7 @@ const buildTakeoutTextMatcher = (candidates: TakeoutCandidate[]) => {
   const fullTextHitsByPattern = new Map<string, TakeoutNeedleHit[]>();
   for (const candidate of candidates) {
     for (const needle of candidateNeedles(candidate, { minPromptLength: 8 })) {
-      const targetMap =
-        needle.haystack === 'prompt'
-          ? promptHitsByPattern
-          : fullTextHitsByPattern;
+      const targetMap = needle.haystack === 'prompt' ? promptHitsByPattern : fullTextHitsByPattern;
       const hits = targetMap.get(needle.comparable) || [];
       hits.push({
         chatId: candidate.chatId.toLowerCase(),
@@ -621,8 +628,11 @@ const buildTakeoutTextMatcher = (candidates: TakeoutCandidate[]) => {
           distinctCandidateCountByPattern,
         }),
       }))
-      .filter((item): item is { score: TakeoutCandidateScore; rawScore: number; evidence: MetadataEvidence } =>
-        Boolean(item.evidence),
+      .filter(
+        (
+          item,
+        ): item is { score: TakeoutCandidateScore; rawScore: number; evidence: MetadataEvidence } =>
+          Boolean(item.evidence),
       )
       .sort((a, b) => b.rawScore - a.rawScore);
     const [best, runnerUp] = scored;
@@ -688,17 +698,15 @@ const evidenceFromTakeoutScore = ({
   const hasUsableExactPrompt = promptHits.some(
     (hit) => hit.promptMatch === 'exact' && (candidateCount === 1 || hit.length >= 24),
   );
-  const uniquePromptOnly =
-    promptHits.some(
-      (hit) =>
-        Boolean(hit.promptMatch) &&
-        hit.length >= 24 &&
-        distinctCandidateCountByPattern.get(hit.comparable) === 1,
-    );
-  const longUniqueAssistant =
-    assistantHits.some(
-      (hit) => hit.length >= 80 && distinctCandidateCountByPattern.get(hit.comparable) === 1,
-    );
+  const uniquePromptOnly = promptHits.some(
+    (hit) =>
+      Boolean(hit.promptMatch) &&
+      hit.length >= 24 &&
+      distinctCandidateCountByPattern.get(hit.comparable) === 1,
+  );
+  const longUniqueAssistant = assistantHits.some(
+    (hit) => hit.length >= 80 && distinctCandidateCountByPattern.get(hit.comparable) === 1,
+  );
 
   if (!promptHits.length && !(titleHits.length && assistantHits.length) && !longUniqueAssistant) {
     return null;
@@ -715,7 +723,12 @@ const evidenceFromTakeoutScore = ({
   }
 
   const normalizedScore = Math.min(1, Number(score.score.toFixed(2)));
-  if (normalizedScore < 0.72 && !uniquePromptOnly && !longUniqueAssistant && !hasUsableExactPrompt) {
+  if (
+    normalizedScore < 0.72 &&
+    !uniquePromptOnly &&
+    !longUniqueAssistant &&
+    !hasUsableExactPrompt
+  ) {
     return null;
   }
 

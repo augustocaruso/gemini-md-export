@@ -62,8 +62,22 @@ export const detectExpectedBrowserBuildStamp = ({
     resolve(root, 'browser-extension', 'background.js'),
     resolve(root, 'dist', 'extension', 'background.js'),
     resolve(root, 'dist', 'extension', 'content.js'),
-    resolve(homeDir, '.gemini', 'extensions', 'gemini-md-export', 'browser-extension', 'background.js'),
-    resolve(homeDir, '.gemini', 'extensions', 'gemini-md-export', 'browser-extension', 'content.js'),
+    resolve(
+      homeDir,
+      '.gemini',
+      'extensions',
+      'gemini-md-export',
+      'browser-extension',
+      'background.js',
+    ),
+    resolve(
+      homeDir,
+      '.gemini',
+      'extensions',
+      'gemini-md-export',
+      'browser-extension',
+      'content.js',
+    ),
   ];
 
   for (const candidate of candidates) {

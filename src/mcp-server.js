@@ -125,6 +125,8 @@ const {
   buildOperationId,
 } = await import(compiledTsModuleUrl('mcp', 'export-operation-contracts.js'));
 const {
+  abortActiveConversationOperationForJob,
+  createBrowserTabWatchdogRecovery,
   runRecentExportConversationOperation,
 } = await import(compiledTsModuleUrl('mcp', 'recent-export-operation-runtime.js'));
 const {
@@ -148,10 +150,15 @@ const {
   shouldUseNativeBrowserBroker,
 } = await import(compiledTsModuleUrl('mcp', 'native-browser-broker.js'));
 const {
+  attachContentScriptSelfHealToNativeReload,
+  attachNativeLeaseVisualToClaim,
   assignExportDateImportVisualGroupTabId,
   clientSelectorFromUrlSearchParams: clientSelectorFromSearchParams,
+  createAutoTabClaimReleaseForJob,
+  createNativeBrokerStatusProbe,
   createNativeBrokerTabsActionRunner,
   createNativeExportLeaseTools,
+  createTabClaimRelease,
   createTargetTabClientMissingAfterActivationError,
   isNativeExportLeaseStrict,
   nativeBrokerAvailabilityFromStatus,
@@ -161,6 +168,7 @@ const {
   noConnectedClientsForReloadResult,
   shouldReturnNativeBrokerReloadResult,
   withNativeExportLease,
+  withNativeBrokerSoftTimeout,
 } = await import(compiledTsModuleUrl('mcp', 'native-release-gate.js'));
 const {
   assertClaimedReadyGeminiTab,
@@ -174,6 +182,7 @@ const {
   isRecentCommandFailureBlocking,
 } = await import(compiledTsModuleUrl('mcp', 'command-channel-health.js'));
 const {
+  activateBrowserTabWithNativeBroker,
   resolveActivatedTargetClient,
 } = await import(compiledTsModuleUrl('mcp', 'tab-runtime.js'));
 const {
@@ -550,17 +559,9 @@ const browserSideEffectsStatus = () => ({
   bridgeHttpEnabled: BRIDGE_HTTP_ENABLED,
 });
 
-const withSoftTimeout = (promise, timeoutMs, fallback) =>
-  Promise.race([
-    promise,
-    new Promise((resolve) => {
-      setTimeout(() => resolve(fallback), timeoutMs);
-    }),
-  ]);
-
-const probeNativeBrowserBrokerStatus = async () => {
+const probeNativeBrowserBrokerStatusOnce = async () => {
   if (!shouldUseNativeBrowserBroker()) return nativeBrokerStatusFromProbe({ enabled: false });
-  const response = await withSoftTimeout(
+  const response = await withNativeBrokerSoftTimeout(
     nativeBrowserBroker.status({ allowFallback: true }),
     750,
     { ok: false, code: 'native_broker_probe_timeout' },
@@ -3202,7 +3203,8 @@ const validateNativeExportTabLeaseForJob = async (args = {}, localClaim = null, 
     error.data = nativeClaim;
     throw error;
   }
-  return validateExportTabLeaseForJob(result.tab || result);
+  const { exportTabLeaseFromNativeClaimResult } = await loadMcpExportWorkflows();
+  return validateExportTabLeaseForJob(exportTabLeaseFromNativeClaimResult(result));
 };
 
 const requireClient = (selector = {}) => {
@@ -3500,6 +3502,10 @@ const reloadChromeExtensionForClient = async (client, args = {}) => {
       timeoutMs: RELOAD_EXTENSION_COMMAND_TIMEOUT_MS,
       browserSideEffectExplicit: args.explicit === true,
     });
+    const assumedReload = extensionReloadAssumedResultForError(result);
+    if (assumedReload) {
+      return assumedReload;
+    }
     return result || null;
   } catch (err) {
     const assumedReload = extensionReloadAssumedResultForError(err);
@@ -3942,132 +3948,23 @@ const claimTabForClient = async (client, args = {}, options = {}) => {
 const claimGeminiTabForClient = async (client, args = {}) =>
   claimTabForClient(client, args, { requireActiveGemini: true });
 
-const releaseTabClaim = async (args = {}) => {
-  cleanupExpiredTabClaims();
-  const sessionId = normalizeSessionId(args.sessionId || args._proxySessionId);
-  const claimId = args.claimId || sessionClaims.get(sessionId);
-  if (!claimId) {
-    const visual = await releaseTabClaimVisualByTabId({
-      tabId: args.tabId,
-      reason: args.reason || 'mcp-release-without-server-claim',
-    });
-    if (visual?.ok) {
-      return {
-        ok: true,
-        released: null,
-        visual,
-        client: null,
-      };
-    }
-    return {
-      ok: false,
-      reason: 'no-claim-for-session',
-      sessionId,
-      claims: summarizeTabClaims(),
-    };
-  }
-
-  const claim = tabClaims.get(claimId);
-  if (!claim) {
-    sessionClaims.delete(sessionId);
-    const visual = await releaseTabClaimVisualByTabId({
-      tabId: args.tabId,
-      claimId,
-      reason: args.reason || 'mcp-release-missing-server-claim',
-    });
-    if (visual?.ok) {
-      return {
-        ok: true,
-        released: null,
-        claimId,
-        sessionId,
-        visual,
-        client: null,
-      };
-    }
-    return {
-      ok: false,
-      reason: 'claim-not-found',
-      claimId,
-      sessionId,
-      claims: summarizeTabClaims(),
-    };
-  }
-
-  let visual = null;
-  let client = liveClientForClaim(claim);
-  if (!client && args.tabId !== undefined && args.tabId !== null) {
-    visual = await releaseTabClaimVisualByTabId({
-      tabId: args.tabId,
-      claimId,
-      reason: args.reason || 'mcp-release-stale-claim-by-tab-id',
-    });
-    if (visual?.ok) {
-      const removed = removeTabClaim(claimId);
-      return {
-        ok: true,
-        released: summarizeTabClaim(removed),
-        visual,
-        client: null,
-      };
-    }
-  }
-  if (!client) {
-    const recoveredClient = await waitForContinuationClient(
-      {
-        clientId: claim.clientId,
-        tabId: claim.tabId,
-        sessionId: claim.sessionId,
-      },
-      {
-        claimId,
-        tabId: claim.tabId,
-        sessionId: claim.sessionId,
-      },
-    );
-    client = isLiveClient(clients.get(recoveredClient?.clientId))
-      ? clients.get(recoveredClient.clientId)
-      : null;
-  }
-  if (client) {
-    try {
-      visual = await enqueueCommand(
-        client.clientId,
-        'release-tab-claim',
-        {
-          claimId,
-          reason: args.reason || 'mcp-release',
-        },
-        {
-          timeoutMs: 8000,
-          dispatchTimeoutMs: 4000,
-          browserSideEffectExplicit: true,
-        },
-      );
-    } catch (err) {
-      visual = {
-        ok: false,
-        error: err?.message || String(err),
-        code: err?.code || null,
-      };
-    }
-  }
-  if (visual?.ok !== true && claim.tabId !== null && claim.tabId !== undefined) {
-    visual = await releaseTabClaimVisualByTabId({
-      tabId: claim.tabId,
-      claimId,
-      reason: args.reason || 'mcp-release-by-tab-id',
-    });
-  }
-
-  const removed = removeTabClaim(claimId);
-  return {
-    ok: true,
-    released: summarizeTabClaim(removed),
-    visual,
-    client: client ? summarizeClient(client) : null,
-  };
-};
+const releaseTabClaim = createTabClaimRelease({
+  cleanupExpiredTabClaims,
+  normalizeSessionId,
+  sessionClaims,
+  tabClaims,
+  clients,
+  tryNativeBrowserBrokerTabsAction,
+  releaseTabClaimVisualByTabId,
+  summarizeTabClaims,
+  liveClientForClaim,
+  waitForContinuationClient: (...args) => waitForContinuationClient(...args),
+  isLiveClient,
+  enqueueCommand,
+  removeTabClaim,
+  summarizeTabClaim,
+  summarizeClient: (client) => summarizeClient(client),
+});
 
 const shouldAutoReleaseTabClaim = (args = {}) =>
   args.autoReleaseClaim !== false && args.keepClaim !== true;
@@ -4086,25 +3983,13 @@ const waitForTabClaimMinimumVisibility = async (claimedAtMs, args = {}) => {
   }
 };
 
-const autoReleaseTabClaimForJob = async (job, reason) => {
-  if (!job?.autoReleaseTabClaim || !job.tabClaimId || job.tabClaimRelease) {
-    return job?.tabClaimRelease || null;
-  }
-  try {
-    job.tabClaimRelease = await releaseTabClaim({
-      claimId: job.tabClaimId,
-      reason,
-    });
-  } catch (err) {
-    job.tabClaimRelease = {
-      ok: false,
-      claimId: job.tabClaimId,
-      error: err?.message || String(err),
-      code: err?.code || null,
-    };
-  }
-  return job.tabClaimRelease;
-};
+const autoReleaseTabClaimForJob = createAutoTabClaimReleaseForJob({
+  clients,
+  clientTabClaim,
+  releaseTabClaim,
+  shouldUseNativeBrowserBroker,
+  tryNativeBrowserBrokerTabsAction,
+});
 
 const ensureTabClaimForJob = async (client, args = {}, label = TAB_CLAIM_LABELS.generic) => {
   const sessionId = normalizeSessionId(args.sessionId || args._proxySessionId);
@@ -4113,7 +3998,8 @@ const ensureTabClaimForJob = async (client, args = {}, label = TAB_CLAIM_LABELS.
     client.lastTabClaimWarning = null;
     const claim = summarizeTabClaim(existingSessionClaim);
     if (shouldRequireNativeExportTabLease(label, args)) {
-      await validateNativeExportTabLeaseForJob(args, claim, client);
+      const nativeLease = await validateNativeExportTabLeaseForJob(args, claim, client);
+      attachNativeLeaseVisualToClaim(claim, nativeLease, tabClaims);
     }
     return claim;
   }
@@ -4124,7 +4010,8 @@ const ensureTabClaimForJob = async (client, args = {}, label = TAB_CLAIM_LABELS.
         ? summarizeTabClaim(existingSessionClaim)
         : null;
     if (shouldRequireNativeExportTabLease(label, args)) {
-      await validateNativeExportTabLeaseForJob(args, claim, client);
+      const nativeLease = await validateNativeExportTabLeaseForJob(args, claim, client);
+      attachNativeLeaseVisualToClaim(claim, nativeLease, tabClaims);
     }
     return claim;
   }
@@ -4136,7 +4023,8 @@ const ensureTabClaimForJob = async (client, args = {}, label = TAB_CLAIM_LABELS.
     });
     client.lastTabClaimWarning = null;
     if (shouldRequireNativeExportTabLease(label, args)) {
-      await validateNativeExportTabLeaseForJob(args, result.claim, result.client);
+      const nativeLease = await validateNativeExportTabLeaseForJob(args, result.claim, result.client);
+      attachNativeLeaseVisualToClaim(result.claim, nativeLease, tabClaims);
     }
     return result.claim;
   } catch (err) {
@@ -4296,7 +4184,7 @@ const buildLightweightBrowserReady = async (args = {}) => {
   let launchResult = null;
   let waitedMs = 0;
   const cdp = await buildCdpSnapshotForArgs(args);
-  const nativeBrokerStatus = await probeNativeBrowserBrokerStatus();
+  const nativeBrokerStatus = await probeNativeBrowserBrokerStatus({ allowWake: true });
 
   if (args.selfHeal === true) {
     try {
@@ -4473,6 +4361,15 @@ const clientMatchesExpectedBrowserExtension = (client) =>
   Number(client?.protocolVersion) === Number(EXPECTED_CHROME_EXTENSION_INFO.protocolVersion) &&
   (!EXPECTED_CHROME_EXTENSION_INFO.buildStamp ||
     String(clientBuildStamp(client) || '') === EXPECTED_CHROME_EXTENSION_INFO.buildStamp);
+
+const probeNativeBrowserBrokerStatus = createNativeBrokerStatusProbe(
+  probeNativeBrowserBrokerStatusOnce,
+  getLiveClients,
+  clientMatchesExpectedBrowserExtension,
+  commandChannelReadyForClient,
+  enqueueCommand,
+  sleep,
+);
 
 const activeClaimableGeminiClientOptions = (overrides = {}) => ({
   now: Date.now(),
@@ -4715,7 +4612,9 @@ const scanActivityWithClient = async (args = {}) => {
   let claimVisibleAtMs = null;
   let tabClaimWarning = null;
   let tabClaimRelease = null;
-  if (args.claimVisual !== false) {
+  const shouldApplyActivityClaimVisual =
+    args.claimVisual !== false && activityClaimAffinity.joinsExistingGeminiClaim !== true;
+  if (shouldApplyActivityClaimVisual) {
     try {
       const claimed = await claimTabForClient(client, {
         ...args,
@@ -4736,10 +4635,19 @@ const scanActivityWithClient = async (args = {}) => {
     }
   }
   const scanClient = claim?.clientId ? clients.get(claim.clientId) || client : client;
+  const activityWaitMs = Number(args.waitMs || args.myActivityWaitMs || 0);
+  const explicitCommandTimeoutMs = Number(
+    args.activityCommandTimeoutMs ?? args.commandTimeoutMs ?? args.timeoutMs,
+  );
+  const commandTimeoutMs = Number.isFinite(explicitCommandTimeoutMs) && explicitCommandTimeoutMs > 0
+    ? explicitCommandTimeoutMs
+    : Number.isFinite(activityWaitMs) && activityWaitMs > 0
+      ? activityWaitMs + 15_000
+      : 10 * 60_000;
   let result;
   try {
     result = await enqueueCommand(scanClient.clientId, 'activity-scan-batch', args, {
-      timeoutMs: Math.max(60_000, Number(args.timeoutMs || 10 * 60_000)),
+      timeoutMs: Math.max(5000, Math.min(10 * 60_000, commandTimeoutMs)),
     });
   } finally {
     if (claim?.claimId && shouldAutoReleaseTabClaim(args)) {
@@ -6298,6 +6206,16 @@ const activateBrowserTabById = async (rawTabId, args = {}, preferredClient = nul
     error.code = 'tab_activation_failed';
     throw error;
   }
+
+  const nativeActivation = await activateBrowserTabWithNativeBroker({
+    tabId,
+    args,
+    preferredClient,
+    tryNativeBrowserBrokerTabsAction,
+    waitForActivatedBrowserTabById,
+    liveClientForBrowserTabId,
+  });
+  if (nativeActivation) return nativeActivation;
 
   const cdpActivation = await activateBrowserTabWithCdp(preferredClient, args);
   if (cdpActivation?.ok) {
@@ -7933,6 +7851,7 @@ const summarizeExportJob = (job) => ({
   tabClaimId: job.tabClaimId || null,
   tabClaimWarning: job.tabClaimWarning || null,
   tabClaimRelease: job.tabClaimRelease || null,
+  nativeTabClaimRelease: job.nativeTabClaimRelease || null,
   tabSession: summarizeTabSession(job.tabSession),
   trace: summarizeJobTrace(job.trace),
   traceFile: job.trace?.retained === false ? null : job.trace?.filePath || null,
@@ -8853,6 +8772,19 @@ const requestActiveBrowserOperationCancelForJob = (job, reason = 'job-cancel') =
     });
 };
 
+const recoverBrowserTabAfterWatchdog = createBrowserTabWatchdogRecovery({
+  appendExportJobTrace,
+  getClaimById: (claimId) => tabClaims.get(claimId) || null,
+  getClientById: (clientId) => clients.get(clientId) || null,
+  claimForClient,
+  normalizeTabId,
+  tryNativeBrowserBrokerTabsAction,
+  waitForContinuationClient,
+  summarizeClient,
+  touchExportJob,
+  recoveryWaitMs: RECENT_CHATS_CLIENT_RECOVERY_WAIT_MS,
+});
+
 const recentExportOperationDeps = {
   appendExportJobTrace,
   broadcastRecentChatsJobProgress,
@@ -8868,6 +8800,7 @@ const recentExportOperationDeps = {
   rebindExportJobToClient,
   recordConversationExportFailure,
   recordConversationExportSuccess,
+  recoverBrowserTabAfterWatchdog,
   requestActiveBrowserOperationCancelForJob,
   summarizeClient,
   touchExportJob,
@@ -8882,6 +8815,7 @@ const requestExportJobCancel = (job, reason = 'job-cancel') => {
   job.status = 'cancel_requested';
   appendExportJobTrace(job, 'job_cancel_requested', { reason });
   touchExportJob(job);
+  abortActiveConversationOperationForJob(job, reason, recentExportOperationDeps);
 
   const client = clients.get(job.clientId);
   if (client) {
@@ -9432,6 +9366,8 @@ const startRecentChatsExportJob = (client, args = {}) => {
     clientId: client.clientId,
     autoReleaseTabClaim: shouldAutoReleaseTabClaim(args),
     tabClaimId: activeClaim?.claimId || args.claimId || null,
+    nativeExportLease: args._nativeExportLease || null,
+    nativeTabClaimRelease: null,
     tabClaimWarning: client.lastTabClaimWarning || null,
     tabClaimRelease: null,
     outputDir,
@@ -9697,6 +9633,8 @@ const startDirectChatsExportJob = (client, args = {}) => {
     clientId: client.clientId,
     autoReleaseTabClaim: shouldAutoReleaseTabClaim(args),
     tabClaimId: activeClaim?.claimId || args.claimId || null,
+    nativeExportLease: args._nativeExportLease || null,
+    nativeTabClaimRelease: null,
     tabClaimWarning: client.lastTabClaimWarning || null,
     tabClaimRelease: null,
     outputDir,
@@ -9842,6 +9780,7 @@ const reloadGeminiTabs = async (args = {}) => {
   });
   const delayMs = Math.max(0, Math.min(10_000, Number(args.delayMs || 500)));
   const nativeReload = await tryNativeBrowserBrokerTabsAction('reload', args);
+  await attachContentScriptSelfHealToNativeReload(nativeReload, args, tryNativeBrowserBrokerTabsAction);
   if (shouldReturnNativeBrokerReloadResult(nativeReload, args)) return nativeReload;
   await reloadExtensionForExistingTabs(
     args,
@@ -13055,8 +12994,13 @@ const bridgeServer = createServer(async (req, res) => {
       };
       const shouldTemporarilyClaimTab =
         (args.countOnly === true || args.untilEnd === true) && args.autoClaim !== false;
+      const preexistingClaimId = claimForSession(
+        normalizeSessionId(args.sessionId || args._proxySessionId),
+      )?.claimId || null;
+      const hasExplicitClaimId = Boolean(String(args.claimId || '').trim());
       let claim = null;
       let claimVisibleAtMs = null;
+      let ownsTemporaryClaim = false;
       let result = null;
       try {
         if (shouldTemporarilyClaimTab) {
@@ -13073,13 +13017,20 @@ const bridgeServer = createServer(async (req, res) => {
             args.countOnly ? TAB_CLAIM_LABELS.count : TAB_CLAIM_LABELS.list,
           );
           claimVisibleAtMs = claim ? Date.now() : null;
+          ownsTemporaryClaim = Boolean(
+            claim?.claimId &&
+              !hasExplicitClaimId &&
+              (!preexistingClaimId || claim.claimId !== preexistingClaimId),
+          );
         }
+        const shouldReleaseTemporaryClaim =
+          ownsTemporaryClaim && shouldAutoReleaseTabClaim(args);
         const operationArgs = claim?.claimId
           ? {
               ...args,
               claimId: claim.claimId,
               tabId: claim.tabId ?? args.tabId,
-              releaseClaimOnOperationEnd: shouldAutoReleaseTabClaim(args),
+              releaseClaimOnOperationEnd: shouldReleaseTemporaryClaim,
               releaseClaimOnOperationTerminalOnly: true,
               releaseClaimReason: 'recent-chats-load-more-finished',
             }
@@ -13087,7 +13038,7 @@ const bridgeServer = createServer(async (req, res) => {
         result = await listRecentChatsForClient(client, operationArgs);
         if (claim) result.tabClaim = claim;
       } finally {
-        if (claim?.claimId && shouldAutoReleaseTabClaim(args)) {
+        if (claim?.claimId && ownsTemporaryClaim && shouldAutoReleaseTabClaim(args)) {
           await waitForTabClaimMinimumVisibility(claimVisibleAtMs, args);
           const tabClaimRelease = await releaseTabClaim({
             claimId: claim.claimId,

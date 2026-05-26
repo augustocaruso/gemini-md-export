@@ -93,3 +93,46 @@ test('My Activity entra no alvo visual da claim sem virar aba exportavel', async
   assert.deepEqual(result.visualCompanionTabIds, [99]);
   assert.deepEqual(listed.tabs.map((item) => item.tabId), [42]);
 });
+
+test('claim visual escolhe apenas uma aba My Activity quando ha varias candidatas', async () => {
+  const activityFar = {
+    id: 98,
+    windowId: 7,
+    index: 1,
+    active: false,
+    url: 'https://myactivity.google.com/product/gemini',
+    title: 'My Activity',
+  };
+  const activityNear = {
+    id: 99,
+    windowId: 7,
+    index: 5,
+    active: false,
+    url: 'https://myactivity.google.com/product/gemini',
+    title: 'My Activity',
+  };
+  const geminiTab = { ...tab, index: 4 };
+  const inspectTab = async (tabId) =>
+    tabId === 42
+      ? {
+          ok: true,
+          tabId,
+          url: geminiTab.url,
+          pageKind: 'gemini',
+          blockerCode: null,
+        }
+      : {
+          ok: true,
+          tabId,
+          url: 'https://myactivity.google.com/product/gemini',
+          pageKind: 'my_activity',
+          blockerCode: null,
+        };
+
+  const result = await claimDebuggableGeminiTab([activityFar, geminiTab, activityNear], {
+    inspectTab,
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.visualCompanionTabIds, [99]);
+});
