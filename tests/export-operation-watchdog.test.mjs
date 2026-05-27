@@ -1,7 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { evaluateConversationOperationWatchdog } from '../build/ts/mcp/export-operation-watchdog.js';
+import {
+  evaluateConversationNoProgressBudgetFsm,
+  evaluateConversationOperationWatchdog,
+} from '../build/ts/mcp/export-operation-watchdog.js';
 
 const assertSafeContinue = (decision) => {
   assert.equal(decision.action, 'continue');
@@ -121,6 +124,24 @@ test('watchdog cancels silently stuck operation after job cancel', () => {
       elapsedMs: 10000,
       code: 'conversation_cancelled_after_no_progress',
       message: 'Cancelamento solicitado; operação sem progresso por 10s.',
+    },
+  );
+});
+
+test('watchdog no-progress budget stays above browser navigation timeout', () => {
+  assert.deepEqual(
+    evaluateConversationNoProgressBudgetFsm({
+      requestedMs: 45_000,
+      browserNavigationTimeoutMs: 45_000,
+      recoveryGapMs: 45_000,
+      maxMs: 10 * 60_000,
+    }),
+    {
+      state: 'normalized',
+      requestedMs: 45_000,
+      minimumMs: 90_000,
+      noProgressMs: 90_000,
+      reason: 'raised_above_browser_navigation_timeout',
     },
   );
 });

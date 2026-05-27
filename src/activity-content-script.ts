@@ -40,6 +40,8 @@
     tabClaim: null,
     activityProgress: null,
     activityProgressHideTimer: 0,
+    mcpProgress: null,
+    mcpProgressHideTimer: 0,
   };
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -186,15 +188,30 @@
     return overlap / needleTokens.size;
   };
 
+  const candidateScoring = (candidate = {}) =>
+    candidate.scoring && typeof candidate.scoring === 'object' ? candidate.scoring : candidate;
+
+  const hasUserPromptScoring = (candidate = {}) => {
+    const scoring = candidateScoring(candidate);
+    return Boolean(String(scoring.firstPrompt || '').trim() || String(scoring.lastPrompt || '').trim());
+  };
+
+  const isPromptlessSingleTurnCandidate = (candidate = {}) =>
+    Number(candidate.turnCount) === 1 && !hasUserPromptScoring(candidate);
+
   const candidateFields = (candidate = {}) => {
-    const scoring = candidate.scoring && typeof candidate.scoring === 'object' ? candidate.scoring : candidate;
+    const scoring = candidateScoring(candidate);
+    const promptlessSingleTurn = isPromptlessSingleTurnCandidate(candidate);
     const fields = [];
     if (scoring.firstPrompt) fields.push({ kind: 'created', text: scoring.firstPrompt });
     if (scoring.lastPrompt) fields.push({ kind: 'last_message', text: scoring.lastPrompt });
+    const assistantKind = promptlessSingleTurn ? 'unknown' : 'last_message';
     for (const sample of scoring.assistantSamples || []) {
-      if (sample) fields.push({ kind: 'last_message', text: sample });
+      if (sample) fields.push({ kind: assistantKind, text: sample });
     }
-    if (!fields.length && scoring.title) fields.push({ kind: 'unknown', text: scoring.title });
+    if (scoring.title && (!fields.length || promptlessSingleTurn)) {
+      fields.push({ kind: 'unknown', text: scoring.title });
+    }
     return fields;
   };
 
@@ -241,6 +258,17 @@
     }
     if (byKind.size === 0) return [scoreCandidate(candidate, text)];
     return Array.from(byKind.values());
+  };
+
+  const requiredKindsForCandidate = (candidate = {}) => {
+    if (isPromptlessSingleTurnCandidate(candidate)) return new Set(['unknown']);
+    const scoring = candidateScoring(candidate);
+    const kinds = new Set();
+    if (scoring.firstPrompt) kinds.add('created');
+    if (scoring.lastPrompt) kinds.add('last_message');
+    if (kinds.size) return kinds;
+    const fieldKinds = new Set(candidateFields(candidate).map((field) => field.kind));
+    return fieldKinds.size ? fieldKinds : new Set(['unknown']);
   };
 
   const parseNumericTimestamp = (value) => {
@@ -365,8 +393,16 @@
     if (!time) return null;
     const now = new Date();
     let offsetDays = null;
-    if (/\b(today|hoje)\b/.test(normalized)) offsetDays = 0;
-    if (/\b(yesterday|ontem)\b/.test(normalized)) offsetDays = -1;
+    if (/\b(today|hoje)\b/.test(normalized) || normalized.startsWith('today') || normalized.startsWith('hoje')) {
+      offsetDays = 0;
+    }
+    if (
+      /\b(yesterday|ontem)\b/.test(normalized) ||
+      normalized.startsWith('yesterday') ||
+      normalized.startsWith('ontem')
+    ) {
+      offsetDays = -1;
+    }
     if (offsetDays === null) return null;
     const date = new Date(now.getFullYear(), now.getMonth(), now.getDate() + offsetDays);
     return localIsoFromParts(
@@ -397,6 +433,10 @@
     if (!normalized || normalized.length > 90) return false;
     return (
       /\b(today|yesterday|hoje|ontem)\b/.test(normalized) ||
+      normalized.startsWith('today') ||
+      normalized.startsWith('yesterday') ||
+      normalized.startsWith('hoje') ||
+      normalized.startsWith('ontem') ||
       /\b(january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sept|sep|october|oct|november|nov|december|dec)\b/.test(
         normalized,
       ) ||
@@ -561,12 +601,15 @@
 
   const updateActivityProgressDock = () => {
     const port = ensureActivityProgressPort();
-    const progress = state.activityProgress;
-    if (!progress) {
+    const activityProgress = state.activityProgress;
+    const mcpProgress = state.mcpProgress;
+    if (!activityProgress && !mcpProgress) {
       port.hide();
       return;
     }
-    const snapshot = buildActivityProgressViewModel(progress);
+    const snapshot = activityProgress
+      ? buildActivityProgressViewModel(activityProgress)
+      : buildExportJobProgressViewModel(mcpProgress);
     port.update(snapshot);
     const { countEl } = getSharedProgressDockElements({
       dockId: PROGRESS_DOCK_ID,
@@ -618,6 +661,40 @@
     state.activityProgressHideTimer?.unref?.();
   };
 
+  const MCP_TERMINAL_STATUSES = new Set(['completed', 'completed_with_errors', 'failed', 'cancelled']);
+
+  const handleMcpJobProgressBroadcast = (jobProgress) => {
+    if (state.mcpProgressHideTimer) {
+      clearTimeout(state.mcpProgressHideTimer);
+      state.mcpProgressHideTimer = 0;
+    }
+    if (!jobProgress) {
+      state.mcpProgress = null;
+      updateActivityProgressDock();
+      return;
+    }
+    if (jobProgress.source && jobProgress.source !== 'mcp') return;
+    const total = Math.max(Number(jobProgress.total || jobProgress.requested || 1), 1);
+    const batchPosition = Number(jobProgress.position ?? jobProgress.current ?? 0);
+    state.mcpProgress = {
+      ...jobProgress,
+      sourceKind: 'export-job',
+      requested: total,
+      batchTotal: total,
+      batchPosition: Number.isFinite(batchPosition) && batchPosition > 0 ? batchPosition : null,
+      progressMessage: jobProgress.label || jobProgress.progressMessage || null,
+    };
+    updateActivityProgressDock();
+    if (MCP_TERMINAL_STATUSES.has(String(jobProgress.status || ''))) {
+      state.mcpProgressHideTimer = setTimeout(() => {
+        state.mcpProgress = null;
+        state.mcpProgressHideTimer = 0;
+        updateActivityProgressDock();
+      }, 4200);
+      state.mcpProgressHideTimer?.unref?.();
+    }
+  };
+
   const sanitizedMatch = ({ candidate, card, score, cardIndex }) => ({
     chatId: String(candidate.chatId || ''),
     date: extractCardDate(card),
@@ -627,6 +704,20 @@
     sampleHash: score.sampleHash,
     sampleLength: score.sampleLength,
     cardIndex,
+  });
+
+  const genericUsageMatch = ({ candidate, card, cardIndex }) => ({
+    chatId: String(candidate.chatId || ''),
+    date: extractCardDate(card),
+    kind: 'unknown',
+    source: 'my-activity-web',
+    confidence: 'weak',
+    score: MATCH_THRESHOLD,
+    textHash: hashText(card.textContent || ''),
+    sampleHash: hashText('Gemini Apps Used Gemini Apps'),
+    sampleLength: 0,
+    cardIndex,
+    warnings: ['generic_usage_card_for_promptless_single_turn'],
   });
 
   const sampleText = (value, max = 240) => {
@@ -725,19 +816,34 @@
     const foundKinds = new Map();
     const requiredKinds = new Map();
     for (const [chatId, candidate] of candidateMap.entries()) {
-      const kinds = new Set(candidateFields(candidate).map((field) => field.kind));
-      requiredKinds.set(chatId, kinds.size ? kinds : new Set(['unknown']));
+      requiredKinds.set(chatId, requiredKindsForCandidate(candidate));
       foundKinds.set(chatId, new Set());
     }
     const matches = [];
     let loadedCardCount = 0;
     let lastSeenActivityToken = null;
+    const resolvedChatIdsForFoundKinds = () =>
+      Array.from(candidateMap.keys())
+        .filter((chatId) => {
+          const required = requiredKinds.get(chatId) || new Set();
+          const found = foundKinds.get(chatId) || new Set();
+          return Array.from(required).every((kind) => found.has(kind));
+        })
+        .sort();
     const unresolvedEntries = () =>
       Array.from(candidateMap.entries()).filter(([chatId]) => {
         const required = requiredKinds.get(chatId) || new Set();
         const found = foundKinds.get(chatId) || new Set();
         return !Array.from(required).every((kind) => found.has(kind));
       });
+    const isGenericUsageCard = (card) => {
+      const normalized = normalizeText(card.textContent || '');
+      return (
+        (normalized.includes('gemini appsused gemini apps') ||
+          normalized.includes('gemini apps used gemini apps')) &&
+        !normalized.includes('prompted')
+      );
+    };
 
     const cards = findActivityCards().slice(0, options.maxCards || DEFAULT_MAX_CARDS);
     loadedCardCount = cards.length;
@@ -776,14 +882,19 @@
         if (right.match.score !== left.match.score) return right.match.score - left.match.score;
         return right.match.sampleLength - left.match.sampleLength;
       });
-      const best = cardMatches[0];
-      if (best) {
-        matches.push(best.match);
-        foundKinds.get(best.chatId)?.add(best.match.kind);
+      const bestChatId = cardMatches[0]?.chatId || null;
+      const acceptedCardMatchKeys = new Set();
+      for (const item of cardMatches) {
+        if (item.chatId !== bestChatId) continue;
+        const key = `${item.chatId}:${item.match.kind || 'unknown'}`;
+        if (acceptedCardMatchKeys.has(key)) continue;
+        acceptedCardMatchKeys.add(key);
+        matches.push(item.match);
+        foundKinds.get(item.chatId)?.add(item.match.kind);
       }
       lastSeenActivityToken = extractCardDate(card) || hashText(card.textContent || '');
       if (options.openDetails === true) await closeOpenDetails();
-      const resolvedCount = Array.from(new Set(matches.map((match) => match.chatId))).length;
+      const resolvedCount = resolvedChatIdsForFoundKinds().length;
       options.onProgress?.({
         scannedCardCount: cardIndex + 1,
         loadedCardCount,
@@ -798,12 +909,53 @@
       if (allResolved) break;
     }
 
+    const genericUsageCards = cards
+      .map((card, cardIndex) => ({ card, cardIndex, date: extractCardDate(card) }))
+      .filter((item) => item.date && isGenericUsageCard(item.card));
+    const promptlessUnresolved = unresolvedEntries().filter(([, candidate]) =>
+      isPromptlessSingleTurnCandidate(candidate),
+    );
+    if (genericUsageCards.length === 1 && promptlessUnresolved.length === 1) {
+      const [chatId, candidate] = promptlessUnresolved[0];
+      const match = genericUsageMatch({
+        candidate,
+        card: genericUsageCards[0].card,
+        cardIndex: genericUsageCards[0].cardIndex,
+      });
+      matches.push(match);
+      foundKinds.get(chatId)?.add('unknown');
+    }
+
     return {
       matches,
       loadedCardCount,
       lastSeenActivityToken,
-      resolvedChatIds: Array.from(new Set(matches.map((match) => match.chatId))).sort(),
+      resolvedChatIds: resolvedChatIdsForFoundKinds(),
     };
+  };
+
+  const resolvedChatIdsForMatches = (candidates, matches) => {
+    const requiredKindsByChatId = new Map();
+    for (const candidate of candidates || []) {
+      if (!candidate?.chatId) continue;
+      const chatId = String(candidate.chatId);
+      requiredKindsByChatId.set(chatId, requiredKindsForCandidate(candidate));
+    }
+    const foundKindsByChatId = new Map();
+    for (const match of matches || []) {
+      const chatId = String(match?.chatId || '');
+      if (!chatId || !requiredKindsByChatId.has(chatId)) continue;
+      const found = foundKindsByChatId.get(chatId) || new Set();
+      found.add(match.kind || 'unknown');
+      foundKindsByChatId.set(chatId, found);
+    }
+    return Array.from(requiredKindsByChatId.entries())
+      .filter(([chatId, required]) => {
+        const found = foundKindsByChatId.get(chatId) || new Set();
+        return Array.from(required).every((kind) => found.has(kind));
+      })
+      .map(([chatId]) => chatId)
+      .sort();
   };
 
   const scanActivityPage = async (args = {}) => {
@@ -853,14 +1005,21 @@
           },
         });
         for (const match of partial.matches) {
-          if (!allMatches.some((existing) => existing.chatId === match.chatId && existing.date === match.date)) {
+          if (
+            !allMatches.some(
+              (existing) =>
+                existing.chatId === match.chatId &&
+                existing.date === match.date &&
+                (existing.kind || 'unknown') === (match.kind || 'unknown'),
+            )
+          ) {
             allMatches.push(match);
           }
         }
         checkpoint = {
           lastSeenActivityToken: partial.lastSeenActivityToken || checkpoint.lastSeenActivityToken,
           loadedCardCount: partial.loadedCardCount,
-          resolvedChatIds: Array.from(new Set(allMatches.map((match) => match.chatId))).sort(),
+          resolvedChatIds: resolvedChatIdsForMatches(candidates, allMatches),
         };
         updateActivityProgress({
           scannedCardCount: partial.loadedCardCount,
@@ -1082,6 +1241,7 @@
         if (typeof EventSource !== 'function') throw new Error('EventSource indisponível');
         return new EventSource(url);
       },
+      onJobProgress: handleMcpJobProgressBroadcast,
       onError: () => {
         // Bridge pode estar fechado enquanto o usuário navega. O próximo heartbeat tenta de novo.
       },
@@ -1135,6 +1295,7 @@
       beginActivityProgress,
       updateActivityProgress,
       finishActivityProgress,
+      handleMcpJobProgressBroadcast,
       buildHeartbeatPayload,
       getActivityBridgeClient,
       extractCardDate,

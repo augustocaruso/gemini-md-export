@@ -178,6 +178,38 @@ test('native broker self-heal runner forwards targeted tab ids', async () => {
   ]);
 });
 
+test('native broker runner can reload the extension service worker', async () => {
+  const calls = [];
+  const runner = createNativeBrokerTabsActionRunner({
+    shouldUseNativeBrowserBroker: () => true,
+    nativeBrowserBroker: {
+      reloadExtensionSelf: async (payload, options) => {
+        calls.push({ payload, options });
+        return { id: 'reload-self-1', ok: true, result: { ok: true, reloading: true } };
+      },
+    },
+    nativeBrowserBrokerToolResult: (response, action) => ({
+      action,
+      ...(response.result || {}),
+    }),
+  });
+
+  const response = await runner('reloadExtensionSelf', {
+    reason: 'extension_build_mismatch',
+    allowHttpBrowserFallback: true,
+  });
+
+  assert.equal(response.action, 'reloadExtensionSelf');
+  assert.deepEqual(calls, [
+    {
+      payload: {
+        reason: 'extension_build_mismatch',
+      },
+      options: { allowFallback: false },
+    },
+  ]);
+});
+
 test('native broker wake is attempted only for recoverable unavailable states with a live client', () => {
   assert.equal(
     shouldAttemptNativeBrokerWake({

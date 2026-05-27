@@ -135,3 +135,36 @@ test('command runner dispatches only with a lease and retries on replacement lea
   assert.equal(result.recovered, true);
   assert.deepEqual(result.result, { ok: true });
 });
+
+test('command runner reports missing command client with a typed recovery code', async () => {
+  await assert.rejects(
+    () =>
+      runBrowserCommandWithClientRecovery({
+        initialClient: {
+          clientId: 'old',
+          tabId: 42,
+          live: false,
+          commandReady: false,
+          recentCommandFailure: true,
+          lastSeenAt: 100,
+        },
+        selector: { tabId: 42 },
+        request: { type: 'get-chat-by-id', args: {} },
+        getPool: () => ({
+          current: null,
+          sameTab: [],
+          fallback: null,
+        }),
+        dispatch: async () => ({ ok: true }),
+        isRecoverableError: () => false,
+        describeError: () => ({}),
+        waitMs: 10,
+        pollMs: 1,
+      }),
+    (error) => {
+      assert.equal(error.code, 'no_command_client_available');
+      assert.match(error.message, /Nenhum cliente de comando do Gemini/);
+      return true;
+    },
+  );
+});

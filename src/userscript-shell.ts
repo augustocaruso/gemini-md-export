@@ -5596,6 +5596,7 @@
         const targetItem = findConversationForBridgeCommand(command.args || {});
         const navigation = await openChatWithNavigationEngine(targetItem, {
           ignoreBusy: true,
+          preferDirectChatUrlNavigation: command.args?.preferDirectChatUrlNavigation === true,
         });
         return {
           ok: true,
@@ -5635,6 +5636,7 @@
       try {
         payload = await collectExportForConversation(targetItem, {
           preferDirectNotebookReturn: command.args?.notebookReturnMode === 'direct',
+          preferDirectChatUrlNavigation: command.args?.preferDirectChatUrlNavigation === true,
           preserveNotebookContext: true,
           hydration: normalizeHydrationOptions(command.args || {}),
           abortSignal: operationContext.abortSignal,
@@ -6459,6 +6461,10 @@
         turnCount: conversationDomTurnCount(document),
         skipped: true,
       };
+    }
+
+    if (options.preferDirectChatUrlNavigation === true && String(item.url || '').includes('/app/')) {
+      return navigateToKnownChatUrl(item, options);
     }
 
     const preferSidebarNavigation =

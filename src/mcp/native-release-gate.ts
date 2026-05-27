@@ -405,6 +405,10 @@ const nativeBrokerSelfHealPayload = (args: NativeExportArgs = {}) => {
   return payload;
 };
 
+const nativeBrokerReloadSelfPayload = (args: NativeExportArgs = {}) => ({
+  reason: args.reason || 'mcp-native-broker-reload-self',
+});
+
 export const shouldReturnNativeBrokerReloadResult = (
   result: Readonly<Record<string, unknown>> | null | undefined,
   args: NativeExportArgs = {},
@@ -872,6 +876,14 @@ export const createNativeBrokerTabsActionRunner =
     if (action === 'extensionStatus') {
       return nativeBrowserBrokerToolResult(
         await nativeBrowserBroker.extensionStatus({ allowFallback: true }),
+        action,
+      );
+    }
+    if (action === 'reloadExtensionSelf') {
+      return nativeBrowserBrokerToolResult(
+        await nativeBrowserBroker.reloadExtensionSelf(nativeBrokerReloadSelfPayload(args), {
+          allowFallback: false,
+        }),
         action,
       );
     }

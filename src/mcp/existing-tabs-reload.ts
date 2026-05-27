@@ -9,6 +9,519 @@ export type ExistingTabsExtensionReloadResult = Readonly<{
   data?: unknown;
 }>;
 
+type ExistingTabsNativeReloadResult = Readonly<Record<string, unknown>> | null | undefined;
+
+export type ExistingTabsRuntimeRefreshFsmInput = Readonly<{
+  allowReload?: boolean;
+  expected?: Readonly<{
+    extensionVersion?: unknown;
+    protocolVersion?: unknown;
+    buildStamp?: unknown;
+  }> | null;
+  extensionStatus?: Readonly<Record<string, unknown>> | null;
+}>;
+
+export type ExistingTabsRuntimeRefreshFsmDecision = Readonly<{
+  state: 'ready' | 'reload_extension_self' | 'blocked';
+  reason: string;
+  force?: true;
+}>;
+
+export type ExistingTabsPostReloadRecoveryFsmInput = Readonly<{
+  allowReload?: boolean;
+  connectedClientCount?: number;
+  nativeReload?: ExistingTabsNativeReloadResult;
+}>;
+
+export type ExistingTabsPostReloadRecoveryFsmDecision = Readonly<{
+  state: 'ready' | 'self_heal_content_scripts' | 'blocked';
+  reason: string;
+  force?: true;
+  tabIds?: readonly number[];
+  waitForClients?: boolean;
+}>;
+
+export type BrowserReadyInactiveTabActivationCandidate = Readonly<{
+  clientId?: unknown;
+  tabId?: unknown;
+  isActiveTab?: unknown;
+  commandReady?: unknown;
+  lastHeartbeatAt?: unknown;
+  lastSnapshotAt?: unknown;
+  lastSeenAt?: unknown;
+  page?: Readonly<Record<string, unknown>> | null;
+}>;
+
+export type BrowserReadyInactiveTabActivationFsmInput = Readonly<{
+  allowActivation?: boolean;
+  ready?: boolean;
+  claimableClientCount?: number;
+  selectableClients?: readonly BrowserReadyInactiveTabActivationCandidate[];
+}>;
+
+export type BrowserReadyInactiveTabActivationFsmDecision = Readonly<{
+  state: 'ready' | 'activate_existing_tab' | 'blocked';
+  reason: string;
+  tabId?: number;
+  clientId?: string;
+}>;
+
+const RECOVERABLE_NATIVE_RELOAD_CODES = new Set([
+  'extension_context_invalidated',
+  'extension_request_timeout',
+]);
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  !!value && typeof value === 'object' && !Array.isArray(value);
+
+const stringValue = (value: unknown): string | null =>
+  typeof value === 'string' && value.trim() ? value : null;
+
+const numberOrStringValue = (value: unknown): string | null => {
+  if (value === null || value === undefined || value === '') return null;
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+  return stringValue(value);
+};
+
+const extensionStatusValue = (
+  status: Readonly<Record<string, unknown>> | null | undefined,
+  key: 'extensionVersion' | 'protocolVersion' | 'buildStamp',
+): string | null => {
+  if (!isRecord(status)) return null;
+  if (key === 'extensionVersion') {
+    return numberOrStringValue(status.extensionVersion) || numberOrStringValue(status.version);
+  }
+  return numberOrStringValue(status[key]);
+};
+
+const expectedValue = (
+  expected: ExistingTabsRuntimeRefreshFsmInput['expected'],
+  key: 'extensionVersion' | 'protocolVersion' | 'buildStamp',
+): string | null => (isRecord(expected) ? numberOrStringValue(expected[key]) : null);
+
+export const evaluateExistingTabsRuntimeRefreshFsm = ({
+  allowReload = false,
+  expected = null,
+  extensionStatus = null,
+}: ExistingTabsRuntimeRefreshFsmInput = {}): ExistingTabsRuntimeRefreshFsmDecision => {
+  if (!isRecord(extensionStatus) || extensionStatus.ok === false) {
+    return { state: 'blocked', reason: 'extension_status_unavailable' };
+  }
+
+  const checks: ReadonlyArray<['extensionVersion' | 'protocolVersion' | 'buildStamp', string]> = [
+    ['extensionVersion', 'extension_version_mismatch'],
+    ['protocolVersion', 'extension_protocol_mismatch'],
+    ['buildStamp', 'extension_build_mismatch'],
+  ];
+  for (const [key, reason] of checks) {
+    const wanted = expectedValue(expected, key);
+    const actual = extensionStatusValue(extensionStatus, key);
+    if (wanted && actual && wanted !== actual) {
+      return allowReload === true
+        ? { state: 'reload_extension_self', reason, force: true }
+        : { state: 'blocked', reason };
+    }
+  }
+
+  return { state: 'ready', reason: 'extension_runtime_current' };
+};
+
+const nativeReloadCode = (result: ExistingTabsNativeReloadResult): string | null => {
+  if (!isRecord(result)) return null;
+  return (
+    stringValue(result.code) ||
+    (isRecord(result.error) ? stringValue(result.error.code) : null) ||
+    (isRecord(result.result) ? stringValue(result.result.code) : null)
+  );
+};
+
+const nativeReloadTabIds = (result: ExistingTabsNativeReloadResult): readonly number[] => {
+  if (!isRecord(result) || !Array.isArray(result.reloadedTabIds)) return [];
+  return result.reloadedTabIds
+    .map((value) => Number(value))
+    .filter((value) => Number.isInteger(value) && value > 0);
+};
+
+const positiveIntegerValue = (value: unknown): number | null => {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+};
+
+const candidatePage = (
+  candidate: BrowserReadyInactiveTabActivationCandidate,
+): Readonly<Record<string, unknown>> => (isRecord(candidate.page) ? candidate.page : {});
+
+const candidateIsActive = (candidate: BrowserReadyInactiveTabActivationCandidate): boolean =>
+  candidate.isActiveTab === true || candidatePage(candidate).isActiveTab === true;
+
+const candidateClientId = (
+  candidate: BrowserReadyInactiveTabActivationCandidate,
+): string | undefined => stringValue(candidate.clientId) || undefined;
+
+const candidateUrl = (candidate: BrowserReadyInactiveTabActivationCandidate): string | null =>
+  stringValue(candidatePage(candidate).url);
+
+const candidateKind = (candidate: BrowserReadyInactiveTabActivationCandidate): string | null =>
+  stringValue(candidatePage(candidate).kind);
+
+const candidateLooksLikeGeminiApp = (
+  candidate: BrowserReadyInactiveTabActivationCandidate,
+): boolean => {
+  const kind = candidateKind(candidate);
+  if (kind === 'activity') return false;
+  const url = candidateUrl(candidate);
+  if (!url) return kind === 'chat' || kind === 'gemini';
+  try {
+    const parsed = new URL(url);
+    return parsed.origin === 'https://gemini.google.com';
+  } catch {
+    return false;
+  }
+};
+
+const candidateHasBlockingPage = (
+  candidate: BrowserReadyInactiveTabActivationCandidate,
+): boolean => {
+  const blocker = candidatePage(candidate).blocker;
+  if (!isRecord(blocker)) return false;
+  const code = stringValue(blocker.code);
+  const kind = stringValue(blocker.kind);
+  return (
+    blocker.terminal === true ||
+    code === 'google_verification_required' ||
+    code === 'google_login_required' ||
+    code === 'google_page_blocked' ||
+    kind === 'google_sorry' ||
+    kind === 'google_login' ||
+    kind === 'google_verification_text'
+  );
+};
+
+const candidateContextScore = (
+  candidate: BrowserReadyInactiveTabActivationCandidate,
+): number => {
+  const page = candidatePage(candidate);
+  let score = 0;
+  if (candidate.commandReady === true) score += 100;
+  if (stringValue(page.chatId)) score += 30;
+  if (stringValue(page.notebookId)) score += 20;
+  if (Number(page.turnCount || 0) > 0) score += 12;
+  if (Number(page.listedConversationCount || 0) > 0) score += 10;
+  if (Number(page.bridgeConversationCount || 0) > 0) score += 10;
+  if (Number(page.sidebarConversationCount || 0) > 0) score += 10;
+  if (page.sidebarOpen === true) score += 4;
+  return score;
+};
+
+const candidateLastSignal = (
+  candidate: BrowserReadyInactiveTabActivationCandidate,
+): number => Math.max(
+  Number(candidate.lastHeartbeatAt || 0),
+  Number(candidate.lastSnapshotAt || 0),
+  Number(candidate.lastSeenAt || 0),
+);
+
+export const evaluateBrowserReadyInactiveTabActivationFsm = ({
+  allowActivation = false,
+  ready = false,
+  claimableClientCount = 0,
+  selectableClients = [],
+}: BrowserReadyInactiveTabActivationFsmInput = {}): BrowserReadyInactiveTabActivationFsmDecision => {
+  if (ready === true || Number(claimableClientCount || 0) > 0) {
+    return { state: 'ready', reason: 'active_claimable_tab_available' };
+  }
+
+  if (allowActivation !== true) {
+    return { state: 'blocked', reason: 'activation_not_allowed' };
+  }
+
+  const candidates = selectableClients
+    .map((candidate) => ({ candidate, tabId: positiveIntegerValue(candidate.tabId) }))
+    .filter(
+      (item): item is { candidate: BrowserReadyInactiveTabActivationCandidate; tabId: number } =>
+        item.tabId !== null &&
+        !candidateIsActive(item.candidate) &&
+        candidateLooksLikeGeminiApp(item.candidate) &&
+        !candidateHasBlockingPage(item.candidate),
+    )
+    .sort(
+      (left, right) =>
+        candidateContextScore(right.candidate) - candidateContextScore(left.candidate) ||
+        candidateLastSignal(right.candidate) - candidateLastSignal(left.candidate) ||
+        right.tabId - left.tabId,
+    );
+
+  const selected = candidates[0];
+  if (!selected) {
+    return { state: 'blocked', reason: 'no_inactive_ready_gemini_tab' };
+  }
+
+  return {
+    state: 'activate_existing_tab',
+    reason: 'inactive_ready_gemini_tab',
+    tabId: selected.tabId,
+    clientId: candidateClientId(selected.candidate),
+  };
+};
+
+export const maybeActivateBrowserReadyInactiveTab = async (
+  input: BrowserReadyInactiveTabActivationFsmInput & {
+    args?: Record<string, unknown>;
+  } = {},
+  deps: {
+    activateBrowserTabById(tabId: number, args?: Record<string, unknown>, candidate?: unknown): Promise<Record<string, any> | null>;
+    summarizeClient(client: unknown): unknown;
+  },
+) => {
+  const args = input.args || {};
+  const decision = evaluateBrowserReadyInactiveTabActivationFsm({
+    ...input,
+    allowActivation:
+      input.allowActivation ??
+      (args.wakeBrowser === true ||
+        args.activateTab === true ||
+        args.activateTabBeforeClaim === true),
+  });
+  if (decision.state !== 'activate_existing_tab' || !decision.tabId) {
+    return { attempted: false, decision };
+  }
+
+  const activationCandidate =
+    (input.selectableClients || []).find(
+      (client) => positiveIntegerValue(client.tabId) === decision.tabId,
+    ) || null;
+  try {
+    const activation = await deps.activateBrowserTabById(
+      decision.tabId,
+      {
+        ...args,
+        activateTabReason:
+          args.activateTabReason || 'browser-ready-activate-existing-tab',
+      },
+      activationCandidate,
+    );
+    const activatedClient = activation?.client || activationCandidate;
+    return {
+      attempted: true,
+      ok: true,
+      shouldRefreshClientSets: true,
+      decision,
+      result: activation?.result || null,
+      broker: activation?.broker ? deps.summarizeClient(activation.broker) : null,
+      client: activatedClient ? deps.summarizeClient(activatedClient) : null,
+    };
+  } catch (err) {
+    const error = err as Error & { code?: string | null; data?: unknown };
+    return {
+      attempted: true,
+      ok: false,
+      shouldRefreshClientSets: false,
+      decision,
+      error: error.message,
+      code: error.code || null,
+      data: error.data || null,
+    };
+  }
+};
+
+const attachedContentScriptSelfHealFailed = (result: ExistingTabsNativeReloadResult): boolean =>
+  isRecord(result) &&
+  isRecord(result.contentScriptSelfHeal) &&
+  result.contentScriptSelfHeal.ok === false;
+
+const attachedContentScriptSelfHealCompleted = (result: ExistingTabsNativeReloadResult): boolean =>
+  isRecord(result) &&
+  isRecord(result.contentScriptSelfHeal) &&
+  result.contentScriptSelfHeal.ok === true;
+
+export const evaluateExistingTabsPostReloadRecoveryFsm = ({
+  allowReload = false,
+  connectedClientCount = 0,
+  nativeReload = null,
+}: ExistingTabsPostReloadRecoveryFsmInput = {}): ExistingTabsPostReloadRecoveryFsmDecision => {
+  if (attachedContentScriptSelfHealFailed(nativeReload)) {
+    if (allowReload !== true) {
+      return connectedClientCount > 0
+        ? { state: 'ready', reason: 'content_client_connected' }
+        : { state: 'blocked', reason: 'reload_not_allowed' };
+    }
+    return {
+      state: 'self_heal_content_scripts',
+      reason: 'native_reload_post_self_heal_failed',
+      force: true,
+      waitForClients: true,
+    };
+  }
+
+  if (connectedClientCount > 0) {
+    return { state: 'ready', reason: 'content_client_connected' };
+  }
+
+  if (allowReload !== true) {
+    return { state: 'blocked', reason: 'reload_not_allowed' };
+  }
+
+  if (!isRecord(nativeReload)) {
+    return { state: 'blocked', reason: 'native_reload_result_missing' };
+  }
+
+  const code = nativeReloadCode(nativeReload);
+  if (attachedContentScriptSelfHealCompleted(nativeReload)) {
+    return { state: 'blocked', reason: 'native_reload_post_self_heal_completed_without_client' };
+  }
+
+  const shouldSelfHeal =
+    nativeReload.ok === true || (code !== null && RECOVERABLE_NATIVE_RELOAD_CODES.has(code));
+
+  if (!shouldSelfHeal) {
+    return { state: 'blocked', reason: code ? `native_reload_${code}` : 'native_reload_not_recoverable' };
+  }
+
+  const tabIds = nativeReloadTabIds(nativeReload);
+  return {
+    state: 'self_heal_content_scripts',
+    reason: code ? `native_reload_${code}` : 'native_reload_completed_no_content_clients',
+    force: true,
+    tabIds: tabIds.length > 0 ? tabIds : undefined,
+    waitForClients: true,
+  };
+};
+
+export const reloadSideEffectExplicitlyAllowed = (
+  args: Record<string, unknown> = {},
+): boolean =>
+  args.allowReload === true ||
+  args.explicit === true ||
+  args.intent === 'tab_management' ||
+  args.diagnostic === true;
+
+export const refreshExistingTabsExtensionRuntimeBeforeReload = async (
+  args: Record<string, unknown> = {},
+  deps: {
+    tryNativeBrowserBrokerTabsAction(action: string, args?: Record<string, unknown>): Promise<Record<string, unknown> | null>;
+    expected: ExistingTabsRuntimeRefreshFsmInput['expected'];
+    sleep(ms: number): Promise<unknown>;
+    pollIntervalMs: number;
+  },
+) => {
+  const extensionStatus = await deps.tryNativeBrowserBrokerTabsAction('extensionStatus', args);
+  const decision = evaluateExistingTabsRuntimeRefreshFsm({
+    allowReload: reloadSideEffectExplicitlyAllowed(args),
+    expected: deps.expected,
+    extensionStatus,
+  });
+  if (decision.state !== 'reload_extension_self') {
+    return {
+      decision,
+      attempted: false,
+      ok: decision.state === 'ready',
+      extensionStatus,
+    };
+  }
+
+  const reloadSelf = await deps.tryNativeBrowserBrokerTabsAction('reloadExtensionSelf', {
+    ...args,
+    reason: decision.reason,
+    force: true,
+  });
+  await deps.sleep(deps.pollIntervalMs);
+  return {
+    decision,
+    attempted: true,
+    ok: reloadSelf?.ok !== false,
+    extensionStatus,
+    reloadSelf,
+  };
+};
+
+export const recoverExistingTabsContentScriptsAfterNativeReload = async (
+  nativeReload: ExistingTabsNativeReloadResult,
+  args: Record<string, unknown> = {},
+  deps: {
+    getLiveClients(): unknown[];
+    waitForLiveClients(timeoutMs: number, pollIntervalMs?: number): Promise<unknown[]>;
+    normalizeReloadWaitMs(value: unknown, fallback: number): number;
+    summarizeClient(client: unknown): unknown;
+    tryNativeBrowserBrokerTabsAction(action: string, args?: Record<string, unknown>): Promise<Record<string, unknown> | null>;
+    defaultWaitMs: number;
+    pollIntervalMs: number;
+  },
+) => {
+  const decision = evaluateExistingTabsPostReloadRecoveryFsm({
+    allowReload: reloadSideEffectExplicitlyAllowed(args),
+    connectedClientCount: deps.getLiveClients().length,
+    nativeReload,
+  });
+  const recovery = {
+    decision,
+    attempted: false,
+    ok: decision.state === 'ready',
+    connectedClientCount: deps.getLiveClients().length,
+  };
+  if (decision.state !== 'self_heal_content_scripts') return recovery;
+
+  const selfHealArgs: Record<string, unknown> = {
+    ...args,
+    reason: decision.reason,
+    force: true,
+  };
+  if (Array.isArray(decision.tabIds) && decision.tabIds.length > 0) {
+    selfHealArgs.tabIds = [...decision.tabIds];
+  }
+
+  const waitMs = deps.normalizeReloadWaitMs(args.reloadWaitMs ?? args.waitMs, deps.defaultWaitMs);
+  const waitStartedAt = Date.now();
+  const selfHeal = await deps.tryNativeBrowserBrokerTabsAction(
+    'selfHealContentScripts',
+    selfHealArgs,
+  );
+  const liveClients = decision.waitForClients
+    ? await deps.waitForLiveClients(waitMs, deps.pollIntervalMs)
+    : deps.getLiveClients();
+  return {
+    decision,
+    attempted: true,
+    ok: liveClients.length > 0,
+    waitMs,
+    waitedMs: Math.max(0, Date.now() - waitStartedAt),
+    connectedClientCount: liveClients.length,
+    clients: liveClients.map(deps.summarizeClient),
+    selfHeal,
+  };
+};
+
+export const runExistingTabsNativeReloadRecovery = async (
+  args: Record<string, unknown> = {},
+  deps: {
+    tryNativeBrowserBrokerTabsAction(action: string, args?: Record<string, unknown>): Promise<Record<string, unknown> | null>;
+    attachContentScriptSelfHealToNativeReload(
+      nativeReload: ExistingTabsNativeReloadResult,
+      args: Record<string, unknown>,
+      action: (action: string, args?: Record<string, unknown>) => Promise<Record<string, unknown> | null>,
+    ): Promise<unknown>;
+    expected: ExistingTabsRuntimeRefreshFsmInput['expected'];
+    sleep(ms: number): Promise<unknown>;
+    getLiveClients(): unknown[];
+    waitForLiveClients(timeoutMs: number, pollIntervalMs?: number): Promise<unknown[]>;
+    normalizeReloadWaitMs(value: unknown, fallback: number): number;
+    summarizeClient(client: unknown): unknown;
+    defaultWaitMs: number;
+    pollIntervalMs: number;
+  },
+) => {
+  const nativeExtensionRuntimeRefresh = await refreshExistingTabsExtensionRuntimeBeforeReload(args, deps);
+  const nativeReload = await deps.tryNativeBrowserBrokerTabsAction('reload', args);
+  await deps.attachContentScriptSelfHealToNativeReload(
+    nativeReload,
+    args,
+    deps.tryNativeBrowserBrokerTabsAction,
+  );
+  const postNativeReloadRecovery = nativeReload
+    ? await recoverExistingTabsContentScriptsAfterNativeReload(nativeReload, args, deps)
+    : null;
+  return { nativeExtensionRuntimeRefresh, nativeReload, postNativeReloadRecovery };
+};
+
 type EnsureBrowserExtensionReady = (
   args: Record<string, unknown>,
   options: Record<string, unknown>,

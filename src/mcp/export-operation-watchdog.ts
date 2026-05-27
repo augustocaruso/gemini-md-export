@@ -33,6 +33,21 @@ export type ConversationOperationWatchdogDecision =
   | { action: 'fail'; elapsedMs: number; code: string; message: string }
   | { action: 'cancel'; elapsedMs: number; code: string; message: string };
 
+export type ConversationNoProgressBudgetInput = {
+  requestedMs?: number;
+  browserNavigationTimeoutMs?: number;
+  recoveryGapMs?: number;
+  maxMs?: number;
+};
+
+export type ConversationNoProgressBudgetDecision = {
+  state: 'normalized';
+  requestedMs: number;
+  minimumMs: number;
+  noProgressMs: number;
+  reason: 'requested_ok' | 'raised_above_browser_navigation_timeout';
+};
+
 export const evaluateConversationOperationWatchdog = ({
   now,
   lastProgressAt,
@@ -57,5 +72,36 @@ export const evaluateConversationOperationWatchdog = ({
     elapsedMs,
     code: 'conversation_no_progress_timeout',
     message: `Conversa sem progresso por ${elapsedLabel(elapsedMs)}.`,
+  };
+};
+
+export const evaluateConversationNoProgressBudgetFsm = ({
+  requestedMs = 0,
+  browserNavigationTimeoutMs = 0,
+  recoveryGapMs = 0,
+  maxMs = Number.POSITIVE_INFINITY,
+}: ConversationNoProgressBudgetInput = {}): ConversationNoProgressBudgetDecision => {
+  const safeRequestedMs = isFiniteNonNegativeMs(requestedMs) ? Math.floor(requestedMs) : 0;
+  const safeBrowserNavigationTimeoutMs = isFiniteNonNegativeMs(browserNavigationTimeoutMs)
+    ? Math.floor(browserNavigationTimeoutMs)
+    : 0;
+  const safeRecoveryGapMs = isFiniteNonNegativeMs(recoveryGapMs) ? Math.floor(recoveryGapMs) : 0;
+  const safeMaxMs = isFiniteNonNegativeMs(maxMs) && maxMs > 0
+    ? Math.floor(maxMs)
+    : Number.POSITIVE_INFINITY;
+  const minimumMs = Math.min(
+    safeMaxMs,
+    safeBrowserNavigationTimeoutMs + safeRecoveryGapMs,
+  );
+  const noProgressMs = Math.min(safeMaxMs, Math.max(safeRequestedMs, minimumMs));
+  return {
+    state: 'normalized',
+    requestedMs: safeRequestedMs,
+    minimumMs,
+    noProgressMs,
+    reason:
+      noProgressMs > safeRequestedMs
+        ? 'raised_above_browser_navigation_timeout'
+        : 'requested_ok',
   };
 };

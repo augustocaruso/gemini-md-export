@@ -207,6 +207,42 @@ test('rejects inactive, non-Gemini, missing current chat, command-unready and bu
   );
 });
 
+test('allows inactive Gemini tab for explicit background export readiness', () => {
+  const lifecycle = getGeminiClientLifecycle(
+    { ...baseClient, isActiveTab: false },
+    {
+      ...options,
+      allowInactiveTab: true,
+      capability: 'recent-export',
+    },
+  );
+
+  assert.equal(lifecycle.state, 'claimable');
+  assert.equal(lifecycle.code, null);
+
+  const claimed = getGeminiClientLifecycle(
+    { ...baseClient, isActiveTab: false },
+    {
+      ...options,
+      allowInactiveTab: true,
+      capability: 'recent-export',
+      requireClaimed: true,
+      claims: [
+        {
+          claimId: 'claim-a',
+          clientId: baseClient.clientId,
+          sessionId: 'session-a',
+          tabId: baseClient.tabId,
+          expiresAtMs: 60_000,
+        },
+      ],
+    },
+  );
+
+  assert.equal(claimed.state, 'claimed_ready');
+  assert.equal(claimed.code, null);
+});
+
 test('accepts page-level active tab evidence when top-level tab state lags', () => {
   const lifecycle = getGeminiClientLifecycle(
     {

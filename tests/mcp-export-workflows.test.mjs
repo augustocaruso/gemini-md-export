@@ -146,7 +146,7 @@ test('recent export report preserves activity companion evidence', () => {
   assert.match(reportBlock, /activityCompanion: job\.activityCompanion \|\| null/);
 });
 
-test('recent export does not reload the tab before retrying stale conversation DOM', () => {
+test('recent export reloads the tab only when command client disappears before retry', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const recoveryPolicySource = readFileSync(
     resolve(ROOT, 'src', 'mcp', 'conversation-retry-recovery.ts'),
@@ -157,10 +157,10 @@ test('recent export does not reload the tab before retrying stale conversation D
   )?.[0];
 
   assert.ok(retryBlock, 'downloadConversationItemWithRetry deve existir');
-  assert.doesNotMatch(source, /conversation-retry-recovery\.js/);
-  assert.doesNotMatch(retryBlock, /recoverBrowserTabAfterWatchdog\(\s*job,\s*retryReason/);
-  assert.doesNotMatch(retryBlock, /shouldRecoverTabBeforeConversationRetry\(retryReason\)/);
-  assert.match(recoveryPolicySource, /new Set<string>\(\)/);
+  assert.match(source, /conversation-retry-recovery\.js/);
+  assert.match(retryBlock, /shouldRecoverTabBeforeConversationRetry\(retryReason\)/);
+  assert.match(retryBlock, /recoverBrowserTabAfterWatchdog\(\s*job,\s*retryReason/);
+  assert.match(recoveryPolicySource, /no_command_client_available['"`]/);
   assert.doesNotMatch(recoveryPolicySource, /stale_conversation_dom['"`]\s*\]/);
 });
 

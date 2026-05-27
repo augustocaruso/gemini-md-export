@@ -1,3 +1,4 @@
+import { parseChatId } from '../core/chat-id.js';
 import { runConversationOperation } from './conversation-operation-runner.js';
 import type {
   ConversationOperationTerminalResult,
@@ -58,6 +59,156 @@ type OperationSettlement =
   | { status: 'rejected'; reason: any };
 
 type WatchdogSettlement = { status: 'watchdog'; decision: AnyRecord };
+
+export type WatchdogRecoveryRetryFsmInput = {
+  recoveryAttempted?: boolean;
+  recoveryOk?: boolean;
+  recoveredTargetState?: RecoveredBrowserTargetReadiness['state'] | null;
+  retryAttempt?: number;
+  retryLimit?: number;
+  watchdogCode?: string | null;
+};
+
+export type WatchdogRecoveryRetryFsmDecision =
+  | {
+      state: 'retry_same_conversation';
+      reason: string;
+      nextAttempt: number;
+      forceDirectChatUrlNavigation?: boolean;
+    }
+  | { state: 'record_failure'; reason: string; nextAttempt: number | null }
+  | { state: 'abort_batch'; reason: string; nextAttempt: null };
+
+export type RecoveredBrowserTargetReadiness =
+  | {
+      state: 'target_unchecked';
+      ok: true;
+      reason: 'target_not_requested';
+      expectedChatId: null;
+      observedChatId: string | null;
+    }
+  | {
+      state: 'target_ready';
+      ok: true;
+      reason: 'recovered_target_matches';
+      expectedChatId: string;
+      observedChatId: string;
+    }
+  | {
+      state: 'wrong_target';
+      ok: false;
+      reason: 'recovered_target_mismatch';
+      expectedChatId: string;
+      observedChatId: string;
+    }
+  | {
+      state: 'target_unknown';
+      ok: false;
+      reason: 'recovered_target_unknown';
+      expectedChatId: string;
+      observedChatId: null;
+    };
+
+const safeNonNegativeInteger = (value: unknown, fallback: number): number => {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric < 0) return fallback;
+  return Math.floor(numeric);
+};
+
+export const DEFAULT_WATCHDOG_RECOVERY_RETRY_LIMIT = 2;
+
+const observedChatIdForRecoveredClient = (client: AnyRecord | null | undefined): string | null =>
+  parseChatId(client?.page?.chatId) ||
+  parseChatId(client?.page?.url) ||
+  parseChatId(client?.page?.pathname) ||
+  parseChatId(client?.chatId) ||
+  parseChatId(client?.url);
+
+export const evaluateRecoveredBrowserTargetFsm = ({
+  targetChatId = null,
+  recoveredClient = null,
+}: {
+  targetChatId?: unknown;
+  recoveredClient?: AnyRecord | null;
+}): RecoveredBrowserTargetReadiness => {
+  const expectedChatId = parseChatId(targetChatId);
+  const observedChatId = observedChatIdForRecoveredClient(recoveredClient);
+  if (!expectedChatId) {
+    return {
+      state: 'target_unchecked',
+      ok: true,
+      reason: 'target_not_requested',
+      expectedChatId: null,
+      observedChatId,
+    };
+  }
+  if (observedChatId === expectedChatId) {
+    return {
+      state: 'target_ready',
+      ok: true,
+      reason: 'recovered_target_matches',
+      expectedChatId,
+      observedChatId,
+    };
+  }
+  if (observedChatId) {
+    return {
+      state: 'wrong_target',
+      ok: false,
+      reason: 'recovered_target_mismatch',
+      expectedChatId,
+      observedChatId,
+    };
+  }
+  return {
+    state: 'target_unknown',
+    ok: false,
+    reason: 'recovered_target_unknown',
+    expectedChatId,
+    observedChatId: null,
+  };
+};
+
+export const evaluateWatchdogRecoveryRetryFsm = ({
+  recoveryAttempted = false,
+  recoveryOk = false,
+  recoveredTargetState = null,
+  retryAttempt = 0,
+  retryLimit = DEFAULT_WATCHDOG_RECOVERY_RETRY_LIMIT,
+  watchdogCode = null,
+}: WatchdogRecoveryRetryFsmInput): WatchdogRecoveryRetryFsmDecision => {
+  const safeRetryAttempt = safeNonNegativeInteger(retryAttempt, 0);
+  const safeRetryLimit = safeNonNegativeInteger(
+    retryLimit,
+    DEFAULT_WATCHDOG_RECOVERY_RETRY_LIMIT,
+  );
+  if (watchdogCode !== 'conversation_no_progress_timeout') {
+    return { state: 'record_failure', reason: 'not_no_progress_watchdog', nextAttempt: null };
+  }
+  if (recoveryOk) {
+    if (safeRetryAttempt < safeRetryLimit) {
+      const forceDirectChatUrlNavigation =
+        recoveredTargetState === 'wrong_target' || recoveredTargetState === 'target_unknown';
+      return {
+        state: 'retry_same_conversation',
+        reason: forceDirectChatUrlNavigation
+          ? 'recovered_tab_wrong_target_reopen_required'
+          : 'recovered_tab_ready',
+        nextAttempt: safeRetryAttempt + 1,
+        ...(forceDirectChatUrlNavigation ? { forceDirectChatUrlNavigation: true } : {}),
+      };
+    }
+    return {
+      state: 'record_failure',
+      reason: 'retry_limit_exhausted',
+      nextAttempt: null,
+    };
+  }
+  if (recoveryAttempted) {
+    return { state: 'abort_batch', reason: 'recovery_failed', nextAttempt: null };
+  }
+  return { state: 'record_failure', reason: 'recovery_unavailable', nextAttempt: null };
+};
 
 const drainTimedOutConversationOperation = async (
   settlementPromise: Promise<AnyRecord>,
@@ -177,6 +328,10 @@ export const createBrowserTabWatchdogRecovery =
             code: 'recovered_client_missing',
             message: 'Aba recarregada, mas a extensão ainda não reconectou.',
           };
+      const targetReadiness = evaluateRecoveredBrowserTargetFsm({
+        targetChatId: context.targetChatId || null,
+        recoveredClient,
+      });
       const recoveryOk = reload?.ok === true && recoveredClientReadiness.ok === true;
       const result = {
         ok: recoveryOk,
@@ -187,6 +342,9 @@ export const createBrowserTabWatchdogRecovery =
         reload,
         recoveredClient: recoveredClient ? deps.summarizeClient(recoveredClient) : null,
         recoveredClientReadiness,
+        targetReadiness,
+        requiresTargetReopen:
+          targetReadiness.state === 'wrong_target' || targetReadiness.state === 'target_unknown',
       };
       deps.appendExportJobTrace(job, 'browser_operation_recovery_result', result);
       deps.touchExportJob(job);
@@ -222,6 +380,7 @@ export const runRecentExportConversationOperation = async (
     operationId: string;
     successes: AnyRecord[];
     target: ExportBatchTarget;
+    watchdogRecoveryAttempt?: number;
   },
   deps: RecentExportOperationDeps,
 ): Promise<{ client: AnyRecord }> => {
@@ -237,7 +396,12 @@ export const runRecentExportConversationOperation = async (
     operationId,
     successes,
     target,
+    watchdogRecoveryAttempt = 0,
   } = input;
+  const watchdogRecoveryRetryLimit = safeNonNegativeInteger(
+    args?.conversationWatchdogRecoveryRetryLimit ?? args?.watchdogRecoveryRetryLimit,
+    DEFAULT_WATCHDOG_RECOVERY_RETRY_LIMIT,
+  );
   let operationLastProgressAt = Date.now();
   const operationAbortController = new AbortController();
   let operationCollected: AnyRecord | null = null;
@@ -339,6 +503,71 @@ export const runRecentExportConversationOperation = async (
     (error as AnyRecord).targetChatId = target.targetChatId;
     (error as AnyRecord).data = { recoveryResult: recoveryResult || null };
     return error;
+  };
+
+  const retryRecoveredWatchdogConversation = async ({
+    cancelResult,
+    decision,
+    drainTimedOut,
+    recoveryResult,
+  }: {
+    cancelResult: AnyRecord | null | undefined;
+    decision: AnyRecord;
+    drainTimedOut: boolean;
+    recoveryResult: AnyRecord | null | undefined;
+  }): Promise<{ client: AnyRecord } | null> => {
+    const retryDecision = evaluateWatchdogRecoveryRetryFsm({
+      watchdogCode: decision.code,
+      recoveryAttempted: recoveryResult !== null && recoveryResult !== undefined,
+      recoveryOk: recoveryResult?.ok === true,
+      recoveredTargetState: recoveryResult?.targetReadiness?.state || null,
+      retryAttempt: watchdogRecoveryAttempt,
+      retryLimit: watchdogRecoveryRetryLimit,
+    });
+    if (retryDecision.state === 'abort_batch') {
+      throw errorAfterFailedWatchdogRecovery(recoveryResult);
+    }
+    if (retryDecision.state !== 'retry_same_conversation') {
+      deps.appendExportJobTrace(job, 'conversation_watchdog_recovery_retry_skipped', {
+        operationId,
+        targetChatId: target.targetChatId,
+        reason: retryDecision.reason,
+        watchdogRecoveryAttempt,
+        watchdogRecoveryRetryLimit,
+        drainTimedOut,
+        cancelOk: cancelResult?.ok === true,
+        recoveryOk: recoveryResult?.ok === true,
+        recoveredTargetState: recoveryResult?.targetReadiness?.state || null,
+        forceDirectChatUrlNavigation: false,
+      });
+      return null;
+    }
+    deps.appendExportJobTrace(job, 'conversation_watchdog_recovered_retry', {
+      operationId,
+      targetChatId: target.targetChatId,
+      reason: retryDecision.reason,
+      watchdogRecoveryAttempt,
+      nextWatchdogRecoveryAttempt: retryDecision.nextAttempt,
+      watchdogRecoveryRetryLimit,
+      drainTimedOut,
+      cancelOk: cancelResult?.ok === true,
+      recoveryOk: recoveryResult?.ok === true,
+      recoveredTargetState: recoveryResult?.targetReadiness?.state || null,
+      forceDirectChatUrlNavigation: retryDecision.forceDirectChatUrlNavigation === true,
+      recoveredClient: recoveryResult?.recoveredClient || null,
+    });
+    return runRecentExportConversationOperation(
+      {
+        ...input,
+        args:
+          retryDecision.forceDirectChatUrlNavigation === true
+            ? { ...(input.args || {}), preferDirectChatUrlNavigation: true }
+            : input.args,
+        client,
+        watchdogRecoveryAttempt: retryDecision.nextAttempt,
+      },
+      deps,
+    );
   };
 
   try {
@@ -614,6 +843,13 @@ export const runRecentExportConversationOperation = async (
           cancelReason: cancelResult?.reason || null,
           cancelCode: cancelResult?.code || null,
         });
+        const retryOutcome = await retryRecoveredWatchdogConversation({
+          cancelResult,
+          decision,
+          drainTimedOut: true,
+          recoveryResult,
+        });
+        if (retryOutcome) return retryOutcome;
         if (recoveryResult?.ok === true) {
           (watchdogError as AnyRecord).data = {
             drainTimedOut: true,
@@ -631,6 +867,13 @@ export const runRecentExportConversationOperation = async (
         }
         throw errorAfterFailedWatchdogRecovery(recoveryResult);
       }
+      const retryOutcome = await retryRecoveredWatchdogConversation({
+        cancelResult,
+        decision,
+        drainTimedOut: false,
+        recoveryResult,
+      });
+      if (retryOutcome) return retryOutcome;
       if (recoveryResult?.ok === true) {
         (watchdogError as AnyRecord).data = {
           cancelResult,

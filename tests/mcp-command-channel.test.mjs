@@ -5,6 +5,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { sanitizeAgentJsonValue, stringifyAgentPayload } from '../build/ts/mcp/agent-json.js';
 import {
+  evaluateEventStreamReconnectCommandFsm,
   isCommandSseDeliveryEnabled,
   shouldAbortDispatchedCommandsOnEventStreamReconnect,
   shouldAbortPendingSseCommandsOnEventStreamReconnect,
@@ -182,18 +183,29 @@ test('MCP usa SSE para comandos por padrão, mantendo long-poll como prioridade 
   assert.match(contentSource, /while \(bridgeState\.started && \(!bridgeState\.eventsConnected \|\| force\)\)/);
 });
 
-test('MCP aborta comando despachado quando a mesma aba reabre o event stream', () => {
+test('MCP preserva comando despachado quando a mesma aba reabre o event stream', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const eventsBlock = source.match(
     /url\.pathname === '\/bridge\/events'[\s\S]*?if \(req\.method === 'POST' && url\.pathname === '\/bridge\/snapshot'\)/,
   )?.[0] || '';
 
+  assert.deepEqual(
+    evaluateEventStreamReconnectCommandFsm({
+      existingEventStreamUsable: true,
+      hasDispatchedPendingCommand: true,
+    }),
+    {
+      state: 'transport_reconnected_with_dispatched_command',
+      action: 'preserve_dispatched_command',
+      reason: 'same-client-event-stream-reconnect-is-transport-only',
+    },
+  );
   assert.equal(
     shouldAbortDispatchedCommandsOnEventStreamReconnect({
       existingEventStreamUsable: true,
       hasDispatchedPendingCommand: true,
     }),
-    true,
+    false,
   );
   assert.equal(
     shouldAbortDispatchedCommandsOnEventStreamReconnect({
@@ -207,7 +219,7 @@ test('MCP aborta comando despachado quando a mesma aba reabre o event stream', (
       existingEventStreamUsable: true,
       hasDispatchedSsePendingCommand: true,
     }),
-    true,
+    false,
   );
   assert.equal(
     shouldAbortPendingSseCommandsOnEventStreamReconnect({
@@ -219,11 +231,10 @@ test('MCP aborta comando despachado quando a mesma aba reabre o event stream', (
   assert.match(source, /hasDispatchedPendingCommandForClient/);
   assert.match(source, /abortPendingCommandsAfterEventStreamReconnect/);
   assert.match(eventsBlock, /shouldAbortDispatchedCommandsOnEventStreamReconnect/);
-  assert.match(eventsBlock, /abortPendingCommandsForClient/);
   assert.ok(
     eventsBlock.indexOf('abortPendingCommandsAfterEventStreamReconnect') <
       eventsBlock.indexOf('closeEventStream(client)'),
-    'comando pendente precisa ser abortado antes de substituir o stream antigo',
+    'decisao de politica precisa acontecer antes de substituir o stream antigo',
   );
 });
 
@@ -502,13 +513,17 @@ test('MCP acorda My Activity reaproveitando aba existente antes de abrir outra',
   assert.match(ensureActivityBlock, /const existingClient = await waitForActivityClient/);
   assert.match(ensureActivityBlock, /args\.preLaunchWaitMs \?\? ACTIVITY_PRE_LAUNCH_WAIT_MS/);
   assert.match(ensureActivityBlock, /reason:\s*'activity-client-connected-before-launch'/);
+  assert.match(scanActivityBlock, /args\.activateActivityTabBeforeScan === true/);
   assert.match(scanActivityBlock, /activateBrowserTabById\(\s*scanClient\.tabId/);
   assert.match(scanActivityBlock, /activateTabReason:\s*'wake-activity-before-scan'/);
   assert.match(scanActivityBlock, /focusWindow:\s*false/);
   assert.ok(
-    scanActivityBlock.indexOf('wake-activity-before-scan') <
+    scanActivityBlock.indexOf('activateActivityTabBeforeScan') <
+      scanActivityBlock.indexOf('wake-activity-before-scan') &&
+      scanActivityBlock.indexOf('wake-activity-before-scan') <
       scanActivityBlock.indexOf("'activity-scan-batch'"),
   );
+  assert.match(scanActivityBlock, /restoreTabId !== activityTabId &&\s*activation/);
   assert.match(scanActivityBlock, /activateTabReason:\s*'restore-gemini-after-activity-scan'/);
   assert.match(source, /const launchMatchesTarget = \(launch = \{\}\) => \{[\s\S]*?return launch\.targetUrl === targetUrl;/);
   assert.doesNotMatch(source, /return !launch\.targetUrl \|\| launch\.targetUrl === targetUrl/);
@@ -781,6 +796,32 @@ test('browser readiness inclui diagnostico do tab orchestrator FSM', () => {
   assert.match(readyBlock, /tabOrchestrator:\s*summarizeTabOrchestratorPlan\(tabOrchestratorPlan\)/);
 });
 
+test('browser readiness ativa aba Gemini inativa existente antes de reportar falha de wake', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const runtimeSource = readFileSync(resolve(ROOT, 'src', 'mcp', 'existing-tabs-reload.ts'), 'utf-8');
+  const readyBlock = source.match(
+    /const buildLightweightBrowserReady = async \(args = \{\}\) => \{[\s\S]*?\n\};\n\nconst normalizeLimit/,
+  )?.[0] || '';
+
+  assert.match(runtimeSource, /evaluateBrowserReadyInactiveTabActivationFsm/);
+  assert.match(runtimeSource, /maybeActivateBrowserReadyInactiveTab/);
+  assert.match(readyBlock, /maybeActivateBrowserReadyInactiveTab/);
+  assert.match(runtimeSource, /args\.wakeBrowser === true/);
+  assert.match(readyBlock, /\{ activateBrowserTabById, summarizeClient \}/);
+  assert.match(readyBlock, /readyTabActivation\.shouldRefreshClientSets/);
+  assert.match(readyBlock, /cleanupStaleClients\(\);[\s\S]*allLiveClients = getLiveClients\(\)/);
+  assert.match(readyBlock, /extensionReadiness: buildExtensionReadiness/);
+});
+
+test('endpoint HTTP de browser readiness preserva parametros de ativacao de aba', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const endpointBlock = source.match(
+    /if \(req\.method === 'GET' && url\.pathname === '\/agent\/ready'\) \{[\s\S]*?\n  \}/,
+  )?.[0] || '';
+
+  assert.match(endpointBlock, /activateTab:\s*parseOptionalBoolean\(url\.searchParams\.get\('activateTab'\)\)/);
+});
+
 test('My Activity scan readiness passa pelo tab orchestrator antes de iniciar scan', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const ensureActivityBlock = source.match(
@@ -794,6 +835,18 @@ test('My Activity scan readiness passa pelo tab orchestrator antes de iniciar sc
   assert.match(source, /const throwActivityTabOrchestratorBlocker = async \(plan, activityClients = \[\]\) =>/);
   assert.match(source, /const activityTabOrchestratorExecution = await executeTabOrchestratorPlanEffects\(plan\)/);
   assert.match(source, /effectExecution:\s*activityTabOrchestratorExecution/);
+});
+
+test('My Activity scan recovery cobre mismatch detectado pelo tab orchestrator', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const ensureActivityBlock = source.match(
+    /const ensureActivityClientForScan = async \(args = \{\}\) => \{[\s\S]*?\n\};\n\nconst scanActivityWithClient/,
+  )?.[0] || '';
+
+  assert.match(
+    ensureActivityBlock,
+    /try \{[\s\S]*await throwActivityTabOrchestratorBlocker\(activityTabOrchestratorPlan, activityClientsForPlan\);[\s\S]*const client = requireActivityClient\(selector\);[\s\S]*\} catch \(err\) \{[\s\S]*recoverActivityClientAfterVersionMismatch/,
+  );
 });
 
 test('reload de abas retorna diagnostico de recovery do tab orchestrator', () => {
@@ -909,6 +962,7 @@ test('reload de abas existentes pode atualizar extensao sem abrir navegador', ()
 
 test('reload de abas usa native broker antes de depender de clientes vivos', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const runtimeSource = readFileSync(resolve(ROOT, 'src', 'mcp', 'existing-tabs-reload.ts'), 'utf-8');
   const nativeGateSource = readFileSync(resolve(ROOT, 'src', 'mcp', 'native-release-gate.ts'), 'utf-8');
   const reloadBlock = source.match(
     /const reloadGeminiTabs = async \(args = \{\}\) => \{[\s\S]*?\n\};\n\nconst legacyRawTools/,
@@ -916,25 +970,68 @@ test('reload de abas usa native broker antes de depender de clientes vivos', () 
   const nativeReloadBlock =
     nativeGateSource.match(/export const attachContentScriptSelfHealToNativeReload[\s\S]*?\nexport const noConnectedClientsForReloadResult/)?.[0] ||
     '';
+  const runtimeReloadBlock =
+    runtimeSource.match(/export const runExistingTabsNativeReloadRecovery[\s\S]*?\n\};\n\n/)?.[0] ||
+    '';
 
   assert.ok(reloadBlock, 'reloadGeminiTabs deve existir');
-  assert.match(reloadBlock, /tryNativeBrowserBrokerTabsAction\('reload', args\)/);
-  assert.match(reloadBlock, /attachContentScriptSelfHealToNativeReload/);
+  assert.match(reloadBlock, /runExistingTabsNativeReloadRecovery/);
+  assert.match(runtimeSource, /tryNativeBrowserBrokerTabsAction\('reload', args\)/);
+  assert.match(runtimeSource, /attachContentScriptSelfHealToNativeReload/);
   assert.match(nativeReloadBlock, /reloadedTabIds/);
   assert.match(nativeReloadBlock, /tabIds:\s*reloadedTabIds\.length > 0 \? reloadedTabIds : args\.tabIds/);
   assert.match(nativeReloadBlock, /runTabsAction\('selfHealContentScripts'/);
   assert.ok(
-    reloadBlock.indexOf("tryNativeBrowserBrokerTabsAction('reload', args)") <
-      reloadBlock.indexOf('attachContentScriptSelfHealToNativeReload'),
+    runtimeReloadBlock.indexOf("tryNativeBrowserBrokerTabsAction('reload', args)") <
+      runtimeReloadBlock.lastIndexOf('attachContentScriptSelfHealToNativeReload'),
     'self-heal nativo deve rodar depois do reload nativo',
   );
   assert.ok(
-    reloadBlock.indexOf("tryNativeBrowserBrokerTabsAction('reload', args)") <
+    reloadBlock.indexOf('runExistingTabsNativeReloadRecovery') <
       reloadBlock.indexOf('const liveClients = getLiveClients()'),
     'native broker precisa rodar antes de getLiveClients',
   );
   assert.match(nativeGateSource, /nativeBrowserBroker\.reload/);
   assert.match(nativeGateSource, /nativeBrowserBroker\.selfHealContentScripts/);
+});
+
+test('reload de abas recupera content scripts depois de timeout recuperavel do native broker', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const runtimeSource = readFileSync(resolve(ROOT, 'src', 'mcp', 'existing-tabs-reload.ts'), 'utf-8');
+  const reloadBlock = source.match(
+    /const reloadGeminiTabs = async \(args = \{\}\) => \{[\s\S]*?\n\};\n\nconst legacyRawTools/,
+  )?.[0] || '';
+
+  assert.match(runtimeSource, /evaluateExistingTabsPostReloadRecoveryFsm/);
+  assert.match(runtimeSource, /recoverExistingTabsContentScriptsAfterNativeReload/);
+  assert.match(reloadBlock, /runExistingTabsNativeReloadRecovery/);
+  assert.match(reloadBlock, /postNativeReloadRecovery/);
+  assert.match(reloadBlock, /mode:\s*'native-broker-post-reload-self-heal'/);
+  assert.ok(
+    reloadBlock.indexOf('runExistingTabsNativeReloadRecovery') <
+      reloadBlock.indexOf('shouldReturnNativeBrokerReloadResult'),
+    'self-heal pos-timeout deve rodar antes do retorno terminal do native broker',
+  );
+});
+
+test('reload de abas atualiza runtime da extensao pelo native broker antes de reinjetar tabs', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const runtimeSource = readFileSync(resolve(ROOT, 'src', 'mcp', 'existing-tabs-reload.ts'), 'utf-8');
+  const nativeGateSource = readFileSync(resolve(ROOT, 'src', 'mcp', 'native-release-gate.ts'), 'utf-8');
+  const reloadBlock = source.match(
+    /const reloadGeminiTabs = async \(args = \{\}\) => \{[\s\S]*?\n\};\n\nconst legacyRawTools/,
+  )?.[0] || '';
+
+  assert.match(runtimeSource, /evaluateExistingTabsRuntimeRefreshFsm/);
+  assert.match(runtimeSource, /refreshExistingTabsExtensionRuntimeBeforeReload/);
+  assert.match(nativeGateSource, /reloadExtensionSelf/);
+  assert.match(reloadBlock, /runExistingTabsNativeReloadRecovery/);
+  assert.match(reloadBlock, /nativeExtensionRuntimeRefresh/);
+  assert.ok(
+    runtimeSource.indexOf('refreshExistingTabsExtensionRuntimeBeforeReload') <
+      runtimeSource.indexOf("tryNativeBrowserBrokerTabsAction('reload', args)"),
+    'runtime da extensao deve ser atualizado antes do reload de abas',
+  );
 });
 
 test('self-reload trata Extension context invalidated como reload em andamento', () => {

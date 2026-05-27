@@ -106,6 +106,7 @@ export type GeminiClientLifecycleOptions = Readonly<{
   expectedBuildStamp?: string | null;
   requireCommandReady?: boolean;
   requireClaimed?: boolean;
+  allowInactiveTab?: boolean;
   capability?: 'current-chat' | 'recent-export';
   sessionId?: string | null;
   claimId?: string | null;
@@ -449,7 +450,9 @@ export const getGeminiClientLifecycle = (
   const tabId = normalizeNumber(client.tabId);
   if (tabId === null) return result('page_unready', 'missing_tab_id', client);
 
-  if (!effectiveIsActiveTab(client)) return result('page_unready', 'inactive_tab', client);
+  if (!effectiveIsActiveTab(client) && options.allowInactiveTab !== true) {
+    return result('page_unready', 'inactive_tab', client);
+  }
 
   const hydrationGraceMs = Number(options.hydrationGraceMs ?? 4000);
   if (!client.page) {

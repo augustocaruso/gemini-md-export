@@ -357,6 +357,46 @@ test('activity content script usa cabecalho de data anterior ao card', async () 
   }
 });
 
+test('activity content script parseia cabecalho relativo concatenado com texto auxiliar', async () => {
+  const originalTz = process.env.TZ;
+  process.env.TZ = 'America/Sao_Paulo';
+  try {
+    const debug = loadHarness(`
+      <section>
+        <div>Today<span>Some activity may not appear yet</span></div>
+        <div class="activity-card">
+          <div>Gemini Apps</div>
+          <div>Prompted can i use python libraries in my ios app8:17 PM • Details</div>
+        </div>
+      </section>
+    `);
+
+    const result = await debug.scanActivityPage({
+      candidates: [
+        {
+          chatId: 'dbe5dd4b50b09c74',
+          firstPrompt: 'can i use python libraries in my ios app',
+        },
+      ],
+      maxCards: 20,
+    });
+
+    const today = new Date();
+    const expected = new Date(
+      today.getFullYear(),
+      today.getMonth(),
+      today.getDate(),
+      20,
+      17,
+      0,
+    ).toISOString().replace(/\.\d{3}Z$/, 'Z');
+    assert.equal(result.matches[0].date, expected);
+  } finally {
+    if (originalTz === undefined) delete process.env.TZ;
+    else process.env.TZ = originalTz;
+  }
+});
+
 test('activity content script carrega cabecalho de data distante no mesmo grupo', async () => {
   const originalTz = process.env.TZ;
   process.env.TZ = 'America/Sao_Paulo';
@@ -398,6 +438,143 @@ test('activity content script carrega cabecalho de data distante no mesmo grupo'
     if (originalTz === undefined) delete process.env.TZ;
     else process.env.TZ = originalTz;
   }
+});
+
+test('activity content script continua rolando ate encontrar todas as bordas de data', async () => {
+  const originalTz = process.env.TZ;
+  process.env.TZ = 'America/Sao_Paulo';
+  try {
+    const debug = loadHarness(`
+      <section id="activity-feed">
+        <h2>May 2</h2>
+        <div class="activity-card">
+          <div>Gemini Apps</div>
+          <div>Prompted Quinidina fale sobre o uso na doença de brugada10:52 PM • Details</div>
+        </div>
+      </section>
+    `);
+    const { document } = debug._window;
+    let appended = false;
+    debug._window.scrollTo = () => {
+      if (appended) return;
+      appended = true;
+      document.getElementById('activity-feed').insertAdjacentHTML(
+        'beforeend',
+        `
+          <h2>May 2</h2>
+          <div class="activity-card">
+            <div>Gemini Apps</div>
+            <div>Prompted No contexto de anemia falciforme e sd vaso oclusiva, comente Sequestro isquêmico Sequestro esplênico5:34 PM • Details</div>
+          </div>
+        `,
+      );
+    };
+
+    const result = await debug.scanActivityPage({
+      candidates: [
+        {
+          chatId: '72f49fe17ca031d3',
+          firstPrompt:
+            'No contexto de anemia falciforme e sd vaso oclusiva, comente Sequestro isquêmico Sequestro esplênico',
+          lastPrompt: 'Quinidina fale sobre o uso na doença de brugada',
+        },
+      ],
+      maxCards: 20,
+      maxScrollRounds: 2,
+    });
+
+    assert.equal(appended, true);
+    assert.deepEqual(
+      JSON.parse(JSON.stringify(result.matches.map((match) => [match.kind, match.date]).sort())),
+      [
+        ['created', '2026-05-02T20:34:00Z'],
+        ['last_message', '2026-05-03T01:52:00Z'],
+      ],
+    );
+    assert.deepEqual(JSON.parse(JSON.stringify(result.checkpoint.resolvedChatIds)), ['72f49fe17ca031d3']);
+  } finally {
+    if (originalTz === undefined) delete process.env.TZ;
+    else process.env.TZ = originalTz;
+  }
+});
+
+test('activity content script usa card generico unico para chat de um turno sem prompt', async () => {
+  const originalTz = process.env.TZ;
+  process.env.TZ = 'America/Sao_Paulo';
+  try {
+    const debug = loadHarness(`
+      <section>
+        <h2>April 25</h2>
+        <div class="activity-card">
+          <div>Gemini Apps</div>
+          <div>Used Gemini Apps9:30 PM • Details</div>
+        </div>
+      </section>
+    `);
+
+    const result = await debug.scanActivityPage({
+      candidates: [
+        {
+          chatId: '2c52369234b6f57a',
+          turnCount: 1,
+          scoring: {
+            title: 'Personalizado Ecossistema Produtividade: Próximos Passos',
+            firstPrompt: '',
+            lastPrompt: '',
+            assistantSamples: [
+              'Olá! Que satisfação finalmente abrir as portas e me conectar ao seu ecossistema',
+            ],
+          },
+        },
+      ],
+      maxCards: 20,
+    });
+
+    assert.equal(result.matches.length, 1);
+    assert.equal(result.matches[0].kind, 'unknown');
+    assert.equal(result.matches[0].date, '2026-04-26T00:30:00Z');
+    assert.match(result.matches[0].warnings.join(','), /generic_usage_card/);
+    assert.deepEqual(JSON.parse(JSON.stringify(result.checkpoint.resolvedChatIds)), ['2c52369234b6f57a']);
+  } finally {
+    if (originalTz === undefined) delete process.env.TZ;
+    else process.env.TZ = originalTz;
+  }
+});
+
+test('activity content script nao usa card generico ambiguo para chat sem prompt', async () => {
+  const debug = loadHarness(`
+    <section>
+      <h2>April 25</h2>
+      <div class="activity-card">
+        <div>Gemini Apps</div>
+        <div>Used Gemini Apps9:30 PM • Details</div>
+      </div>
+      <div class="activity-card">
+        <div>Gemini Apps</div>
+        <div>Used Gemini Apps8:30 PM • Details</div>
+      </div>
+    </section>
+  `);
+
+  const result = await debug.scanActivityPage({
+    candidates: [
+      {
+        chatId: '2c52369234b6f57a',
+        turnCount: 1,
+        scoring: {
+          title: 'Personalizado Ecossistema Produtividade: Próximos Passos',
+          firstPrompt: '',
+          lastPrompt: '',
+          assistantSamples: ['Olá! Que satisfação finalmente abrir as portas'],
+        },
+      },
+    ],
+    maxCards: 20,
+    maxScrollRounds: 0,
+  });
+
+  assert.equal(result.matches.length, 0);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.checkpoint.resolvedChatIds)), []);
 });
 
 test('activity content script reaproveita claim visual da extensao', async () => {
@@ -569,6 +746,32 @@ test('activity content script usa dock de progresso existente para o scan', asyn
   assert.match(dock.querySelector('.gm-dock-bar')?.getAttribute('style') || '', /width:\s*33%/);
 });
 
+test('activity content script renderiza jobProgress do MCP no mesmo dock do export', () => {
+  const debug = loadHarness('<div>Gemini Apps</div>');
+
+  debug._private.handleMcpJobProgressBroadcast({
+    source: 'mcp',
+    kind: 'recent-chats-export',
+    workflow: 'partial-history-export',
+    status: 'running',
+    phase: 'exporting',
+    total: 30,
+    current: 11,
+    completed: 10,
+    position: 11,
+    label: 'Baixando conversas do Gemini: Anemia Falciforme',
+    title: 'Anemia Falciforme',
+    chatId: 'aaaaaaaaaaaa',
+  });
+
+  const dock = debug._window.document.getElementById('gm-md-export-progress-dock');
+  assert.ok(dock);
+  assert.equal(dock.hidden, false);
+  assert.match(dock.textContent, /Gemini Markdown Export/);
+  assert.match(dock.textContent, /Baixando conversas do Gemini/);
+  assert.match(dock.textContent, /30/);
+});
+
 test('activity content script não abre Item details no scan padrão', async () => {
   let detailClicks = 0;
   const debug = loadHarness(`
@@ -622,6 +825,8 @@ test('activity content script compartilha infraestrutura grafica e claim com o e
   assert.match(activitySource, /createSharedProgressPort/);
   assert.match(activitySource, /createSharedTabCommandHandlers/);
   assert.match(activitySource, /createBrowserBridgeClient/);
+  assert.match(activitySource, /onJobProgress:\s*handleMcpJobProgressBroadcast/);
+  assert.match(activitySource, /buildExportJobProgressViewModel/);
   assert.match(activitySource, /getOrCreateBridgeClientId/);
   assert.match(activitySource, /getOrCreateActivityClientId/);
   assert.match(shellSource, /createSharedTabCommandHandlers/);

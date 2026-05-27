@@ -52,11 +52,11 @@ test('load more: limita o alvo máximo para paginação longa', () => {
 });
 
 test('load more: defaults de runtime vivem no modulo TypeScript', () => {
-  assert.equal(DEFAULT_RECENT_CHATS_LOAD_MORE_BUDGET_MS, 15_000);
-  assert.equal(DEFAULT_RECENT_CHATS_LOAD_MORE_BROWSER_TIMEOUT_MS, 10_000);
+  assert.equal(DEFAULT_RECENT_CHATS_LOAD_MORE_BUDGET_MS, 45_000);
+  assert.equal(DEFAULT_RECENT_CHATS_LOAD_MORE_BROWSER_TIMEOUT_MS, 30_000);
   assert.deepEqual(recentChatsLoadMoreRuntimeConfig({}), {
-    loadMoreBudgetMs: 15_000,
-    loadMoreBrowserTimeoutMs: 10_000,
+    loadMoreBudgetMs: 45_000,
+    loadMoreBrowserTimeoutMs: 30_000,
   });
   assert.deepEqual(
     recentChatsLoadMoreRuntimeConfig({
@@ -142,8 +142,8 @@ test('load more parcial tem budget maior que abertura atrasada do sidebar', () =
 
   assert.match(contentSource, /const SIDEBAR_OPEN_WAIT_MS = 6000/);
   assert.match(mcpSource, /recentChatsLoadMoreRuntimeConfig\(process\.env\)/);
-  assert.match(runtimeSource, /DEFAULT_RECENT_CHATS_LOAD_MORE_BUDGET_MS = 15_000/);
-  assert.match(runtimeSource, /DEFAULT_RECENT_CHATS_LOAD_MORE_BROWSER_TIMEOUT_MS = 10_000/);
+  assert.match(runtimeSource, /DEFAULT_RECENT_CHATS_LOAD_MORE_BUDGET_MS = 45_000/);
+  assert.match(runtimeSource, /DEFAULT_RECENT_CHATS_LOAD_MORE_BROWSER_TIMEOUT_MS = 30_000/);
 });
 
 test('contagem longa aplica claim visual temporaria na aba', () => {
@@ -179,7 +179,11 @@ test('jobs renovam claim existente para recriar indicador visual ausente', () =>
   const block = source.match(/const ensureTabClaimForJob = async[\s\S]*?\n};/)?.[0];
   assert.ok(block, 'ensureTabClaimForJob deve existir');
   assert.match(block, /args\.renewExistingClaim === false/);
-  assert.match(block, /claimGeminiTabForClient\(client/);
+  assert.match(block, /exportTabReadinessPolicyForArgs/);
+  assert.match(block, /readinessPolicy\.effects\.requireActiveTab/);
+  assert.match(block, /claimClientForJob\(client/);
+  assert.match(block, /claimTabForClient/);
+  assert.match(block, /claimGeminiTabForClient/);
   assert.match(block, /client\.lastTabClaimWarning = warning/);
   assert.match(block, /args\.requireTabClaim === true/);
   assert.match(block, /return null/);
@@ -187,7 +191,7 @@ test('jobs renovam claim existente para recriar indicador visual ausente', () =>
   assert.match(source, /tabClaimWarning: job\.tabClaimWarning \|\| null/);
 });
 
-test('export pesado ativa a aba real antes de hidratar conversa', () => {
+test('export pesado só ativa a aba real quando a política pede foreground', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const prepareBlock = source.match(
     /const ensureClientActiveForExport = async[\s\S]*?\n\};\n\nconst compareRecentExportClientPreference/,
@@ -199,9 +203,10 @@ test('export pesado ativa a aba real antes de hidratar conversa', () => {
   assert.match(source, /EXPORT_TAB_ACTIVATION_TIMEOUT_MS/);
   assert.match(source, /const activateBrowserTabById = async/);
   assert.match(source, /const tabActivationBrokerClients = \(/);
+  assert.match(prepareBlock, /exportTabReadinessPolicyForArgs/);
+  assert.match(prepareBlock, /exportTabReadinessPolicyForArgs\(args\)\.effects\.activateTab/);
   assert.match(prepareBlock, /activateBrowserTabById\(client\?\.tabId/);
   assert.match(source, /'activate-browser-tab'/);
-  assert.match(prepareBlock, /activateTabBeforeExport === true \|\| args\.activateTab === true/);
   assert.match(prepareBlock, /tab_activation_failed/);
   assert.match(collectBlock, /const prepared = await ensureClientActiveForExport\(client, args\)/);
   assert.ok(
@@ -230,13 +235,22 @@ test('export recente prepara automaticamente uma aba hidratada antes da claim', 
   assert.match(serverSource, /const prepareClientForBrowserExport = async/);
   assert.match(prepareBlock, /recentExportCandidateClients\(\)/);
   assert.match(prepareBlock, /prepareClientForBrowserExport\(candidates\[0\], selector\)/);
-  assert.match(serverSource, /assertActiveClaimableGeminiClient\(\s*\n\s*hydrateClientLifecycleFields\(prepared\.client\)/);
+  assert.match(serverSource, /const assertExportClientReadyForJob = \(client, args = \{\}, options = \{\}\) =>/);
+  assert.match(serverSource, /assertExportClientReadyForJobRuntime/);
+  assert.match(
+    readFileSync(resolve(ROOT, 'src', 'mcp', 'export-tab-readiness.ts'), 'utf-8'),
+    /allowInactiveTab: readinessPolicy\.effects\.allowInactiveTab/,
+  );
+  assert.match(serverSource, /assertExportClientReadyForJob\(prepared\.client, args/);
+  assert.match(recentEndpointBlock, /exportBrowserArgsFromSearchParams\(url\.searchParams\)/);
   assert.match(recentEndpointBlock, /const client = await selectRecentExportClient\(selector\)/);
   assert.match(recentEndpointBlock, /prepareNativeExportJobArgs\(client/);
   assert.ok(
-    recentEndpointBlock.indexOf('selectRecentExportClient') <
+    recentEndpointBlock.indexOf('exportBrowserArgsFromSearchParams') <
+      recentEndpointBlock.indexOf('selectRecentExportClient') &&
+      recentEndpointBlock.indexOf('selectRecentExportClient') <
       recentEndpointBlock.indexOf('prepareNativeExportJobArgs'),
-    'export recent precisa ativar/validar a aba antes de criar claim visual',
+    'export recent precisa propagar activateTab antes de ativar/validar a aba',
   );
   assert.ok(
     jobArgsBlock.indexOf('claimNativeExportLeaseForJob') <
@@ -415,9 +429,12 @@ test('export recente prepara companion My Activity antes de iniciar job', () => 
   assert.match(helperBlock, /activityCompanionTabIdsForNativeTabs/);
   assert.match(helperBlock, /tryNativeBrowserBrokerTabsAction\('claim'/);
   assert.match(helperBlock, /relatedTabIds: \[companionTabId\]/);
+  assert.match(helperSource, /transitionActivityCompanionWakeFsm/);
+  assert.match(helperBlock, /wakePolicy\.effects\.activateCompanion/);
   assert.match(helperBlock, /activateBrowserTabById\(\s*companionTabId/);
   assert.match(helperBlock, /tryNativeBrowserBrokerTabsAction\('reload'/);
   assert.match(helperBlock, /waitForActivityClient\(\s*\{ tabId: companionTabId \}/);
+  assert.match(helperBlock, /wakePolicy\.effects\.restoreExportTab/);
   assert.match(helperBlock, /activateBrowserTabById\(\s*exportTabId/);
   assert.match(nativeBrokerSource, /relatedTabIdsFromClaimPayload/);
   assert.match(nativeBrokerSource, /applyNativeClaimVisual\(\s*[\s\S]*?relatedTabIds/);
@@ -479,8 +496,8 @@ test('export all incompleto vira aviso em vez de sucesso silencioso', () => {
   assert.match(block, /job\.loadMoreTimedOut = loadMore\.timedOut === true && !loadMoreResolved/);
   assert.match(block, /job\.syncMode && job\.syncBoundary\?\.found === true/);
   assert.match(block, /Nao consegui confirmar que cheguei ao fim do historico do Gemini/);
-  assert.match(block, /failures\.length > 0 \|\| job\.truncated \|\| job\.loadMoreTimedOut/);
-  assert.match(block, /completed_with_errors/);
+  assert.match(block, /terminalExportStatusForDateCompleteness\(\s*job,\s*failures\.length/);
+  assert.match(block, /job\.truncated \|\| job\.loadMoreTimedOut/);
   assert.match(source, /const autoReleaseTabClaimForJob = createAutoTabClaimReleaseForJob/);
   assert.match(source, /await autoReleaseTabClaimForJob\(job, `job-\$\{job\.status \|\| 'finished'\}`\)/);
   assert.match(nativeGateSource, /tryNativeBrowserBrokerTabsAction\('release'/);
@@ -488,6 +505,58 @@ test('export all incompleto vira aviso em vez de sucesso silencioso', () => {
   assert.match(nativeGateSource, /job\.nativeTabClaimRelease = await deps\.tryNativeBrowserBrokerTabsAction\('release'/);
   assert.match(source, /tabClaimRelease/);
   assert.match(source, /autoReleaseTabClaim/);
+});
+
+test('export com datas obrigatorias pendentes vira completed_with_errors e orienta fix-vault', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const dateSummarySource = readFileSync(
+    resolve(ROOT, 'src', 'mcp', 'export-job-date-summary.ts'),
+    'utf-8',
+  );
+  const actionBlock = source.match(
+    /const exportJobNextAction = \(job\) =>[\s\S]*?\n\};\n\nconst exportJobDecisionSummary/,
+  )?.[0] || '';
+  const recentBlock = source.match(
+    /const runRecentChatsExportJob = async[\s\S]*?\nconst startRecentChatsExportJob/,
+  )?.[0] || '';
+  const directBlock = source.match(
+    /const runDirectChatsExportJob = async[\s\S]*?\nconst startDirectChatsExportJob/,
+  )?.[0] || '';
+
+  assert.match(source, /dateCompletenessNextActionForJob/);
+  assert.match(source, /terminalExportStatusForDateCompleteness/);
+  assert.match(source, /exportJobProgressMessageForJob/);
+  assert.match(dateSummarySource, /dateAction/);
+  assert.match(dateSummarySource, /return dateAction\.message/);
+  assert.match(actionBlock, /dateAction/);
+  assert.match(actionBlock, /if \(dateAction\) return dateAction/);
+  assert.match(recentBlock, /terminalExportStatusForDateCompleteness\(/);
+  assert.match(directBlock, /terminalExportStatusForDateCompleteness\(job, failures\.length\)/);
+});
+
+test('jobProgress do export é espelhado para companion My Activity', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const mirrorSource = readFileSync(resolve(ROOT, 'src', 'mcp', 'job-progress-mirror.ts'), 'utf-8');
+  const mirrorBlock = source.match(
+    /const broadcastRecentChatsJobProgress = \(job, client, patch = \{\}\) =>[\s\S]*?\n\};\n\nconst broadcastDirectChatsJobProgress/,
+  )?.[0] || '';
+  const recentBroadcastBlock = source.match(
+    /const broadcastRecentChatsJobProgress = \(job, client, patch = \{\}\) =>[\s\S]*?\n\};\n\nconst broadcastDirectChatsJobProgress/,
+  )?.[0] || '';
+  const directBroadcastBlock = source.match(
+    /const broadcastDirectChatsJobProgress = \(job, client, patch = \{\}\) =>[\s\S]*?\n\};\n\nconst maybeFinalizeStaleCancelRequestedJob/,
+  )?.[0] || '';
+
+  assert.match(source, /setJobProgressForPrimaryAndMirrors/);
+  assert.match(mirrorSource, /jobProgressMirrorTabIdsForJob/);
+  assert.match(mirrorSource, /shouldMirrorJobProgressToClient/);
+  assert.match(mirrorSource, /job\.activityCompanion\?\.tabId/);
+  assert.match(mirrorSource, /job\.nativeExportLease\?\.visual\?\.tabIds/);
+  assert.match(mirrorSource, /client\.kind !== 'activity'/);
+  assert.match(mirrorBlock, /clients\.values\(\)/);
+  assert.match(mirrorSource, /mirroredFromClientId/);
+  assert.match(recentBroadcastBlock, /setJobProgressForPrimaryAndMirrors\(/);
+  assert.match(directBroadcastBlock, /setJobProgressForPrimaryAndMirrors\(/);
 });
 
 test('job status diferencia lote parcial de historico inteiro verificado', () => {
@@ -536,6 +605,10 @@ test('export total registra métricas de performance no status e relatório', ()
   const contentSource = readFileSync(resolve(ROOT, 'src', 'userscript-shell.ts'), 'utf-8');
   const operationSource = readFileSync(
     resolve(ROOT, 'src', 'mcp', 'recent-export-operation-runtime.ts'),
+    'utf-8',
+  );
+  const retryRecoverySource = readFileSync(
+    resolve(ROOT, 'src', 'mcp', 'conversation-retry-recovery.ts'),
     'utf-8',
   );
   const recordingSource = readFileSync(
@@ -600,7 +673,9 @@ test('export jobs bloqueiam novo export ativo antes de tentar claim-tab', () => 
     const escaped = route.replaceAll('/', '\\/');
     const block = source.match(new RegExp(`url\\.pathname === '${escaped}'[\\s\\S]*?catch \\(err\\)`))?.[0];
     assert.ok(block, `${route} deve existir`);
-    assert.match(block, /const client = (?:await selectRecentExportClient\(selector\)|requireClient\(selector\));[\s\S]*?assertNoRunningBrowserExportJob\(client\);[\s\S]*?prepareNativeExportJobArgs[\s\S]*?start(?:Recent|Direct)ChatsExportJob/);
+    assert.match(block, /exportBrowserArgsFromSearchParams/);
+    assert.match(block, /const client = await selectRecentExportClient\(selector\)/);
+    assert.match(block, /assertNoRunningBrowserExportJob\(client\);[\s\S]*?prepareNativeExportJobArgs[\s\S]*?start(?:Recent|Direct)ChatsExportJob/);
   }
   assert.match(source, /const prepareNativeExportJobArgs = async[\s\S]*?claimNativeExportLeaseForJob/);
   assert.match(source, /const assertClientClaimedReadyForSession = \(client, args = \{\}\) =>/);
@@ -611,9 +686,7 @@ test('export jobs bloqueiam novo export ativo antes de tentar claim-tab', () => 
 
 test('export missing oferece UX guiada para importação completa do vault', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
-  const jobBlock = source.match(
-    /const exportJobProgressMessage = \(job\) =>[\s\S]*?\nconst exportJobNextAction/,
-  )?.[0];
+  const jobBlock = readFileSync(resolve(ROOT, 'src', 'mcp', 'export-job-date-summary.ts'), 'utf-8');
   const summaryBlock = source.match(
     /const exportJobDecisionSummary = \(job\) =>[\s\S]*?\nconst setClientJobProgressAndNotify/,
   )?.[0];
@@ -832,17 +905,25 @@ test('export recente faz retry para aba ocupada antes de registrar falha', () =>
     resolve(ROOT, 'src', 'mcp', 'recent-export-operation-runtime.ts'),
     'utf-8',
   );
+  const retryRecoverySource = readFileSync(
+    resolve(ROOT, 'src', 'mcp', 'conversation-retry-recovery.ts'),
+    'utf-8',
+  );
   const jobBlock = source.match(
     /const runRecentChatsExportJob = async[\s\S]*?\nconst startRecentChatsExportJob/,
   )?.[0];
   assert.ok(jobBlock, 'runRecentChatsExportJob deve existir');
   assert.match(source, /const isTransientTabBusyError = \(err\) =>/);
   assert.match(source, /const retryableConversationExportReason = \(err\) =>/);
+  assert.match(source, /evaluateConversationRetryDelayForJobFsm/);
+  assert.match(retryRecoverySource, /evaluateConversationRetryDelayForJobFsm/);
+  assert.match(retryRecoverySource, /GEMINI_MCP_RECENT_CHATS_TAB_BUSY_RETRY_LIMIT/);
   assert.match(source, /tab_operation_in_progress/);
   assert.match(source, /stale_conversation_dom/);
   assert.match(source, /conversation_not_ready/);
   assert.match(source, /const downloadConversationItemWithRetry = async/);
   assert.match(source, /RECENT_CHATS_TRANSIENT_BUSY_RETRY_LIMIT/);
+  assert.doesNotMatch(source, /RECENT_CHATS_TAB_BUSY_RETRY_LIMIT/);
   assert.match(
     operationSource,
     /downloadConversationItemWithRetry\(\s*job,\s*client,\s*conversation/,

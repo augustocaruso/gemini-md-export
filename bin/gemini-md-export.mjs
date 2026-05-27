@@ -2450,6 +2450,12 @@ const emitResult = (ui, job) => {
         );
       }
     }
+    if (result.nextAction?.message) {
+      ui.stdout.write(`Próximo passo: ${result.nextAction.message}\n`);
+    }
+    if (result.nextAction?.command?.text) {
+      ui.stdout.write(`Comando: ${result.nextAction.command.text}\n`);
+    }
     ui.stdout.write(`RESULT_JSON ${JSON.stringify(result)}\n`);
   }
   return result;
@@ -2475,7 +2481,7 @@ const shouldWakeBrowserForReady = (ready = {}) => {
   if (ready.ready === true) return false;
   const connected = Number(ready.connectedClientCount ?? ready.connectedClients?.length ?? 0);
   const selectable = Number(ready.selectableTabCount ?? 0);
-  const issue = String(ready.blockingIssue || '');
+  const issue = readinessIssueCode(ready.blockingIssue);
   if (issue === 'no_connected_clients') return true;
   if (issue === 'no_selectable_gemini_tab') return connected <= 0 && selectable <= 0;
   return connected <= 0 && selectable <= 0;
@@ -2485,7 +2491,7 @@ const shouldWaitForExistingTabsForReady = (ready = {}) => {
   if (ready.ready === true) return false;
   const connected = connectedClientCountFromReady(ready);
   if (connected <= 0) return false;
-  const issue = String(ready.blockingIssue || '');
+  const issue = readinessIssueCode(ready.blockingIssue);
   return [
     'no_selectable_gemini_tab',
     'no_active_claimable_gemini_tab',
@@ -2507,11 +2513,32 @@ const setWaitNote = (ui, note, { detail = null, issue = null } = {}) => {
   if (!ui) return;
   ui.waitNote = note || null;
   ui.waitDetail = detail || null;
-  ui.waitIssue = issue || null;
+  ui.waitIssue = readinessIssueDisplay(issue, '') || null;
 };
 
 const connectedClientCountFromReady = (ready = {}) =>
   Number(ready.connectedClientCount ?? ready.connectedClients?.length ?? ready.clients?.length ?? 0) || 0;
+
+const readinessIssueCode = (issue) => {
+  if (!issue) return '';
+  if (typeof issue === 'string') return issue;
+  if (typeof issue === 'object') {
+    return String(issue.code || issue.reason || issue.type || issue.message || '').trim();
+  }
+  return String(issue).trim();
+};
+
+const readinessIssueMessage = (issue) => {
+  if (!issue) return '';
+  if (typeof issue === 'string') return issue;
+  if (typeof issue === 'object') {
+    return String(issue.message || issue.code || issue.reason || issue.type || '').trim();
+  }
+  return String(issue).trim();
+};
+
+const readinessIssueDisplay = (issue, fallback = 'desconhecido') =>
+  readinessIssueCode(issue) || readinessIssueMessage(issue) || fallback;
 
 const browserDiagnosticMessage = (diagnosis = {}) => {
   if (diagnosis.kind === 'google_sorry') {
@@ -2904,10 +2931,13 @@ const ensureReady = async (bridgeUrl, flags, ui) => {
   );
   if (ready.ready === true) return ready;
   if (ui.format !== 'json' && ui.format !== 'jsonl') {
+    const issue = readinessIssueDisplay(ready.blockingIssue);
+    const issueMessage = readinessIssueMessage(ready.blockingIssue);
     ui.stderr.write(
       [
         'Gemini Web ainda nao esta pronto.',
-        `Motivo: ${ready.blockingIssue || 'desconhecido'}.`,
+        `Motivo: ${issue}.`,
+        issueMessage && issueMessage !== issue ? issueMessage : '',
         ready.browserDiagnostic?.message ||
         ready.extensionReadiness?.nextAction?.message ||
           ready.cliBrowserWake?.reason ||
@@ -2918,7 +2948,7 @@ const ensureReady = async (bridgeUrl, flags, ui) => {
         .join('\n') + '\n',
     );
   }
-  const err = new Error(ready.blockingIssue || 'Gemini Web nao esta pronto.');
+  const err = new Error(readinessIssueDisplay(ready.blockingIssue, 'Gemini Web nao esta pronto.'));
   err.code = 'extension_unready';
   err.reported = true;
   err.data = ready;
@@ -2930,7 +2960,7 @@ const canPrepareExportFromReady = (ready = {}) =>
   connectedClientCountFromReady(ready) > 0 &&
   Number(ready.commandReadyClientCount || 0) > 0 &&
   ['extension_not_connected', 'no_active_claimable_gemini_tab', 'no_selectable_gemini_tab'].includes(
-    String(ready.blockingIssue || ''),
+    readinessIssueCode(ready.blockingIssue),
   );
 
 const ensureReadyForExport = async (bridgeUrl, flags, ui) => {
@@ -2963,10 +2993,13 @@ const ensureReadyForExport = async (bridgeUrl, flags, ui) => {
   }
 
   if (ui.format !== 'json' && ui.format !== 'jsonl') {
+    const issue = readinessIssueDisplay(ready.blockingIssue);
+    const issueMessage = readinessIssueMessage(ready.blockingIssue);
     ui.stderr.write(
       [
         'Gemini Web ainda nao esta pronto.',
-        `Motivo: ${ready.blockingIssue || 'desconhecido'}.`,
+        `Motivo: ${issue}.`,
+        issueMessage && issueMessage !== issue ? issueMessage : '',
         ready.browserDiagnostic?.message ||
         ready.extensionReadiness?.nextAction?.message ||
           ready.cliBrowserWake?.reason ||
@@ -2977,7 +3010,7 @@ const ensureReadyForExport = async (bridgeUrl, flags, ui) => {
         .join('\n') + '\n',
     );
   }
-  const err = new Error(ready.blockingIssue || 'Gemini Web nao esta pronto.');
+  const err = new Error(readinessIssueDisplay(ready.blockingIssue, 'Gemini Web nao esta pronto.'));
   err.code = 'extension_unready';
   err.reported = true;
   err.data = ready;
@@ -3591,7 +3624,11 @@ const runDoctor = async (parsed, streams = {}) => {
       `Bridge: ${result.bridge.ok ? 'ok' : `falhou - ${result.bridge.error || 'sem resposta'}`}\n`,
     );
     ui.stdout.write(
-      `Gemini Web: ${result.ready ? 'pronto' : `nao pronto${result.blockingIssue ? ` - ${result.blockingIssue}` : ''}`}\n`,
+      `Gemini Web: ${
+        result.ready
+          ? 'pronto'
+          : `nao pronto${result.blockingIssue ? ` - ${readinessIssueDisplay(result.blockingIssue, '')}` : ''}`
+      }\n`,
     );
     if (parsed.flags.resultJson === true) ui.stdout.write(`RESULT_JSON ${JSON.stringify(result)}\n`);
   }
@@ -3610,9 +3647,13 @@ const runBrowser = async (parsed, streams = {}) => {
   if (!['status', 'side-effects'].includes(subcommand)) {
     throw usageError('Uso: gemini-md-export browser status | browser side-effects status|disable|enable.');
   }
-  const ui = makeUi(parsed.flags, streams);
+  const flags = { ...parsed.flags };
+  if (subcommand === 'status' && flags.wakeBrowser === true && flags.activateTabExplicit !== true) {
+    flags.activateTab = true;
+  }
+  const ui = makeUi(flags, streams);
   warnTuiFallback(ui);
-  await ensureBridgeAvailable(parsed.flags, ui);
+  await ensureBridgeAvailable(flags, ui);
 
   if (subcommand === 'side-effects') {
     const action = parsed.positionals[1] || 'status';
@@ -3620,11 +3661,11 @@ const runBrowser = async (parsed, streams = {}) => {
       throw usageError('Uso: gemini-md-export browser side-effects status|disable|enable.');
     }
     const result = await requestJson(
-      parsed.flags.bridgeUrl,
+      flags.bridgeUrl,
       appendParams('/agent/browser-side-effects', {
         action,
-        reason: parsed.flags.reason,
-        expiresAt: parsed.flags.expiresAt,
+        reason: flags.reason,
+        expiresAt: flags.expiresAt,
       }),
       { timeoutMs: 5000 },
     );
@@ -3641,10 +3682,10 @@ const runBrowser = async (parsed, streams = {}) => {
     return { exitCode: result.ok ? EXIT.OK : EXIT.MANUAL_ACTION, result };
   }
 
-  const ready = await readyWithCliWake(parsed.flags.bridgeUrl, parsed.flags, ui);
+  const ready = await readyWithCliWake(flags.bridgeUrl, flags, ui);
   let clients = null;
   try {
-    clients = await requestJson(parsed.flags.bridgeUrl, '/agent/clients?diagnostics=1', { timeoutMs: 5000 });
+    clients = await requestJson(flags.bridgeUrl, '/agent/clients?diagnostics=1', { timeoutMs: 5000 });
   } catch {
     clients = null;
   }

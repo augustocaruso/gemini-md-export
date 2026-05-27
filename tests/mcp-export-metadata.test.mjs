@@ -19,6 +19,7 @@ import {
   defaultDateImportSummary,
   hasDateImportSource,
   shouldUseMyActivityForDateImport,
+  transitionActivityScanFallbackFsm,
 } from '../build/ts/mcp/export-date-import-runtime.js';
 import { validateMcpExportPayloadBeforeWrite } from '../build/ts/mcp/export-workflows.js';
 
@@ -450,6 +451,78 @@ test('export metadata fallback preserva export quando My Activity some', async (
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('activity scan fallback FSM retries once without stale companion tab affinity', () => {
+  const decision = transitionActivityScanFallbackFsm('initial_scan_failed', {
+    errorCode: 'activity_client_missing',
+    retryCount: 0,
+    pinnedByCompanion: true,
+    explicitActivityTabId: false,
+  });
+
+  assert.equal(decision.state, 'retry_without_companion_affinity');
+  assert.equal(decision.effects.retry, true);
+  assert.equal(decision.effects.clearActivityTabId, true);
+  assert.equal(decision.effects.clearCompanionAffinity, true);
+});
+
+test('export metadata retries My Activity scan on another live tab when companion disappears', async () => {
+  const integrity = validateMcpExportPayloadBeforeWrite(payload, {
+    expectedChatId: 'b8e7c075effe9457',
+  });
+  const entries = [{ key: 'b8e7c075effe9457', payload, integrity }];
+  const scanCalls = [];
+  const args = {
+    activityCompanion: {
+      tabId: 713803095,
+    },
+    _exportDateImportVisualGroupTabId: 713803402,
+  };
+
+  const batch = await buildExportDateImportBatchEvidenceWithActivityFallback(entries, args, {
+    scanActivity: async (scanArgs) => {
+      scanCalls.push(scanArgs);
+      if (scanCalls.length === 1) {
+        const error = new Error('Nenhuma aba do My Activity conectada à extensão.');
+        error.code = 'activity_client_missing';
+        throw error;
+      }
+      return {
+        matches: [
+          {
+            chatId: 'b8e7c075effe9457',
+            source: 'my-activity-web',
+            kind: 'last_message',
+            dateKind: 'last_message',
+            confidence: 'strong',
+            date: '2026-05-10T07:12:31Z',
+            warnings: [],
+          },
+        ],
+        checkpoint: { loadedCardCount: 2 },
+      };
+    },
+  });
+
+  assert.equal(scanCalls.length, 2);
+  assert.equal(scanCalls[0].activityTabId, 713803095);
+  assert.equal(scanCalls[0].claimVisual, false);
+  assert.equal(scanCalls[1].activityTabId, undefined);
+  assert.equal(scanCalls[1].claimVisual, undefined);
+  assert.equal(args._exportDateImportActivitySummary.error, undefined);
+  assert.equal(args._exportDateImportActivitySummary.matched, 1);
+
+  const result = enrichExportPayloadWithMetadataDates({
+    payload,
+    integrity,
+    context: createExportDateImportContext({ useMyActivity: true }),
+    groupedEvidence: batch.groupedByKey.get('b8e7c075effe9457'),
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.receipt.status, 'partial');
+  assert.equal(result.receipt.source, 'my-activity');
+  assert.equal(result.receipt.dateLastMessage, '2026-05-10T07:12:31Z');
 });
 
 test('export metadata fallback aborta espera de My Activity com AbortSignal', async () => {

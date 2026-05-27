@@ -32,6 +32,65 @@ const RECOVERABLE_ACTIVITY_DATE_IMPORT_ERRORS = new Set([
   'tab_operation_in_progress',
 ]);
 
+export type ActivityScanFallbackState =
+  | 'initial_scan_failed'
+  | 'retry_without_companion_affinity'
+  | 'fallback_exhausted';
+
+export type ActivityScanFallbackEvent = Readonly<{
+  errorCode?: unknown;
+  retryCount: number;
+  pinnedByCompanion: boolean;
+  explicitActivityTabId: boolean;
+}>;
+
+export type ActivityScanFallbackDecision = Readonly<{
+  state: ActivityScanFallbackState;
+  effects: {
+    retry: boolean;
+    clearActivityTabId: boolean;
+    clearCompanionAffinity: boolean;
+  };
+}>;
+
+const noActivityScanRetryEffects = {
+  retry: false,
+  clearActivityTabId: false,
+  clearCompanionAffinity: false,
+};
+
+const activityScanErrorCodeIsRecoverable = (code: unknown): boolean => {
+  const normalized = String(code || '');
+  if (normalized === 'operation_cancelled' || normalized === 'AbortError') return false;
+  if (RECOVERABLE_ACTIVITY_DATE_IMPORT_ERRORS.has(normalized)) return true;
+  return Boolean(normalized && normalized.startsWith('activity_'));
+};
+
+export const transitionActivityScanFallbackFsm = (
+  state: ActivityScanFallbackState,
+  event: ActivityScanFallbackEvent,
+): ActivityScanFallbackDecision => {
+  if (state !== 'initial_scan_failed') {
+    return { state, effects: noActivityScanRetryEffects };
+  }
+  if (
+    activityScanErrorCodeIsRecoverable(event.errorCode) &&
+    event.pinnedByCompanion &&
+    !event.explicitActivityTabId &&
+    event.retryCount === 0
+  ) {
+    return {
+      state: 'retry_without_companion_affinity',
+      effects: {
+        retry: true,
+        clearActivityTabId: true,
+        clearCompanionAffinity: true,
+      },
+    };
+  }
+  return { state: 'fallback_exhausted', effects: noActivityScanRetryEffects };
+};
+
 const isRecoverableActivityDateImportError = (err: RuntimeArgs): boolean => {
   if (err?.code === 'operation_cancelled' || err?.name === 'AbortError') return false;
   if (RECOVERABLE_ACTIVITY_DATE_IMPORT_ERRORS.has(String(err?.code || ''))) return true;
@@ -325,25 +384,58 @@ export const buildExportDateImportBatchEvidenceWithActivityFallback = async (
   throwIfAborted(args.abortSignal);
   const activityWaitMs = dateImportActivityWaitMs(args);
   let activity: RuntimeArgs;
+  const explicitActivityTabId =
+    args.activityTabId !== undefined && args.activityTabId !== null && args.activityTabId !== '';
+  const companionActivityTabId = args.activityCompanion?.tabId;
+  const pinnedByCompanion = !explicitActivityTabId && companionActivityTabId !== undefined && companionActivityTabId !== null;
+  let activityScanRetryCount = 0;
+  const buildActivityScanArgs = (decision: ActivityScanFallbackDecision | null = null) => {
+    const clearCompanionAffinity = decision?.effects.clearCompanionAffinity === true;
+    const activityTabId = decision?.effects.clearActivityTabId
+      ? undefined
+      : args.activityTabId ?? companionActivityTabId;
+    const claimVisual =
+      args.claimVisual ?? (activityTabId && !clearCompanionAffinity ? false : undefined);
+    return {
+      ...args,
+      candidates,
+      resume: args._exportDateImportActivityCheckpoint || null,
+      openIfMissing: args.openMyActivityIfMissing !== false && args.openIfMissing !== false,
+      openDetails: true,
+      claimLabel: args.claimLabel || options.claimLabel,
+      activityTabId,
+      claimVisual,
+      visualGroupTabId:
+        args.visualGroupTabId ?? args.groupWithTabId ?? args._exportDateImportVisualGroupTabId,
+      waitMs: activityWaitMs,
+      activityCommandTimeoutMs: args.activityCommandTimeoutMs ?? activityWaitMs + 15_000,
+      preLaunchWaitMs: dateImportActivityPreLaunchWaitMs(args),
+    };
+  };
+  let activityScanDecision: ActivityScanFallbackDecision | null = null;
+  let activityScanDecisionState: ActivityScanFallbackState | null = null;
   try {
-    activity = await abortable(
-      options.scanActivity({
-        ...args,
-        candidates,
-        resume: args._exportDateImportActivityCheckpoint || null,
-        openIfMissing: args.openMyActivityIfMissing !== false && args.openIfMissing !== false,
-        openDetails: true,
-        claimLabel: args.claimLabel || options.claimLabel,
-        activityTabId: args.activityTabId ?? args.activityCompanion?.tabId,
-        claimVisual: args.claimVisual ?? (args.activityCompanion?.tabId ? false : undefined),
-        visualGroupTabId:
-          args.visualGroupTabId ?? args.groupWithTabId ?? args._exportDateImportVisualGroupTabId,
-        waitMs: activityWaitMs,
-        activityCommandTimeoutMs: args.activityCommandTimeoutMs ?? activityWaitMs + 15_000,
-        preLaunchWaitMs: dateImportActivityPreLaunchWaitMs(args),
-      }),
-      args.abortSignal,
-    );
+    while (true) {
+      try {
+        activity = await abortable(
+          options.scanActivity(buildActivityScanArgs(activityScanDecision)),
+          args.abortSignal,
+        );
+        break;
+      } catch (err) {
+        if (!isRecoverableActivityDateImportError(err as RuntimeArgs)) throw err;
+        const decision = transitionActivityScanFallbackFsm('initial_scan_failed', {
+          errorCode: (err as RuntimeArgs)?.code || (err as RuntimeArgs)?.name,
+          retryCount: activityScanRetryCount,
+          pinnedByCompanion,
+          explicitActivityTabId,
+        });
+        if (!decision.effects.retry) throw err;
+        activityScanDecision = decision;
+        activityScanDecisionState = decision.state;
+        activityScanRetryCount += 1;
+      }
+    }
   } catch (err) {
     if (!isRecoverableActivityDateImportError(err as RuntimeArgs)) throw err;
     args._exportDateImportActivitySummary = {
@@ -354,6 +446,14 @@ export const buildExportDateImportBatchEvidenceWithActivityFallback = async (
       checkpoint: args._exportDateImportActivityCheckpoint || null,
       browserWake: null,
       tabClaimWarning: null,
+      fallback:
+        activityScanRetryCount > 0
+          ? {
+              attempted: true,
+              retries: activityScanRetryCount,
+              reason: activityScanDecisionState || 'activity_scan_retry_failed',
+            }
+          : null,
       error: {
         code: (err as RuntimeArgs)?.code || 'activity_date_import_failed',
         message: (err as Error)?.message || String(err),
@@ -375,6 +475,14 @@ export const buildExportDateImportBatchEvidenceWithActivityFallback = async (
     checkpoint: activity.checkpoint || null,
     browserWake: activity.browserWake || null,
     tabClaimWarning: activity.tabClaimWarning || null,
+    fallback:
+      activityScanRetryCount > 0
+        ? {
+            attempted: true,
+            retries: activityScanRetryCount,
+            reason: activityScanDecisionState || 'activity_scan_retry_succeeded',
+          }
+        : null,
   };
   return mergeExportDateImportBatchEvidenceWithActivityMatches({
     entries,

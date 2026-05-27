@@ -1950,9 +1950,10 @@ test('CLI sync --plain destaca historico incompleto e falhas no RESULT_JSON', as
   });
 });
 
-test('CLI RESULT_JSON conta datas pendentes como avisos', async () => {
+test('CLI RESULT_JSON trata datas pendentes como export não concluído e orienta fix-vault', async () => {
   const completedWithPendingDates = {
     ...completedJob,
+    status: 'completed_with_errors',
     decisionSummary: {
       ...completedJob.decisionSummary,
       totals: {
@@ -1965,6 +1966,14 @@ test('CLI RESULT_JSON conta datas pendentes como avisos', async () => {
         },
       },
       warnings: ['1 conversa ficou sem datas no Takeout/My Activity.'],
+      nextAction: {
+        code: 'fix_vault_required',
+        message: 'Não consegui preencher todas as datas. Rode fix-vault.',
+        command: {
+          tool: 'shell',
+          text: "gemini-md-export fix-vault '/tmp/gemini-md-export-test' --use-my-activity",
+        },
+      },
     },
   };
 
@@ -1992,12 +2001,19 @@ test('CLI RESULT_JSON conta datas pendentes como avisos', async () => {
       { stdout, stderr },
     );
 
-    assert.equal(run.exitCode, 0);
+    assert.equal(run.exitCode, 1);
+    assert.match(stdout.text(), /Próximo passo:/);
+    assert.match(stdout.text(), /Não consegui preencher todas as datas/);
+    assert.match(stdout.text(), /Comando:/);
+    assert.match(stdout.text(), /gemini-md-export fix-vault/);
     const resultLine = stdout
       .text()
       .split(/\r?\n/)
       .find((line) => line.startsWith('RESULT_JSON '));
     const result = JSON.parse(resultLine.replace('RESULT_JSON ', ''));
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 'completed_with_errors');
+    assert.equal(result.nextAction.code, 'fix_vault_required');
     assert.equal(result.warningCount, 1);
     assert.deepEqual(result.dateImport, {
       matched: 1,
@@ -3042,6 +3058,58 @@ test('CLI export recent respeita opt-out explicito de ativacao de aba', async ()
   });
 });
 
+test('CLI export recent preserva opt-in explicito de ativacao de aba', async () => {
+  await withServer((req, res, url) => {
+    if (url.pathname === '/agent/ready') {
+      sendJson(res, 200, {
+        ready: true,
+        mode: 'hot',
+        connectedClientCount: 1,
+        selectableTabCount: 1,
+        commandReadyClientCount: 1,
+      });
+      return;
+    }
+    if (url.pathname === '/agent/export-recent-chats') {
+      sendJson(res, 200, {
+        jobId: 'job-1',
+        status: 'completed',
+        phase: 'done',
+        successCount: 1,
+        failureCount: 0,
+        completed: 1,
+        requested: 1,
+        outputDir: '/tmp/gemini-md-export-test',
+      });
+      return;
+    }
+    sendJson(res, 404, { error: `not found: ${url.pathname}` });
+  }, async (bridgeUrl, requests) => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+    const run = await main(
+      [
+        'export',
+        'recent',
+        '--bridge-url',
+        bridgeUrl,
+        '--plain',
+        '--activate-tab',
+        '--max-chats',
+        '1',
+        '--output-dir',
+        '/tmp/gemini-md-export-test',
+      ],
+      { stdout, stderr },
+    );
+
+    assert.equal(run.exitCode, 0);
+    assert.equal(stderr.text(), '');
+    const exportRequest = requests.find((item) => item.pathname === '/agent/export-recent-chats');
+    assert.equal(exportRequest?.searchParams.get('activateTab'), 'true');
+  });
+});
+
 test('CLI export recent adota job ativo quando start retorna aba ocupada', async () => {
   const outputDir = '/tmp/gemini-md-export-adopt';
   let activeJobsRequested = false;
@@ -3205,6 +3273,58 @@ test('CLI browser status surfaces native broker blocker from readiness', async (
     assert.equal(run.result.nativeBroker.code, 'native_broker_extension_disconnected');
     assert.equal(stderr.text(), '');
   });
+});
+
+test('CLI browser status permite ativar aba inativa existente quando --wake foi pedido', async () => {
+  const readyRequests = [];
+  await withEnv(
+    {
+      GEMINI_MD_EXPORT_EXISTING_TAB_GRACE_MS: '0',
+    },
+    async () => {
+      await withServer((req, res, url) => {
+        if (url.pathname === '/agent/ready') {
+          readyRequests.push(new URLSearchParams(url.searchParams));
+          const canActivate = url.searchParams.get('activateTab') === 'true';
+          sendJson(res, 200, {
+            ready: canActivate,
+            blockingIssue: canActivate ? null : 'no_active_claimable_gemini_tab',
+            connectedClientCount: 1,
+            selectableTabCount: 1,
+            commandReadyClientCount: 1,
+          });
+          return;
+        }
+        if (url.pathname === '/agent/clients') {
+          sendJson(res, 200, { mcp: { bridgeRole: 'primary' }, connectedClients: [] });
+          return;
+        }
+        sendJson(res, 404, { error: `not found: ${url.pathname}` });
+      }, async (bridgeUrl) => {
+        const stdout = captureStream();
+        const stderr = captureStream();
+        const run = await main(
+          [
+            'browser',
+            'status',
+            '--bridge-url',
+            bridgeUrl,
+            '--plain',
+            '--wake',
+            '--ready-wait-ms',
+            '0',
+            '--result-json',
+          ],
+          { stdout, stderr },
+        );
+
+        assert.equal(run.exitCode, 0);
+        assert.equal(run.result.ready, true);
+        assert.equal(readyRequests[0]?.get('activateTab'), 'true');
+        assert.equal(stderr.text(), '');
+      });
+    },
+  );
 });
 
 test('CLI passes explicit HTTP browser fallback flag only when requested', async () => {
@@ -3672,6 +3792,53 @@ test('CLI --tui renderiza readiness sem misturar logs plain', async () => {
   } finally {
     rmSync(tmpRoot, { recursive: true, force: true });
   }
+});
+
+test('CLI readiness imprime blockingIssue estruturado sem [object Object]', async () => {
+  await withServer((req, res, url) => {
+    if (url.pathname === '/agent/ready') {
+      sendJson(res, 200, {
+        ready: false,
+        connectedClientCount: 1,
+        selectableTabCount: 0,
+        commandReadyClientCount: 0,
+        blockingIssue: {
+          code: 'runtime_epoch_not_ready',
+          message: 'A aba observada pertence a outro runtime da extensao ou esta stale.',
+          source: 'tab-orchestrator',
+        },
+      });
+      return;
+    }
+    sendJson(res, 404, { error: `not found: ${url.pathname}` });
+  }, async (bridgeUrl) => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+    await assert.rejects(
+      () =>
+        main(
+          [
+            'export',
+            'recent',
+            '--bridge-url',
+            bridgeUrl,
+            '--plain',
+            '--no-wake',
+            '--ready-wait-ms',
+            '0',
+          ],
+          { stdout, stderr },
+        ),
+      /runtime_epoch_not_ready/,
+    );
+
+    assert.match(stderr.text(), /Motivo: runtime_epoch_not_ready/);
+    assert.match(
+      stderr.text(),
+      /A aba observada pertence a outro runtime da extensao ou esta stale\./,
+    );
+    assert.doesNotMatch(stderr.text(), /\[object Object\]/);
+  });
 });
 
 test('CLI sync --tui usa stream compacto quando pedido por env', async () => {

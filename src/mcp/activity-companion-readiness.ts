@@ -113,6 +113,64 @@ export const shouldPrepareActivityCompanionForDateImport = (
   args: Readonly<Record<string, unknown>> = {},
 ): boolean => args.noMyActivity !== true && args.useMyActivity !== false;
 
+export type ActivityCompanionWakeState =
+  | 'checking'
+  | 'already_ready'
+  | 'no_companion'
+  | 'background_reload'
+  | 'activate_then_reload';
+
+export type ActivityCompanionWakeEvent =
+  | { type: 'client_ready' }
+  | {
+      type: 'needs_wake';
+      explicitActivation: boolean;
+      companionTabIdKnown: boolean;
+      exportTabIdKnown: boolean;
+    };
+
+export type ActivityCompanionWakeDecision = Readonly<{
+  state: ActivityCompanionWakeState;
+  effects: {
+    activateCompanion: boolean;
+    reloadCompanion: boolean;
+    restoreExportTab: boolean;
+  };
+}>;
+
+const noWakeEffects = {
+  activateCompanion: false,
+  reloadCompanion: false,
+  restoreExportTab: false,
+};
+
+export const transitionActivityCompanionWakeFsm = (
+  state: ActivityCompanionWakeState,
+  event: ActivityCompanionWakeEvent,
+): ActivityCompanionWakeDecision => {
+  if (state !== 'checking') return { state, effects: noWakeEffects };
+  if (event.type === 'client_ready') return { state: 'already_ready', effects: noWakeEffects };
+  if (!event.companionTabIdKnown) return { state: 'no_companion', effects: noWakeEffects };
+  if (event.explicitActivation) {
+    return {
+      state: 'activate_then_reload',
+      effects: {
+        activateCompanion: true,
+        reloadCompanion: true,
+        restoreExportTab: event.exportTabIdKnown,
+      },
+    };
+  }
+  return {
+    state: 'background_reload',
+    effects: {
+      activateCompanion: false,
+      reloadCompanion: true,
+      restoreExportTab: false,
+    },
+  };
+};
+
 const DEFAULT_ACTIVITY_COMPANION_WAKE_WAIT_MS = 30_000;
 
 type AnyRecord = Record<string, any>;
@@ -338,6 +396,7 @@ export const createActivityCompanionPreparer =
       return {
         attempted: false,
         reason: 'activity-companion-already-ready',
+        wakePolicy: transitionActivityCompanionWakeFsm('checking', { type: 'client_ready' }),
         source: companionSource,
         tabId: companionTabId,
         client: summarizeActivityCompanionClient(alreadyReady, deps.summarizeClient),
@@ -345,38 +404,49 @@ export const createActivityCompanionPreparer =
       };
     }
 
+    const wakePolicy = transitionActivityCompanionWakeFsm('checking', {
+      type: 'needs_wake',
+      explicitActivation:
+        args.activateActivityTabBeforeExport === true || args.activateActivityTab === true,
+      companionTabIdKnown: companionTabId !== null,
+      exportTabIdKnown: exportTabId !== null,
+    });
     let activation = null;
     let reload = null;
     let restore = null;
-    try {
-      activation = summarizeActivationResult(
-        await deps.activateBrowserTabById(
-          companionTabId,
-          {
-            ...args,
-            activateTabReason: 'wake-activity-companion-before-export',
-            focusWindow: false,
-            activateTabConfirmWaitMs: 5000,
-          },
-          null,
-        ),
-        deps.summarizeClient,
-      );
-    } catch (err) {
-      activation = summarizeActivityCompanionWakeError(err);
+    if (wakePolicy.effects.activateCompanion) {
+      try {
+        activation = summarizeActivationResult(
+          await deps.activateBrowserTabById(
+            companionTabId,
+            {
+              ...args,
+              activateTabReason: 'wake-activity-companion-before-export',
+              focusWindow: false,
+              activateTabConfirmWaitMs: 5000,
+            },
+            null,
+          ),
+          deps.summarizeClient,
+        );
+      } catch (err) {
+        activation = summarizeActivityCompanionWakeError(err);
+      }
     }
 
     const reloadStartedAt = Date.now();
-    try {
-      reload = summarizeNativeActionResult(
-        await deps.tryNativeBrowserBrokerTabsAction('reload', {
-          tabIds: [companionTabId],
-          reason: 'reload-activity-companion-before-export',
-          focusWindow: false,
-        }),
-      );
-    } catch (err) {
-      reload = summarizeActivityCompanionWakeError(err);
+    if (wakePolicy.effects.reloadCompanion) {
+      try {
+        reload = summarizeNativeActionResult(
+          await deps.tryNativeBrowserBrokerTabsAction('reload', {
+            tabIds: [companionTabId],
+            reason: 'reload-activity-companion-before-export',
+            focusWindow: false,
+          }),
+        );
+      } catch (err) {
+        reload = summarizeActivityCompanionWakeError(err);
+      }
     }
 
     const activityClient = await deps.waitForActivityClient(
@@ -384,7 +454,7 @@ export const createActivityCompanionPreparer =
       activityCompanionWakeWaitMs(args, deps.normalizeWaitMs),
     );
 
-    if (exportTabId !== null) {
+    if (wakePolicy.effects.restoreExportTab && exportTabId !== null) {
       try {
         restore = summarizeActivationResult(
           await deps.activateBrowserTabById(
@@ -404,6 +474,147 @@ export const createActivityCompanionPreparer =
       }
     }
 
+    let fallback: AnyRecord | null = null;
+    if (
+      (!activityClient || !deps.activityClientCommandReady(activityClient)) &&
+      companionSource === 'claim-visual'
+    ) {
+      try {
+        const rawFallbackList = await deps.tryNativeBrowserBrokerTabsAction('list', {
+          reason: 'find-activity-companion-after-stale-claim-visual',
+        });
+        const fallbackCompanionList = summarizeNativeActionResult(rawFallbackList);
+        const fallbackCompanionTabId =
+          activityCompanionTabIdsForNativeTabs(rawFallbackList, exportTabId).find(
+            (tabId) => tabId !== companionTabId,
+          ) || null;
+        fallback = {
+          attempted: true,
+          source: 'native-tabs-list',
+          companionList: fallbackCompanionList,
+          tabId: fallbackCompanionTabId,
+          visualRefresh: null,
+          wakePolicy: null,
+          activation: null,
+          reload: null,
+          restore: null,
+          client: null,
+        };
+        if (fallbackCompanionTabId !== null) {
+          if (exportTabId !== null) {
+            try {
+              fallback.visualRefresh = summarizeNativeActionResult(
+                await deps.tryNativeBrowserBrokerTabsAction('claim', {
+                  ...args,
+                  tabId: exportTabId,
+                  claimId: claimIdFromLease(nativeLease, args) || undefined,
+                  tabIds: [exportTabId, fallbackCompanionTabId],
+                  relatedTabIds: [fallbackCompanionTabId],
+                  reason: 'reattach-activity-companion-after-stale-claim-visual',
+                }),
+              );
+            } catch (err) {
+              fallback.visualRefresh = summarizeActivityCompanionWakeError(err);
+            }
+          }
+          const fallbackWakePolicy = transitionActivityCompanionWakeFsm('checking', {
+            type: 'needs_wake',
+            explicitActivation:
+              args.activateActivityTabBeforeExport === true || args.activateActivityTab === true,
+            companionTabIdKnown: true,
+            exportTabIdKnown: exportTabId !== null,
+          });
+          fallback.wakePolicy = fallbackWakePolicy;
+          if (fallbackWakePolicy.effects.activateCompanion) {
+            try {
+              fallback.activation = summarizeActivationResult(
+                await deps.activateBrowserTabById(
+                  fallbackCompanionTabId,
+                  {
+                    ...args,
+                    activateTabReason: 'wake-activity-companion-fallback-before-export',
+                    focusWindow: false,
+                    activateTabConfirmWaitMs: 5000,
+                  },
+                  null,
+                ),
+                deps.summarizeClient,
+              );
+            } catch (err) {
+              fallback.activation = summarizeActivityCompanionWakeError(err);
+            }
+          }
+          const fallbackReloadStartedAt = Date.now();
+          if (fallbackWakePolicy.effects.reloadCompanion) {
+            try {
+              fallback.reload = summarizeNativeActionResult(
+                await deps.tryNativeBrowserBrokerTabsAction('reload', {
+                  tabIds: [fallbackCompanionTabId],
+                  reason: 'reload-activity-companion-fallback-before-export',
+                  focusWindow: false,
+                }),
+              );
+            } catch (err) {
+              fallback.reload = summarizeActivityCompanionWakeError(err);
+            }
+          }
+          const fallbackActivityClient = await deps.waitForActivityClient(
+            { tabId: fallbackCompanionTabId, minRuntimeSignalAt: fallbackReloadStartedAt },
+            activityCompanionWakeWaitMs(args, deps.normalizeWaitMs),
+          );
+          if (fallbackWakePolicy.effects.restoreExportTab && exportTabId !== null) {
+            try {
+              fallback.restore = summarizeActivationResult(
+                await deps.activateBrowserTabById(
+                  exportTabId,
+                  {
+                    ...args,
+                    activateTabReason: 'restore-gemini-after-activity-companion-fallback',
+                    focusWindow: false,
+                    activateTabConfirmWaitMs: 8000,
+                  },
+                  client,
+                ),
+                deps.summarizeClient,
+              );
+            } catch (err) {
+              fallback.restore = summarizeActivityCompanionWakeError(err);
+            }
+          }
+          fallback.client = summarizeActivityCompanionClient(
+            fallbackActivityClient,
+            deps.summarizeClient,
+          );
+          if (fallbackActivityClient && deps.activityClientCommandReady(fallbackActivityClient)) {
+            return {
+              attempted: true,
+              reason: 'activity-companion-ready-after-fallback',
+              source: 'native-tabs-list',
+              tabId: fallbackCompanionTabId,
+              client: fallback.client,
+              visualRefresh: fallback.visualRefresh,
+              wakePolicy: fallbackWakePolicy,
+              activation: fallback.activation,
+              reload: fallback.reload,
+              restore: fallback.restore,
+              fallbackFrom: {
+                source: companionSource,
+                tabId: companionTabId,
+                wakePolicy,
+                activation,
+                reload,
+                restore,
+                visualRefresh,
+                client: summarizeActivityCompanionClient(activityClient, deps.summarizeClient),
+              },
+            };
+          }
+        }
+      } catch (err) {
+        fallback = summarizeActivityCompanionWakeError(err);
+      }
+    }
+
     if (!activityClient || !deps.activityClientCommandReady(activityClient)) {
       const error = new Error(
         'A aba My Activity da claim visual não ficou pronta para buscar datas.',
@@ -412,10 +623,12 @@ export const createActivityCompanionPreparer =
       error.data = {
         companionTabId,
         exportTabId,
+        wakePolicy,
         activation,
         reload,
         restore,
         visualRefresh,
+        fallback,
         connectedActivityClients: deps.getActivityClients().map(deps.summarizeClient),
       };
       throw error;
@@ -428,6 +641,7 @@ export const createActivityCompanionPreparer =
       tabId: companionTabId,
       client: summarizeActivityCompanionClient(activityClient, deps.summarizeClient),
       visualRefresh,
+      wakePolicy,
       activation,
       reload,
       restore,

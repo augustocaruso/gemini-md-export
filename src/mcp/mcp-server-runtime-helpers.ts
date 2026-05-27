@@ -68,7 +68,11 @@ export const validateRecoveredBrowserClientLifecycle = (
   summarizeClientLifecycle(
     deps.getGeminiClientLifecycle(
       deps.hydrateClientLifecycleFields(client),
-      deps.activeClaimableGeminiClientOptions(),
+      {
+        ...deps.activeClaimableGeminiClientOptions(),
+        capability: 'recent-export',
+        allowInactiveTab: true,
+      },
     ),
   );
 

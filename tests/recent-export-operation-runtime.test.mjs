@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 
 import {
   createBrowserTabWatchdogRecovery,
+  evaluateRecoveredBrowserTargetFsm,
+  evaluateWatchdogRecoveryRetryFsm,
   runRecentExportConversationOperation,
 } from '../build/ts/mcp/recent-export-operation-runtime.js';
 
@@ -15,6 +17,59 @@ const target = {
   source: 'sidebar',
   url: 'https://gemini.google.com/app/f05318e93e234d75',
 };
+
+test('watchdog recovery retry FSM retries the same conversation after successful tab recovery', () => {
+  const decision = evaluateWatchdogRecoveryRetryFsm({
+    watchdogCode: 'conversation_no_progress_timeout',
+    recoveryOk: true,
+    retryAttempt: 0,
+    retryLimit: 1,
+  });
+
+  assert.equal(decision.state, 'retry_same_conversation');
+  assert.equal(decision.reason, 'recovered_tab_ready');
+});
+
+test('watchdog recovery retry FSM forces direct target reopen when recovery lands on another chat', () => {
+  const decision = evaluateWatchdogRecoveryRetryFsm({
+    watchdogCode: 'conversation_no_progress_timeout',
+    recoveryOk: true,
+    recoveredTargetState: 'wrong_target',
+    retryAttempt: 0,
+    retryLimit: 1,
+  });
+
+  assert.equal(decision.state, 'retry_same_conversation');
+  assert.equal(decision.reason, 'recovered_tab_wrong_target_reopen_required');
+  assert.equal(decision.forceDirectChatUrlNavigation, true);
+});
+
+test('watchdog recovery retry FSM records the conversation failure when retry budget is exhausted', () => {
+  const decision = evaluateWatchdogRecoveryRetryFsm({
+    watchdogCode: 'conversation_no_progress_timeout',
+    recoveryOk: true,
+    retryAttempt: 1,
+    retryLimit: 1,
+  });
+
+  assert.equal(decision.state, 'record_failure');
+  assert.equal(decision.reason, 'retry_limit_exhausted');
+});
+
+test('recovered browser target FSM detects target mismatch from recovered page URL', () => {
+  const decision = evaluateRecoveredBrowserTargetFsm({
+    targetChatId: '8837c0ae19ce4d2e',
+    recoveredClient: {
+      page: {
+        url: 'https://gemini.google.com/app/538f2f6eec041e0a',
+      },
+    },
+  });
+
+  assert.equal(decision.state, 'wrong_target');
+  assert.equal(decision.expectedChatId, '8837c0ae19ce4d2e');
+  assert.equal(decision.observedChatId, '538f2f6eec041e0a');
+});
 
 const createDeps = (overrides = {}) => {
   const traces = [];
@@ -83,7 +138,7 @@ const createDeps = (overrides = {}) => {
   return deps;
 };
 
-test('recent export watchdog records one conversation failure when cancel is acknowledged but operation drain times out', async () => {
+test('recent export watchdog records one conversation failure when recovered retry budget is exhausted', async () => {
   const deps = createDeps({
     recoverBrowserTabAfterWatchdog: async () => ({ ok: true }),
   });
@@ -99,7 +154,7 @@ test('recent export watchdog records one conversation failure when cancel is ack
 
   const result = await runRecentExportConversationOperation(
     {
-      args: {},
+      args: { watchdogRecoveryRetryLimit: 1 },
       client,
       conversation: { chatId: target.targetChatId, title: target.title },
       failures,
@@ -491,14 +546,34 @@ test('recent export operation aborts local date resolution after job cancel requ
   assert.equal(failures[0].code, 'conversation_cancel_requested');
 });
 
-test('recent export watchdog reloads the tab and continues when cancel command times out', async () => {
+test('recent export watchdog retries the same conversation after tab recovery when operation drain times out', async () => {
   const recoveries = [];
   const recoveredClient = { clientId: 'client-2', tabId: 42 };
-  let reboundReason = null;
+  const reboundReasons = [];
+  let downloadAttempts = 0;
   const deps = createDeps({
+    downloadConversationItemWithRetry: async (_job, activeClient, activeConversation) => {
+      downloadAttempts += 1;
+      if (downloadAttempts === 1) {
+        await new Promise(() => {});
+      }
+      return {
+        activeClient,
+        browserCommandMs: 4,
+        result: {
+          payload: {
+            chatId: activeConversation.chatId,
+            title: activeConversation.title,
+            content: '# ok',
+            metrics: { timings: {}, counters: {} },
+          },
+          conversation: activeConversation,
+        },
+      };
+    },
     getClientById: (clientId) => (clientId === recoveredClient.clientId ? recoveredClient : null),
     rebindExportJobToClient: (_job, client, reason) => {
-      reboundReason = reason;
+      reboundReasons.push(reason);
       return client;
     },
     requestActiveBrowserOperationCancelForJob: async () => null,
@@ -535,25 +610,124 @@ test('recent export watchdog reloads the tab and continues when cancel command t
   );
 
   assert.equal(result.client, recoveredClient);
-  assert.equal(successes.length, 0);
-  assert.equal(failures.length, 1);
-  assert.equal(failures[0].code, 'conversation_no_progress_timeout');
+  assert.equal(successes.length, 1);
+  assert.equal(failures.length, 0);
+  assert.equal(downloadAttempts, 2);
   assert.equal(recoveries.length, 1);
   assert.equal(recoveries[0].reason, 'conversation_no_progress_timeout');
   assert.equal(recoveries[0].context.operationId, 'job-1:008:f05318e93e234d75');
-  assert.equal(reboundReason, 'conversation-watchdog-recovery');
+  assert.equal(reboundReasons.includes('conversation-watchdog-recovery'), true);
+  assert.equal(reboundReasons.includes('conversation-download'), true);
+  assert.equal(
+    deps.traces.some((trace) => trace.event === 'conversation_watchdog_recovered_retry'),
+    true,
+  );
 });
 
-test('recent export watchdog recovers the tab even when the aborted operation settles quickly', async () => {
+test('recent export watchdog retry uses direct URL navigation when recovery reconnects on another chat', async () => {
+  const recoveredClient = {
+    clientId: 'client-2',
+    tabId: 42,
+    page: {
+      url: 'https://gemini.google.com/app/538f2f6eec041e0a',
+      chatId: '538f2f6eec041e0a',
+    },
+  };
+  const browserArgs = [];
+  let downloadAttempts = 0;
+  const deps = createDeps({
+    downloadConversationItemWithRetry: async (_job, activeClient, activeConversation, args) => {
+      downloadAttempts += 1;
+      browserArgs.push({ ...args });
+      if (downloadAttempts === 1) return new Promise(() => {});
+      return {
+        activeClient,
+        browserCommandMs: 4,
+        result: {
+          payload: {
+            chatId: activeConversation.chatId,
+            title: activeConversation.title,
+            content: '# ok',
+            metrics: { timings: {}, counters: {} },
+          },
+          conversation: activeConversation,
+        },
+      };
+    },
+    getClientById: (clientId) => (clientId === recoveredClient.clientId ? recoveredClient : null),
+    rebindExportJobToClient: (_job, client) => client,
+    requestActiveBrowserOperationCancelForJob: async () => ({ ok: true, cancelled: true }),
+    recoverBrowserTabAfterWatchdog: async () => ({
+      ok: true,
+      recoveredClient,
+      targetReadiness: {
+        state: 'wrong_target',
+        expectedChatId: target.targetChatId,
+        observedChatId: recoveredClient.page.chatId,
+      },
+    }),
+  });
+  const job = {
+    jobId: 'job-1',
+    phase: 'exporting',
+    outputDir: '/tmp/export',
+    completed: 7,
+  };
+  const failures = [];
+  const successes = [];
+
+  await runRecentExportConversationOperation(
+    {
+      args: {},
+      client: { clientId: 'client-1', tabId: 42 },
+      conversation: { chatId: target.targetChatId, title: target.title },
+      failures,
+      index: 8,
+      itemMetric: {},
+      job,
+      noProgressMs: 1,
+      operationId: 'job-1:008:f05318e93e234d75',
+      successes,
+      target,
+    },
+    deps,
+  );
+
+  assert.equal(downloadAttempts, 2);
+  assert.equal(browserArgs[0].preferDirectChatUrlNavigation, undefined);
+  assert.equal(browserArgs[1].preferDirectChatUrlNavigation, true);
+  assert.equal(successes.length, 1);
+  assert.equal(failures.length, 0);
+});
+
+test('recent export watchdog retries the same conversation after tab recovery when aborted operation settles quickly', async () => {
   const recoveries = [];
   const recoveredClient = { clientId: 'client-2', tabId: 42 };
+  let downloadAttempts = 0;
   const deps = createDeps({
-    downloadConversationItemWithRetry: async (_job, _client, _conversation, args) =>
-      new Promise((_resolve, reject) => {
-        args.abortSignal.addEventListener('abort', () => reject(args.abortSignal.reason), {
-          once: true,
+    downloadConversationItemWithRetry: async (_job, activeClient, activeConversation, args) => {
+      downloadAttempts += 1;
+      if (downloadAttempts === 1) {
+        return new Promise((_resolve, reject) => {
+          args.abortSignal.addEventListener('abort', () => reject(args.abortSignal.reason), {
+            once: true,
+          });
         });
-      }),
+      }
+      return {
+        activeClient,
+        browserCommandMs: 4,
+        result: {
+          payload: {
+            chatId: activeConversation.chatId,
+            title: activeConversation.title,
+            content: '# ok',
+            metrics: { timings: {}, counters: {} },
+          },
+          conversation: activeConversation,
+        },
+      };
+    },
     getClientById: (clientId) => (clientId === recoveredClient.clientId ? recoveredClient : null),
     rebindExportJobToClient: (_job, client) => client,
     requestActiveBrowserOperationCancelForJob: async () => null,
@@ -589,10 +763,101 @@ test('recent export watchdog recovers the tab even when the aborted operation se
   );
 
   assert.equal(result.client, recoveredClient);
-  assert.equal(successes.length, 0);
-  assert.equal(failures.length, 1);
-  assert.equal(failures[0].code, 'conversation_no_progress_timeout');
+  assert.equal(successes.length, 1);
+  assert.equal(failures.length, 0);
+  assert.equal(downloadAttempts, 2);
   assert.equal(recoveries.length, 1);
+});
+
+test('recent export watchdog allows two recovered retries by default before recording failure', async () => {
+  const recoveries = [];
+  let downloadAttempts = 0;
+  const recoveredClient = {
+    clientId: 'client-2',
+    tabId: 42,
+    page: {
+      chatId: target.targetChatId,
+      url: target.url,
+    },
+  };
+  const deps = createDeps({
+    downloadConversationItemWithRetry: async (_job, activeClient, activeConversation, args) => {
+      downloadAttempts += 1;
+      if (downloadAttempts <= 2) {
+        return new Promise((_resolve, reject) => {
+          args.abortSignal.addEventListener('abort', () => reject(args.abortSignal.reason), {
+            once: true,
+          });
+        });
+      }
+      return {
+        activeClient,
+        browserCommandMs: 4,
+        result: {
+          payload: {
+            chatId: activeConversation.chatId,
+            title: activeConversation.title,
+            content: '# ok',
+            metrics: { timings: {}, counters: {} },
+          },
+          conversation: activeConversation,
+        },
+      };
+    },
+    getClientById: (clientId) => (clientId === recoveredClient.clientId ? recoveredClient : null),
+    rebindExportJobToClient: (_job, client) => client,
+    requestActiveBrowserOperationCancelForJob: async () => ({ ok: true, cancelled: true }),
+    recoverBrowserTabAfterWatchdog: async (_job, reason, context) => {
+      recoveries.push({ reason, context });
+      return {
+        ok: true,
+        recoveredClient: {
+          ...recoveredClient,
+          page: {
+            ...recoveredClient.page,
+            turnCount: recoveries.length === 1 ? 0 : 46,
+          },
+        },
+        targetReadiness: {
+          state: 'target_ready',
+          ok: true,
+          reason: 'recovered_target_matches',
+          expectedChatId: target.targetChatId,
+          observedChatId: target.targetChatId,
+        },
+      };
+    },
+  });
+  const job = {
+    jobId: 'job-1',
+    phase: 'exporting',
+    outputDir: '/tmp/export',
+    completed: 7,
+  };
+  const failures = [];
+  const successes = [];
+
+  await runRecentExportConversationOperation(
+    {
+      args: {},
+      client: { clientId: 'client-1', tabId: 42 },
+      conversation: { chatId: target.targetChatId, title: target.title },
+      failures,
+      index: 8,
+      itemMetric: {},
+      job,
+      noProgressMs: 1,
+      operationId: 'job-1:008:f05318e93e234d75',
+      successes,
+      target,
+    },
+    deps,
+  );
+
+  assert.equal(downloadAttempts, 3);
+  assert.equal(recoveries.length, 2);
+  assert.equal(successes.length, 1);
+  assert.equal(failures.length, 0);
 });
 
 test('recent export watchdog stops the batch when cancel and recovery both fail', async () => {

@@ -119,6 +119,16 @@ const issueCommandClientLease = (
     issuedAt: Date.now(),
   }) satisfies CommandClientLease;
 
+const commandClientUnavailableError = () => {
+  const error = new Error('Nenhum cliente de comando do Gemini está disponível.') as Error & {
+    code?: string;
+    recoverable?: boolean;
+  };
+  error.code = 'no_command_client_available';
+  error.recoverable = true;
+  return error;
+};
+
 const commandClientPreferenceScore = (client: CommandClientState) =>
   Number(client.commandReady === true) * 100 +
   Number(client.recentCommandFailure !== true) * 50 +
@@ -282,7 +292,7 @@ export const runBrowserCommandWithClientRecovery = async <T>({
     initialLease ||
     (isLive(initialClient) ? issueCommandClientLease(initialClient, 'fallback') : null);
   if (!lease) {
-    throw new Error('Nenhum cliente de comando do Gemini está disponível.');
+    throw commandClientUnavailableError();
   }
 
   try {
