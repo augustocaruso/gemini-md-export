@@ -5,6 +5,17 @@ import { JSDOM } from 'jsdom';
 import { createActivityDomAdapter } from '../build/ts/activity/activity-adapter.js';
 import { createGeminiWebDomAdapter } from '../build/ts/browser/dom-adapter/gemini-web-current.js';
 
+const withTimezone = (tz, fn) => {
+  const originalTz = process.env.TZ;
+  process.env.TZ = tz;
+  try {
+    return fn();
+  } finally {
+    if (originalTz === undefined) delete process.env.TZ;
+    else process.env.TZ = originalTz;
+  }
+};
+
 test('Gemini DOM adapter nao fabrica chatId para linha sem URL real', () => {
   const dom = new JSDOM(
     `<!doctype html><html><body>
@@ -49,43 +60,45 @@ test('Gemini DOM adapter expõe rota atual sem inventar identidade fora de /app/
 });
 
 test('My Activity adapter retorna evidencia sanitizada usando o contrato do core', () => {
-  const dom = new JSDOM(
-    `<!doctype html><html><body>
-      <div class="activity-card" data-date="May 10, 2026">
-        <div>Gemini Apps</div>
-        <div>3:46 AM</div>
-        <section data-gm-activity-details>
-          <p>Prompted Gemini</p>
-          <p>Explique mecanismo dos ISRS com detalhes</p>
-          <p>Os ISRS inibem o transportador de serotonina na fenda sinaptica.</p>
-        </section>
-      </div>
-    </body></html>`,
-    { url: 'https://myactivity.google.com/product/gemini' },
-  );
+  withTimezone('America/Sao_Paulo', () => {
+    const dom = new JSDOM(
+      `<!doctype html><html><body>
+        <div class="activity-card" data-date="May 10, 2026">
+          <div>Gemini Apps</div>
+          <div>3:46 AM</div>
+          <section data-gm-activity-details>
+            <p>Prompted Gemini</p>
+            <p>Explique mecanismo dos ISRS com detalhes</p>
+            <p>Os ISRS inibem o transportador de serotonina na fenda sinaptica.</p>
+          </section>
+        </div>
+      </body></html>`,
+      { url: 'https://myactivity.google.com/product/gemini' },
+    );
 
-  const adapter = createActivityDomAdapter({ documentRef: dom.window.document });
-  const result = adapter.scanLoadedEvidence({
-    candidates: [
-      {
-        chatId: 'b8e7c075effe9457',
-        scoring: {
-          firstPrompt: 'Explique mecanismo dos ISRS com detalhes',
-          assistantSamples: ['transportador de serotonina na fenda sinaptica'],
+    const adapter = createActivityDomAdapter({ documentRef: dom.window.document });
+    const result = adapter.scanLoadedEvidence({
+      candidates: [
+        {
+          chatId: 'b8e7c075effe9457',
+          scoring: {
+            firstPrompt: 'Explique mecanismo dos ISRS com detalhes',
+            assistantSamples: ['transportador de serotonina na fenda sinaptica'],
+          },
         },
-      },
-    ],
-  });
+      ],
+    });
 
-  assert.equal(result.evidence.length, 1);
-  assert.equal(result.evidence[0].chatId, 'b8e7c075effe9457');
-  assert.equal(result.evidence[0].source, 'my-activity-web');
-  assert.equal(result.evidence[0].date, '2026-05-10T06:46:00Z');
-  assert.equal(result.scannedCardCount, 1);
-  assert.equal(result.loadedCardCount, 1);
-  const serialized = JSON.stringify(result);
-  assert.doesNotMatch(serialized, /Explique mecanismo dos ISRS/);
-  assert.doesNotMatch(serialized, /transportador de serotonina/);
+    assert.equal(result.evidence.length, 1);
+    assert.equal(result.evidence[0].chatId, 'b8e7c075effe9457');
+    assert.equal(result.evidence[0].source, 'my-activity-web');
+    assert.equal(result.evidence[0].date, '2026-05-10T06:46:00Z');
+    assert.equal(result.scannedCardCount, 1);
+    assert.equal(result.loadedCardCount, 1);
+    const serialized = JSON.stringify(result);
+    assert.doesNotMatch(serialized, /Explique mecanismo dos ISRS/);
+    assert.doesNotMatch(serialized, /transportador de serotonina/);
+  });
 });
 
 test('My Activity adapter usa cabecalho de data anterior ao card', () => {
