@@ -11,6 +11,7 @@ export type NativeBrokerCommand =
   | 'tabs.reload'
   | 'extension.status'
   | 'extension.selfHealContentScripts'
+  | 'extension.reloadManagedTabs'
   | 'extension.reloadSelf'
   | 'export.start'
   | 'export.cancel'

@@ -387,13 +387,16 @@ export const buildExportDateImportBatchEvidenceWithActivityFallback = async (
   const explicitActivityTabId =
     args.activityTabId !== undefined && args.activityTabId !== null && args.activityTabId !== '';
   const companionActivityTabId = args.activityCompanion?.tabId;
-  const pinnedByCompanion = !explicitActivityTabId && companionActivityTabId !== undefined && companionActivityTabId !== null;
+  const pinnedByCompanion =
+    !explicitActivityTabId &&
+    companionActivityTabId !== undefined &&
+    companionActivityTabId !== null;
   let activityScanRetryCount = 0;
   const buildActivityScanArgs = (decision: ActivityScanFallbackDecision | null = null) => {
     const clearCompanionAffinity = decision?.effects.clearCompanionAffinity === true;
     const activityTabId = decision?.effects.clearActivityTabId
       ? undefined
-      : args.activityTabId ?? companionActivityTabId;
+      : (args.activityTabId ?? companionActivityTabId);
     const claimVisual =
       args.claimVisual ?? (activityTabId && !clearCompanionAffinity ? false : undefined);
     return {

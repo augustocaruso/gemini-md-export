@@ -15,6 +15,9 @@ Thumbs.db
 .telemetry-defaults.json
 telemetry.defaults.json
 .claude/settings.local.json
+.understand-anything/
+__pycache__/
+*.egg-info/
 
 # Fixtures podem conter trechos de conversas pessoais.
 fixtures/*.html

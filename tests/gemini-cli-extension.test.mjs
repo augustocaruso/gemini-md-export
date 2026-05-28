@@ -45,6 +45,14 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   const tabSessionPath = resolve(extensionDir, 'src', 'tab-session.mjs');
   const timeoutDiagnosticsPath = resolve(extensionDir, 'src', 'timeout-diagnostics.mjs');
   const telemetryPath = resolve(extensionDir, 'src', 'telemetry.mjs');
+  const pyprojectPath = resolve(extensionDir, 'pyproject.toml');
+  const uvLockPath = resolve(extensionDir, 'uv.lock');
+  const pythonAdapterPath = resolve(
+    extensionDir,
+    'python',
+    'gemini_md_export',
+    'gemini_webapi_adapter.py',
+  );
   const compiledTakeoutAdapterPath = resolve(
     extensionDir,
     'build',
@@ -150,6 +158,9 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   assert.equal(existsSync(tabSessionPath), true);
   assert.equal(existsSync(timeoutDiagnosticsPath), true);
   assert.equal(existsSync(telemetryPath), true);
+  assert.equal(existsSync(pyprojectPath), true);
+  assert.equal(existsSync(uvLockPath), true);
+  assert.equal(existsSync(pythonAdapterPath), true);
   assert.equal(existsSync(compiledTakeoutAdapterPath), true);
   assert.equal(existsSync(compiledMetadataEvidencePath), true);
   assert.equal(existsSync(compiledNativeHostRuntimePath), true);

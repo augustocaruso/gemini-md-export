@@ -66,14 +66,11 @@ export const validateRecoveredBrowserClientLifecycle = (
   },
 ) =>
   summarizeClientLifecycle(
-    deps.getGeminiClientLifecycle(
-      deps.hydrateClientLifecycleFields(client),
-      {
-        ...deps.activeClaimableGeminiClientOptions(),
-        capability: 'recent-export',
-        allowInactiveTab: true,
-      },
-    ),
+    deps.getGeminiClientLifecycle(deps.hydrateClientLifecycleFields(client), {
+      ...deps.activeClaimableGeminiClientOptions(),
+      capability: 'recent-export',
+      allowInactiveTab: true,
+    }),
   );
 
 export const activityClientMatchesSelector = (
@@ -145,7 +142,10 @@ export const waitForContinuationClientWithRecovery = async (
     ) {
       return false;
     }
-    if (args.requireCommandReady === true && deps.validateRecoveredClient(liveCandidate).ok !== true) {
+    if (
+      args.requireCommandReady === true &&
+      deps.validateRecoveredClient(liveCandidate).ok !== true
+    ) {
       return false;
     }
     return true;
@@ -215,7 +215,8 @@ export const cleanupOrphanNativeClaimVisualsOnStartup = async (
     const nativeVisual = await deps.tryNativeBrowserBrokerTabsAction('release', {
       reason: 'bridge-startup-orphan-claim-cleanup',
     });
-    if (nativeVisual) deps.recordFlightEvent('orphan_native_claim_visual_cleanup', { nativeVisual });
+    if (nativeVisual)
+      deps.recordFlightEvent('orphan_native_claim_visual_cleanup', { nativeVisual });
   } catch (err: any) {
     deps.recordFlightEvent('orphan_native_claim_visual_cleanup_failed', {
       error: err?.message || String(err),

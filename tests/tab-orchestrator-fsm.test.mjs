@@ -775,6 +775,17 @@ test('allocation marks leaseClaimId in returned state and repeated allocation sk
   assert.equal(second.state, first.state);
 });
 
+test('allocation reuses a tab already leased to the same claim', () => {
+  const state = observedPoolWith(strongDesiredEvidence({ tabId: 22, page: { kind: 'activity' } }));
+
+  const first = allocateTabForPurpose(state, allocationRequest({ claimId: 'claim-22' }));
+  const second = allocateTabForPurpose(first.state, allocationRequest({ claimId: 'claim-22' }));
+
+  assert.equal(second.status, 'allocated');
+  assert.equal(second.tabId, 22);
+  assert.equal(second.state.tabs[0].leaseClaimId, 'claim-22');
+});
+
 test('repeated allocation with returned state can choose another unleased candidate', () => {
   const state = observedPoolWith(
     strongDesiredEvidence({ tabId: 23, page: { kind: 'activity' } }),
@@ -1589,6 +1600,28 @@ test('observed tabClaim hydrates lease and prevents allocation', () => {
   assert.equal(result.blocker?.code, 'no_ready_tab_for_purpose');
   assert.equal(result.state.tabs[0].leaseClaimId, 'other-session');
   assert.equal(result.effects.some((effect) => effect.type === 'tab.claim'), false);
+});
+
+test('observed tabClaim from the requested claim stays reusable', () => {
+  const result = planTabOrchestration(
+    orchestrationRequest({
+      claimId: 'same-session',
+      clients: [
+        matchingClient({
+          clientId: 'claimed-activity',
+          tabId: 10,
+          lastSeenAt: 1900,
+          eventStreamConnected: true,
+          page: { kind: 'activity' },
+          tabClaim: { claimId: 'same-session' },
+        }),
+      ],
+    }),
+  );
+
+  assert.equal(result.ready, true);
+  assert.equal(result.selected?.tabId, 10);
+  assert.equal(result.state.tabs[0].leaseClaimId, 'same-session');
 });
 
 test('orchestration diagnostics include requested page and evidence counts', () => {

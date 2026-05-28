@@ -77,6 +77,7 @@ export type NativeBrowserBrokerCommand = Readonly<{
     | 'tabs.reload'
     | 'extension.status'
     | 'extension.selfHealContentScripts'
+    | 'extension.reloadManagedTabs'
     | 'extension.reloadSelf';
   payload?: {
     tabId?: number | null;
@@ -84,6 +85,7 @@ export type NativeBrowserBrokerCommand = Readonly<{
     label?: string | null;
     color?: string | null;
     reloadAll?: boolean | null;
+    explicit?: boolean | null;
     reason?: string | null;
     force?: boolean | null;
     focusWindow?: boolean | null;
@@ -98,6 +100,7 @@ export type NativeBrowserBrokerCommand = Readonly<{
 type NativeBrowserBrokerRuntimeActions = Readonly<{
   extensionStatus?: () => unknown;
   selfHealContentScripts?: (payload: NativeBrowserBrokerCommand['payload']) => Promise<unknown>;
+  reloadManagedTabs?: (payload: NativeBrowserBrokerCommand['payload']) => Promise<unknown>;
   reloadSelf?: (payload: NativeBrowserBrokerCommand['payload']) => Promise<unknown>;
 }>;
 
@@ -142,19 +145,19 @@ const chromeReloadTab = (
 const chromeGroupTabs = (
   chromeApi: ChromeNativeBrokerApi,
   tabIds: number[],
-): Promise<number | null> =>
+): Promise<{ ok: true; groupId: number } | { ok: false; reason: string }> =>
   new Promise((resolve) => {
     if (!chromeApi.tabs || !chromeApi.tabs.group || tabIds.length === 0) {
-      resolve(null);
+      resolve({ ok: false, reason: 'chrome_tabs_group_unavailable' });
       return;
     }
     chromeApi.tabs.group({ tabIds }, (groupId) => {
       const message = chromeApi.runtime?.lastError?.message;
       if (message || !Number.isInteger(groupId)) {
-        resolve(null);
+        resolve({ ok: false, reason: message || 'chrome_tabs_group_invalid_group_id' });
         return;
       }
-      resolve(Number(groupId));
+      resolve({ ok: true, groupId: Number(groupId) });
     });
   });
 
@@ -162,15 +165,15 @@ const chromeUpdateTabGroup = (
   chromeApi: ChromeNativeBrokerApi,
   groupId: number,
   updateProperties: { title?: string; color?: string },
-): Promise<boolean> =>
+): Promise<{ ok: true } | { ok: false; reason: string }> =>
   new Promise((resolve) => {
     if (!chromeApi.tabGroups?.update || !Number.isInteger(groupId)) {
-      resolve(false);
+      resolve({ ok: false, reason: 'chrome_tabGroups_update_unavailable' });
       return;
     }
     chromeApi.tabGroups.update(groupId, updateProperties, () => {
       const message = chromeApi.runtime?.lastError?.message;
-      resolve(!message);
+      resolve(message ? { ok: false, reason: message } : { ok: true });
     });
   });
 
@@ -208,11 +211,7 @@ const existingManagedClaimGroupIdForTabs = async (
     .filter((tab): tab is RawBrowserTab => tab !== null);
   if (targetTabs.length !== tabIds.length || targetTabs.length === 0) return null;
   const groupIds = Array.from(
-    new Set(
-      targetTabs
-        .map(tabGroupId)
-        .filter((groupId): groupId is number => groupId !== null),
-    ),
+    new Set(targetTabs.map(tabGroupId).filter((groupId): groupId is number => groupId !== null)),
   );
   if (groupIds.length !== 1) return null;
   const groupId = groupIds[0];
@@ -328,12 +327,13 @@ const applyNativeClaimVisual = async (
   const existingGroupId = await existingManagedClaimGroupIdForTabs(chromeApi, tabs, tabIds);
   if (existingGroupId !== null) {
     const updated = await chromeUpdateTabGroup(chromeApi, existingGroupId, { title: label, color });
-    if (!updated) {
+    if (!updated.ok) {
       return {
         mode: 'action-badge' as const,
         tabId,
         groupId: existingGroupId,
         reason: 'tab-group-update-failed',
+        detail: updated.reason,
       };
     }
     return {
@@ -346,13 +346,25 @@ const applyNativeClaimVisual = async (
       reason: 'reused-existing-managed-claim-group',
     };
   }
-  const groupId = Number(await chromeGroupTabs(chromeApi, tabIds));
-  if (!Number.isInteger(groupId)) {
-    return { mode: 'action-badge' as const, tabId, reason: 'tab-group-create-failed' };
+  const grouped = await chromeGroupTabs(chromeApi, tabIds);
+  if (!grouped.ok) {
+    return {
+      mode: 'action-badge' as const,
+      tabId,
+      reason: 'tab-group-create-failed',
+      detail: grouped.reason,
+    };
   }
+  const groupId = grouped.groupId;
   const updated = await chromeUpdateTabGroup(chromeApi, groupId, { title: label, color });
-  if (!updated) {
-    return { mode: 'action-badge' as const, tabId, groupId, reason: 'tab-group-update-failed' };
+  if (!updated.ok) {
+    return {
+      mode: 'action-badge' as const,
+      tabId,
+      groupId,
+      reason: 'tab-group-update-failed',
+      detail: updated.reason,
+    };
   }
   return {
     mode: 'tab-group' as const,
@@ -468,6 +480,16 @@ export const handleNativeBrowserBrokerCommand = async (
       };
     }
     return runtimeActions.selfHealContentScripts(request.payload || {});
+  }
+
+  if (request.command === 'extension.reloadManagedTabs') {
+    if (!runtimeActions.reloadManagedTabs) {
+      return {
+        ok: false as const,
+        code: 'extension_reload_managed_tabs_unavailable',
+      };
+    }
+    return runtimeActions.reloadManagedTabs(request.payload || {});
   }
 
   if (request.command === 'extension.reloadSelf') {
@@ -607,6 +629,7 @@ const isBrowserBrokerCommand = (
   command === 'tabs.reload' ||
   command === 'extension.status' ||
   command === 'extension.selfHealContentScripts' ||
+  command === 'extension.reloadManagedTabs' ||
   command === 'extension.reloadSelf';
 
 const unsupportedCommandResponse = (

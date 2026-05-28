@@ -3,7 +3,11 @@ type ReadySnapshot = Readonly<{
   blockingIssue?: unknown;
   connectedClientCount?: unknown;
   connectedClients?: readonly unknown[];
+  clients?: readonly unknown[];
+  diagnosticClients?: readonly unknown[];
+  selectableTabCount?: unknown;
   extensionReadiness?: {
+    connectedClients?: readonly unknown[];
     reload?: {
       attempted?: boolean;
       attempts?: unknown;
@@ -76,6 +80,76 @@ const nativeBrokerCanReloadExistingTab = (ready: ReadySnapshot): boolean => {
   const tabs = nativeBrokerDebuggableTabs(ready);
   if (!Array.isArray(tabs)) return true;
   return tabs.length > 0;
+};
+
+const pageKind = (client: unknown): string => {
+  if (!client || typeof client !== 'object') return '';
+  const record = client as Record<string, any>;
+  return String(record.page?.kind || record.pageKind || '')
+    .trim()
+    .toLowerCase();
+};
+
+const pageUrl = (client: unknown): string => {
+  if (!client || typeof client !== 'object') return '';
+  const record = client as Record<string, any>;
+  return String(record.page?.url || record.url || '').trim();
+};
+
+const clientLooksLikeGeminiApp = (client: unknown): boolean => {
+  const kind = pageKind(client);
+  if (kind === 'chat' || kind === 'gemini' || kind === 'notebook') return true;
+  if (kind === 'activity') return false;
+
+  const url = pageUrl(client);
+  if (!url) return false;
+  try {
+    return new URL(url).origin === 'https://gemini.google.com';
+  } catch {
+    return false;
+  }
+};
+
+const knownClientsFromReady = (ready: ReadySnapshot): readonly unknown[] => {
+  if (Array.isArray(ready.diagnosticClients) && ready.diagnosticClients.length > 0) {
+    return ready.diagnosticClients;
+  }
+  if (Array.isArray(ready.extensionReadiness?.connectedClients)) {
+    return ready.extensionReadiness.connectedClients;
+  }
+  if (Array.isArray(ready.connectedClients)) return ready.connectedClients;
+  if (Array.isArray(ready.clients)) return ready.clients;
+  return [];
+};
+
+const readyHasKnownOnlyNonGeminiClients = (ready: ReadySnapshot): boolean => {
+  const clients = knownClientsFromReady(ready);
+  return clients.length > 0 && !clients.some(clientLooksLikeGeminiApp);
+};
+
+export const shouldWakeBrowserForReady = (ready: ReadySnapshot = {}): boolean => {
+  if (ready.ready === true) return false;
+  const connected = connectedClientCountFromReady(ready);
+  const selectable = toCount(ready.selectableTabCount);
+  const issue = blockingIssueCode(ready.blockingIssue);
+  if (issue === 'no_connected_clients') return true;
+  if (issue === 'no_selectable_gemini_tab') {
+    if (readyHasKnownOnlyNonGeminiClients(ready)) return true;
+    return connected <= 0 && selectable <= 0;
+  }
+  return connected <= 0 && selectable <= 0;
+};
+
+export const shouldWaitForExistingTabsForReady = (ready: ReadySnapshot = {}): boolean => {
+  if (ready.ready === true) return false;
+  if (readyHasKnownOnlyNonGeminiClients(ready)) return false;
+  const connected = connectedClientCountFromReady(ready);
+  if (connected <= 0) return false;
+  const issue = blockingIssueCode(ready.blockingIssue);
+  if (issue === 'no_selectable_gemini_tab' || issue === 'no_active_claimable_gemini_tab') {
+    return true;
+  }
+  return RELOADABLE_MISMATCH_ISSUES.has(issue) || RELOADABLE_COMMAND_CHANNEL_ISSUES.has(issue);
 };
 
 export const shouldReloadAllExistingTabsForReady = (

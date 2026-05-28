@@ -6,13 +6,7 @@ const positiveTabId = (value: unknown): number | null => {
 };
 
 const compactUniqueNumbers = (items: readonly unknown[]): number[] =>
-  Array.from(
-    new Set(
-      items
-        .map(positiveTabId)
-        .filter((value): value is number => value !== null),
-    ),
-  );
+  Array.from(new Set(items.map(positiveTabId).filter((value): value is number => value !== null)));
 
 export const jobProgressMirrorTabIdsForJob = (
   job: AnyRecord = {},

@@ -15,6 +15,7 @@ type NativeBrowserBrokerCommand = Extract<
   | 'tabs.reload'
   | 'extension.status'
   | 'extension.selfHealContentScripts'
+  | 'extension.reloadManagedTabs'
   | 'extension.reloadSelf'
 >;
 
@@ -133,6 +134,10 @@ export const createNativeBrowserBrokerClient = ({
         { timeoutMs: DEFAULT_EXTENSION_SELF_HEAL_TIMEOUT_MS, ...payload },
         options,
       ),
+    reloadManagedTabs: (
+      payload: Record<string, unknown> = {},
+      options: NativeBrowserBrokerOptions = {},
+    ) => call('extension.reloadManagedTabs', payload, options),
     reloadExtensionSelf: (
       payload: Record<string, unknown> = {},
       options: NativeBrowserBrokerOptions = {},

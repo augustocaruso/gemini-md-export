@@ -54,3 +54,18 @@ test('managed browser diagnostics prefer Gemini evidence over unrelated active t
   assert.equal(diagnosis.kind, 'gemini');
   assert.equal(diagnosis.terminal, false);
 });
+
+test('managed browser diagnostics prefer valid Gemini evidence over stale Google sorry tabs', () => {
+  const diagnosis = diagnoseManagedBrowserTabs({
+    activeUrl:
+      'https://www.google.com/sorry/index?continue=https%3A%2F%2Fgemini.google.com%2Fapp',
+    urls: [
+      'https://www.google.com/sorry/index?continue=https%3A%2F%2Fgemini.google.com%2Fapp',
+      'https://gemini.google.com/app/abcdef1234567890',
+    ],
+    inventoryComplete: true,
+  });
+
+  assert.equal(diagnosis.kind, 'gemini');
+  assert.equal(diagnosis.terminal, false);
+});

@@ -1,17 +1,11 @@
-import {
-  classifyRuntimeEvidence,
-  runtimeEpochId,
-} from './runtime-epoch-fsm.js';
+import { initialRecoveryState, reduceRuntimeRecovery } from './recovery-fsm.js';
+import { classifyRuntimeEvidence, runtimeEpochId } from './runtime-epoch-fsm.js';
 import {
   allocateTabForPurpose,
   initialTabPoolState,
   reduceTabLifecycle,
   type TabPoolState,
 } from './tab-lifecycle-fsm.js';
-import {
-  initialRecoveryState,
-  reduceRuntimeRecovery,
-} from './recovery-fsm.js';
 import type {
   ExpectedExtensionRuntime,
   ObservedTabClient,
@@ -102,9 +96,7 @@ const hydrateObservedLease = (
   leaseClaimId: string,
 ): TabPoolState => ({
   ...state,
-  tabs: state.tabs.map((tab) =>
-    evidenceMatchesTab(item, tab) ? { ...tab, leaseClaimId } : tab,
-  ),
+  tabs: state.tabs.map((tab) => (evidenceMatchesTab(item, tab) ? { ...tab, leaseClaimId } : tab)),
 });
 
 const summarizeEvidence = (item: RuntimeEpochEvidence) => ({
@@ -156,9 +148,7 @@ const recoveryForEvidence = (
   };
 };
 
-export const planTabOrchestration = (
-  request: TabOrchestrationRequest,
-): TabOrchestrationResult => {
+export const planTabOrchestration = (request: TabOrchestrationRequest): TabOrchestrationResult => {
   const desiredEpochId = runtimeEpochId(request.expected);
   const evidence = request.clients.map((client) =>
     classifyRuntimeEvidence({
@@ -267,10 +257,7 @@ export const planTabOrchestration = (
 
   return {
     ready: false,
-    blocker: blocker(
-      'no_ready_tab_for_purpose',
-      'Nao ha aba pronta para esta operacao.',
-    ),
+    blocker: blocker('no_ready_tab_for_purpose', 'Nao ha aba pronta para esta operacao.'),
     effects: allocation.effects,
     evidence,
     state: allocation.state,

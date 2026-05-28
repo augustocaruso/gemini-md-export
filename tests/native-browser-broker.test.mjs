@@ -142,6 +142,41 @@ test('native broker client sends extension self-heal command', async () => {
   });
 });
 
+test('native broker client sends managed tab reload command without debugger routing', async () => {
+  const calls = [];
+  const client = createNativeBrowserBrokerClient({
+    request: async (request) => {
+      calls.push(request);
+      return { id: request.id, ok: true, result: { ok: true, reloaded: 2 } };
+    },
+  });
+
+  const response = await client.reloadManagedTabs({
+    reason: 'runtime-refresh',
+    force: true,
+    explicit: true,
+  });
+
+  assert.equal(response.ok, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command, 'extension.reloadManagedTabs');
+  assert.deepEqual(calls[0].payload, {
+    reason: 'runtime-refresh',
+    force: true,
+    explicit: true,
+  });
+});
+
+test('native broker status probe uses cheap extension status instead of tab inspection', async () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const probeBlock =
+    source.match(/const probeNativeBrowserBrokerStatusOnce = async \(\) => \{[\s\S]*?\n\};/)?.[0] ||
+    '';
+
+  assert.match(probeBlock, /nativeBrowserBroker\.extensionStatus/);
+  assert.doesNotMatch(probeBlock, /nativeBrowserBroker\.status/);
+});
+
 test('native broker self-heal runner forwards targeted tab ids', async () => {
   const calls = [];
   const runner = createNativeBrokerTabsActionRunner({

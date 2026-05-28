@@ -1,13 +1,10 @@
 import {
-  getGeminiClientLifecycle,
   type GeminiClientLifecycleOptions,
   type GeminiClientSnapshot,
+  getGeminiClientLifecycle,
 } from './client-lifecycle.js';
 
-export type ExportTabReadinessState =
-  | 'checking'
-  | 'background_allowed'
-  | 'foreground_required';
+export type ExportTabReadinessState = 'checking' | 'background_allowed' | 'foreground_required';
 
 export type ExportTabReadinessEvent = Readonly<{
   type: 'client_seen';

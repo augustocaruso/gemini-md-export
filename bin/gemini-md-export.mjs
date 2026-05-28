@@ -42,9 +42,31 @@ import {
   buildProgressViewModel,
 } from '../build/ts/core/progress-view-model.js';
 import {
-  shouldReloadAllExistingTabsForReady,
   shouldReloadExistingTabsForReady,
+  shouldWaitForExistingTabsForReady,
+  shouldWakeBrowserForReady,
 } from '../build/ts/cli/browser-ready-policy.js';
+import {
+  countClaimWarningMessage,
+  isRecoverableCountClaimError,
+} from '../build/ts/cli/count-claim-recovery.js';
+import {
+  localExtensionReloadPreflightCliLine,
+  readyHasExtensionMismatchClients,
+  runLocalExtensionReloadPreflight,
+} from '../build/ts/cli/local-extension-reload-preflight.js';
+import { buildExistingTabsReloadRequestParams } from '../build/ts/cli/existing-tabs-reload-request.js';
+import {
+  attachBrowserDiagnosticToReady,
+  connectedClientCountFromReady,
+  readinessIssueCode,
+  readinessIssueDisplay,
+  readinessIssueMessage,
+} from '../build/ts/cli/readiness-display.js';
+import {
+  evaluateCliBrowserLaunchGate,
+  observeCliBrowserLaunchResultState,
+} from '../build/ts/cli/browser-launch-lifecycle.js';
 import { buildBridgeOnlyChildEnv } from '../build/ts/mcp/browser-runtime-env.js';
 
 const DEFAULT_BRIDGE_URL = 'http://127.0.0.1:47283';
@@ -2477,28 +2499,6 @@ const exitCodeForJobCommand = (subcommand, job = {}) => {
   return exitCodeForJob(job);
 };
 
-const shouldWakeBrowserForReady = (ready = {}) => {
-  if (ready.ready === true) return false;
-  const connected = Number(ready.connectedClientCount ?? ready.connectedClients?.length ?? 0);
-  const selectable = Number(ready.selectableTabCount ?? 0);
-  const issue = readinessIssueCode(ready.blockingIssue);
-  if (issue === 'no_connected_clients') return true;
-  if (issue === 'no_selectable_gemini_tab') return connected <= 0 && selectable <= 0;
-  return connected <= 0 && selectable <= 0;
-};
-
-const shouldWaitForExistingTabsForReady = (ready = {}) => {
-  if (ready.ready === true) return false;
-  const connected = connectedClientCountFromReady(ready);
-  if (connected <= 0) return false;
-  const issue = readinessIssueCode(ready.blockingIssue);
-  return [
-    'no_selectable_gemini_tab',
-    'no_active_claimable_gemini_tab',
-    'command_channel_not_ready',
-  ].includes(issue);
-};
-
 const buildCliLaunchId = () =>
   `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
@@ -2514,81 +2514,6 @@ const setWaitNote = (ui, note, { detail = null, issue = null } = {}) => {
   ui.waitNote = note || null;
   ui.waitDetail = detail || null;
   ui.waitIssue = readinessIssueDisplay(issue, '') || null;
-};
-
-const connectedClientCountFromReady = (ready = {}) =>
-  Number(ready.connectedClientCount ?? ready.connectedClients?.length ?? ready.clients?.length ?? 0) || 0;
-
-const readinessIssueCode = (issue) => {
-  if (!issue) return '';
-  if (typeof issue === 'string') return issue;
-  if (typeof issue === 'object') {
-    return String(issue.code || issue.reason || issue.type || issue.message || '').trim();
-  }
-  return String(issue).trim();
-};
-
-const readinessIssueMessage = (issue) => {
-  if (!issue) return '';
-  if (typeof issue === 'string') return issue;
-  if (typeof issue === 'object') {
-    return String(issue.message || issue.code || issue.reason || issue.type || '').trim();
-  }
-  return String(issue).trim();
-};
-
-const readinessIssueDisplay = (issue, fallback = 'desconhecido') =>
-  readinessIssueCode(issue) || readinessIssueMessage(issue) || fallback;
-
-const browserDiagnosticMessage = (diagnosis = {}) => {
-  if (diagnosis.kind === 'google_sorry') {
-    return 'O Google abriu uma tela de verificação antes do Gemini. Resolva essa tela no navegador e rode o comando de novo.';
-  }
-  if (diagnosis.kind === 'google_login') {
-    return 'O navegador está no login do Google. Conclua o login e rode o comando de novo.';
-  }
-  if (diagnosis.kind === 'other') {
-    return `O navegador abriu, mas não chegou ao Gemini Web${diagnosis.url ? ` (${diagnosis.url})` : ''}.`;
-  }
-  if (diagnosis.kind === 'gemini') {
-    return 'Gemini Web abriu, mas a extensão ainda não conectou. Recarregue a aba ou a extensão do navegador.';
-  }
-  return null;
-};
-
-const browserDiagnosticBlockingIssue = (diagnosis = {}) => {
-  if (diagnosis.kind === 'google_sorry') return 'google_verification_required';
-  if (diagnosis.kind === 'google_login') return 'google_login_required';
-  if (diagnosis.kind === 'other') return 'browser_not_on_gemini';
-  if (diagnosis.kind === 'gemini') return 'extension_not_connected';
-  return null;
-};
-
-const attachBrowserDiagnosticToReady = (ready = {}, browserTabs = {}, { forceGemini = false } = {}) => {
-  const diagnosis = browserTabs?.diagnosis || {};
-  const blockingIssue = browserDiagnosticBlockingIssue(diagnosis);
-  if (!blockingIssue && !forceGemini) return ready;
-  const effectiveDiagnosis =
-    forceGemini && diagnosis.kind === 'gemini'
-      ? { ...diagnosis, terminal: true }
-      : diagnosis;
-  const message = browserDiagnosticMessage(effectiveDiagnosis);
-  return {
-    ...ready,
-    blockingIssue: blockingIssue || ready.blockingIssue,
-    browserDiagnostic: {
-      ...browserTabs,
-      diagnosis: effectiveDiagnosis,
-      message,
-    },
-    extensionReadiness: {
-      ...(ready.extensionReadiness || {}),
-      nextAction: {
-        ...(ready.extensionReadiness?.nextAction || {}),
-        message: message || ready.extensionReadiness?.nextAction?.message || null,
-      },
-    },
-  };
 };
 
 const readBrowserTabsQuietly = () => {
@@ -2691,6 +2616,31 @@ const wakeBrowserFromCli = async (flags, ui, ready) => {
 
   const now = Date.now();
   const previousState = readBrowserLaunchState();
+  const launchId = buildCliLaunchId();
+  const browserTabs = readBrowserTabsQuietly();
+  const launchGate = evaluateCliBrowserLaunchGate({
+    previousState,
+    browserTabs,
+    nowMs: now,
+    launchId,
+    readyBlockingIssue: ready.blockingIssue || null,
+  });
+  const targetUrl = launchGate.targetUrl;
+  if (!launchGate.canLaunch) {
+    try {
+      writeBrowserLaunchState(launchGate.blockedLaunchState);
+    } catch {
+      // Launch state is only coordination/diagnostics; never fail the CLI over it.
+    }
+    setWaitNote(ui, launchGate.waitNote?.note, {
+      issue: launchGate.waitNote?.issue || null,
+    });
+    if (shouldWriteInlineStatus(ui) && launchGate.waitNote?.inlineMessage) {
+      ui.stdout.write(`${launchGate.waitNote.inlineMessage}\n`);
+    }
+    return launchGate.blockedLaunch;
+  }
+
   if (activeBrowserLaunchState(previousState, now)) {
     setWaitNote(ui, 'Outra chamada ja esta abrindo Gemini Web', {
       issue: ready.blockingIssue || null,
@@ -2708,7 +2658,6 @@ const wakeBrowserFromCli = async (flags, ui, ready) => {
 
   const profileDirectory =
     process.env.GEMINI_MCP_CHROME_PROFILE_DIRECTORY || process.env.GME_CHROME_PROFILE_DIRECTORY || null;
-  const launchId = buildCliLaunchId();
   const state = {
     source: 'cli',
     launchId,
@@ -2718,6 +2667,7 @@ const wakeBrowserFromCli = async (flags, ui, ready) => {
     expiresAt: now + Number(flags.readyWaitMs || 0) + DEFAULT_BROWSER_LAUNCH_LOCK_GRACE_MS,
     bridgeUrl: normalizeBridgeUrl(flags.bridgeUrl),
     blockingIssue: ready.blockingIssue || null,
+    tabLifecycle: launchGate.state,
   };
 
   const writeLaunchState = (patch) => {
@@ -2743,18 +2693,27 @@ const wakeBrowserFromCli = async (flags, ui, ready) => {
       browserName: process.env.GEMINI_MCP_BROWSER || process.env.GME_BROWSER || 'Chrome',
       reason: 'dry-run',
     };
-    writeLaunchState({ status: 'dry-run', launch });
+    writeLaunchState({ status: 'dry-run', launch, tabLifecycle: launchGate.state });
     return launch;
   }
 
   writeLaunchState({});
   const launch = await launchGeminiBrowser({
     profileDirectory,
+    targetUrl,
     launchObserveMs: nonNegativeIntEnv(process.env.GEMINI_MCP_BROWSER_LAUNCH_OBSERVE_MS, 180, 2000),
+  });
+  const observedState = observeCliBrowserLaunchResultState({
+    state: launchGate.state,
+    nowMs: Date.now(),
+    launchId,
+    targetUrl,
+    result: launch,
   });
   writeLaunchState({
     status: launch.attempted ? 'attempted' : 'skipped',
     launch,
+    tabLifecycle: observedState,
     lastFailureAt: launch.error || launch.reason ? Date.now() : null,
   });
   return launch;
@@ -2782,13 +2741,7 @@ const requestExistingTabsReloadFromCli = async (bridgeUrl, flags, ready = {}) =>
   try {
     return await requestJson(
       bridgeUrl,
-      appendParams('/agent/tabs', {
-        action: 'reload',
-        openIfMissing: false,
-        allowReload: true,
-        reloadAll: shouldReloadAllExistingTabsForReady(ready, flags),
-        delayMs: flags.delayMs,
-      }),
+      appendParams('/agent/tabs', buildExistingTabsReloadRequestParams(flags, ready)),
       { timeoutMs: 45_000 },
     );
   } catch (err) {
@@ -2825,13 +2778,79 @@ const reloadExistingTabsFromCli = async (bridgeUrl, flags, ui, ready = {}) => {
   return retry;
 };
 
+const syncLoadedExtensionBeforeReload = async (bridgeUrl, flags, ui) => {
+  const result = await runLocalExtensionReloadPreflight({
+    allowReload: flags.allowReload === true,
+    packageRoot: packageRoot(),
+  }, {
+    fetchActiveJobCount: async () => {
+      try {
+        const result = await requestJson(
+          bridgeUrl,
+          appendParams('/agent/export-jobs', { active: true, limit: 2 }),
+          { timeoutMs: 5000, operation: 'local-extension-sync-active-jobs' },
+        );
+        return { ok: true, activeJobCount: Array.isArray(result?.jobs) ? result.jobs.length : 0 };
+      } catch (err) {
+        return { ok: false, error: err?.message || String(err) };
+      }
+    },
+    buildLocalDoctorReport: () =>
+      buildLocalDoctorReport({
+        browser: flags.browser,
+        profileDirectory: flags.profileDirectory,
+        extensionId: flags.extensionId,
+        packageRoot: packageRoot(),
+        version: VERSION,
+      }),
+  });
+  const line = localExtensionReloadPreflightCliLine(result);
+  if (line && shouldWriteInlineStatus(ui)) ui.stdout.write(`${line}\n`);
+  return result;
+};
+
 const readyWithCliWake = async (bridgeUrl, flags, ui) => {
+  let cliBrowserWake = null;
+  let existingTabsReload = null;
+  let localExtensionSync = null;
+  if (flags.allowReload === true) {
+    localExtensionSync = await syncLoadedExtensionBeforeReload(bridgeUrl, flags, ui);
+    if (
+      localExtensionSync?.status === 'synced' &&
+      localExtensionSync?.shouldReloadExistingTabs !== false
+    ) {
+      existingTabsReload = await reloadExistingTabsFromCli(bridgeUrl, flags, ui, {
+        blockingIssue: 'extension_build_mismatch',
+      });
+    }
+  }
+
   let ready = await requestReadyStatus(bridgeUrl, flags, { waitMs: 0 });
   setWaitNote(ui, ready.ready === true ? 'Gemini Web pronto' : 'Verificando Gemini Web', {
     issue: ready.blockingIssue || null,
   });
-  let cliBrowserWake = null;
-  let existingTabsReload = null;
+  if (
+    ready.ready === true &&
+    flags.allowReload === true &&
+    readyHasExtensionMismatchClients(ready) &&
+    localExtensionSync?.shouldReloadExistingTabs !== false
+  ) {
+    setWaitNote(ui, 'Recarregando abas com content script antigo', {
+      issue: 'extension_build_mismatch',
+    });
+    if (shouldWriteInlineStatus(ui)) {
+      ui.stdout.write('Recarregando abas com content script antigo...\n');
+    }
+    existingTabsReload = await reloadExistingTabsFromCli(bridgeUrl, flags, ui, {
+      blockingIssue: 'extension_build_mismatch',
+    });
+    if (existingTabsReload?.ok && flags.readyWaitMs > 0) {
+      ready = await requestReadyStatus(bridgeUrl, flags, { waitMs: flags.readyWaitMs });
+      setWaitNote(ui, ready.ready === true ? 'Gemini Web pronto' : 'Verificando Gemini Web', {
+        issue: ready.blockingIssue || null,
+      });
+    }
+  }
   if (ready.ready !== true) {
     if (shouldWaitForExistingTabsForReady(ready)) {
       const connectedClientCount = connectedClientCountFromReady(ready);
@@ -2866,8 +2885,23 @@ const readyWithCliWake = async (bridgeUrl, flags, ui) => {
         }
       }
     }
-    if (ready.ready !== true && shouldReloadExistingTabsForReady(ready, flags)) {
-      existingTabsReload = await reloadExistingTabsFromCli(bridgeUrl, flags, ui, ready);
+    if (
+      ready.ready !== true &&
+      shouldReloadExistingTabsForReady(ready, flags) &&
+      existingTabsReload?.ok !== true
+    ) {
+      if (!localExtensionSync) {
+        localExtensionSync = await syncLoadedExtensionBeforeReload(bridgeUrl, flags, ui);
+      }
+      if (localExtensionSync?.shouldReloadExistingTabs !== false) {
+        existingTabsReload = await reloadExistingTabsFromCli(bridgeUrl, flags, ui, ready);
+      } else {
+        existingTabsReload = {
+          ok: false,
+          code: localExtensionSync?.status || 'local_extension_sync_blocked',
+          localExtensionSync,
+        };
+      }
       if (existingTabsReload?.ok && flags.readyWaitMs > 0) {
         setWaitNote(ui, 'Aguardando abas existentes reconectarem', {
           detail: `limite ${formatDuration(flags.readyWaitMs)}`,
@@ -2879,9 +2913,14 @@ const readyWithCliWake = async (bridgeUrl, flags, ui) => {
         });
       }
     }
-    if (ready.ready !== true) {
+    if (ready.ready !== true && localExtensionSync?.shouldReloadExistingTabs !== false) {
       cliBrowserWake = await wakeBrowserFromCli(flags, ui, ready);
-      if (flags.readyWaitMs > 0) {
+      if (cliBrowserWake?.reason === 'terminal-browser-blocker') {
+        ready = attachBrowserDiagnosticToReady(ready, cliBrowserWake.browserDiagnostic || {});
+        if (!ready.blockingIssue && cliBrowserWake.blocker?.code) {
+          ready = { ...ready, blockingIssue: cliBrowserWake.blocker.code };
+        }
+      } else if (flags.readyWaitMs > 0) {
         setWaitNote(ui, 'Aguardando a extensao conectar', {
           detail: `limite ${formatDuration(
             Math.min(
@@ -2909,6 +2948,7 @@ const readyWithCliWake = async (bridgeUrl, flags, ui) => {
     ...ready,
     cliBrowserWake,
     existingTabsReload,
+    localExtensionSync,
   };
 };
 
@@ -3389,16 +3429,6 @@ const claimCliTabForCount = async (flags = {}, countTimeoutMs) => {
   );
 };
 
-const isRecoverableCountClaimError = (err) => {
-  const text = [err?.message, err?.code, err?.data?.code, err?.data?.error]
-    .filter(Boolean)
-    .join(' ');
-  return /claim-tab|tab_claim_visual_failed|command_timeout|Timeout aguardando resposta/i.test(text);
-};
-
-const countClaimWarningMessage = (err) =>
-  `Indicador visual da aba nao respondeu; continuando a contagem sem ele. (${err?.message || err})`;
-
 const writeStructuredResult = (ui, result, { label = null, includeResultJson = true } = {}) => {
   if (ui.format === 'json') {
     ui.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
@@ -3700,6 +3730,7 @@ const runBrowser = async (parsed, streams = {}) => {
     bridgeRole: clients?.mcp?.bridgeRole || null,
     connectedClients: clients?.connectedClients || [],
     existingTabsReload: ready.existingTabsReload || null,
+    localExtensionSync: ready.localExtensionSync || null,
     nativeBroker: ready.nativeBroker || null,
     nextAction:
       ready.ready === true

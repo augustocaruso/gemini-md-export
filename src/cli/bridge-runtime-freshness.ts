@@ -81,7 +81,9 @@ export const staleBridgeMessage = (
   const pid = processInfo.pid ? ` PID ${processInfo.pid}` : '';
   const path = processInfo.root || processInfo.path || processInfo.commandLine || null;
   const location = path ? `\nProcesso: ${path}` : '';
-  const restartSuffix = safe ? '' : '\nNão encontrei um alvo seguro para reiniciar automaticamente.';
+  const restartSuffix = safe
+    ? ''
+    : '\nNão encontrei um alvo seguro para reiniciar automaticamente.';
   if (mismatch?.kind === 'name') {
     return `A porta da bridge respondeu como ${mismatch.actualName || 'outro serviço'}, não como gemini-md-export.${location}`;
   }
@@ -124,4 +126,5 @@ export const bridgeMismatchIntervalMessage = (
   mismatch: AnyRecord,
   elapsedText: string,
   version: string,
-): string => `${bridgeMismatchStatusDetail(mismatch, version).replace(/\.$/, '')}; ${elapsedText} decorridos.`;
+): string =>
+  `${bridgeMismatchStatusDetail(mismatch, version).replace(/\.$/, '')}; ${elapsedText} decorridos.`;

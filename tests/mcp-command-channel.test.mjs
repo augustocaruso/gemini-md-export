@@ -796,6 +796,36 @@ test('browser readiness inclui diagnostico do tab orchestrator FSM', () => {
   assert.match(readyBlock, /tabOrchestrator:\s*summarizeTabOrchestratorPlan\(tabOrchestratorPlan\)/);
 });
 
+test('comandos pesados usam seletor gerenciado de aba', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+
+  assert.match(source, /createManagedChatClientSelector/);
+  const recentSelectorBlock = source.match(
+    /const requireRecentChatsClient = \(selector = \{\}\) => \{[\s\S]*?\n\};/,
+  )?.[0] || '';
+  assert.match(recentSelectorBlock, /requireManagedChatClient\(selector, 'recent-chats'/);
+  assert.match(recentSelectorBlock, /candidateMode:\s*'recent-chats'/);
+  assert.doesNotMatch(recentSelectorBlock, /getSelectableGeminiClients/);
+  assert.doesNotMatch(recentSelectorBlock, /ambiguousTabsError/);
+
+  for (const toolName of [
+    'gemini_get_current_chat',
+    'gemini_download_chat',
+    'gemini_export_recent_chats',
+    'gemini_export_missing_chats',
+    'gemini_sync_vault',
+    'gemini_reexport_chats',
+    'gemini_diagnose_page',
+    'gemini_snapshot',
+  ]) {
+    const block = source.match(
+      new RegExp(`name: '${toolName}'[\\s\\S]*?call: async \\(args = \\{\\}\\) => \\{[\\s\\S]*?\\n    \\},`),
+    )?.[0] || '';
+    assert.match(block, /requireManagedChatClient\(args\)/, `${toolName} deve passar pelo tab orchestrator`);
+    assert.doesNotMatch(block, /const client = requireClient\(args\)/);
+  }
+});
+
 test('browser readiness ativa aba Gemini inativa existente antes de reportar falha de wake', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const runtimeSource = readFileSync(resolve(ROOT, 'src', 'mcp', 'existing-tabs-reload.ts'), 'utf-8');
@@ -933,6 +963,14 @@ test('reload de abas existentes pode atualizar extensao sem abrir navegador', ()
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const cliSource = readFileSync(resolve(ROOT, 'bin', 'gemini-md-export.mjs'), 'utf-8');
   const runtimeSource = readFileSync(resolve(ROOT, 'src', 'mcp', 'existing-tabs-reload.ts'), 'utf-8');
+  const cliReloadRequestSource = readFileSync(
+    resolve(ROOT, 'src', 'cli', 'existing-tabs-reload-request.ts'),
+    'utf-8',
+  );
+  const browserReadyPolicySource = readFileSync(
+    resolve(ROOT, 'src', 'cli', 'browser-ready-policy.ts'),
+    'utf-8',
+  );
   const reloadBlock = source.match(
     /const reloadGeminiTabs = async \(args = \{\}\) => \{[\s\S]*?\n\};\n\nconst legacyRawTools/,
   )?.[0];
@@ -942,22 +980,24 @@ test('reload de abas existentes pode atualizar extensao sem abrir navegador', ()
   const cliReloadBlock = cliSource.match(
     /const reloadExistingTabsFromCli = async[\s\S]*?\n\};\n\nconst readyWithCliWake/,
   )?.[0];
-  const wakeDecisionBlock = cliSource.match(
-    /const shouldWakeBrowserForReady = \(ready = \{\}\) => \{[\s\S]*?\n\};/,
-  )?.[0];
 
   assert.ok(reloadBlock, 'reloadGeminiTabs deve existir');
   assert.ok(cliReloadRequestBlock, 'requestExistingTabsReloadFromCli deve existir');
   assert.ok(cliReloadBlock, 'reloadExistingTabsFromCli deve existir');
-  assert.ok(wakeDecisionBlock, 'shouldWakeBrowserForReady deve existir');
   assert.match(reloadBlock, /reloadExtensionForExistingTabs/);
   assert.doesNotMatch(reloadBlock, /launchChromeForGemini/);
   assert.match(runtimeSource, /allowLaunchChrome:\s*false/);
   assert.match(runtimeSource, /allowReload:\s*args\.allowReload === true/);
-  assert.match(cliReloadRequestBlock, /action:\s*'reload'/);
-  assert.match(cliReloadRequestBlock, /openIfMissing:\s*false/);
-  assert.match(cliReloadRequestBlock, /allowReload:\s*true/);
-  assert.match(wakeDecisionBlock, /issue === 'no_selectable_gemini_tab'[\s\S]*connected <= 0/);
+  assert.match(cliReloadRequestBlock, /buildExistingTabsReloadRequestParams\(flags, ready\)/);
+  assert.match(cliReloadRequestSource, /action:\s*'reload'/);
+  assert.match(cliReloadRequestSource, /openIfMissing:\s*false/);
+  assert.match(cliReloadRequestSource, /allowReload:\s*true/);
+  assert.match(cliReloadRequestSource, /allowHttpBrowserFallback:\s*true/);
+  assert.match(cliSource, /shouldWakeBrowserForReady/);
+  assert.doesNotMatch(cliSource, /const shouldWakeBrowserForReady =/);
+  assert.match(browserReadyPolicySource, /export const shouldWakeBrowserForReady/);
+  assert.match(browserReadyPolicySource, /readyHasKnownOnlyNonGeminiClients/);
+  assert.match(browserReadyPolicySource, /no_selectable_gemini_tab/);
 });
 
 test('reload de abas usa native broker antes de depender de clientes vivos', () => {

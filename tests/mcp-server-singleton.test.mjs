@@ -375,6 +375,8 @@ test('bridge-only com exit-when-idle anuncia lifecycle e encerra apos idle', asy
   const health = await waitForHealth(port);
   assert.equal(health.idleLifecycle.enabled, true);
   assert.equal(health.idleLifecycle.keepAliveMs, 1000);
+  assert.equal(health.idleLifecycle.activeRequestBlockerCount, 0);
+  assert.equal(health.idleLifecycle.blockedBy.includes('active_request'), false);
 
   const exitCode = await waitForProcessExit(bridge.child, 4000);
   assert.notEqual(exitCode, null);

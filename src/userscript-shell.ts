@@ -714,6 +714,13 @@
   };
   const MIN_FAST_POLL_BACKOFF_MS = 250;
 
+  const disableNativeBridgeTransport = (reason) => {
+    bridgeTransportState.nativeLastError =
+      reason?.message || String(reason || 'native-proxy-unavailable');
+    bridgeTransportState.nativeDisabledUntil =
+      Date.now() + NATIVE_BRIDGE_TRANSPORT_COOLDOWN_MS;
+  };
+
   const markBridgeSnapshotDirty = (reason = 'changed') => {
     state.bridgeSnapshotDirty = true;
     state.bridgeSnapshotDirtyReason = reason;
@@ -3440,23 +3447,26 @@
       return null;
     }
 
-    const response = await extensionSendMessage(
-      {
-        type: 'gemini-md-export/native-proxy-http',
-        bridgeUrl: BRIDGE_BASE_URL,
-        path,
-        method,
-        payload,
-        timeoutMs,
-      },
-      { timeoutMs: Math.max(1500, timeoutMs + 1800) },
-    );
+    let response;
+    try {
+      response = await extensionSendMessage(
+        {
+          type: 'gemini-md-export/native-proxy-http',
+          bridgeUrl: BRIDGE_BASE_URL,
+          path,
+          method,
+          payload,
+          timeoutMs,
+        },
+        { timeoutMs: Math.max(1500, timeoutMs + 1800) },
+      );
+    } catch (err) {
+      disableNativeBridgeTransport(err);
+      return null;
+    }
 
     if (!response?.ok) {
-      bridgeTransportState.nativeLastError =
-        response?.error || response?.code || 'native-proxy-unavailable';
-      bridgeTransportState.nativeDisabledUntil =
-        Date.now() + NATIVE_BRIDGE_TRANSPORT_COOLDOWN_MS;
+      disableNativeBridgeTransport(response?.error || response?.code || 'native-proxy-unavailable');
       return null;
     }
 
@@ -3789,10 +3799,11 @@
   // --- ação de baixar ---------------------------------------------------
 
   const MEDIA_ASSET_SELECTOR = MEDIA_SELECTOR;
-  const MEDIA_EXPORT_TOTAL_BUDGET_MS = 25000;
+  const MEDIA_EXPORT_TOTAL_BUDGET_MS = 120000;
   const MEDIA_IMAGE_READY_TIMEOUT_MS = 2200;
   const MEDIA_IMAGE_SCROLL_SETTLE_MS = 180;
   const MEDIA_LIGHTBOX_TIMEOUT_MS = 2400;
+  const RENDERED_MEDIA_CAPTURE_TIMEOUT_MS = 7000;
   const LIGHTBOX_ROOT_SELECTOR = [
     '[role="dialog"]',
     '[aria-modal="true"]',
@@ -3895,6 +3906,24 @@
   const shouldPrepareImageBeforeFetch = (source) =>
     !/^(?:blob|data):/i.test(String(source || ''));
 
+  const isProtectedGoogleMediaSource = (source) => {
+    try {
+      const url = new URL(source, location.href);
+      return (
+        (url.protocol === 'https:' || url.protocol === 'http:') &&
+        (
+          /(?:^|\.)googleusercontent\.com$/i.test(url.hostname) ||
+          /(?:^|\.)usercontent\.goog$/i.test(url.hostname)
+        )
+      );
+    } catch {
+      return false;
+    }
+  };
+
+  const shouldCaptureRenderedMediaFirst = (source) =>
+    isExtensionContext && isProtectedGoogleMediaSource(source);
+
   const canvasToAsset = (canvas) => {
     const dataUrl = canvas.toDataURL('image/png');
     return parseDataUrlAsset(dataUrl);
@@ -3958,6 +3987,50 @@
     await sleep(MEDIA_IMAGE_SCROLL_SETTLE_MS);
     await waitForImageElementReady(img);
     return mediaSourceOf(img);
+  };
+
+  const imageRenderedCaptureRect = (img) => {
+    if (!(img instanceof HTMLImageElement)) return null;
+    const rect = img.getBoundingClientRect?.();
+    if (!rect || rect.width < 2 || rect.height < 2) return null;
+    const viewportLeft = Math.max(0, rect.left);
+    const viewportTop = Math.max(0, rect.top);
+    const viewportRight = Math.min(window.innerWidth || rect.right, rect.right);
+    const viewportBottom = Math.min(window.innerHeight || rect.bottom, rect.bottom);
+    const width = Math.max(1, viewportRight - viewportLeft);
+    const height = Math.max(1, viewportBottom - viewportTop);
+    if (width < 2 || height < 2) return null;
+    return {
+      x: viewportLeft,
+      y: viewportTop,
+      pageX: viewportLeft + (window.scrollX || 0),
+      pageY: viewportTop + (window.scrollY || 0),
+      width,
+      height,
+      devicePixelRatio: window.devicePixelRatio || 1,
+    };
+  };
+
+  const captureRenderedImageAsset = async (img) => {
+    if (!isExtensionContext || !(img instanceof HTMLImageElement)) return null;
+    if (!(await waitForImageElementReady(img, MEDIA_IMAGE_READY_TIMEOUT_MS))) return null;
+    const rect = imageRenderedCaptureRect(img);
+    if (!rect) return null;
+    const response = await extensionSendMessage(
+      {
+        type: 'gemini-md-export/capture-rendered-media',
+        rect,
+        source: mediaSourceOf(img),
+      },
+      { timeoutMs: RENDERED_MEDIA_CAPTURE_TIMEOUT_MS },
+    );
+    if (!response?.ok || !response.contentBase64) {
+      throw new Error(response?.error || 'rendered-media-capture-failed');
+    }
+    return {
+      mimeType: response.mimeType || 'image/png',
+      contentBase64: response.contentBase64,
+    };
   };
 
   const visibleElement = (el) => {
@@ -4360,12 +4433,19 @@
               if (shouldPrepareImageBeforeFetch(source)) {
                 source = (await prepareImageElementForExport(candidate.el)) || source;
               }
+              if (shouldCaptureRenderedMediaFirst(source)) {
+                try {
+                  asset = await captureRenderedImageAsset(candidate.el);
+                } catch {
+                  asset = null;
+                }
+              }
               try {
-                asset = await fetchImageAsset(source);
+                asset ||= await fetchImageAsset(source);
               } catch (fetchErr) {
                 let finalFetchErr = fetchErr;
                 try {
-                  asset = await imageElementToAsset(candidate.el);
+                  asset ||= await imageElementToAsset(candidate.el);
                 } catch {
                   asset = null;
                 }
@@ -5346,6 +5426,24 @@
         contentScript: true,
         serviceWorker: response?.ok === true,
         attempts: ping.attempts,
+      };
+    }
+
+    if (command.type === 'private-api-read-chat') {
+      const requestedChatId =
+        normalizeExpectedChatId(command.args || {}) || extractChatId(location.pathname);
+      const response = await extensionSendMessage(
+        {
+          type: 'gemini-md-export/private-api-read-chat',
+          chatId: command.args?.chatId || requestedChatId,
+          title: command.args?.title || scrapeTitleFromDocument(document),
+        },
+        { timeoutMs: Math.max(5000, Number(command.args?.timeoutMs || 30_000)) },
+      );
+      return response || {
+        ok: false,
+        code: 'private_api_empty_extension_response',
+        error: 'A extensão não retornou resposta da leitura privada.',
       };
     }
 

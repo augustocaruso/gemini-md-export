@@ -96,9 +96,7 @@ export const dateImportIssueCountsForJob = (job: AnyRecord = {}): DateImportIssu
   };
 };
 
-export const evaluateDateImportMessageFsm = (
-  job: AnyRecord = {},
-): DateImportMessageFsmResult => {
+export const evaluateDateImportMessageFsm = (job: AnyRecord = {}): DateImportMessageFsmResult => {
   const source = String(job.dateImport?.source || '').toLowerCase();
   const primarySource = String(job.dateImport?.primarySource || '').toLowerCase();
   const hasSourceFile = Boolean(job.dateImport?.sourceFile);
@@ -120,7 +118,10 @@ export const evaluateDateImportMessageFsm = (
     };
   }
 
-  if (source === 'takeout+my-activity' || (hasSourceFile && job.dateImport?.fallback === 'my-activity')) {
+  if (
+    source === 'takeout+my-activity' ||
+    (hasSourceFile && job.dateImport?.fallback === 'my-activity')
+  ) {
     return {
       state: 'takeout_with_activity_fallback',
       sourceLabel: 'Takeout/My Activity',
