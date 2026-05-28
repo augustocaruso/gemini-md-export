@@ -970,13 +970,19 @@ test('openExportModal recria modal antigo de build anterior antes de anexar scro
   window.close();
 });
 
-test('content script não contém fallback de captura visual', async () => {
-  const [contentScript, backgroundScript] = await Promise.all([
+test('content script usa captura renderizada sem captureVisibleTab', async () => {
+  const [contentScript, backgroundScript, debuggerController] = await Promise.all([
     readFile(contentScriptUrl, 'utf8'),
     readFile(new URL('../dist/extension/background.js', import.meta.url), 'utf8'),
+    readFile(
+      new URL('../dist/extension/browser/background/chrome-debugger-controller.js', import.meta.url),
+      'utf8',
+    ),
   ]);
 
-  assert.doesNotMatch(contentScript, /capture-visible-tab|captureVisibleTab|ScreenshotToAsset/);
+  assert.match(contentScript, /capture-rendered-media/);
+  assert.match(backgroundScript, /captureTabClipWithDebugger/);
+  assert.match(debuggerController, /Page\.captureScreenshot/);
   assert.doesNotMatch(backgroundScript, /capture-visible-tab|captureVisibleTab/);
 });
 
@@ -1483,6 +1489,68 @@ test('exportPayload baixa blob sem preparar a imagem antes', { timeout: 5000 }, 
   assert.equal(payload.mediaFiles.length, 1);
   assert.equal(payload.mediaFailures.length, 0);
   assert.match(payload.content, /!\[Blob image\]\(assets\/b8e7c075effe9457\/gemini-01-image-01\.png\)/);
+  assert.deepEqual(runtimeErrors, []);
+
+  window.close();
+});
+
+test('exportPayload captura imagem protegida já renderizada antes de fetch', { timeout: 5000 }, async () => {
+  const protectedUrl = 'https://lh3.googleusercontent.com/gg/protected-rendered=s1024-rj';
+  const { dom, runtimeErrors } = createGeminiMediaDom(`
+    <model-response>
+      <button class="image-button">
+        <img src="${protectedUrl}" alt="Rendered protected image" data-rect="40,80,320,180">
+      </button>
+    </model-response>
+  `);
+  const { window } = dom;
+  installReadyImageMock(window);
+
+  const messages = [];
+  let fetchCount = 0;
+  window.fetch = async () => {
+    fetchCount += 1;
+    throw new Error('HTTP 403');
+  };
+  window.chrome = {
+    runtime: {
+      id: 'test-extension',
+      lastError: null,
+      sendMessage(message, callback) {
+        messages.push(message);
+        if (message?.type === 'gemini-md-export/capture-rendered-media') {
+          callback({
+            ok: true,
+            mimeType: 'image/png',
+            contentBase64: 'CQgHBg==',
+          });
+          return;
+        }
+        callback({ ok: true });
+      },
+    },
+  };
+
+  const debug = await evaluateContentScript(window);
+  const payload = await debug.exportPayload();
+  const captureMessage = messages.find(
+    (message) => message?.type === 'gemini-md-export/capture-rendered-media',
+  );
+
+  assert.equal(fetchCount, 0);
+  assert.ok(captureMessage, 'deve pedir captura renderizada da mídia protegida');
+  assert.equal(captureMessage.source, protectedUrl);
+  assert.equal(captureMessage.rect.pageX, 40);
+  assert.equal(captureMessage.rect.pageY, 80);
+  assert.equal(captureMessage.rect.width, 320);
+  assert.equal(captureMessage.rect.height, 180);
+  assert.equal(payload.mediaFiles.length, 1);
+  assert.equal(payload.mediaFailures.length, 0);
+  assert.equal(payload.mediaFiles[0].contentBase64, 'CQgHBg==');
+  assert.match(
+    payload.content,
+    /!\[Rendered protected image\]\(assets\/b8e7c075effe9457\/gemini-01-image-01\.png\)/,
+  );
   assert.deepEqual(runtimeErrors, []);
 
   window.close();

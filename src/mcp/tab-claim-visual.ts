@@ -13,6 +13,7 @@ export type ActionBadgeClaimVisual = Readonly<{
   tabId: number;
   groupId?: number | null;
   reason?: string | null;
+  detail?: string | null;
 }>;
 
 export type TabClaimVisual = TabGroupClaimVisual | ActionBadgeClaimVisual;

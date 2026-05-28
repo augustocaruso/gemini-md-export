@@ -371,6 +371,11 @@ cpSync(
   resolve(extensionDir, 'browser'),
   { recursive: true },
 );
+cpSync(
+  resolve(ROOT, 'build', 'ts', 'core'),
+  resolve(extensionDir, 'core'),
+  { recursive: true },
+);
 writeFileSync(
   resolve(extensionDir, 'background.js'),
   extensionBackgroundSrc
@@ -431,6 +436,17 @@ writeFileSync(
 );
 if (existsSync(resolve(ROOT, 'build', 'ts'))) {
   cpSync(resolve(ROOT, 'build', 'ts'), resolve(geminiCliExtensionDir, 'build', 'ts'), {
+    recursive: true,
+  });
+}
+if (existsSync(resolve(ROOT, 'pyproject.toml'))) {
+  cpSync(resolve(ROOT, 'pyproject.toml'), resolve(geminiCliExtensionDir, 'pyproject.toml'));
+}
+if (existsSync(resolve(ROOT, 'uv.lock'))) {
+  cpSync(resolve(ROOT, 'uv.lock'), resolve(geminiCliExtensionDir, 'uv.lock'));
+}
+if (existsSync(resolve(ROOT, 'python'))) {
+  cpSync(resolve(ROOT, 'python'), resolve(geminiCliExtensionDir, 'python'), {
     recursive: true,
   });
 }
@@ -573,6 +589,9 @@ if (existsSync(resolve(geminiCliExtensionDir, 'docs'))) {
 }
 if (existsSync(resolve(geminiCliExtensionDir, 'build', 'ts'))) {
   console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'build', 'ts')}`);
+}
+if (existsSync(resolve(geminiCliExtensionDir, 'python'))) {
+  console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'python')}`);
 }
 if (existsSync(resolve(geminiCliExtensionDir, 'scripts'))) {
   console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'scripts')}`);

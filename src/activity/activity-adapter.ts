@@ -204,12 +204,17 @@ const findDateContextText = (card: Element): string => {
       sibling = sibling.previousElementSibling
     ) {
       scanned += 1;
-      const directText = String(sibling.textContent || '').replace(/\s+/g, ' ').trim();
+      const directText = String(sibling.textContent || '')
+        .replace(/\s+/g, ' ')
+        .trim();
       if (looksLikeDateContext(directText)) return directText;
       const heading = Array.from(sibling.querySelectorAll('h1,h2,h3,[role="heading"],time'))
         .reverse()
         .find((element) => looksLikeDateContext(element.textContent || ''));
-      if (heading) return String(heading.textContent || '').replace(/\s+/g, ' ').trim();
+      if (heading)
+        return String(heading.textContent || '')
+          .replace(/\s+/g, ' ')
+          .trim();
     }
   }
   return '';

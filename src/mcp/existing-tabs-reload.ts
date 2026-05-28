@@ -10,6 +10,7 @@ export type ExistingTabsExtensionReloadResult = Readonly<{
 }>;
 
 type ExistingTabsNativeReloadResult = Readonly<Record<string, unknown>> | null | undefined;
+type ExistingTabsReloadClientPredicate = (client: unknown) => boolean;
 
 export type ExistingTabsRuntimeRefreshFsmInput = Readonly<{
   allowReload?: boolean;
@@ -34,7 +35,7 @@ export type ExistingTabsPostReloadRecoveryFsmInput = Readonly<{
 }>;
 
 export type ExistingTabsPostReloadRecoveryFsmDecision = Readonly<{
-  state: 'ready' | 'self_heal_content_scripts' | 'blocked';
+  state: 'ready' | 'self_heal_content_scripts' | 'wait_for_clients' | 'blocked';
   reason: string;
   force?: true;
   tabIds?: readonly number[];
@@ -197,9 +198,7 @@ const candidateHasBlockingPage = (
   );
 };
 
-const candidateContextScore = (
-  candidate: BrowserReadyInactiveTabActivationCandidate,
-): number => {
+const candidateContextScore = (candidate: BrowserReadyInactiveTabActivationCandidate): number => {
   const page = candidatePage(candidate);
   let score = 0;
   if (candidate.commandReady === true) score += 100;
@@ -213,13 +212,12 @@ const candidateContextScore = (
   return score;
 };
 
-const candidateLastSignal = (
-  candidate: BrowserReadyInactiveTabActivationCandidate,
-): number => Math.max(
-  Number(candidate.lastHeartbeatAt || 0),
-  Number(candidate.lastSnapshotAt || 0),
-  Number(candidate.lastSeenAt || 0),
-);
+const candidateLastSignal = (candidate: BrowserReadyInactiveTabActivationCandidate): number =>
+  Math.max(
+    Number(candidate.lastHeartbeatAt || 0),
+    Number(candidate.lastSnapshotAt || 0),
+    Number(candidate.lastSeenAt || 0),
+  );
 
 export const evaluateBrowserReadyInactiveTabActivationFsm = ({
   allowActivation = false,
@@ -269,7 +267,11 @@ export const maybeActivateBrowserReadyInactiveTab = async (
     args?: Record<string, unknown>;
   } = {},
   deps: {
-    activateBrowserTabById(tabId: number, args?: Record<string, unknown>, candidate?: unknown): Promise<Record<string, any> | null>;
+    activateBrowserTabById(
+      tabId: number,
+      args?: Record<string, unknown>,
+      candidate?: unknown,
+    ): Promise<Record<string, any> | null>;
     summarizeClient(client: unknown): unknown;
   },
 ) => {
@@ -295,8 +297,7 @@ export const maybeActivateBrowserReadyInactiveTab = async (
       decision.tabId,
       {
         ...args,
-        activateTabReason:
-          args.activateTabReason || 'browser-ready-activate-existing-tab',
+        activateTabReason: args.activateTabReason || 'browser-ready-activate-existing-tab',
       },
       activationCandidate,
     );
@@ -334,6 +335,14 @@ const attachedContentScriptSelfHealCompleted = (result: ExistingTabsNativeReload
   isRecord(result.contentScriptSelfHeal) &&
   result.contentScriptSelfHeal.ok === true;
 
+const reloadReadyClients = (
+  clients: readonly unknown[],
+  predicate?: ExistingTabsReloadClientPredicate,
+): unknown[] => {
+  const items = [...clients];
+  return predicate ? items.filter(predicate) : items;
+};
+
 export const evaluateExistingTabsPostReloadRecoveryFsm = ({
   allowReload = false,
   connectedClientCount = 0,
@@ -369,12 +378,22 @@ export const evaluateExistingTabsPostReloadRecoveryFsm = ({
   if (attachedContentScriptSelfHealCompleted(nativeReload)) {
     return { state: 'blocked', reason: 'native_reload_post_self_heal_completed_without_client' };
   }
+  if (nativeReload.ok === true && nativeReload.reloadMode === 'managed-tabs') {
+    return {
+      state: 'wait_for_clients',
+      reason: 'managed_tabs_reloaded_wait_for_clients',
+      waitForClients: true,
+    };
+  }
 
   const shouldSelfHeal =
     nativeReload.ok === true || (code !== null && RECOVERABLE_NATIVE_RELOAD_CODES.has(code));
 
   if (!shouldSelfHeal) {
-    return { state: 'blocked', reason: code ? `native_reload_${code}` : 'native_reload_not_recoverable' };
+    return {
+      state: 'blocked',
+      reason: code ? `native_reload_${code}` : 'native_reload_not_recoverable',
+    };
   }
 
   const tabIds = nativeReloadTabIds(nativeReload);
@@ -387,9 +406,7 @@ export const evaluateExistingTabsPostReloadRecoveryFsm = ({
   };
 };
 
-export const reloadSideEffectExplicitlyAllowed = (
-  args: Record<string, unknown> = {},
-): boolean =>
+export const reloadSideEffectExplicitlyAllowed = (args: Record<string, unknown> = {}): boolean =>
   args.allowReload === true ||
   args.explicit === true ||
   args.intent === 'tab_management' ||
@@ -398,7 +415,10 @@ export const reloadSideEffectExplicitlyAllowed = (
 export const refreshExistingTabsExtensionRuntimeBeforeReload = async (
   args: Record<string, unknown> = {},
   deps: {
-    tryNativeBrowserBrokerTabsAction(action: string, args?: Record<string, unknown>): Promise<Record<string, unknown> | null>;
+    tryNativeBrowserBrokerTabsAction(
+      action: string,
+      args?: Record<string, unknown>,
+    ): Promise<Record<string, unknown> | null>;
     expected: ExistingTabsRuntimeRefreshFsmInput['expected'];
     sleep(ms: number): Promise<unknown>;
     pollIntervalMs: number;
@@ -439,25 +459,53 @@ export const recoverExistingTabsContentScriptsAfterNativeReload = async (
   args: Record<string, unknown> = {},
   deps: {
     getLiveClients(): unknown[];
-    waitForLiveClients(timeoutMs: number, pollIntervalMs?: number): Promise<unknown[]>;
+    waitForLiveClients(
+      timeoutMs: number,
+      pollIntervalMs?: number,
+      predicate?: ExistingTabsReloadClientPredicate,
+    ): Promise<unknown[]>;
     normalizeReloadWaitMs(value: unknown, fallback: number): number;
     summarizeClient(client: unknown): unknown;
-    tryNativeBrowserBrokerTabsAction(action: string, args?: Record<string, unknown>): Promise<Record<string, unknown> | null>;
+    tryNativeBrowserBrokerTabsAction(
+      action: string,
+      args?: Record<string, unknown>,
+    ): Promise<Record<string, unknown> | null>;
     defaultWaitMs: number;
     pollIntervalMs: number;
+    clientReadyAfterReload?: ExistingTabsReloadClientPredicate;
   },
 ) => {
+  const readyClients = () => reloadReadyClients(deps.getLiveClients(), deps.clientReadyAfterReload);
+  const connectedClientCount = readyClients().length;
   const decision = evaluateExistingTabsPostReloadRecoveryFsm({
     allowReload: reloadSideEffectExplicitlyAllowed(args),
-    connectedClientCount: deps.getLiveClients().length,
+    connectedClientCount,
     nativeReload,
   });
   const recovery = {
     decision,
     attempted: false,
     ok: decision.state === 'ready',
-    connectedClientCount: deps.getLiveClients().length,
+    connectedClientCount,
+    totalConnectedClientCount: deps.getLiveClients().length,
   };
+  if (decision.state === 'wait_for_clients') {
+    const waitMs = deps.normalizeReloadWaitMs(args.reloadWaitMs ?? args.waitMs, deps.defaultWaitMs);
+    const waitStartedAt = Date.now();
+    const liveClients = decision.waitForClients
+      ? await deps.waitForLiveClients(waitMs, deps.pollIntervalMs, deps.clientReadyAfterReload)
+      : readyClients();
+    return {
+      decision,
+      attempted: true,
+      ok: liveClients.length > 0,
+      waitMs,
+      waitedMs: Math.max(0, Date.now() - waitStartedAt),
+      connectedClientCount: liveClients.length,
+      totalConnectedClientCount: deps.getLiveClients().length,
+      clients: liveClients.map(deps.summarizeClient),
+    };
+  }
   if (decision.state !== 'self_heal_content_scripts') return recovery;
 
   const selfHealArgs: Record<string, unknown> = {
@@ -476,8 +524,8 @@ export const recoverExistingTabsContentScriptsAfterNativeReload = async (
     selfHealArgs,
   );
   const liveClients = decision.waitForClients
-    ? await deps.waitForLiveClients(waitMs, deps.pollIntervalMs)
-    : deps.getLiveClients();
+    ? await deps.waitForLiveClients(waitMs, deps.pollIntervalMs, deps.clientReadyAfterReload)
+    : readyClients();
   return {
     decision,
     attempted: true,
@@ -485,6 +533,7 @@ export const recoverExistingTabsContentScriptsAfterNativeReload = async (
     waitMs,
     waitedMs: Math.max(0, Date.now() - waitStartedAt),
     connectedClientCount: liveClients.length,
+    totalConnectedClientCount: deps.getLiveClients().length,
     clients: liveClients.map(deps.summarizeClient),
     selfHeal,
   };
@@ -493,29 +542,49 @@ export const recoverExistingTabsContentScriptsAfterNativeReload = async (
 export const runExistingTabsNativeReloadRecovery = async (
   args: Record<string, unknown> = {},
   deps: {
-    tryNativeBrowserBrokerTabsAction(action: string, args?: Record<string, unknown>): Promise<Record<string, unknown> | null>;
+    tryNativeBrowserBrokerTabsAction(
+      action: string,
+      args?: Record<string, unknown>,
+    ): Promise<Record<string, unknown> | null>;
     attachContentScriptSelfHealToNativeReload(
       nativeReload: ExistingTabsNativeReloadResult,
       args: Record<string, unknown>,
-      action: (action: string, args?: Record<string, unknown>) => Promise<Record<string, unknown> | null>,
+      action: (
+        action: string,
+        args?: Record<string, unknown>,
+      ) => Promise<Record<string, unknown> | null>,
     ): Promise<unknown>;
     expected: ExistingTabsRuntimeRefreshFsmInput['expected'];
     sleep(ms: number): Promise<unknown>;
     getLiveClients(): unknown[];
-    waitForLiveClients(timeoutMs: number, pollIntervalMs?: number): Promise<unknown[]>;
+    waitForLiveClients(
+      timeoutMs: number,
+      pollIntervalMs?: number,
+      predicate?: ExistingTabsReloadClientPredicate,
+    ): Promise<unknown[]>;
     normalizeReloadWaitMs(value: unknown, fallback: number): number;
     summarizeClient(client: unknown): unknown;
     defaultWaitMs: number;
     pollIntervalMs: number;
+    clientReadyAfterReload?: ExistingTabsReloadClientPredicate;
   },
 ) => {
-  const nativeExtensionRuntimeRefresh = await refreshExistingTabsExtensionRuntimeBeforeReload(args, deps);
-  const nativeReload = await deps.tryNativeBrowserBrokerTabsAction('reload', args);
-  await deps.attachContentScriptSelfHealToNativeReload(
-    nativeReload,
+  const nativeExtensionRuntimeRefresh = await refreshExistingTabsExtensionRuntimeBeforeReload(
     args,
-    deps.tryNativeBrowserBrokerTabsAction,
+    deps,
   );
+  const managedReload = await deps.tryNativeBrowserBrokerTabsAction('reloadManagedTabs', args);
+  const nativeReload =
+    managedReload?.ok === true
+      ? managedReload
+      : await deps.tryNativeBrowserBrokerTabsAction('reload', args);
+  if (nativeReload?.reloadMode !== 'managed-tabs') {
+    await deps.attachContentScriptSelfHealToNativeReload(
+      nativeReload,
+      args,
+      deps.tryNativeBrowserBrokerTabsAction,
+    );
+  }
   const postNativeReloadRecovery = nativeReload
     ? await recoverExistingTabsContentScriptsAfterNativeReload(nativeReload, args, deps)
     : null;

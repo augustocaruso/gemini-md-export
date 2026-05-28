@@ -1,12 +1,11 @@
-import type { TabOrchestratorEffectExecutionReport } from './executor.js';
-import type { TabOrchestratorEffectAdapter } from './executor.js';
+import type {
+  TabOrchestratorEffectAdapter,
+  TabOrchestratorEffectExecutionReport,
+} from './executor.js';
+import { planTabOrchestration, type TabOrchestrationResult } from './orchestrator.js';
 import {
-  type TabOrchestrationResult,
-  planTabOrchestration,
-} from './orchestrator.js';
-import {
-  type RuntimeRecoveryState,
   initialRecoveryState,
+  type RuntimeRecoveryState,
   reduceRuntimeRecovery,
 } from './recovery-fsm.js';
 import { classifyRuntimeEvidence, runtimeEpochId } from './runtime-epoch-fsm.js';
@@ -123,8 +122,7 @@ const isRecord = (value: unknown): value is UnknownRecord =>
 const stringOrNull = (value: unknown): string | null =>
   typeof value === 'string' && value.length > 0 ? value : null;
 
-const recordOrNull = (value: unknown): UnknownRecord | null =>
-  isRecord(value) ? value : null;
+const recordOrNull = (value: unknown): UnknownRecord | null => (isRecord(value) ? value : null);
 
 export const clientToObservedTabClient = (
   client: unknown,
@@ -282,9 +280,7 @@ export const createMcpTabOrchestratorEffectAdapter = (
 ): TabOrchestratorEffectAdapter => ({
   async reloadExtensionSelf(effect) {
     const client = effect.clientId
-      ? deps.getLiveClients().find(
-          (item) => isRecord(item) && item.clientId === effect.clientId,
-        )
+      ? deps.getLiveClients().find((item) => isRecord(item) && item.clientId === effect.clientId)
       : null;
     if (!client) return { skipped: true, reason: 'no_client_for_extension_reload' };
     return deps.reloadChromeExtensionForClient(client, {

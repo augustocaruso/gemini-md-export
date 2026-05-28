@@ -178,10 +178,7 @@ export const evaluateWatchdogRecoveryRetryFsm = ({
   watchdogCode = null,
 }: WatchdogRecoveryRetryFsmInput): WatchdogRecoveryRetryFsmDecision => {
   const safeRetryAttempt = safeNonNegativeInteger(retryAttempt, 0);
-  const safeRetryLimit = safeNonNegativeInteger(
-    retryLimit,
-    DEFAULT_WATCHDOG_RECOVERY_RETRY_LIMIT,
-  );
+  const safeRetryLimit = safeNonNegativeInteger(retryLimit, DEFAULT_WATCHDOG_RECOVERY_RETRY_LIMIT);
   if (watchdogCode !== 'conversation_no_progress_timeout') {
     return { state: 'record_failure', reason: 'not_no_progress_watchdog', nextAttempt: null };
   }

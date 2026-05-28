@@ -133,6 +133,40 @@ test('native broker reloads an explicit tab target even when it is inactive', as
   assert.deepEqual(reloaded, [42]);
 });
 
+test('native broker reloads managed tabs through runtime action without tab inspection', async () => {
+  const chromeApi = {
+    tabs: {
+      query() {
+        throw new Error('tabs.query should not run for extension.reloadManagedTabs');
+      },
+    },
+    debugger: {
+      attach() {
+        throw new Error('debugger should not run for extension.reloadManagedTabs');
+      },
+    },
+  };
+  const calls = [];
+
+  const result = await handleNativeBrowserBrokerCommand(
+    {
+      command: 'extension.reloadManagedTabs',
+      payload: { reason: 'runtime-refresh', force: true, explicit: true },
+    },
+    chromeApi,
+    {
+      reloadManagedTabs: async (payload) => {
+        calls.push(payload);
+        return { ok: true, reloaded: 3, reason: payload.reason };
+      },
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.reloaded, 3);
+  assert.deepEqual(calls, [{ reason: 'runtime-refresh', force: true, explicit: true }]);
+});
+
 test('native broker reloads explicit Gemini and My Activity tab ids together', async () => {
   const { api, reloaded } = chromeApiForTabs({
     tabs: [
@@ -390,6 +424,63 @@ test('native broker claim reuses an existing managed claim group instead of recr
   assert.deepEqual(updatedGroups, [
     { groupId: 777, updateProperties: { title: 'Gemini Export', color: 'blue' } },
   ]);
+});
+
+test('native broker claim reports tab group create lastError while falling back to badge', async () => {
+  const { api } = chromeApiForTabs({
+    tabs: [{ id: 42, windowId: 7, active: true, url: 'https://gemini.google.com/app/abc123456789' }],
+    hrefByTabId: {
+      42: 'https://gemini.google.com/app/abc123456789',
+    },
+  });
+  api.tabs.group = (_createProperties, callback) => {
+    api.runtime.lastError = { message: 'Tabs cannot be grouped in this browser window' };
+    callback(null);
+    api.runtime.lastError = null;
+  };
+  api.tabGroups = {
+    update() {
+      throw new Error('tabGroups.update should not run after group failure');
+    },
+  };
+
+  const result = await handleNativeBrowserBrokerCommand(
+    { command: 'tabs.claim', payload: { claimId: 'claim-42', label: 'Gemini Export' } },
+    api,
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.visual.mode, 'action-badge');
+  assert.equal(result.visual.reason, 'tab-group-create-failed');
+  assert.equal(result.visual.detail, 'Tabs cannot be grouped in this browser window');
+});
+
+test('native broker claim reports tab group update lastError while falling back to badge', async () => {
+  const { api } = chromeApiForTabs({
+    tabs: [{ id: 42, windowId: 7, active: true, url: 'https://gemini.google.com/app/abc123456789' }],
+    hrefByTabId: {
+      42: 'https://gemini.google.com/app/abc123456789',
+    },
+  });
+  api.tabs.group = (_createProperties, callback) => callback(777);
+  api.tabGroups = {
+    update(_groupId, _updateProperties, callback) {
+      api.runtime.lastError = { message: 'Tab group cannot be edited right now' };
+      callback(null);
+      api.runtime.lastError = null;
+    },
+  };
+
+  const result = await handleNativeBrowserBrokerCommand(
+    { command: 'tabs.claim', payload: { claimId: 'claim-42', label: 'Gemini Export' } },
+    api,
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.visual.mode, 'action-badge');
+  assert.equal(result.visual.groupId, 777);
+  assert.equal(result.visual.reason, 'tab-group-update-failed');
+  assert.equal(result.visual.detail, 'Tab group cannot be edited right now');
 });
 
 test('native broker claim does not add a second My Activity tab when one is explicit', async () => {

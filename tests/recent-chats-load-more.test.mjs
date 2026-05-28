@@ -93,9 +93,14 @@ test('export all mantém lista acumulada do browser a cada rodada', () => {
   assert.match(block, /Array\.isArray\(result\.conversations\)/);
   assert.match(block, /resolveContinuationClient/);
   assert.match(block, /enqueueCommandWithClientRecovery/);
-  assert.match(source, /const commandReadyClients = liveClients\.filter\(commandChannelReadyForClient\)/);
-  assert.match(source, /if \(selector\.preferActive === true\)[\s\S]*?activeClients\.length === 1\) return activeClients\[0\]/);
-  assert.match(source, /const candidateClients = usefulRecentClients\.length > 0 \? usefulRecentClients : selectableClients/);
+  const managedSelectorSource = readFileSync(
+    resolve(ROOT, 'src', 'mcp', 'managed-tab-selection.ts'),
+    'utf-8',
+  );
+  assert.match(source, /requireManagedChatClient\(selector, 'recent-chats'/);
+  assert.match(source, /candidateMode:\s*'recent-chats'/);
+  assert.match(managedSelectorSource, /const usefulRecentClients = clients\.filter/);
+  assert.match(managedSelectorSource, /usefulRecentClients\.length > 0 \? usefulRecentClients : clients/);
   assert.match(block, /maxNoGrowthRounds/);
   assert.match(block, /args\.maxNoGrowthRounds\s*\|\|\s*8/);
   assert.match(block, /untilEnd:\s*args\.untilEndInBrowser !== false/);
@@ -591,10 +596,15 @@ test('listagem de chats expõe contagem parcial sem fingir total', () => {
   assert.match(block, /Nao informe esse numero como "ao todo"/);
   assert.match(block, /Nao chame gemini_chats\/gemini_ready\/gemini_tabs como fallback/);
   assert.match(block, /command: null/);
-  assert.match(source, /preferActive/);
-  assert.match(source, /activeClients\.length === 1/);
-  assert.match(source, /usefulRecentClients/);
-  assert.match(source, /recentConversationCountForClient\(client\) > 0 \|\| !!client\.page\?\.chatId/);
+  const managedSelectorSource = readFileSync(
+    resolve(ROOT, 'src', 'mcp', 'managed-tab-selection.ts'),
+    'utf-8',
+  );
+  assert.match(source, /requireManagedChatClient\(selector, 'recent-chats'/);
+  assert.match(source, /candidateMode:\s*'recent-chats'/);
+  assert.match(managedSelectorSource, /usefulRecentClients/);
+  assert.match(managedSelectorSource, /recentConversationCount\(client, recentConversationCountForClient\) > 0/);
+  assert.match(managedSelectorSource, /clientHasChatId\(client\)/);
   assert.match(source, /const hasExportableRecentConversationIdentity = \(conversation = \{\}\) =>/);
   assert.match(source, /filter\(hasExportableRecentConversationIdentity\)/);
   assert.match(source, /action:\s*\{\s*type:\s*'string',\s*enum:\s*\['list', 'count'/);

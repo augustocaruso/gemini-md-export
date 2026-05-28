@@ -43,7 +43,9 @@ export const normalizeDirectReexportSelection = (
     const idLike = item.chatId || item.id || '';
     const chatId = parseChatId(item.url) || parseChatId(idLike);
     if (!chatId) {
-      throw new Error(`chatId inválido para reexportação: ${String(item.chatId || item.url || item.id || raw)}`);
+      throw new Error(
+        `chatId inválido para reexportação: ${String(item.chatId || item.url || item.id || raw)}`,
+      );
     }
 
     const key = chatId;

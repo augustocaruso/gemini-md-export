@@ -1,5 +1,5 @@
-import type { FsmTransition, RuntimeEpochEvidence, TabOrchestratorEffect } from './types.js';
 import { runtimeEvidenceSatisfiesDesired } from './runtime-epoch-fsm.js';
+import type { FsmTransition, RuntimeEpochEvidence, TabOrchestratorEffect } from './types.js';
 
 const RUNTIME_EPOCH_TIMEOUT_MS = 8_000;
 const MAX_RECOVERY_ATTEMPTS = 2;
@@ -57,7 +57,10 @@ export const initialRecoveryState = ({
   backoffMs: RUNTIME_EPOCH_TIMEOUT_MS,
 });
 
-const waitForEpochEffect = (state: RuntimeRecoveryState, reason: string): TabOrchestratorEffect => ({
+const waitForEpochEffect = (
+  state: RuntimeRecoveryState,
+  reason: string,
+): TabOrchestratorEffect => ({
   type: 'runtime.waitForEpoch',
   reason,
   epochId: state.desiredEpochId,
@@ -81,7 +84,10 @@ const diagnosticEffect = (
   severity,
 });
 
-const runtimeEvidenceIsReady = (state: RuntimeRecoveryState, evidence: RuntimeEpochEvidence): boolean =>
+const runtimeEvidenceIsReady = (
+  state: RuntimeRecoveryState,
+  evidence: RuntimeEpochEvidence,
+): boolean =>
   runtimeEvidenceSatisfiesDesired(evidence, {
     requiredEpochId: state.desiredEpochId,
     minStrength: 'strong',
@@ -94,12 +100,10 @@ const terminalStatuses: ReadonlySet<RuntimeRecoveryStatus> = new Set([
   'failed',
 ]);
 
-const isTerminalState = (state: RuntimeRecoveryState): boolean => terminalStatuses.has(state.status);
+const isTerminalState = (state: RuntimeRecoveryState): boolean =>
+  terminalStatuses.has(state.status);
 
-const withWaitDeadline = (
-  state: RuntimeRecoveryState,
-  nowMs: number,
-): RuntimeRecoveryState => ({
+const withWaitDeadline = (state: RuntimeRecoveryState, nowMs: number): RuntimeRecoveryState => ({
   ...state,
   deadlineAtMs: nowMs + state.backoffMs,
 });
@@ -113,13 +117,16 @@ export const reduceRuntimeRecovery = (
   }
 
   if (event.type === 'reloadRequested') {
-    const nextState = withWaitDeadline({
-      ...state,
-      status: 'reload_requested',
-      updatedAtMs: event.nowMs,
-      attempts: state.attempts + 1,
-      lastReason: event.reason,
-    }, event.nowMs);
+    const nextState = withWaitDeadline(
+      {
+        ...state,
+        status: 'reload_requested',
+        updatedAtMs: event.nowMs,
+        attempts: state.attempts + 1,
+        lastReason: event.reason,
+      },
+      event.nowMs,
+    );
     return {
       state: nextState,
       effects: [
@@ -131,12 +138,15 @@ export const reduceRuntimeRecovery = (
 
   if (event.type === 'extensionContextInvalidated') {
     const reason = 'extension_context_invalidated';
-    const nextState = withWaitDeadline({
-      ...state,
-      status: 'awaiting_runtime_epoch',
-      updatedAtMs: event.nowMs,
-      lastReason: reason,
-    }, event.nowMs);
+    const nextState = withWaitDeadline(
+      {
+        ...state,
+        status: 'awaiting_runtime_epoch',
+        updatedAtMs: event.nowMs,
+        lastReason: reason,
+      },
+      event.nowMs,
+    );
     return {
       state: nextState,
       effects: [waitForEpochEffect(nextState, reason), selfHealEffect(reason)],
@@ -176,11 +186,18 @@ export const reduceRuntimeRecovery = (
   if (event.type === 'timeout') {
     const reason = 'runtime_epoch_timeout';
 
-    if (state.status === 'idle' || state.deadlineAtMs === undefined || event.nowMs < state.deadlineAtMs) {
+    if (
+      state.status === 'idle' ||
+      state.deadlineAtMs === undefined ||
+      event.nowMs < state.deadlineAtMs
+    ) {
       return { state, effects: [] };
     }
 
-    if (state.attempts >= MAX_RECOVERY_ATTEMPTS || state.rejectedEvidenceCount >= MAX_REJECTED_EVIDENCE) {
+    if (
+      state.attempts >= MAX_RECOVERY_ATTEMPTS ||
+      state.rejectedEvidenceCount >= MAX_REJECTED_EVIDENCE
+    ) {
       return {
         state: {
           ...state,
@@ -192,13 +209,16 @@ export const reduceRuntimeRecovery = (
       };
     }
 
-    const nextState = withWaitDeadline({
-      ...state,
-      status: 'awaiting_runtime_epoch',
-      updatedAtMs: event.nowMs,
-      attempts: state.attempts + 1,
-      lastReason: reason,
-    }, event.nowMs);
+    const nextState = withWaitDeadline(
+      {
+        ...state,
+        status: 'awaiting_runtime_epoch',
+        updatedAtMs: event.nowMs,
+        attempts: state.attempts + 1,
+        lastReason: reason,
+      },
+      event.nowMs,
+    );
     return {
       state: nextState,
       effects: [selfHealEffect(reason), waitForEpochEffect(nextState, reason)],

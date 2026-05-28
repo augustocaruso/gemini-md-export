@@ -8,12 +8,7 @@ type ExportJobLike = {
   [key: string]: unknown;
 };
 
-const TERMINAL_STATUSES = new Set([
-  'completed',
-  'completed_with_errors',
-  'failed',
-  'cancelled',
-]);
+const TERMINAL_STATUSES = new Set(['completed', 'completed_with_errors', 'failed', 'cancelled']);
 
 export type FinishedExportJobStatusNormalization = {
   changed: boolean;
@@ -49,7 +44,8 @@ export const normalizeFinishedExportJobStatus = (
     changed: true,
     fromStatus,
     status: 'cancelled',
-    reason: fromStatus === 'cancel_requested' ? 'pending-cancel-at-finish' : 'cancel-requested-at-finish',
+    reason:
+      fromStatus === 'cancel_requested' ? 'pending-cancel-at-finish' : 'cancel-requested-at-finish',
   };
 };
 
@@ -58,7 +54,11 @@ export const markExportJobFinishedForReport = (
   options: {
     nowIso?: string;
     clearFields?: string[];
-    appendTrace?(job: ExportJobLike, event: string, payload: FinishedExportJobStatusNormalization): void;
+    appendTrace?(
+      job: ExportJobLike,
+      event: string,
+      payload: FinishedExportJobStatusNormalization,
+    ): void;
     touch?(job: ExportJobLike): void;
   } = {},
 ) => {

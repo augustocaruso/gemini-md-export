@@ -8,6 +8,7 @@ export type ChatAttachment = {
   label: string;
   url?: string;
   hash?: string;
+  assetRefId?: string;
 };
 
 export type ChatTurn = {
@@ -28,6 +29,7 @@ export type ChatMetadata = {
 
 export type EvidenceSource =
   | 'chat-dom'
+  | 'gemini-private-api'
   | 'my-activity-web'
   | 'takeout-html'
   | 'takeout-json'

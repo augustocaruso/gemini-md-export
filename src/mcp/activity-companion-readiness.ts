@@ -211,9 +211,7 @@ const copyScalar = (target: AnyRecord, source: AnyRecord, key: string) => {
 
 const tabIdArrayOrNull = (value: unknown): readonly number[] | null => {
   if (!Array.isArray(value)) return null;
-  const tabIds = value
-    .map(positiveTabId)
-    .filter((tabId): tabId is number => tabId !== null);
+  const tabIds = value.map(positiveTabId).filter((tabId): tabId is number => tabId !== null);
   return tabIds.length > 0 ? Array.from(new Set(tabIds)) : null;
 };
 
@@ -231,7 +229,8 @@ const summarizeVisualResult = (visual: unknown): AnyRecord | null => {
 };
 
 const summarizeNativeActionResult = (result: unknown): AnyRecord | null => {
-  if (!isRecord(result)) return result === null || result === undefined ? null : { value: String(result) };
+  if (!isRecord(result))
+    return result === null || result === undefined ? null : { value: String(result) };
   const summary: AnyRecord = {};
   for (const key of [
     'ok',

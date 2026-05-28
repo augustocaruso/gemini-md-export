@@ -409,6 +409,12 @@ const nativeBrokerReloadSelfPayload = (args: NativeExportArgs = {}) => ({
   reason: args.reason || 'mcp-native-broker-reload-self',
 });
 
+const nativeBrokerReloadManagedTabsPayload = (args: NativeExportArgs = {}) => ({
+  reason: args.reason || 'mcp-native-broker-managed-tabs-reload',
+  force: args.force !== false,
+  explicit: args.explicit !== false,
+});
+
 export const shouldReturnNativeBrokerReloadResult = (
   result: Readonly<Record<string, unknown>> | null | undefined,
   args: NativeExportArgs = {},
@@ -557,9 +563,7 @@ export const createTabClaimRelease =
       const orphanClientRecord = orphanClient as MutableRecord | null;
       const orphanClientClaim = (orphanClientRecord?.tabClaim ||
         (orphanClientRecord?.summary as MutableRecord | undefined)?.tabClaim ||
-        null) as
-        | MutableRecord
-        | null;
+        null) as MutableRecord | null;
       const releaseTabId = args.tabId ?? orphanClientRecord?.tabId;
       const releaseTabIds =
         args.tabIds || (orphanClientClaim?.visual as MutableRecord | undefined)?.tabIds || null;
@@ -738,9 +742,9 @@ export const createAutoTabClaimReleaseForJob =
         reason,
       });
       if (deps.shouldUseNativeBrowserBroker()) {
-        const releasedVisual = ((job.tabClaimRelease as MutableRecord | undefined)?.released as
-          | MutableRecord
-          | undefined)?.visual as MutableRecord | undefined;
+        const releasedVisual = (
+          (job.tabClaimRelease as MutableRecord | undefined)?.released as MutableRecord | undefined
+        )?.visual as MutableRecord | undefined;
         const nativeReleaseTabIds = releaseTabIds || releasedVisual?.tabIds || null;
         job.nativeTabClaimRelease = await deps.tryNativeBrowserBrokerTabsAction('release', {
           tabId: releaseTabId,
@@ -868,6 +872,14 @@ export const createNativeBrokerTabsActionRunner =
     if (action === 'selfHealContentScripts') {
       return nativeBrowserBrokerToolResult(
         await nativeBrowserBroker.selfHealContentScripts(nativeBrokerSelfHealPayload(args), {
+          allowFallback: args.allowHttpBrowserFallback === true,
+        }),
+        action,
+      );
+    }
+    if (action === 'reloadManagedTabs') {
+      return nativeBrowserBrokerToolResult(
+        await nativeBrowserBroker.reloadManagedTabs(nativeBrokerReloadManagedTabsPayload(args), {
           allowFallback: args.allowHttpBrowserFallback === true,
         }),
         action,

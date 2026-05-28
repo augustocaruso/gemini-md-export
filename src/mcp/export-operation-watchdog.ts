@@ -86,13 +86,9 @@ export const evaluateConversationNoProgressBudgetFsm = ({
     ? Math.floor(browserNavigationTimeoutMs)
     : 0;
   const safeRecoveryGapMs = isFiniteNonNegativeMs(recoveryGapMs) ? Math.floor(recoveryGapMs) : 0;
-  const safeMaxMs = isFiniteNonNegativeMs(maxMs) && maxMs > 0
-    ? Math.floor(maxMs)
-    : Number.POSITIVE_INFINITY;
-  const minimumMs = Math.min(
-    safeMaxMs,
-    safeBrowserNavigationTimeoutMs + safeRecoveryGapMs,
-  );
+  const safeMaxMs =
+    isFiniteNonNegativeMs(maxMs) && maxMs > 0 ? Math.floor(maxMs) : Number.POSITIVE_INFINITY;
+  const minimumMs = Math.min(safeMaxMs, safeBrowserNavigationTimeoutMs + safeRecoveryGapMs);
   const noProgressMs = Math.min(safeMaxMs, Math.max(safeRequestedMs, minimumMs));
   return {
     state: 'normalized',
@@ -100,8 +96,6 @@ export const evaluateConversationNoProgressBudgetFsm = ({
     minimumMs,
     noProgressMs,
     reason:
-      noProgressMs > safeRequestedMs
-        ? 'raised_above_browser_navigation_timeout'
-        : 'requested_ok',
+      noProgressMs > safeRequestedMs ? 'raised_above_browser_navigation_timeout' : 'requested_ok',
   };
 };

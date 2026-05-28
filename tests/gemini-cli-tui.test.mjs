@@ -1623,6 +1623,78 @@ test('CLI chats count continua quando o indicador visual da aba trava', async ()
   });
 });
 
+test('CLI chats count continua quando canal do indicador visual ainda esta reconectando', async () => {
+  await withServer((req, res, url) => {
+    if (url.pathname === '/agent/ready') {
+      sendJson(res, 200, {
+        ready: true,
+        mode: 'post-update',
+        connectedClientCount: 1,
+        selectableTabCount: 1,
+        commandReadyClientCount: 1,
+      });
+      return;
+    }
+    if (url.pathname === '/agent/tabs' && url.searchParams.get('action') === 'claim') {
+      sendJson(res, 503, {
+        ok: false,
+        error: 'A aba ativa ainda nao abriu o canal de comandos.',
+        code: 'command_channel_unready',
+      });
+      return;
+    }
+    if (url.pathname === '/agent/clients') {
+      sendJson(res, 200, {
+        connectedClients: [
+          {
+            clientId: 'client-1',
+            tabId: 101,
+            isActiveTab: true,
+            lastSeenAt: new Date().toISOString(),
+            listedConversationCount: 33,
+            sidebarConversationCount: 33,
+          },
+        ],
+      });
+      return;
+    }
+    if (url.pathname === '/agent/recent-chats') {
+      sendJson(res, 200, {
+        ok: true,
+        countStatus: 'complete',
+        countIsTotal: true,
+        totalKnown: true,
+        totalCount: 119,
+        knownLoadedCount: 119,
+        minimumKnownCount: 119,
+        pagination: {
+          loadedCount: 119,
+          reachedEnd: true,
+          canLoadMore: false,
+        },
+        conversations: [],
+      });
+      return;
+    }
+    sendJson(res, 404, { error: `not found: ${url.pathname}` });
+  }, async (bridgeUrl, requests) => {
+    const stdout = captureStream();
+    const stderr = captureStream();
+    const run = await main(
+      ['chats', 'count', '--bridge-url', bridgeUrl, '--plain', '--result-json'],
+      { stdout, stderr },
+    );
+
+    assert.equal(run.exitCode, 0);
+    assert.match(stdout.text(), /Indicador visual da aba nao respondeu/);
+    assert.match(stdout.text(), /Total confirmado: 119 chat\(s\)/);
+    assert.equal(stderr.text(), '');
+    const countRequest = requests.find((item) => item.pathname === '/agent/recent-chats');
+    assert.equal(countRequest.searchParams.get('autoClaim'), 'false');
+    assert.equal(requests.some((item) => item.pathname === '/agent/release-tab'), false);
+  });
+});
+
 test('CLI chats count libera claim explicita sem imprimir JSON extra', async () => {
   await withServer((req, res, url) => {
     if (url.pathname === '/agent/ready') {
@@ -2381,6 +2453,102 @@ test('CLI browser status nao recarrega varias abas quando falta aba Gemini ativa
       });
     },
   );
+});
+
+test('CLI browser status acorda Gemini quando so My Activity esta conectado', async () => {
+  const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-cli-activity-only-wake-'));
+  try {
+    await withEnv(
+      {
+        GEMINI_MD_EXPORT_CLI_BROWSER_LAUNCH_DRY_RUN: 'true',
+        GEMINI_MCP_BROWSER_LAUNCH_STATE_DIR: tmpRoot,
+        GEMINI_MD_EXPORT_EXISTING_TAB_GRACE_MS: '300',
+      },
+      async () => {
+        await withServer((req, res, url) => {
+          if (url.pathname === '/agent/ready') {
+            sendJson(res, 200, {
+              ready: false,
+              blockingIssue: 'no_selectable_gemini_tab',
+              mode: 'hot',
+              connectedClientCount: 3,
+              selectableTabCount: 0,
+              commandReadyClientCount: 3,
+              diagnosticClients: [
+                {
+                  clientId: 'activity-1',
+                  tabId: 101,
+                  page: {
+                    kind: 'activity',
+                    url: 'https://myactivity.google.com/product/gemini',
+                  },
+                },
+                {
+                  clientId: 'activity-2',
+                  tabId: 102,
+                  page: {
+                    kind: 'activity',
+                    url: 'https://myactivity.google.com/product/gemini',
+                  },
+                },
+              ],
+            });
+            return;
+          }
+          if (url.pathname === '/agent/clients') {
+            sendJson(res, 200, {
+              mcp: { bridgeRole: 'primary' },
+              connectedClients: [
+                {
+                  clientId: 'activity-1',
+                  tabId: 101,
+                  page: {
+                    kind: 'activity',
+                    url: 'https://myactivity.google.com/product/gemini',
+                  },
+                },
+              ],
+            });
+            return;
+          }
+          sendJson(res, 404, { error: `not found: ${url.pathname}` });
+        }, async (bridgeUrl, requests) => {
+          const stdout = captureStream();
+          const stderr = captureStream();
+          const run = await main(
+            [
+              'browser',
+              'status',
+              '--bridge-url',
+              bridgeUrl,
+              '--plain',
+              '--wake',
+              '--ready-wait-ms',
+              '10',
+            ],
+            { stdout, stderr },
+          );
+
+          assert.equal(run.exitCode, 4);
+          assert.match(stdout.text(), /Abrindo Gemini Web em background/);
+          assert.doesNotMatch(stdout.text(), /Aguardando aba Gemini existente reconectar/);
+          assert.equal(stderr.text(), '');
+          assert.equal(run.result.blockingIssue, 'no_selectable_gemini_tab');
+          assert.equal(
+            requests.some((item) => item.pathname === '/agent/tabs' && item.searchParams.get('action') === 'reload'),
+            false,
+          );
+
+          const launchState = JSON.parse(readFileSync(resolve(tmpRoot, 'browser-launch.json'), 'utf-8'));
+          assert.equal(launchState.source, 'cli');
+          assert.equal(launchState.status, 'dry-run');
+          assert.equal(launchState.launch.dryRun, true);
+        });
+      },
+    );
+  } finally {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  }
 });
 
 test('CLI browser status recarrega abas existentes quando build da extensao diverge', async () => {

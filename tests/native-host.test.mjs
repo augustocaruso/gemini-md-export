@@ -209,6 +209,8 @@ test('content script prefere native proxy para bridgeRequest com fallback HTTP',
   assert.match(source, /preferred:\s*'native'/);
   assert.match(source, /gemini-md-export\/native-proxy-http/);
   assert.match(source, /NATIVE_BRIDGE_TRANSPORT_COOLDOWN_MS/);
+  assert.match(source, /disableNativeBridgeTransport/);
+  assert.match(source, /catch \(err\)[\s\S]*?disableNativeBridgeTransport\(err\);[\s\S]*?return null;/);
   assert.match(source, /bridgeTransportState\.active\s*=\s*'http'/);
 });
 

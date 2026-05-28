@@ -6,6 +6,8 @@
 // de extensão e servir de ponto de integração futura com helper local,
 // native messaging ou automações.
 
+import { captureTabClipWithDebugger } from './browser/background/chrome-debugger-controller.js';
+import { readGeminiPrivateChat } from './browser/background/gemini-private-api-client.js';
 import {
   decideManagedTabsReload,
   managedTabsReloadRuntimeKey,
@@ -98,6 +100,16 @@ const nativeBrokerPort = createNativeBrokerPort({
         tabIds: payload.tabIds,
         maxTabs: payload.maxTabs,
       }),
+    reloadManagedTabs: async (payload = {}) => {
+      const reload = await reloadGeminiTabs(payload.reason || 'native-broker-managed-tabs-reload', {
+        force: payload.force !== false,
+        explicit: payload.explicit !== false,
+      });
+      return {
+        ...reload,
+        reloadMode: 'managed-tabs',
+      };
+    },
     reloadSelf: async (payload = {}) => {
       const reason = payload.reason || 'native-broker-reload-self';
       await storageSet({
@@ -1488,6 +1500,7 @@ const applyTabClaim = async (message, sender = {}) => {
             tabId,
             groupId: grouped.groupId,
             reason: updated.reason || 'tab-group-update-failed',
+            detail: updated.reason || null,
           };
         }
       } else {
@@ -1496,6 +1509,7 @@ const applyTabClaim = async (message, sender = {}) => {
           tabId,
           groupId: null,
           reason: grouped.reason || 'tab-group-create-failed',
+          detail: grouped.reason || null,
         };
       }
     } else {
@@ -2052,6 +2066,54 @@ const fetchAsset = async (source) => {
   };
 };
 
+const renderedMediaClipFromMessage = (message) => {
+  const rect = message?.rect || message?.clip || {};
+  const maxSide = 4096;
+  const maxPixels = 12_000_000;
+  const x = Math.max(0, Number(rect.pageX ?? rect.x));
+  const y = Math.max(0, Number(rect.pageY ?? rect.y));
+  let width = Math.max(1, Number(rect.width));
+  let height = Math.max(1, Number(rect.height));
+  if (![x, y, width, height].every(Number.isFinite)) return null;
+  if (width > maxSide || height > maxSide || width * height > maxPixels) {
+    const factor = Math.min(
+      maxSide / width,
+      maxSide / height,
+      Math.sqrt(maxPixels / (width * height)),
+    );
+    width = Math.max(1, Math.floor(width * factor));
+    height = Math.max(1, Math.floor(height * factor));
+  }
+  return { x, y, width, height, scale: 1 };
+};
+
+const captureRenderedMedia = async (message, sender = {}) => {
+  const tabId = Number(sender.tab?.id || message?.tabId);
+  if (!Number.isInteger(tabId) || tabId <= 0) {
+    return { ok: false, error: 'sender-tab-unavailable', code: 'sender-tab-unavailable' };
+  }
+
+  const clip = renderedMediaClipFromMessage(message);
+  if (!clip) {
+    return { ok: false, error: 'Recorte de mídia inválido.', code: 'invalid-media-clip' };
+  }
+
+  const captured = await captureTabClipWithDebugger(tabId, clip, { chromeApi: chrome });
+  if (!captured.ok) {
+    return {
+      ok: false,
+      error: captured.error,
+      code: captured.code,
+    };
+  }
+  return {
+    ok: true,
+    mimeType: captured.mimeType,
+    contentBase64: captured.contentBase64,
+    clip: captured.clip,
+  };
+};
+
 const artifactFrameProbeScript = (options = {}) => {
   const maxSampleLength = Math.max(0, Math.min(5000, Number(options.maxSampleLength || 1200)));
   const includeHtmlSample = options.includeHtmlSample === true;
@@ -2254,6 +2316,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+  if (message?.type === 'gemini-md-export/private-api-read-chat') {
+    readGeminiPrivateChat({
+      chatId: message.chatId,
+      title: message.title || sender?.tab?.title || null,
+    }).then(sendResponse);
+    return true;
+  }
+
   if (message?.type === 'gemini-md-export/native-proxy-http') {
     ensureOffscreenDocument({
       reason: message.reason || 'native-proxy-http',
@@ -2333,6 +2403,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({
           ok: false,
           error: err?.message || String(err),
+        });
+      });
+    return true;
+  }
+
+  if (message?.type === 'gemini-md-export/capture-rendered-media') {
+    captureRenderedMedia(message, sender)
+      .then(sendResponse)
+      .catch((err) => {
+        sendResponse({
+          ok: false,
+          error: err?.message || String(err),
+          code: 'rendered-media-capture-failed',
         });
       });
     return true;

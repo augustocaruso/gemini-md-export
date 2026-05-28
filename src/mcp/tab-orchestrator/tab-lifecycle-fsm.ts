@@ -92,10 +92,7 @@ export const initialTabPoolState = ({
   updatedAtMs: nowMs,
 });
 
-const hasDesiredStrongRuntime = (
-  evidence: RuntimeEpochEvidence,
-  desiredEpochId: string,
-): boolean =>
+const hasDesiredStrongRuntime = (evidence: RuntimeEpochEvidence, desiredEpochId: string): boolean =>
   evidence.epochId === desiredEpochId &&
   evidence.strength === 'strong' &&
   evidence.hasCommandChannel === true;
@@ -265,18 +262,14 @@ const canAllocate = (
 ): boolean => {
   if (tab.pageKind !== request.pageKind) return false;
   if (tab.status !== 'ready') return false;
-  if (tab.leaseClaimId) return false;
+  if (tab.leaseClaimId && tab.leaseClaimId !== request.claimId) return false;
   if (request.requireStrongRuntime && !hasDesiredStrongRuntime(tab.evidence, desiredEpochId)) {
     return false;
   }
   return true;
 };
 
-const reserveTabLease = (
-  state: TabPoolState,
-  tab: ManagedTab,
-  claimId: string,
-): TabPoolState => ({
+const reserveTabLease = (state: TabPoolState, tab: ManagedTab, claimId: string): TabPoolState => ({
   ...state,
   tabs: state.tabs.map((candidate) =>
     candidate === tab ? { ...candidate, leaseClaimId: claimId } : candidate,

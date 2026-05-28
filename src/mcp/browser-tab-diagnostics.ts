@@ -75,7 +75,7 @@ export const diagnoseManagedBrowserTabs = ({
   const first = (...kinds: BrowserTabDiagnosisKind[]) =>
     classified.find((item) => kinds.includes(item.kind));
   const relevant =
-    first('google_sorry') || first('google_login') || first('gemini') || first('loading') || null;
+    first('gemini') || first('google_sorry') || first('google_login') || first('loading') || null;
 
   if (relevant) {
     return {

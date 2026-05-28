@@ -27,6 +27,7 @@ import { ensureChromeExtensionReady } from './chrome-extension-guard.mjs';
 import {
   describeRecentBrowserLaunch,
   launchGeminiBrowser,
+  readBrowserTabsForGeminiDiagnostics,
   readBrowserLaunchState,
   resolveGeminiBrowserLaunchPlan,
   writeBrowserLaunchState,
@@ -222,6 +223,23 @@ const {
   evaluateBridgeHealth,
 } = await import(compiledTsModuleUrl('mcp', 'bridge-health.js'));
 const {
+  buildBridgeRequestRecord,
+  bridgeRequestBlocksIdle,
+  transitionBridgeIdleLifecycle,
+} = await import(compiledTsModuleUrl('mcp', 'bridge-idle-lifecycle.js'));
+const {
+  buildProcessCleanupDecision,
+  buildProcessLifecycleSummary,
+  cleanupPlanReason,
+} = await import(compiledTsModuleUrl('mcp', 'process-cleanup-policy.js'));
+const {
+  evaluateMcpBrowserLaunchGate,
+  observeMcpBrowserLaunchResultState,
+} = await import(compiledTsModuleUrl('mcp', 'browser-launch-lifecycle.js'));
+const {
+  createMcpPrivateReadAction,
+} = await import(compiledTsModuleUrl('mcp', 'private-read-action.js'));
+const {
   isRecentCommandFailureBlocking,
 } = await import(compiledTsModuleUrl('mcp', 'command-channel-health.js'));
 const {
@@ -283,6 +301,7 @@ const {
   buildTabOrchestratorReloadRecovery,
   createMcpTabOrchestratorEffectAdapter,
   executeTabOrchestratorEffects,
+  createManagedChatClientSelector,
   summarizeTabOrchestratorPlan,
   tabOrchestratorBlockingIssueForReady,
 } = await import(compiledTsModuleUrl('mcp', 'tab-orchestrator', 'index.js'));
@@ -544,6 +563,7 @@ const PROCESS_CLEANUP_TIMEOUT_MS = Number(
   process.env.GEMINI_MCP_PROCESS_CLEANUP_TIMEOUT_MS || 8000,
 );
 const EXPORTER_PROCESS_RE = /gemini-md-export|mcp-server\.js/i;
+const MCP_SERVER_PROCESS_RE = /(?:^|\s|[/\\])(mcp-server|bridge-server)\.js(?:\s|$)/i;
 const pathContains = (candidate, fragment) =>
   String(candidate || '').replace(/\\/g, '/').toLowerCase().includes(fragment);
 
@@ -591,7 +611,7 @@ let bridgeRole = 'starting';
 let bridgeListening = false;
 let bridgeStartupSettled = false;
 let bridgeStartupResolve;
-let activeBridgeRequests = 0;
+const activeBridgeRequestRecords = new Set();
 let lastBridgeActivityAt = Date.now();
 let lastChromeHeartbeatAt = 0;
 let idleShutdownTimer = null;
@@ -629,7 +649,7 @@ const browserSideEffectsStatus = () => ({
 const probeNativeBrowserBrokerStatusOnce = async () => {
   if (!shouldUseNativeBrowserBroker()) return nativeBrokerStatusFromProbe({ enabled: false });
   const response = await withNativeBrokerSoftTimeout(
-    nativeBrowserBroker.status({ allowFallback: true }),
+    nativeBrowserBroker.extensionStatus({ allowFallback: true }),
     750,
     { ok: false, code: 'native_broker_probe_timeout' },
   );
@@ -778,49 +798,32 @@ const touchBridgeActivity = () => {
   lastBridgeActivityAt = Date.now();
 };
 
-const bridgeIdleLifecycleSnapshot = () => {
-  const now = Date.now();
-  const activeJobs = activeExportJobs();
-  const liveClientCount = getLiveClients().length;
-  const heartbeatAgeMs = lastChromeHeartbeatAt ? now - lastChromeHeartbeatAt : null;
-  const idleForMs = Math.max(0, now - lastBridgeActivityAt);
-  const blockedBy = [];
-  if (activeBridgeRequests > 0) blockedBy.push('active_request');
-  if (activeJobs.length > 0) blockedBy.push('active_job');
-  if (liveClientCount > 0) blockedBy.push('recent_extension_heartbeat');
+const activeBridgeRequestBlockers = (now = Date.now()) =>
+  Array.from(activeBridgeRequestRecords).filter((record) =>
+    bridgeRequestBlocksIdle(record, clientHasLiveRuntimeEvidenceForServer(clients.get(record.clientId), now)),
+  );
 
-  return {
-    enabled: cli.exitWhenIdle === true,
+const bridgeIdleLifecycleInput = (now = Date.now()) => ({
+    exitWhenIdle: cli.exitWhenIdle === true,
     keepAliveMs: cli.keepAliveMs,
-    idleForMs,
-    activeRequestCount: activeBridgeRequests,
-    activeJobCount: activeJobs.length,
-    liveClientCount,
-    lastActivityAt: new Date(lastBridgeActivityAt).toISOString(),
-    lastChromeHeartbeatAt: lastChromeHeartbeatAt
-      ? new Date(lastChromeHeartbeatAt).toISOString()
-      : null,
-    heartbeatAgeMs,
-    blockedBy,
-    exitsWhenIdle: cli.exitWhenIdle === true && blockedBy.length === 0,
-    remainingMs:
-      cli.exitWhenIdle === true && blockedBy.length === 0
-        ? Math.max(0, cli.keepAliveMs - idleForMs)
-        : null,
-  };
-};
+    now,
+    lastActivityAt: lastBridgeActivityAt,
+    lastChromeHeartbeatAt,
+    activeRequestCount: activeBridgeRequestRecords.size,
+    activeRequestBlockerCount: activeBridgeRequestBlockers(now).length,
+    activeJobCount: activeExportJobs().length,
+    liveClientCount: getLiveClients().length,
+});
+
+const bridgeIdleLifecycleSnapshot = () => transitionBridgeIdleLifecycle(bridgeIdleLifecycleInput()).snapshot;
 
 const scheduleIdleShutdownCheck = () => {
   if (!cli.exitWhenIdle || shuttingDown) return;
   if (idleShutdownTimer) clearTimeout(idleShutdownTimer);
-  const snapshot = bridgeIdleLifecycleSnapshot();
-  const delayMs =
-    snapshot.blockedBy.length > 0
-      ? Math.min(30_000, Math.max(1000, cli.keepAliveMs))
-      : Math.max(1000, Math.min(30_000, snapshot.remainingMs || 0));
+  const delayMs = transitionBridgeIdleLifecycle(bridgeIdleLifecycleInput()).delayMs;
   idleShutdownTimer = setTimeout(() => {
     maybeShutdownIdleBridge();
-  }, delayMs);
+  }, delayMs || 1000);
   idleShutdownTimer.unref?.();
 };
 
@@ -828,7 +831,7 @@ const maybeShutdownIdleBridge = () => {
   if (!cli.exitWhenIdle || shuttingDown) return;
   cleanupStaleClients();
   const snapshot = bridgeIdleLifecycleSnapshot();
-  if (snapshot.blockedBy.length > 0 || snapshot.idleForMs < cli.keepAliveMs) {
+  if (snapshot.blockedBy.length > 0 || !snapshot.exitsWhenIdle || snapshot.idleForMs < cli.keepAliveMs) {
     scheduleIdleShutdownCheck();
     return;
   }
@@ -840,13 +843,14 @@ const maybeShutdownIdleBridge = () => {
 };
 
 const trackBridgeRequestLifecycle = (req, res) => {
-  activeBridgeRequests += 1;
+  const record = buildBridgeRequestRecord(req.method, req.url);
+  activeBridgeRequestRecords.add(record);
   touchBridgeActivity();
   let finished = false;
   const finish = () => {
     if (finished) return;
     finished = true;
-    activeBridgeRequests = Math.max(0, activeBridgeRequests - 1);
+    activeBridgeRequestRecords.delete(record);
     touchBridgeActivity();
     scheduleIdleShutdownCheck();
   };
@@ -1068,6 +1072,30 @@ const looksLikeExporterProcess = (processInfo = {}) =>
       .filter(Boolean)
       .join('\n'),
   );
+
+const looksLikeMcpServerProcess = (processInfo = {}) =>
+  MCP_SERVER_PROCESS_RE.test(
+    [
+      processInfo.processName,
+      processInfo.path,
+      processInfo.commandLine,
+      processInfo.cwd,
+      ...(Array.isArray(processInfo.argv) ? processInfo.argv : []),
+    ]
+      .filter(Boolean)
+      .join('\n'),
+  );
+
+const processIsAlive = (pid) => {
+  const parsed = parseInteger(pid);
+  if (!parsed || parsed <= 1) return false;
+  try {
+    process.kill(parsed, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 const normalizeProcessCandidate = (candidate = {}) => {
   const pid = parseInteger(candidate.pid);
@@ -1386,34 +1414,8 @@ const primaryBridgeMismatchMessage = (mismatch) => {
   return `A porta ${cli.host}:${cli.port} parece ocupada${pid}, mas esta instância não conseguiu consultar o bridge primário (${mismatch.detail || 'sem detalhe'}). Reinicie o Gemini CLI; se persistir, feche o processo dono da porta ou reinicie a máquina.`;
 };
 
-const cleanupEligibilityForProcess = (candidate, mismatch, portOwner) => {
-  if (!candidate.isPortOwner) {
-    return { eligible: false, reason: 'not_port_owner' };
-  }
-  if (!mismatch) {
-    return { eligible: false, reason: 'primary_healthy' };
-  }
-  if (mismatch.kind === 'name') {
-    return { eligible: false, reason: 'port_owner_is_other_service' };
-  }
-  if (!portOwner?.pid) {
-    return { eligible: false, reason: 'port_owner_unknown' };
-  }
-  if (candidate.pid === process.pid) {
-    return { eligible: false, reason: 'current_process_protected' };
-  }
-  if (candidate.pid === process.ppid) {
-    return { eligible: false, reason: 'parent_process_protected' };
-  }
-  if (!candidate.looksLikeExporter) {
-    return { eligible: false, reason: 'process_not_recognized_as_exporter' };
-  }
-  return {
-    eligible: true,
-    reason: `stale_primary_${mismatch.kind}`,
-    requiresConfirm: true,
-  };
-};
+const cleanupEligibilityForProcess = (candidate, mismatch, portOwner) =>
+  buildProcessCleanupDecision(candidate, mismatch, portOwner);
 
 const recommendedRecoveryAction = (mismatch, cleanupPlan) => {
   if (!mismatch) {
@@ -1448,6 +1450,8 @@ const buildProcessDiagnostics = async () => {
       const isParent = item.pid === process.ppid;
       const isPortOwner = item.pid === portOwner?.pid;
       const looksLikeExporter = looksLikeExporterProcess(item);
+      const looksLikeMcpServer = looksLikeMcpServerProcess(item);
+      const parentAlive = processIsAlive(item.ppid);
       const detectedVersion = isCurrent
         ? SERVER_VERSION
         : isPortOwner && health?.payload?.version
@@ -1467,6 +1471,8 @@ const buildProcessDiagnostics = async () => {
           isParent,
           isPortOwner,
           looksLikeExporter,
+          looksLikeMcpServer,
+          parentAlive,
         },
         mismatch,
         portOwner,
@@ -1477,6 +1483,8 @@ const buildProcessDiagnostics = async () => {
         isParent,
         isPortOwner,
         looksLikeExporter,
+        looksLikeMcpServer,
+        parentAlive,
         detectedVersion,
         state,
         cleanup,
@@ -1497,6 +1505,7 @@ const buildProcessDiagnostics = async () => {
       path: item.path,
       commandLine: item.commandLine,
       listeningPorts: item.listeningPorts,
+      parentAlive: item.parentAlive,
       detectedVersion: item.detectedVersion,
       state: item.state,
       reason: item.cleanup.reason,
@@ -1504,9 +1513,10 @@ const buildProcessDiagnostics = async () => {
   const cleanupPlan = {
     eligible: targets.length > 0,
     targets,
-    reason: targets.length > 0 ? 'safe_stale_primary_found' : processes.find((item) => item.isPortOwner)?.cleanup?.reason || 'no_safe_target',
+    reason: cleanupPlanReason(targets, processes),
     requiresConfirm: targets.length > 0,
   };
+  const lifecycleSummary = buildProcessLifecycleSummary({ processes, cleanupPlan });
 
   return {
     ok: true,
@@ -1543,6 +1553,7 @@ const buildProcessDiagnostics = async () => {
     },
     processes,
     cleanupPlan,
+    lifecycleSummary,
     recommendedAction: recommendedRecoveryAction(mismatch, cleanupPlan),
   };
 };
@@ -2160,13 +2171,18 @@ if (cli.help) {
   process.exit(0);
 }
 
+const BRIDGE_CORS_BASE_HEADERS = {
+  'access-control-allow-methods': 'GET,POST,OPTIONS',
+  'access-control-allow-headers': 'content-type',
+  'access-control-allow-private-network': 'true',
+};
+
 const sendJson = (res, statusCode, payload) => {
   res.writeHead(statusCode, {
     'content-type': 'application/json; charset=utf-8',
     'cache-control': 'no-store',
     'access-control-allow-origin': '*',
-    'access-control-allow-methods': 'GET,POST,OPTIONS',
-    'access-control-allow-headers': 'content-type',
+    ...BRIDGE_CORS_BASE_HEADERS,
   });
   res.end(JSON.stringify(payload));
 };
@@ -2200,8 +2216,7 @@ const sendBridgeJson = (req, res, statusCode, payload) => {
   res.writeHead(statusCode, {
     'content-type': 'application/json; charset=utf-8',
     'cache-control': 'no-store',
-    'access-control-allow-methods': 'GET,POST,OPTIONS',
-    'access-control-allow-headers': 'content-type',
+    ...BRIDGE_CORS_BASE_HEADERS,
     ...bridgeCorsHeaders(req),
   });
   res.end(JSON.stringify(payload));
@@ -2210,8 +2225,7 @@ const sendBridgeJson = (req, res, statusCode, payload) => {
 const sendBridgeNoContent = (req, res) => {
   res.writeHead(204, {
     'cache-control': 'no-store',
-    'access-control-allow-methods': 'GET,POST,OPTIONS',
-    'access-control-allow-headers': 'content-type',
+    ...BRIDGE_CORS_BASE_HEADERS,
     ...bridgeCorsHeaders(req),
   });
   res.end();
@@ -2237,8 +2251,7 @@ const sendNoContent = (res) => {
   res.writeHead(204, {
     'cache-control': 'no-store',
     'access-control-allow-origin': '*',
-    'access-control-allow-methods': 'GET,POST,OPTIONS',
-    'access-control-allow-headers': 'content-type',
+    ...BRIDGE_CORS_BASE_HEADERS,
   });
   res.end();
 };
@@ -2308,7 +2321,7 @@ const readJsonBody = async (req) => {
 };
 
 const clientHasLiveRuntimeEvidenceForServer = (client, now = Date.now()) =>
-  clientHasLiveRuntimeEvidence(client, {
+  !!client && clientHasLiveRuntimeEvidence(client, {
     now,
     staleAfterMs: CLIENT_STALE_MS,
     warmupGraceMs: 4000,
@@ -3435,7 +3448,11 @@ const requireNotebookClient = (selector = {}) => {
 let lastBrowserLaunchAt = 0;
 let lastBrowserLaunchResult = null;
 
-const launchChromeForGemini = async ({ profileDirectory, targetUrl, explicit = false } = {}) => {
+const launchChromeForGemini = async ({
+  profileDirectory,
+  targetUrl = 'https://gemini.google.com/app',
+  explicit = false,
+} = {}) => {
   assertBrowserSideEffect('browser-launch', { explicit });
   const now = Date.now();
   const launchMatchesTarget = (launch = {}) => {
@@ -3463,7 +3480,37 @@ const launchChromeForGemini = async ({ profileDirectory, targetUrl, explicit = f
     return reuseProbe;
   }
 
-  const sharedRecentLaunch = describeRecentBrowserLaunch(readBrowserLaunchState(), {
+  const previousLaunchState = readBrowserLaunchState();
+  let browserTabs = null;
+  try {
+    browserTabs = readBrowserTabsForGeminiDiagnostics({ timeoutMs: 700 });
+  } catch (err) {
+    browserTabs = {
+      ok: false,
+      error: err?.message || String(err),
+      diagnosis: { kind: 'unknown', terminal: false, url: null },
+    };
+  }
+  const launchId = `mcp-${PROCESS_SESSION_ID}-${randomUUID()}`;
+  const launchGate = evaluateMcpBrowserLaunchGate({
+    previousState: previousLaunchState,
+    browserTabs,
+    nowMs: now,
+    launchId,
+    targetUrl,
+  });
+  if (!launchGate.canLaunch) {
+    lastBrowserLaunchAt = now;
+    lastBrowserLaunchResult = launchGate.blockedLaunch;
+    try {
+      writeBrowserLaunchState(launchGate.blockedLaunchState);
+    } catch (err) {
+      log('[browser-launch]', 'failed to write blocked launch state', err?.message || String(err));
+    }
+    return launchGate.blockedLaunch;
+  }
+
+  const sharedRecentLaunch = describeRecentBrowserLaunch(previousLaunchState, {
     now,
     cooldownMs: BROWSER_LAUNCH_COOLDOWN_MS,
   });
@@ -3496,11 +3543,19 @@ const launchChromeForGemini = async ({ profileDirectory, targetUrl, explicit = f
   const result = await launchGeminiBrowser({ profileDirectory, targetUrl });
   lastBrowserLaunchAt = now;
   lastBrowserLaunchResult = result;
+  const observedState = observeMcpBrowserLaunchResultState({
+    state: launchGate.state,
+    nowMs: Date.now(),
+    launchId,
+    targetUrl,
+    result,
+  });
   try {
     writeBrowserLaunchState({
       source: 'mcp',
       lastAttemptAt: now,
       profileDirectory: profileDirectory || null,
+      tabLifecycle: observedState,
       ...result,
     });
   } catch (err) {
@@ -3620,16 +3675,17 @@ const normalizeReloadWaitMs = (value, fallback, max = 120_000) => {
   return Math.max(0, Math.min(max, safe));
 };
 
-const waitForLiveClients = async (timeoutMs, pollIntervalMs = 500) => {
+const waitForLiveClients = async (timeoutMs, pollIntervalMs = 500, predicate = null) => {
   const startedAt = Date.now();
+  const filterClients = (clients) => (typeof predicate === 'function' ? clients.filter(predicate) : clients);
   while (Date.now() - startedAt <= timeoutMs) {
     cleanupStaleClients();
-    const liveClients = getLiveClients();
+    const liveClients = filterClients(getLiveClients());
     if (liveClients.length > 0) return liveClients;
     await sleep(pollIntervalMs);
   }
   cleanupStaleClients();
-  return getLiveClients();
+  return filterClients(getLiveClients());
 };
 
 const getChromeExtensionInfo = async (client) => {
@@ -4678,6 +4734,36 @@ const hydrateClientLifecycleFields = (client) => {
   return client;
 };
 
+const clientReadyAfterExistingTabsReload = (client) => {
+  const hydrated = hydrateClientLifecycleFields(client);
+  return (
+    !clientIsActivityClient(hydrated) &&
+    clientMatchesExpectedBrowserExtension(hydrated) &&
+    commandChannelReadyForClient(hydrated)
+  );
+};
+
+const requireManagedChatClient = createManagedChatClientSelector(
+  cleanupStaleClients,
+  cleanupExpiredTabClaims,
+  normalizeClientSelector,
+  getLiveClients,
+  hydrateClientLifecycleFields,
+  tabClaims,
+  claimForSession,
+  liveClientForClaim,
+  PROCESS_SESSION_ID,
+  EXPECTED_CHROME_EXTENSION_INFO,
+  tabOrchestratorClientDeps,
+  recentConversationCountForClient,
+);
+
+const runMcpPrivateReadAction = createMcpPrivateReadAction({
+  requireManagedChatClient,
+  enqueueCommand,
+  summarizeClient,
+});
+
 const validateRecoveredBrowserClient = (client) => {
   return validateRecoveredBrowserClientLifecycle(client, {
     getGeminiClientLifecycle,
@@ -5091,47 +5177,9 @@ const tabSelectionDiagnostics = (liveClients, selectableClients) => {
 };
 
 const requireRecentChatsClient = (selector = {}) => {
-  const normalized = normalizeClientSelector(selector);
-  if (normalized.clientId || normalized.tabId !== null || normalized.claimId) {
-    return requireClient(normalized);
-  }
-
-  cleanupStaleClients();
-  cleanupExpiredTabClaims();
-  const liveClients = getSelectableGeminiClients();
-  if (liveClients.length === 0) {
-    throw new Error('Nenhuma aba do Gemini conectada à extensão.');
-  }
-  const commandReadyClients = liveClients.filter(commandChannelReadyForClient);
-  const selectableClients = commandReadyClients.length > 0 ? commandReadyClients : liveClients;
-
-  if (selector.preferActive === true) {
-    const activeClients = selectableClients.filter((client) => client.isActiveTab === true);
-    if (activeClients.length === 1) return activeClients[0];
-  }
-
-  const usefulRecentClients = selectableClients.filter(
-    (client) => recentConversationCountForClient(client) > 0 || !!client.page?.chatId,
-  );
-  const candidateClients = usefulRecentClients.length > 0 ? usefulRecentClients : selectableClients;
-
-  const sessionClaim = claimForSession(normalized.sessionId);
-  const sessionClaimClient = liveClientForClaim(sessionClaim);
-  if (sessionClaimClient) return sessionClaimClient;
-
-  if (candidateClients.length > 1) {
-    throw ambiguousTabsError(candidateClients, normalized);
-  }
-
-  return [...candidateClients].sort(
-    (a, b) =>
-      Number(clientMatchesExpectedBrowserExtension(b)) -
-        Number(clientMatchesExpectedBrowserExtension(a)) ||
-      recentConversationCountForClient(b) - recentConversationCountForClient(a) ||
-      Number(b.isActiveTab === true) - Number(a.isActiveTab === true) ||
-      Number(!!b.pendingPoll) - Number(!!a.pendingPoll) ||
-      b.lastSeenAt - a.lastSeenAt,
-  )[0];
+  return requireManagedChatClient(selector, 'recent-chats', {
+    candidateMode: 'recent-chats',
+  });
 };
 
 const recentChatsReachedEndForClient = (client) =>
@@ -9969,6 +10017,7 @@ const reloadGeminiTabs = async (args = {}) => {
     summarizeClient,
     defaultWaitMs: Math.min(CHROME_GUARD_CONFIG.reloadTimeoutMs, 30_000),
     pollIntervalMs: CHROME_GUARD_CONFIG.pollIntervalMs || 500,
+    clientReadyAfterReload: clientReadyAfterExistingTabsReload,
   });
   if (postNativeReloadRecovery?.ok) {
     return {
@@ -10760,7 +10809,7 @@ const legacyRawTools = [
       additionalProperties: false,
     },
     call: async (args = {}) => {
-      const client = requireClient(args);
+      const client = requireManagedChatClient(args);
       const result = await enqueueCommand(client.clientId, 'get-current-chat');
       return toolTextResult({
         client: summarizeClient(client),
@@ -10799,7 +10848,7 @@ const legacyRawTools = [
       additionalProperties: false,
     },
     call: async (args = {}) => {
-      const client = requireClient(args);
+      const client = requireManagedChatClient(args);
       const result = await downloadChatForClient(client, args);
       return toolTextResult(result);
     },
@@ -10945,7 +10994,7 @@ const legacyRawTools = [
       additionalProperties: false,
     },
     call: async (args = {}) => {
-      const client = requireClient(args);
+      const client = requireManagedChatClient(args);
       assertNoRunningBrowserExportJob(client);
       const jobArgs = await prepareNativeExportJobArgs(client, args, TAB_CLAIM_LABELS.export);
       return toolTextResult(startRecentChatsExportJob(client, jobArgs));
@@ -11041,7 +11090,7 @@ const legacyRawTools = [
       additionalProperties: false,
     },
     call: async (args = {}) => {
-      const client = requireClient(args);
+      const client = requireManagedChatClient(args);
       assertNoRunningBrowserExportJob(client);
       const jobArgs = await prepareNativeExportJobArgs(client, {
         ...args,
@@ -11136,7 +11185,7 @@ const legacyRawTools = [
       additionalProperties: false,
     },
     call: async (args = {}) => {
-      const client = requireClient(args);
+      const client = requireManagedChatClient(args);
       assertNoRunningBrowserExportJob(client);
       const jobArgs = await prepareNativeExportJobArgs(client, {
         ...args,
@@ -11214,7 +11263,7 @@ const legacyRawTools = [
       additionalProperties: false,
     },
     call: async (args = {}) => {
-      const client = requireClient(args);
+      const client = requireManagedChatClient(args);
       assertNoRunningBrowserExportJob(client);
       const jobArgs = await prepareNativeExportJobArgs(client, args, TAB_CLAIM_LABELS.export);
       return toolTextResult(startDirectChatsExportJob(client, jobArgs));
@@ -11426,7 +11475,9 @@ const legacyRawTools = [
       additionalProperties: false,
     },
     call: async (args = {}) => {
-      const client = args.notebook ? requireNotebookClient(args) : requireClient(args);
+      const client = args.notebook
+        ? requireNotebookClient(args)
+        : requireManagedChatClient(args);
       const result = await enqueueCommand(client.clientId, 'open-chat', args, {
         browserSideEffectExplicit: true,
       });
@@ -11499,7 +11550,7 @@ const legacyRawTools = [
       additionalProperties: false,
     },
     call: async (args = {}) => {
-      const client = requireClient(args);
+      const client = requireManagedChatClient(args);
       const result = await diagnosePageArtifactsForClient(client, {
         releaseClaimOnOperationEnd: args.releaseClaimOnOperationEnd !== false,
         ...args,
@@ -11545,7 +11596,7 @@ const legacyRawTools = [
       additionalProperties: false,
     },
     call: async (args = {}) => {
-      const client = requireClient(args);
+      const client = requireManagedChatClient(args);
       const result = await enqueueCommand(client.clientId, 'snapshot');
       return toolTextResult({
         client: summarizeClient(client),
@@ -12331,13 +12382,13 @@ const rawTools = [
   {
     name: 'gemini_chats',
     description:
-      'Operações MCP deliberadas em chats. Contagem total e download/exportação são CLI-only; list/current/open exigem diagnostic=true ou intent="small_page"/"one_off".',
+      'Operações MCP deliberadas em chats. Contagem total e download/exportação são CLI-only; list/current/open/private_read exigem diagnostic=true ou intent="small_page"/"one_off".',
     inputSchema: {
       type: 'object',
       properties: {
         action: {
           type: 'string',
-          enum: ['list', 'count', 'current', 'open', 'download', 'diagnose_artifacts'],
+          enum: ['list', 'count', 'current', 'open', 'download', 'diagnose_artifacts', 'private_read'],
         },
         source: { type: 'string', enum: ['recent', 'notebook'] },
         ...domainSelectorProperties(),
@@ -12374,6 +12425,12 @@ const rawTools = [
         maxListItems: { type: 'integer', minimum: 1, maximum: 60 },
         waitMs: { type: 'integer', minimum: 1000, maximum: 120000 },
         openTimeoutMs: { type: 'integer', minimum: 1000, maximum: 120000 },
+        privateApiTransport: {
+          type: 'string',
+          enum: ['browser-background', 'gemini-webapi-python'],
+        },
+        cookiesJson: { type: 'string' },
+        python: { type: 'string' },
         diagnostic: { type: 'boolean' },
         intent: { type: 'string', enum: ['diagnostic', 'small_page', 'one_off'] },
         detail: { type: 'string', enum: ['compact', 'full'] },
@@ -12401,6 +12458,9 @@ const rawTools = [
       }
       if (!hasExplicitPublicMcpIntent(args)) {
         return publicMcpDiagnosticRequiredResult('gemini_chats', action, args);
+      }
+      if (action === 'private_read') {
+        return toolTextResult(await runMcpPrivateReadAction(args));
       }
       const legacyArgs = { ...args };
       if (source === 'notebook') legacyArgs.notebook = true;
