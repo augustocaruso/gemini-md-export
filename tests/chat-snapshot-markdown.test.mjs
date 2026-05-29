@@ -22,6 +22,11 @@ test('chat snapshot markdown renderer owns frontmatter, turns and attachments', 
               label: 'Gemini artifact',
               assetRefId: 'private-api-artifact:abc',
             },
+            {
+              kind: 'image',
+              label: 'Generated image',
+              url: 'assets/dbe5dd4b50b09c74/turn-0001-asset-00.png',
+            },
           ],
         },
         {
@@ -43,4 +48,8 @@ test('chat snapshot markdown renderer owns frontmatter, turns and attachments', 
   assert.match(markdown, /date_exported: 2026-05-28T12:00:00Z/);
   assert.match(markdown, /## 🧑 Usuário\n\nPergunta\n\n---\n\n## 🤖 Gemini\n\nResposta/);
   assert.match(markdown, /Anexos:\n- Gemini artifact \(private-api-artifact:abc\)/);
+  assert.match(
+    markdown,
+    /- !\[Generated image\]\(assets\/dbe5dd4b50b09c74\/turn-0001-asset-00\.png\)/,
+  );
 });

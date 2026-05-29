@@ -6,7 +6,10 @@ import { dirname, resolve } from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { readyHasExtensionMismatchClients } from '../build/ts/cli/local-extension-reload-preflight.js';
+import {
+  readyHasExtensionMismatchClients,
+  runLocalExtensionReloadPreflight,
+} from '../build/ts/cli/local-extension-reload-preflight.js';
 import { syncLoadedUnpackedExtension } from '../build/ts/cli/local-extension-sync.js';
 
 const EXTENSION_NAME = 'Gemini Chat -> Markdown Export';
@@ -74,6 +77,11 @@ test('CLI sincroniza pasta unpacked antes de recarregar abas existentes', () => 
   )?.[0] || '';
 
   assert.match(source, /runLocalExtensionReloadPreflight/);
+  assert.doesNotMatch(source, /local-extension-cdp-reload/);
+  assert.doesNotMatch(source, /reloadExtensionFromDevToolsActivePort/);
+  assert.match(source, /createBridgeLocalExtensionCdpReloadPort/);
+  assert.match(preflightSource, /\/agent\/cdp\/extension-reload/);
+  assert.match(preflightSource, /runLocalExtensionCdpReload/);
   assert.match(preflightSource, /syncLoadedUnpackedExtension/);
   assert.match(preflightSource, /resolveSourceExtensionDir/);
   assert.match(source, /const syncLoadedExtensionBeforeReload = async/);
@@ -136,6 +144,62 @@ test('bloqueia sync e reload quando ha job ativo', async () => {
     assert.equal(result.status, 'blocked-active-job');
     assert.equal(readFileSync(resolve(loadedDir, 'background.js'), 'utf-8'), "const buildStamp = '20260528-1020';\n");
     assert.equal(existsSync(resolve(loadedDir, 'stale-only.js')), true);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test('preflight aciona reload via CDP depois de sync local autorizado', async () => {
+  const home = await mkdtemp(resolve(tmpdir(), 'gme-local-extension-cdp-preflight-'));
+  try {
+    const sourceDir = resolve(home, 'dist', 'extension');
+    const loadedDir = resolve(home, 'Dia', 'Loaded Extension');
+    writeExtension(sourceDir, { buildStamp: '20260528-1343' });
+    writeExtension(loadedDir, { buildStamp: '20260528-1020' });
+    const calls = [];
+
+    const result = await runLocalExtensionReloadPreflight(
+      {
+        allowReload: true,
+        packageRoot: home,
+      },
+      {
+        fetchActiveJobCount: async () => ({ ok: true, activeJobCount: 0 }),
+        buildLocalDoctorReport: () => ({
+          browser: 'dia',
+          profileDirectory: 'Default',
+          loadedExtension: {
+            extension: {
+              id: 'ikjanjokpogoakdlikhcgfgcjbgoogkc',
+              locationKind: 'unpacked',
+              path: loadedDir,
+            },
+          },
+        }),
+        runLocalExtensionCdpReload: async (args) => {
+          calls.push(args);
+          return {
+            ok: true,
+            attempted: true,
+            mode: 'cdp-browser-websocket',
+            extensionId: args.extensionId,
+            targetId: 'extensions',
+            targetUrl: 'chrome://extensions/?id=ikjanjokpogoakdlikhcgfgcjbgoogkc',
+            devToolsActivePortFile: '/tmp/DevToolsActivePort',
+          };
+        },
+      },
+    );
+
+    assert.equal(result.status, 'synced');
+    assert.equal(result.cdpReload?.ok, true);
+    assert.deepEqual(calls, [
+      {
+        allowReload: true,
+        browser: 'dia',
+        extensionId: 'ikjanjokpogoakdlikhcgfgcjbgoogkc',
+      },
+    ]);
   } finally {
     await rm(home, { recursive: true, force: true });
   }

@@ -13,6 +13,7 @@ const roleHeading = (turn: ChatTurn): string =>
 
 const attachmentLine = (attachment: ChatAttachment): string => {
   const label = attachment.label || attachment.kind;
+  if (attachment.kind === 'image' && attachment.url) return `- ![${label}](${attachment.url})`;
   if (attachment.url) return `- [${label}](${attachment.url})`;
   if (attachment.assetRefId) return `- ${label} (${attachment.assetRefId})`;
   return `- ${label}`;

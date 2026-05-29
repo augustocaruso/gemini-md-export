@@ -301,6 +301,8 @@ export const saveCollectedConversationPayloadRuntime = async (
     hydration: collected.result.payload?.hydration || null,
     navigation: collected.result.payload?.hydration?.navigation || null,
     media: payloadMetrics.media || null,
+    privateRead: payloadMetrics.privateRead || null,
+    assets: payloadMetrics.assets || null,
   };
   return {
     client: deps.summarizeClient(collected.activeClient),

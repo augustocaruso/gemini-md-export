@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
+import { type ExportAdapterPlan, planExportAdapters } from './export-adapter-policy.js';
 import type { FixVaultReport } from './fix-vault-contract.js';
 import { buildFixVaultProgressViewModel } from './progress-view-model.js';
 
@@ -7,6 +8,7 @@ export type FixVaultFlowFlags = {
   bridgeUrl: string;
   takeout?: string | null;
   noMyActivity?: boolean;
+  privateApi?: boolean | null;
   openIfMissing?: boolean | null;
   limit?: number | null;
   claimId?: string | null;
@@ -14,6 +16,33 @@ export type FixVaultFlowFlags = {
   tabId?: number | string | null;
   session?: string | null;
   activateTab?: boolean | null;
+  waitMs?: number | null;
+  timeoutMs?: number | null;
+  privateReadWaitMs?: number | null;
+  python?: string | null;
+  cookiesJson?: string | null;
+  delayMs?: number | null;
+};
+
+export type FixVaultPrivateRepairTarget = {
+  chatId: string;
+  title: string | null;
+  url: string | null;
+  sourcePath: string;
+  relativePath: string;
+  outputDir: string;
+  filename: string;
+  reasons: string[];
+  missingAssets: string[];
+};
+
+export type FixVaultPrivateRepairRecord = {
+  chatId: string;
+  title?: string | null;
+  url?: string | null;
+  sourcePath: string;
+  relativePath: string;
+  missingAssets?: readonly string[];
 };
 
 export const FIX_VAULT_MANUAL_ACTION_EXIT_CODE = 2;
@@ -97,6 +126,76 @@ export const repairTargetPathsFromDiagnosis = ({
   metadataExportErrorItems(diagnosisReport)
     .map((item) => (item.file ? resolve(vaultDir, item.file) : null))
     .filter((item): item is string => Boolean(item && existsSync(item)));
+
+export const buildFixVaultPrivateRepairTargets = ({
+  vaultDir,
+  diagnosisReport,
+  vaultRecords = [],
+}: {
+  vaultDir: string;
+  diagnosisReport: { items?: Array<{ status?: string; file?: string | null }> } | null | undefined;
+  vaultRecords?: readonly FixVaultPrivateRepairRecord[];
+}): FixVaultPrivateRepairTarget[] => {
+  const resolvedVaultDir = resolve(vaultDir);
+  const byPath = new Map<string, FixVaultPrivateRepairTarget>();
+  const recordsByPath = new Map(
+    vaultRecords.map((record) => [resolve(record.sourcePath), record] as const),
+  );
+
+  const addTarget = (
+    record: FixVaultPrivateRepairRecord,
+    reason: string,
+    missingAssets: readonly string[] = [],
+  ) => {
+    const resolvedPath = resolve(record.sourcePath);
+    const existing = byPath.get(resolvedPath);
+    const reasons = new Set([...(existing?.reasons || []), reason]);
+    const assetSet = new Set([...(existing?.missingAssets || []), ...missingAssets]);
+    byPath.set(resolvedPath, {
+      chatId: String(record.chatId).toLowerCase(),
+      title: record.title || null,
+      url: record.url || null,
+      sourcePath: resolvedPath,
+      relativePath: record.relativePath,
+      outputDir: dirname(resolvedPath),
+      filename: basename(resolvedPath),
+      reasons: [...reasons].sort(),
+      missingAssets: [...assetSet].sort(),
+    });
+  };
+
+  for (const targetPath of repairTargetPathsFromDiagnosis({
+    vaultDir: resolvedVaultDir,
+    diagnosisReport,
+  })) {
+    const record = recordsByPath.get(resolve(targetPath));
+    if (record) addTarget(record, 'metadata_export_error');
+  }
+
+  for (const record of vaultRecords) {
+    if ((record.missingAssets || []).length > 0) {
+      addTarget(record, 'missing_asset', record.missingAssets || []);
+    }
+  }
+
+  return [...byPath.values()].sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+};
+
+export const buildFixVaultRepairAdapterPlan = ({
+  flags,
+  targets,
+}: {
+  flags: Pick<FixVaultFlowFlags, 'privateApi' | 'openIfMissing'>;
+  targets: readonly Pick<FixVaultPrivateRepairTarget, 'chatId'>[];
+}): ExportAdapterPlan =>
+  planExportAdapters({
+    operationKind: 'fix_vault',
+    knownChatIds: targets.map((target) => target.chatId),
+    privateApiAvailable: flags.privateApi !== false,
+    extensionPrivateApiAvailable: false,
+    pythonSidecarAvailable: flags.privateApi !== false,
+    browserFallbackAllowed: flags.privateApi === false || flags.openIfMissing === true,
+  });
 
 export const formatFixVaultProgressLine = ({
   format,

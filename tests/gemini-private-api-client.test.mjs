@@ -67,8 +67,8 @@ test('private API background adapter reads a chat with browser credentials and r
   assert.match(result.markdown, /^---\ntype: gemini_chat/m);
   assert.match(result.markdown, /## 🤖 Gemini\n\nAnswer from API/);
   assert.equal(result.adapterPlan.selectedAdapter, 'browserBackground');
-  assert.deepEqual(result.adapterPlan.fallbackAdapters, ['dom']);
-  assert.equal(calls[0].url, `https://gemini.google.com/app/${chatId}`);
+  assert.deepEqual(result.adapterPlan.fallbackAdapters, []);
+  assert.equal(calls[0].url, 'https://gemini.google.com/app');
   assert.equal(calls[0].init.credentials, 'include');
   assert.equal(calls[1].init.credentials, 'include');
   assert.equal(calls[1].init.method, 'POST');

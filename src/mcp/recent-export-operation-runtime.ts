@@ -713,6 +713,8 @@ export const runRecentExportConversationOperation = async (
             hydration: payload?.hydration || null,
             navigation: payload?.hydration?.navigation || null,
             media: payloadMetrics.media || null,
+            privateRead: payloadMetrics.privateRead || null,
+            assets: payloadMetrics.assets || null,
           };
           operationSavedResult = {
             client: operationCollected?.activeClient

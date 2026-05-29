@@ -1,3 +1,9 @@
+import {
+  type BrowserWebSocketSession,
+  createBrowserWebSocketSession,
+  listBrowserTargetsViaWebSocket,
+} from './browser-websocket.js';
+
 export type CdpTargetClassificationKind =
   | 'gemini_chat'
   | 'gemini_home'
@@ -23,6 +29,7 @@ export type CdpTarget = Readonly<{
   title?: string;
   url: string;
   webSocketDebuggerUrl?: string;
+  browserWebSocketUrl?: string;
   chatId?: string | null;
   classification: CdpTargetClassification;
 }>;
@@ -62,8 +69,11 @@ export type CdpWebSocketConstructor = new (url: string) => CdpWebSocketLike;
 
 export type CdpRequestOptions = Readonly<{
   endpoint: string;
+  browserWebSocketUrl?: string | null;
+  browserWebSocketSession?: BrowserWebSocketSession | null;
   fetchImpl?: CdpFetch;
   timeoutMs?: number;
+  WebSocketImpl?: CdpWebSocketConstructor;
 }>;
 
 export type CdpCommandOptions = Readonly<{
@@ -187,6 +197,26 @@ const normalizeTarget = (target: Record<string, unknown>): CdpTarget | null => {
   };
 };
 
+const normalizeBrowserWebSocketTarget = (
+  target: Record<string, unknown>,
+  browserWebSocketUrl: string,
+): CdpTarget | null => {
+  const id = String(target.targetId || '').trim();
+  const type = String(target.type || '').trim();
+  const url = String(target.url || '').trim();
+  if (!id || type !== 'page') return null;
+  const classification = classifyCdpTargetUrl(url);
+  return {
+    id,
+    type,
+    title: typeof target.title === 'string' ? target.title : undefined,
+    url,
+    browserWebSocketUrl,
+    chatId: chatIdFromGeminiUrl(url),
+    classification,
+  };
+};
+
 export const listCdpTargets = async ({
   endpoint,
   fetchImpl,
@@ -196,6 +226,33 @@ export const listCdpTargets = async ({
   });
   return rawTargets.flatMap((target) => {
     const normalized = normalizeTarget(target);
+    return normalized ? [normalized] : [];
+  });
+};
+
+const listCdpTargetsFromBrowserWebSocket = async ({
+  browserWebSocketUrl,
+  browserWebSocketSession,
+  WebSocketImpl,
+  timeoutMs,
+}: Readonly<{
+  browserWebSocketUrl: string;
+  browserWebSocketSession?: BrowserWebSocketSession | null;
+  WebSocketImpl?: CdpWebSocketConstructor;
+  timeoutMs?: number;
+}>): Promise<CdpTarget[]> => {
+  const rawTargets = browserWebSocketSession
+    ? await browserWebSocketSession.listTargets()
+    : await listBrowserTargetsViaWebSocket({
+        browserWebSocketUrl,
+        WebSocketImpl,
+        timeoutMs,
+      });
+  return rawTargets.flatMap((target) => {
+    const normalized = normalizeBrowserWebSocketTarget(
+      target as unknown as Record<string, unknown>,
+      browserWebSocketUrl,
+    );
     return normalized ? [normalized] : [];
   });
 };
@@ -251,12 +308,33 @@ const blockerFromTarget = (target: CdpTarget): CdpBlocker | null => {
 
 export const buildCdpBrowserSnapshot = async ({
   endpoint,
+  browserWebSocketUrl: explicitBrowserWebSocketUrl,
+  browserWebSocketSession,
   fetchImpl,
+  WebSocketImpl,
+  timeoutMs,
 }: CdpRequestOptions): Promise<CdpBrowserSnapshot> => {
-  const [version, targets] = await Promise.all([
-    fetchJson<Record<string, unknown>>(endpoint, '/json/version', { fetchImpl }).catch(() => null),
-    listCdpTargets({ endpoint, fetchImpl }),
-  ]);
+  const version = await fetchJson<Record<string, unknown>>(endpoint, '/json/version', {
+    fetchImpl,
+  }).catch(() => null);
+  const browserWebSocketUrl =
+    String(explicitBrowserWebSocketUrl || '').trim() ||
+    (typeof version?.webSocketDebuggerUrl === 'string' ? String(version.webSocketDebuggerUrl) : '');
+  let targets: CdpTarget[];
+  if (browserWebSocketUrl) {
+    try {
+      targets = await listCdpTargetsFromBrowserWebSocket({
+        browserWebSocketUrl,
+        browserWebSocketSession,
+        WebSocketImpl,
+        timeoutMs,
+      });
+    } catch {
+      targets = await listCdpTargets({ endpoint, fetchImpl });
+    }
+  } else {
+    targets = await listCdpTargets({ endpoint, fetchImpl });
+  }
   const geminiTargets = targets.filter((target) => target.classification.kind.startsWith('gemini'));
   const blocker = targets.map(blockerFromTarget).find(Boolean) || null;
   return {
@@ -272,8 +350,23 @@ export const buildCdpBrowserSnapshot = async ({
 
 export const activateCdpTarget = async (
   target: Pick<CdpTarget, 'id'>,
-  { endpoint, fetchImpl }: CdpRequestOptions,
+  { endpoint, browserWebSocketSession, fetchImpl, WebSocketImpl, timeoutMs }: CdpRequestOptions,
 ) => {
+  const browserWebSocketUrl = (target as Pick<CdpTarget, 'browserWebSocketUrl'>)
+    .browserWebSocketUrl;
+  if (browserWebSocketUrl) {
+    if (browserWebSocketSession) return await browserWebSocketSession.activateTarget(target.id);
+    const session = createBrowserWebSocketSession({
+      browserWebSocketUrl,
+      WebSocketImpl,
+      timeoutMs,
+    });
+    try {
+      return await session.activateTarget(target.id);
+    } finally {
+      session.close();
+    }
+  }
   const body = await fetchJson<unknown>(
     endpoint,
     `/json/activate/${encodeURIComponent(target.id)}`,

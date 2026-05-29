@@ -280,7 +280,8 @@ test('export parcial carrega mais historico ate maxChats antes de fatiar', () =>
   assert.match(block, /recentConversationsForClient\(client\)\.length < partialLoadTargetCount/);
   assert.match(block, /loadMoreRecentChatsForClient\(client, partialLoadTargetCount, \{/);
   assert.ok(
-    block.indexOf('partialLoadTargetCount') < block.indexOf('const allConversations = recentConversationsForClient(client)'),
+    block.indexOf('partialLoadTargetCount') <
+      block.indexOf('const allConversations = recentConversationsForClient(client)'),
     'lazy-load parcial precisa acontecer antes de calcular allConversations',
   );
   assert.ok(

@@ -1,10 +1,15 @@
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
 
-import { buildFixVaultCombinedReport, buildWebRepairArgs } from '../build/ts/core/fix-vault-flow.js';
+import {
+  buildFixVaultCombinedReport,
+  buildFixVaultPrivateRepairTargets,
+  buildFixVaultRepairAdapterPlan,
+  buildWebRepairArgs,
+} from '../build/ts/core/fix-vault-flow.js';
 import { runFixVaultCommand } from '../build/ts/cli/fix-vault-runner.js';
 
 test('fix-vault marca reparo web como bloqueado quando chats nao abrem nesta conta', () => {
@@ -71,6 +76,65 @@ test('fix-vault repassa claim explicita para o reparo web sem escolher outra aba
   ]);
 });
 
+test('fix-vault monta fila da API privada a partir dos registros do indice Markdown', () => {
+  const root = resolve(tmpdir(), `gme-fix-vault-assets-${process.pid}-${Date.now()}`);
+  const vault = join(root, 'vault');
+  const nested = join(vault, 'Gemini');
+  mkdirSync(nested, { recursive: true });
+  const chatPath = join(nested, 'abc123abc123.md');
+  writeFileSync(chatPath, '# fixture\n', 'utf-8');
+
+  try {
+    const targets = buildFixVaultPrivateRepairTargets({
+      vaultDir: vault,
+      diagnosisReport: { items: [] },
+      vaultRecords: [
+        {
+          chatId: 'abc123abc123',
+          title: 'Chat com asset',
+          url: 'https://gemini.google.com/app/abc123abc123',
+          sourcePath: chatPath,
+          relativePath: 'Gemini/abc123abc123.md',
+          missingAssets: ['assets/abc123abc123/missing.png'],
+        },
+      ],
+    });
+    assert.equal(targets.length, 1);
+    assert.equal(targets[0].chatId, 'abc123abc123');
+    assert.equal(targets[0].sourcePath, chatPath);
+    assert.equal(targets[0].outputDir, nested);
+    assert.equal(targets[0].filename, 'abc123abc123.md');
+    assert.equal(targets[0].title, 'Chat com asset');
+    assert.deepEqual(targets[0].reasons, ['missing_asset']);
+    assert.deepEqual(targets[0].missingAssets, ['assets/abc123abc123/missing.png']);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('fix-vault adapter plan prefers private API and avoids browser lease for known targets', () => {
+  const plan = buildFixVaultRepairAdapterPlan({
+    flags: { privateApi: true, openIfMissing: false },
+    targets: [{ chatId: 'abc123abc123' }],
+  });
+
+  assert.deepEqual(plan.adapters.map((adapter) => adapter.kind), ['private_api']);
+  assert.equal(plan.requiresBrowserLease, false);
+});
+
+test('fix-vault adapter plan uses browser fallback only when private API is disabled', () => {
+  const plan = buildFixVaultRepairAdapterPlan({
+    flags: { privateApi: false, openIfMissing: true },
+    targets: [{ chatId: 'abc123abc123' }],
+  });
+
+  assert.deepEqual(plan.adapters.map((adapter) => adapter.kind), [
+    'browser_inventory',
+    'dom_legacy',
+  ]);
+  assert.equal(plan.requiresBrowserLease, true);
+});
+
 test('fix-vault bloqueia datas e nao reutiliza relatorio antigo quando reparo web falha', async () => {
   const root = resolve(tmpdir(), `gme-fix-vault-${process.pid}-${Date.now()}`);
   const vault = join(root, 'vault');
@@ -130,6 +194,7 @@ process.exit(0);
     parsed: {
       flags: {
         bridgeUrl: 'http://127.0.0.1:47283',
+        privateApi: false,
         report,
         takeout: join(root, 'Minhaatividade.html'),
         format: 'plain',

@@ -4,7 +4,7 @@ export type IsoDateTime = string & { readonly __brand: 'IsoDateTime' };
 export type ChatRole = 'user' | 'assistant';
 
 export type ChatAttachment = {
-  kind: 'image' | 'document' | 'artifact' | 'unknown';
+  kind: 'image' | 'video' | 'audio' | 'media' | 'document' | 'artifact' | 'unknown';
   label: string;
   url?: string;
   hash?: string;
@@ -16,6 +16,7 @@ export type ChatTurn = {
   markdown: string;
   textHash: string;
   sourceOrder: number;
+  createdAt?: IsoDateTime;
   attachments: ChatAttachment[];
 };
 

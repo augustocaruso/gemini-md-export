@@ -51,6 +51,7 @@ import {
   isRecoverableCountClaimError,
 } from '../build/ts/cli/count-claim-recovery.js';
 import {
+  createBridgeLocalExtensionCdpReloadPort,
   localExtensionReloadPreflightCliLine,
   readyHasExtensionMismatchClients,
   runLocalExtensionReloadPreflight,
@@ -235,6 +236,8 @@ const jobOptionHelp = () => [
   '  --chat-id <id>               Chat ID para export selected; pode repetir.',
   '  --selection-file <path>      Manifesto criado por chats list --save-selection.',
   '  --expected-count <n>         Falha antes de iniciar se a selecao tiver outra quantidade.',
+  '  --private-api                Export selected direto pela API privada. Hoje e o default.',
+  '  --browser-export             Diagnostico: forca fluxo antigo via bridge/aba.',
   '  --delay-ms <ms>              Pausa entre chats selecionados.',
   '  --takeout <file.zip|html|json> Usa Takeout como fonte offline; My Activity cobre o restante.',
   '  --no-my-activity           Nao tenta My Activity para datas (diagnostico avancado).',
@@ -598,9 +601,9 @@ const exportSelectedHelp = () =>
     '  gemini-md-export export selected --chat-id <id> [--chat-id <id>] [opcoes]',
     '  gemini-md-export export selected <id1> <id2> ... [opcoes]',
     '',
-    'Baixa conversas selecionadas em job de background. Para follow-up de "baixe essas",',
+    'Baixa conversas selecionadas pela API privada, sem bridge/aba. Para follow-up de "baixe essas",',
     'prefira o manifesto criado por chats list --save-selection para evitar ambiguidade.',
-    'Salva cada Markdown ja com datas usando My Activity; --takeout so adiciona fonte offline.',
+    'Salva cada Markdown ja com datas e assets quando o Gemini Web API expuser os arquivos.',
     '',
     ...outputModeHelp(),
     '',
@@ -780,8 +783,8 @@ const fixVaultHelp = () =>
     '  gemini-md-export fix-vault <vaultDir> [--takeout <takeout.zip|Minhaatividade.html|MyActivity.json>] [--report <report.json>]',
     '',
     'Corrige o back catalog em um unico fluxo: audita integridade, normaliza o',
-    'YAML canonico dos chats e preenche datas com Takeout primeiro e My Activity',
-    'para o que sobrar.',
+    'YAML canonico dos chats, reexporta chats/assets suspeitos pela API privada',
+    'e preenche datas com Takeout primeiro e My Activity para o que sobrar.',
     '',
     'Opcoes:',
     '  --takeout <file>       Usa arquivo offline do Google Takeout/My Activity (.zip, .html ou .json).',
@@ -1006,6 +1009,8 @@ const parseArgs = (argv) => {
     else if (arg === '--selection-file') out.flags.selectionFile = value();
     else if (arg === '--save-selection') out.flags.saveSelection = true;
     else if (arg === '--expected-count') out.flags.expectedCount = Number(value());
+    else if (arg === '--private-api') out.flags.privateApi = true;
+    else if (arg === '--browser-export' || arg === '--no-private-api') out.flags.privateApi = false;
     else if (arg === '--delay-ms') out.flags.delayMs = Number(value());
     else if (arg === '--reset') out.flags.reset = true;
     else if (arg === '--confirm') out.flags.confirm = true;
@@ -2803,6 +2808,11 @@ const syncLoadedExtensionBeforeReload = async (bridgeUrl, flags, ui) => {
         packageRoot: packageRoot(),
         version: VERSION,
       }),
+    runLocalExtensionCdpReload: createBridgeLocalExtensionCdpReloadPort(
+      bridgeUrl,
+      flags,
+      requestJson,
+    ),
   });
   const line = localExtensionReloadPreflightCliLine(result);
   if (line && shouldWriteInlineStatus(ui)) ui.stdout.write(`${line}\n`);
@@ -4367,6 +4377,14 @@ const runExport = async (parsed, streams = {}) => {
     flags.reexportInputCount = cliSelection.inputCount;
     flags.reexportUniqueCount = cliSelection.uniqueCount;
     flags.reexportDuplicateCount = cliSelection.duplicateCount;
+  }
+
+  if ((isSelectedExport || subcommand === 'recent') && flags.privateApi !== false) {
+    flags.privateApiRecent = subcommand === 'recent';
+    const { runPrivateApiSelectedExportCommand } = await import(
+      '../build/ts/cli/private-api-selected-export-command.js'
+    );
+    return runPrivateApiSelectedExportCommand({ flags, streams });
   }
 
   const ui = makeUi(flags, streams);

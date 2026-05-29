@@ -27,7 +27,7 @@ export type RuntimeRecoveryState = {
 };
 
 export type RuntimeRecoveryEvent =
-  | { type: 'reloadRequested'; nowMs: number; reason: string }
+  | { type: 'reloadRequested'; nowMs: number; reason: string; clientId?: string | null }
   | { type: 'extensionContextInvalidated'; nowMs: number; message: string }
   | { type: 'runtimeEvidenceObserved'; nowMs: number; evidence: RuntimeEpochEvidence }
   | { type: 'timeout'; nowMs: number }
@@ -127,12 +127,12 @@ export const reduceRuntimeRecovery = (
       },
       event.nowMs,
     );
+    const reloadEffect: TabOrchestratorEffect = event.clientId
+      ? { type: 'extension.reloadSelf', reason: event.reason, clientId: event.clientId }
+      : { type: 'extension.reloadSelf', reason: event.reason };
     return {
       state: nextState,
-      effects: [
-        { type: 'extension.reloadSelf', reason: event.reason },
-        waitForEpochEffect(nextState, event.reason),
-      ],
+      effects: [reloadEffect, waitForEpochEffect(nextState, event.reason)],
     };
   }
 

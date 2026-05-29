@@ -172,16 +172,20 @@ const {
 const {
   buildActivityClaimAffinity,
   maybeActivateBrowserReadyInactiveTab,
+  existingTabsReloadHttpFallbackArgs,
   recentChatsResumeCounters,
   recentExportResumeScope,
   reloadExtensionForExistingTabs,
+  runExistingTabsControllerReloadCommand,
   runExistingTabsNativeReloadRecovery,
+  shouldUseDirectPageReloadForExistingTabs,
 } = await import(compiledTsModuleUrl('mcp', 'existing-tabs-reload.js'));
 const {
   createActivityCompanionPreparer,
 } = await import(compiledTsModuleUrl('mcp', 'activity-companion-readiness.js'));
 const {
   extensionReloadAssumedResultForError,
+  runBridgeCdpExtensionReloadHttpRequest,
 } = await import(compiledTsModuleUrl('mcp', 'extension-reload-runtime.js'));
 const {
   assertActiveClaimableGeminiClient,
@@ -237,11 +241,23 @@ const {
   observeMcpBrowserLaunchResultState,
 } = await import(compiledTsModuleUrl('mcp', 'browser-launch-lifecycle.js'));
 const {
-  createMcpPrivateReadAction,
+  createMcpPrivateReadRuntimes,
 } = await import(compiledTsModuleUrl('mcp', 'private-read-action.js'));
+const {
+  checkPrivateSessionStatus: checkPrivateSessionStatusRuntime,
+  listPrivateRecentChatsForClient,
+  loadPrivateInventoryForRecentExportJob,
+  localProxySupportActions,
+  privateSupportLegacyToolName,
+} = await import(compiledTsModuleUrl('mcp', 'private-inventory-runtime.js'));
 const {
   isRecentCommandFailureBlocking,
 } = await import(compiledTsModuleUrl('mcp', 'command-channel-health.js'));
+const {
+  extractChatIdFromUrl,
+  normalizeConversationChatId,
+  stripGeminiPrefix,
+} = await import(compiledTsModuleUrl('mcp', 'gemini-chat-id.js'));
 const {
   evaluateConversationNoProgressBudgetFsm,
 } = await import(compiledTsModuleUrl('mcp', 'export-operation-watchdog.js'));
@@ -273,9 +289,7 @@ const {
   mergeExplicitNullableClientState,
 } = await import(compiledTsModuleUrl('mcp', 'client-state.js'));
 const {
-  activateRuntimeExtensionClientWithCdp,
-  buildRuntimeCdpControlSnapshot,
-  defaultCdpUrlFromEnv,
+  cdpRuntime,
 } = await import(compiledTsModuleUrl('cdp', 'runtime-options.js'));
 const {
   assertBrowserSideEffectAllowed,
@@ -322,7 +336,6 @@ const PROCESS_SESSION_ID =
   `mcp-${process.pid}-${PROCESS_STARTED_AT.getTime().toString(36)}`;
 const DEFAULT_HOST = process.env.GEMINI_MCP_BRIDGE_HOST || '127.0.0.1';
 const DEFAULT_PORT = Number(process.env.GEMINI_MCP_BRIDGE_PORT || 47283);
-const DEFAULT_CDP_URL = defaultCdpUrlFromEnv(process.env);
 const DEFAULT_EXPORT_DIR = process.env.GEMINI_MCP_EXPORT_DIR || resolve(homedir(), 'Downloads');
 const DIAGNOSTIC_DIR =
   process.env.GEMINI_MCP_DIAGNOSTIC_DIR || resolve(homedir(), '.gemini-md-export');
@@ -4439,7 +4452,7 @@ const buildLightweightBrowserReady = async (args = {}) => {
   };
   let launchResult = null;
   let waitedMs = 0;
-  const cdp = await buildCdpSnapshotForArgs(args);
+  const cdp = await cdpRuntime.buildSnapshot(args);
   const nativeBrokerStatus = await probeNativeBrowserBrokerStatus({ allowWake: true });
 
   if (args.selfHeal === true) {
@@ -4758,10 +4771,13 @@ const requireManagedChatClient = createManagedChatClientSelector(
   recentConversationCountForClient,
 );
 
-const runMcpPrivateReadAction = createMcpPrivateReadAction({
+const privateRead = createMcpPrivateReadRuntimes({
   requireManagedChatClient,
   enqueueCommand,
   summarizeClient,
+  validateMcpExportPayload,
+  assertNotAborted: assertConversationOperationNotAborted,
+  env: process.env,
 });
 
 const validateRecoveredBrowserClient = (client) => {
@@ -5191,29 +5207,6 @@ const enrichNotebookConversation = (conversation, index) => ({
   urlKnown: !!conversation.chatId && String(conversation.url || '').includes('/app/'),
   cachedOrLearned: !!conversation.chatId,
 });
-
-const stripGeminiPrefix = (value) => String(value || '').replace(/^c_/, '');
-
-const extractChatIdFromUrl = (value) => {
-  if (!value || typeof value !== 'string') return null;
-  try {
-    const parsed = new URL(value);
-    const match = parsed.pathname.match(/\/app\/([a-f0-9]{12,})/i);
-    return match?.[1] || null;
-  } catch {
-    const match = value.match(/\/app\/([a-f0-9]{12,})/i);
-    return match?.[1] || null;
-  }
-};
-
-const normalizeConversationChatId = (conversation = {}) => {
-  const candidates = [
-    stripGeminiPrefix(conversation.chatId || ''),
-    extractChatIdFromUrl(conversation.url),
-    stripGeminiPrefix(conversation.id || ''),
-  ];
-  return candidates.find((candidate) => /^[a-f0-9]{12,}$/i.test(candidate || '')) || '';
-};
 
 const resolveOutputDir = (outputDir) => {
   if (!outputDir) return configuredExportDir;
@@ -6531,12 +6524,6 @@ const resolveNotebookConversationRequest = (client, args = {}) => {
   throw new Error('Informe index, chatId ou title para escolher a conversa do caderno.');
 };
 
-const buildCdpSnapshotForArgs = async (args = {}) =>
-  buildRuntimeCdpControlSnapshot(args, { defaultCdpUrl: DEFAULT_CDP_URL });
-
-const activateBrowserTabWithCdp = async (client, args = {}) =>
-  activateRuntimeExtensionClientWithCdp(client, args, { defaultCdpUrl: DEFAULT_CDP_URL });
-
 const tabActivationBrokerClients = (preferredClient = null) => {
   cleanupStaleClients();
   const preferred =
@@ -6624,7 +6611,7 @@ const activateBrowserTabById = async (rawTabId, args = {}, preferredClient = nul
   });
   if (nativeActivation) return nativeActivation;
 
-  const cdpActivation = await activateBrowserTabWithCdp(preferredClient, args);
+  const cdpActivation = await cdpRuntime.activateClient(preferredClient, args);
   if (cdpActivation?.ok) {
     const confirmedClient = resolveActivatedTargetClient({
       targetTabId: tabId,
@@ -6817,6 +6804,13 @@ const collectConversationItemPayloadForClient = async (client, conversation, arg
   const commandStartedAt = Date.now();
   const hydrationArgs = exportHydrationArgs(args);
   const commandTimeoutMs = exportCommandTimeoutMs(args);
+  const privateCollected = await privateRead.collectExport(
+    client,
+    conversation,
+    args,
+  );
+  if (privateCollected) return privateCollected;
+
   const prepared = await ensureClientActiveForExport(client, args);
   if (args._nativeExportLease || args.claimId || args.requireNativeExportLease === true) {
     await validateNativeExportTabLeaseForJob(
@@ -6825,6 +6819,7 @@ const collectConversationItemPayloadForClient = async (client, conversation, arg
       prepared.client,
     );
   }
+
   args.onOperationProgress?.({ phase: 'browser-command-started' });
   assertConversationOperationNotAborted(args);
   const command = await enqueueCommandWithClientRecovery(
@@ -7869,6 +7864,17 @@ const withTimeout = (promise, timeoutMs) =>
     );
   });
 
+const privateInventoryDeps = {
+  enqueueCommand,
+  commandChannelReadyForClient,
+  normalizeConversationChatId,
+  summarizeClient,
+  getSelectableGeminiClients,
+  normalizeClientSelector,
+  requireClient,
+  claimForSession,
+};
+
 const listRecentChatsForClient = async (client, args = {}) => {
   const limit = normalizeLimit(args.limit, 10, 100);
   const offset = normalizeOffset(args.offset);
@@ -7877,6 +7883,18 @@ const listRecentChatsForClient = async (client, args = {}) => {
   let loadMore = null;
   const countOnly = args.countOnly === true || args.action === 'count';
   const untilEnd = args.untilEnd === true || args.countAll === true || args.action === 'count';
+  const privateRecentChats = await listPrivateRecentChatsForClient(
+    client,
+    args,
+    {
+      limit,
+      maxLoadTarget: MAX_RECENT_CHATS_LOAD_TARGET,
+      offset,
+      targetCount,
+    },
+    privateInventoryDeps,
+  );
+  if (privateRecentChats) return privateRecentChats;
   const baseRefreshPlan = buildRecentChatsRefreshPlan(client, args, {
     maxAgeMs: RECENT_CHATS_CACHE_MAX_AGE_MS,
     requestedCount: targetCount,
@@ -9130,6 +9148,13 @@ const runRecentChatsExportJob = async (job, client, args = {}) => {
     broadcastRecentChatsJobProgress(job, client);
 
     await measureJobTiming(job, 'loadSidebarMs', async () => {
+      if (
+        await loadPrivateInventoryForRecentExportJob(job, client, args, {
+          inventoryDeps: privateInventoryDeps,
+          maxRecentChatsLoadTarget: MAX_RECENT_CHATS_LOAD_TARGET,
+        })
+      ) return;
+
       if (job.exportAll) {
         const refreshPlan = buildRecentChatsRefreshPlan(client, args, {
           maxAgeMs: RECENT_CHATS_CACHE_MAX_AGE_MS,
@@ -9984,6 +10009,7 @@ const reloadGeminiTabs = async (args = {}) => {
   });
   const activeReloadBlocked = activeExportJobReloadResult('tab-reload');
   if (activeReloadBlocked) return activeReloadBlocked;
+  const reloadArgs = existingTabsReloadHttpFallbackArgs(args);
   const delayMs = Math.max(0, Math.min(10_000, Number(args.delayMs || 500)));
   const tabOrchestratorPlan = buildTabOrchestratorPlan({
     mode: 'interactive',
@@ -10006,7 +10032,7 @@ const reloadGeminiTabs = async (args = {}) => {
     nativeExtensionRuntimeRefresh,
     nativeReload,
     postNativeReloadRecovery,
-  } = await runExistingTabsNativeReloadRecovery(args, {
+  } = await runExistingTabsNativeReloadRecovery(reloadArgs, {
     tryNativeBrowserBrokerTabsAction,
     attachContentScriptSelfHealToNativeReload,
     expected: EXPECTED_CHROME_EXTENSION_INFO,
@@ -10031,7 +10057,7 @@ const reloadGeminiTabs = async (args = {}) => {
       tabOrchestrator: summarizeReloadTabOrchestrator(),
     };
   }
-  if (shouldReturnNativeBrokerReloadResult(nativeReload, args)) {
+  if (shouldReturnNativeBrokerReloadResult(nativeReload, reloadArgs)) {
     return {
       ...nativeReload,
       nativeExtensionRuntimeRefresh,
@@ -10040,7 +10066,7 @@ const reloadGeminiTabs = async (args = {}) => {
     };
   }
   await reloadExtensionForExistingTabs(
-    args,
+    reloadArgs,
     ensureBrowserExtensionReady,
     summarizeClient,
     CHROME_GUARD_CONFIG.reloadTimeoutMs,
@@ -10078,9 +10104,14 @@ const reloadGeminiTabs = async (args = {}) => {
   }
 
   const controller = liveClients[0];
-  const result = await enqueueCommand(controller.clientId, 'reload-gemini-tabs', {
-    reason: args.reason || 'mcp-command',
-    explicitBrowserSideEffect: true,
+  const result = await runExistingTabsControllerReloadCommand({
+    useDirectPageReload: shouldUseDirectPageReloadForExistingTabs({
+      liveClientCount: liveClients.length,
+      matchingRuntimeClientCount: liveClients.filter(clientMatchesExpectedBrowserExtension).length,
+    }),
+    controllerClientId: controller.clientId,
+    reason: args.reason,
+    enqueueCommand,
   });
 
   if (result?.ok) {
@@ -11988,6 +12019,8 @@ const compactStructuredContent = (name, action, structured = {}) => {
       action,
       status: structured.status || null,
       ready: structured.ready ?? null,
+      authenticated: structured.authenticated ?? null,
+      selectedAdapter: structured.selectedAdapter || null,
       bridgeRole: structured.mcp?.bridgeRole || structured.bridgeRole || null,
       pid: structured.pid || structured.process?.pid || null,
       file: structured.file || structured.bundleFile || structured.path || null,
@@ -12088,6 +12121,7 @@ const buildCliExportCommand = (action, args = {}) => {
   } else if (action === 'reexport') {
     const chatIds = chatIdsFromExportArgs(args);
     commandArgs.push('export', 'selected');
+    commandArgs.push('--private-api');
     if (args.selectionFile) commandArgs.push('--selection-file', args.selectionFile);
     else for (const chatId of chatIds) commandArgs.push('--chat-id', chatId);
     if (!args.selectionFile && chatIds.length === 0) missingArguments.push('chatId ou selectionFile');
@@ -12215,7 +12249,7 @@ const buildCliTabsCommand = (action, args = {}) => {
 
 const buildCliReexportCommand = (args = {}) => {
   const bridgeUrl = `http://${cli.host}:${cli.port}`;
-  const commandArgs = [CLI_BIN_PATH, 'export', 'selected'];
+  const commandArgs = [CLI_BIN_PATH, 'export', 'selected', '--private-api'];
   for (const chatId of chatIdsFromExportArgs(args)) commandArgs.push('--chat-id', chatId);
   addCliFlag(commandArgs, '--output-dir', args.outputDir);
   addCliFlag(commandArgs, '--client-id', args.clientId);
@@ -12460,7 +12494,7 @@ const rawTools = [
         return publicMcpDiagnosticRequiredResult('gemini_chats', action, args);
       }
       if (action === 'private_read') {
-        return toolTextResult(await runMcpPrivateReadAction(args));
+        return toolTextResult(await privateRead.run(args));
       }
       const legacyArgs = { ...args };
       if (source === 'notebook') legacyArgs.notebook = true;
@@ -12614,6 +12648,7 @@ const rawTools = [
             'diagnose',
             'processes',
             'cleanup_processes',
+            'session_status',
             'browser_side_effects',
             'flight_recorder',
             'bundle',
@@ -12636,20 +12671,11 @@ const rawTools = [
     },
     call: async (args = {}) => {
       const action = args.action || 'diagnose';
-      const legacyName =
-        action === 'processes'
-          ? 'gemini_mcp_diagnose_processes'
-          : action === 'cleanup_processes'
-            ? 'gemini_mcp_cleanup_stale_processes'
-            : action === 'browser_side_effects'
-              ? 'gemini_browser_side_effects'
-              : action === 'flight_recorder'
-                ? 'gemini_flight_recorder'
-                : action === 'bundle'
-                  ? 'gemini_collect_support_bundle'
-                  : action === 'snapshot'
-                    ? 'gemini_snapshot'
-                    : 'gemini_diagnose_environment';
+      if (action === 'session_status') {
+        const result = await checkPrivateSessionStatusRuntime(args, privateInventoryDeps);
+        return toolTextResult(result, { isError: !result.ok });
+      }
+      const legacyName = privateSupportLegacyToolName(action);
       return callLegacyToolCompacted('gemini_support', action, legacyName, args);
     },
   },
@@ -12699,14 +12725,7 @@ const executeToolCall = async (name, args = {}) => {
   }
 };
 
-const LOCAL_PROXY_SUPPORT_ACTIONS = new Set([
-  'diagnose',
-  'processes',
-  'cleanup_processes',
-  'browser_side_effects',
-  'flight_recorder',
-  'bundle',
-]);
+const LOCAL_PROXY_SUPPORT_ACTIONS = new Set(localProxySupportActions);
 
 const shouldProxyToolCall = (name, args = {}) => {
   if (legacyToolByName.has(name)) return false;
@@ -12965,6 +12984,14 @@ const bridgeServer = createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'POST' && url.pathname === '/agent/cdp/extension-reload') {
+    const result = await runBridgeCdpExtensionReloadHttpRequest(
+      readJsonBody(req),
+      assertBrowserSideEffect,
+    );
+    return sendAgentJson(res, result.status, result.body);
+  }
+
   if (req.method === 'GET' && url.pathname === '/agent/tabs') {
     try {
       const action = url.searchParams.get('action') || 'list';
@@ -13007,7 +13034,7 @@ const bridgeServer = createServer(async (req, res) => {
         selectableClients,
         activeClaimableGeminiClientOptions(),
       );
-      const cdp = await buildCdpSnapshotForArgs(args);
+      const cdp = await cdpRuntime.buildSnapshot(args);
       let launchResult = null;
       if (
         claimableClients.length === 0 &&
@@ -13792,6 +13819,7 @@ const bridgeServer = createServer(async (req, res) => {
         ...clientSelectorFromSearchParams(url.searchParams),
         delayMs: url.searchParams.has('delayMs') ? Number(url.searchParams.get('delayMs')) : undefined,
         reloadAll: parseOptionalBoolean(url.searchParams.get('reloadAll')),
+        explicit: true,
         reason: url.searchParams.get('reason') || 'agent-endpoint',
       });
       sendAgentJson(res, result.ok ? 200 : 503, result);
@@ -14139,6 +14167,7 @@ const shutdown = (reason, exitCode = 0) => {
     clearTimeout(idleShutdownTimer);
     idleShutdownTimer = null;
   }
+  cdpRuntime.close();
 
   for (const client of clients.values()) {
     if (!client.pendingPoll) continue;

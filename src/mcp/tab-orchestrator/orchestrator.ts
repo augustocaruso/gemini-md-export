@@ -136,6 +136,7 @@ const recoveryForEvidence = (
     type: 'reloadRequested',
     nowMs,
     reason: item.rejectReason ?? 'runtime_epoch_not_ready',
+    clientId: item.clientId,
   });
   const observed = reduceRuntimeRecovery(begin.state, {
     type: 'runtimeEvidenceObserved',

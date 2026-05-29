@@ -453,6 +453,10 @@ test('MCP nao escolhe cliente My Activity de build antigo apos reload da extensa
 test('MCP só reivindica abas Gemini ativas por contrato TS', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const tabRuntimeSource = readFileSync(resolve(ROOT, 'src', 'mcp', 'tab-runtime.ts'), 'utf-8');
+  const extensionReloadRuntimeSource = readFileSync(
+    resolve(ROOT, 'src', 'mcp', 'extension-reload-runtime.ts'),
+    'utf-8',
+  );
   const selectClaimableBlock = source.match(
     /const selectClaimableClient = async \(args = \{\}\) => \{[\s\S]*?\n\};\n\nconst claimTabForClient/,
   )?.[0] || '';
@@ -466,10 +470,17 @@ test('MCP só reivindica abas Gemini ativas por contrato TS', () => {
   assert.match(source, /toActiveClaimableGeminiClient/);
   assert.match(source, /getActiveClaimableGeminiClients/);
   assert.match(source, /assertActiveClaimableGeminiClient/);
-  assert.match(source, /activateBrowserTabWithCdp/);
+  assert.match(source, /cdpRuntime\.activateClient/);
   assert.match(tabRuntimeSource, /tryNativeBrowserBrokerTabsAction\('activate'/);
-  assert.match(source, /activateRuntimeExtensionClientWithCdp/);
-  assert.match(source, /buildRuntimeCdpControlSnapshot/);
+  assert.match(source, /cdpRuntime/);
+  assert.doesNotMatch(source, /createOwnedCdpRuntimePorts/);
+  assert.match(source, /cdpRuntime\.buildSnapshot\(args\)/);
+  assert.match(source, /cdpRuntime\.activateClient\(preferredClient, args\)/);
+  assert.match(source, /cdpRuntime\.close\(\)/);
+  assert.match(source, /\/agent\/cdp\/extension-reload/);
+  assert.match(source, /runBridgeCdpExtensionReloadHttpRequest/);
+  assert.match(extensionReloadRuntimeSource, /runLocalExtensionCdpReload/);
+  assert.match(extensionReloadRuntimeSource, /reloadExtensionFromOwnedDevToolsActivePort/);
   assert.doesNotMatch(source, /const cdpUrlForArgs/);
   assert.match(selectClaimableBlock, /getActiveClaimableGeminiClients/);
   assert.match(selectClaimableBlock, /selectClaimActivationCandidate/);
@@ -588,7 +599,7 @@ test('MCP publico bloqueia contagem/exportacao por tools ruidosas sem depender d
   assert.match(source, /use_cli_only/);
   assert.match(source, /buildCliCountCommand/);
   assert.match(source, /buildCliReexportCommand/);
-  assert.match(source, /const commandArgs = \[CLI_BIN_PATH, 'export', 'selected'\]/);
+  assert.match(source, /const commandArgs = \[CLI_BIN_PATH, 'export', 'selected', '--private-api'\]/);
   assert.match(source, /name: 'gemini_job'[\s\S]*?enum: \['list', 'status', 'cancel'\]/);
   assert.match(source, /'gemini_export_job_list'/);
   const countCommandStart = source.indexOf('const buildCliCountCommand');
@@ -1089,11 +1100,15 @@ test('self-reload trata Extension context invalidated como reload em andamento',
 
 test('MCP expõe diagnóstico e cleanup controlado de processos sem guard de browser', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const privateInventorySource = readFileSync(
+    resolve(ROOT, 'src', 'mcp', 'private-inventory-runtime.ts'),
+    'utf-8',
+  );
   const guardedBlock = source.match(
     /const LEGACY_BROWSER_DEPENDENT_TOOL_NAMES = new Set\(\[[\s\S]*?\]\);/,
   )?.[0];
-  const localProxyBlock = source.match(
-    /const LOCAL_PROXY_SUPPORT_ACTIONS = new Set\(\[[\s\S]*?\]\);/,
+  const localProxyBlock = privateInventorySource.match(
+    /export const localProxySupportActions = \[[\s\S]*?\] as const;/,
   )?.[0];
 
   assert.match(source, /name: 'gemini_mcp_diagnose_processes'/);

@@ -23,7 +23,12 @@ test('shared tab commands claim e release atualizam estado local', async () => {
 
   const claim = await handlers.execute({
     type: 'claim-tab',
-    args: { claimId: 'claim-1', label: 'Aba em uso', explicit: true },
+    args: {
+      claimId: 'claim-1',
+      label: 'Aba em uso',
+      explicit: true,
+      browserAuthorityLeaseId: 'lease-claim',
+    },
   });
   assert.equal(claim.ok, true);
   assert.equal(state.tabClaim.claimId, 'claim-1');
@@ -31,7 +36,12 @@ test('shared tab commands claim e release atualizam estado local', async () => {
 
   const release = await handlers.execute({
     type: 'release-tab-claim-by-tab-id',
-    args: { tabId: 7, claimId: 'claim-1', explicit: true },
+    args: {
+      tabId: 7,
+      claimId: 'claim-1',
+      explicit: true,
+      browserAuthorityLeaseId: 'lease-release',
+    },
   });
   assert.equal(release.ok, true);
   assert.equal(state.tabClaim, null);
@@ -48,10 +58,16 @@ test('shared tab commands activate atualiza isActiveTab so para a aba local', as
     extensionSendMessage: async () => ({ ok: true, isActiveTab: true }),
   });
 
-  await handlers.execute({ type: 'activate-browser-tab', args: { tabId: 8, explicit: true } });
+  await handlers.execute({
+    type: 'activate-browser-tab',
+    args: { tabId: 8, explicit: true, browserAuthorityLeaseId: 'lease-activate-other' },
+  });
   assert.equal(state.isActiveTab, false);
 
-  await handlers.execute({ type: 'activate-browser-tab', args: { tabId: 7, explicit: true } });
+  await handlers.execute({
+    type: 'activate-browser-tab',
+    args: { tabId: 7, explicit: true, browserAuthorityLeaseId: 'lease-activate-local' },
+  });
   assert.equal(state.isActiveTab, true);
 });
 

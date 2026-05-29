@@ -49,6 +49,52 @@ test('runtime refresh FSM is ready when service worker matches expected runtime'
   assert.equal(decision.reason, 'extension_runtime_current');
 });
 
+test('existing tabs reload enables HTTP fallback and bounded wait by default', () => {
+  assert.deepEqual(existingTabsReload.existingTabsReloadHttpFallbackArgs({ allowReload: true }), {
+    allowReload: true,
+    allowHttpBrowserFallback: true,
+    reloadWaitMs: 12000,
+  });
+
+  assert.deepEqual(
+    existingTabsReload.existingTabsReloadHttpFallbackArgs({
+      allowReload: true,
+      allowHttpBrowserFallback: false,
+      waitMs: 5000,
+    }),
+    {
+      allowReload: true,
+      allowHttpBrowserFallback: false,
+      waitMs: 5000,
+      reloadWaitMs: 5000,
+    },
+  );
+});
+
+test('existing tabs reload skips extension tabs API when only stale runtimes are alive', () => {
+  assert.equal(
+    existingTabsReload.shouldUseDirectPageReloadForExistingTabs({
+      liveClientCount: 2,
+      matchingRuntimeClientCount: 0,
+    }),
+    true,
+  );
+  assert.equal(
+    existingTabsReload.shouldUseDirectPageReloadForExistingTabs({
+      liveClientCount: 2,
+      matchingRuntimeClientCount: 1,
+    }),
+    false,
+  );
+  assert.equal(
+    existingTabsReload.shouldUseDirectPageReloadForExistingTabs({
+      liveClientCount: 0,
+      matchingRuntimeClientCount: 0,
+    }),
+    false,
+  );
+});
+
 test('post-reload FSM self-heals content scripts after native extension timeout with no clients', () => {
   const decision = evaluateExistingTabsPostReloadRecoveryFsm({
     allowReload: true,

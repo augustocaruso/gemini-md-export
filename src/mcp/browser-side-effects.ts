@@ -358,11 +358,16 @@ export const markBrowserSideEffectCommandArgs = <T extends Record<string, unknow
   commandType: unknown,
   args: T,
   explicit: boolean,
-): T & { explicit?: true; explicitBrowserSideEffect?: true } => {
+): T & { explicit?: true; explicitBrowserSideEffect?: true; browserAuthorityLeaseId?: string } => {
   if (!explicit || !browserCommandSideEffectKind(commandType)) return args;
+  const existingLeaseId =
+    typeof args.browserAuthorityLeaseId === 'string' && args.browserAuthorityLeaseId.trim()
+      ? args.browserAuthorityLeaseId
+      : null;
   return {
     ...args,
     explicit: true,
     explicitBrowserSideEffect: true,
+    browserAuthorityLeaseId: existingLeaseId || `explicit-${String(commandType || 'command')}`,
   };
 };

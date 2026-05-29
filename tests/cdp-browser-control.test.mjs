@@ -53,6 +53,32 @@ class FakeWebSocket {
   send(payload) {
     const message = JSON.parse(payload);
     this.sent.push(message);
+    if (message.method === 'Target.getTargets') {
+      queueMicrotask(() => {
+        this.onmessage?.({
+          data: JSON.stringify({
+            id: message.id,
+            result: {
+              targetInfos: [
+                {
+                  targetId: 'chat-target',
+                  type: 'page',
+                  title: 'Gemini',
+                  url: 'https://gemini.google.com/app/88a98a108cdcfb61',
+                },
+              ],
+            },
+          }),
+        });
+      });
+      return;
+    }
+    if (message.method === 'Target.activateTarget') {
+      queueMicrotask(() => {
+        this.onmessage?.({ data: JSON.stringify({ id: message.id, result: {} }) });
+      });
+      return;
+    }
     queueMicrotask(() => {
       this.onmessage?.({
         data: JSON.stringify({
@@ -92,7 +118,7 @@ test('classifica URLs Gemini, login e bloqueio do Google pelo alvo CDP', () => {
 
 test('lista targets CDP e monta snapshot com bloqueio acionavel', async () => {
   const fetchImpl = makeFetch({
-    'GET /json/version': jsonResponse({ Browser: 'Chrome/126', webSocketDebuggerUrl: 'ws://browser' }),
+    'GET /json/version': jsonResponse({ Browser: 'Chrome/126' }),
     'GET /json/list': jsonResponse([
       {
         id: 'sorry-target',
@@ -120,6 +146,36 @@ test('lista targets CDP e monta snapshot com bloqueio acionavel', async () => {
   assert.equal(snapshot.controlPlane, 'cdp');
   assert.equal(snapshot.blocker?.code, 'google_verification_required');
   assert.equal(snapshot.geminiTargets.length, 1);
+});
+
+test('snapshot CDP usa Browser WebSocket primeiro quando o navegador anuncia websocket', async () => {
+  FakeWebSocket.instances = [];
+  const fetchImpl = makeFetch({
+    'GET /json/version': jsonResponse({
+      Browser: 'Dia/126',
+      webSocketDebuggerUrl: 'ws://127.0.0.1:9222/devtools/browser/abc',
+    }),
+  });
+
+  const snapshot = await buildCdpBrowserSnapshot({
+    endpoint: 'http://127.0.0.1:9222',
+    fetchImpl,
+    WebSocketImpl: FakeWebSocket,
+    timeoutMs: 1000,
+  });
+
+  assert.equal(snapshot.ok, true);
+  assert.equal(snapshot.targets.length, 1);
+  assert.equal(snapshot.targets[0].id, 'chat-target');
+  assert.equal(snapshot.targets[0].browserWebSocketUrl, 'ws://127.0.0.1:9222/devtools/browser/abc');
+  assert.deepEqual(
+    FakeWebSocket.instances[0].sent.map((message) => message.method),
+    ['Target.getTargets'],
+  );
+  assert.deepEqual(
+    fetchImpl.calls.map((call) => call.key),
+    ['GET /json/version'],
+  );
 });
 
 test('seleciona target Gemini por chatId e ativa pelo endpoint CDP HTTP', async () => {
@@ -152,6 +208,27 @@ test('seleciona target Gemini por chatId e ativa pelo endpoint CDP HTTP', async 
   });
   assert.equal(activated.ok, true);
   assert.equal(fetchImpl.calls[0].key, 'GET /json/activate/chat');
+});
+
+test('ativa target CDP por Browser WebSocket quando o snapshot veio do browser endpoint', async () => {
+  FakeWebSocket.instances = [];
+  const activated = await activateCdpTarget(
+    {
+      id: 'chat-target',
+      type: 'page',
+      url: 'https://gemini.google.com/app/88a98a108cdcfb61',
+      browserWebSocketUrl: 'ws://127.0.0.1:9222/devtools/browser/abc',
+      classification: { kind: 'gemini_chat', terminal: false },
+    },
+    { endpoint: 'http://127.0.0.1:9222', WebSocketImpl: FakeWebSocket, timeoutMs: 1000 },
+  );
+
+  assert.equal(activated.ok, true);
+  assert.equal(activated.targetId, 'chat-target');
+  assert.deepEqual(
+    FakeWebSocket.instances[0].sent.map((message) => message.method),
+    ['Target.activateTarget'],
+  );
 });
 
 test('navega target CDP por WebSocket sem depender da bridge HTTP', async () => {

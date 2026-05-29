@@ -7,7 +7,11 @@
 // native messaging ou automações.
 
 import { captureTabClipWithDebugger } from './browser/background/chrome-debugger-controller.js';
-import { readGeminiPrivateChat } from './browser/background/gemini-private-api-client.js';
+import {
+  checkGeminiPrivateSession,
+  listGeminiPrivateChats,
+  readGeminiPrivateChat,
+} from './browser/background/gemini-private-api-client.js';
 import {
   decideManagedTabsReload,
   managedTabsReloadRuntimeKey,
@@ -2321,6 +2325,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       chatId: message.chatId,
       title: message.title || sender?.tab?.title || null,
     }).then(sendResponse);
+    return true;
+  }
+
+  if (message?.type === 'gemini-md-export/private-api-list-chats') {
+    listGeminiPrivateChats({
+      limit: message.limit,
+    }).then(sendResponse);
+    return true;
+  }
+
+  if (message?.type === 'gemini-md-export/private-api-session-status') {
+    checkGeminiPrivateSession().then(sendResponse);
     return true;
   }
 

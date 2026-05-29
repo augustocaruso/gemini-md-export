@@ -1026,6 +1026,8 @@ test('content script mantém caminhos frequentes leves', async () => {
   assert.match(source, /extensionSendMessageWithRetry/);
   assert.match(source, /lastExtensionPingAttempts/);
   assert.match(source, /content-script-fallback/);
+  assert.doesNotMatch(source, /extensionId:\s*null,/);
+  assert.match(source, /extensionId:\s*chrome\.runtime\?\.id \|\| null/);
   assert.match(source, /service-worker-info-unavailable/);
   assert.match(source, /\{ timeoutMs: 1200, attempts: 1, retryDelayMs: 0 \}/);
   assert.match(source, /CHAT_CLIENT_ID_STORAGE_KEY = 'gemini-md-export\.chatClientId\.v1'/);

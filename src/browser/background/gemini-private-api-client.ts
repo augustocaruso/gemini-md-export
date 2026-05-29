@@ -8,6 +8,7 @@ import {
 import { renderChatSnapshotMarkdown } from '../../core/chat-snapshot-markdown.js';
 import {
   buildGeminiPrivateBatchRequest,
+  buildGeminiPrivateListChatsPayload,
   buildGeminiPrivateReadChatPayload,
   decodeGeminiBatchExecuteResponseWithDiagnostics,
   extractGeminiBatchRpcPayload,
@@ -67,12 +68,81 @@ export type GeminiPrivateApiReadChatResult =
       adapterPlan: ReturnType<typeof privateApiAdapterPlan>;
     };
 
+export type GeminiPrivateApiListChat = Readonly<{
+  chatId: string;
+  privateChatId: string;
+  title: string | null;
+  url: string;
+  isPinned: boolean;
+  updatedAt: string | null;
+}>;
+
+export type GeminiPrivateApiListChatsResult =
+  | {
+      ok: true;
+      chats: readonly GeminiPrivateApiListChat[];
+      count: number;
+      transport: {
+        source: 'extension-background-fetch';
+        appStatus: number;
+        rpcStatuses: readonly (number | null)[];
+      };
+      adapterPlan: ReturnType<typeof privateApiAdapterPlan>;
+    }
+  | {
+      ok: false;
+      code:
+        | 'private_api_app_fetch_failed'
+        | 'private_api_token_missing'
+        | 'private_api_rpc_fetch_failed'
+        | 'private_api_wire_format_changed'
+        | 'google_verification_required'
+        | 'private_api_request_failed';
+      message: string;
+      status?: number | null;
+      diagnostics?: GeminiPrivateApiReadDiagnostics;
+      adapterPlan: ReturnType<typeof privateApiAdapterPlan>;
+    };
+
+export type GeminiPrivateApiSessionStatusResult =
+  | {
+      ok: true;
+      authenticated: true;
+      transport: {
+        source: 'extension-background-fetch';
+        appStatus: number;
+      };
+      adapterPlan: ReturnType<typeof privateApiAdapterPlan>;
+    }
+  | {
+      ok: false;
+      authenticated: false;
+      code:
+        | 'private_api_app_fetch_failed'
+        | 'private_api_token_missing'
+        | 'google_verification_required'
+        | 'private_api_request_failed';
+      message: string;
+      status?: number | null;
+      adapterPlan: ReturnType<typeof privateApiAdapterPlan>;
+    };
+
 export type ReadGeminiPrivateChatInput = Readonly<{
   chatId: unknown;
   title?: string | null;
   fetchImpl?: FetchLike;
   requestId?: number;
   markdownRenderer?: MarkdownRenderer;
+}>;
+
+export type ListGeminiPrivateChatsInput = Readonly<{
+  fetchImpl?: FetchLike;
+  requestId?: number;
+  limit?: number;
+}>;
+
+export type CheckGeminiPrivateSessionInput = Readonly<{
+  fetchImpl?: FetchLike;
 }>;
 
 const unescapeJsonString = (value: string): string => {
@@ -115,6 +185,33 @@ const failure = (
   ...(diagnostics ? { diagnostics } : {}),
 });
 
+const listFailure = (
+  code: Extract<GeminiPrivateApiListChatsResult, { ok: false }>['code'],
+  message: string,
+  status?: number | null,
+  diagnostics?: GeminiPrivateApiReadDiagnostics,
+): GeminiPrivateApiListChatsResult => ({
+  ok: false,
+  code,
+  message,
+  adapterPlan: privateApiAdapterPlan(),
+  ...(status === undefined ? {} : { status }),
+  ...(diagnostics ? { diagnostics } : {}),
+});
+
+const sessionFailure = (
+  code: Extract<GeminiPrivateApiSessionStatusResult, { ok: false }>['code'],
+  message: string,
+  status?: number | null,
+): GeminiPrivateApiSessionStatusResult => ({
+  ok: false,
+  authenticated: false,
+  code,
+  message,
+  adapterPlan: privateApiAdapterPlan(),
+  ...(status === undefined ? {} : { status }),
+});
+
 const privateApiAdapterPlan = () =>
   buildChatReadAdapterPlan({
     allowExperimental: true,
@@ -125,8 +222,8 @@ const privateApiAdapterPlan = () =>
         reason: 'extension_background_fetch_with_browser_credentials',
       }),
       domChatReadCapability({
-        available: true,
-        reason: 'dom_export_fallback_available_from_connected_content_script',
+        available: false,
+        reason: 'dom_export_fallback_requires_explicit_mcp_request',
       }),
       takeoutChatReadCapability({
         available: false,
@@ -154,6 +251,74 @@ const summarizeDecodeDiagnostics = ({
   warnings,
 });
 
+const fetchGeminiAppSession = async (fetchImpl: FetchLike) => {
+  const appResponse = await fetchImpl('https://gemini.google.com/app', {
+    credentials: 'include',
+  });
+  if (!appResponse.ok) {
+    return {
+      ok: false as const,
+      response: appResponse,
+      session: null,
+      html: '',
+    };
+  }
+  const html = await appResponse.text();
+  return {
+    ok: true as const,
+    response: appResponse,
+    session: extractGeminiPrivateSessionFields(html),
+    html,
+  };
+};
+
+const timestampToIso = (value: unknown): string | null => {
+  if (!Array.isArray(value) || value.length < 1) return null;
+  const seconds = Number(value[0]);
+  const nanos = Number(value[1] || 0);
+  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  return new Date((seconds + nanos / 1_000_000_000) * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+};
+
+const listChatsFromPayload = (payload: unknown): GeminiPrivateApiListChat[] => {
+  const body =
+    payload && typeof payload === 'object' && 'body' in payload
+      ? (payload as { body?: unknown }).body
+      : payload;
+  const chatList = Array.isArray(body) && Array.isArray(body[2]) ? body[2] : [];
+  return chatList.flatMap((item): GeminiPrivateApiListChat[] => {
+    if (!Array.isArray(item)) return [];
+    const privateChatId = String(item[0] || '').trim();
+    const chatId = parseChatId(privateChatId);
+    if (!chatId) return [];
+    return [
+      {
+        chatId,
+        privateChatId,
+        title: String(item[1] || '').trim() || null,
+        url: canonicalGeminiChatUrl(chatId),
+        isPinned: Boolean(item[2]),
+        updatedAt: timestampToIso(item[5]),
+      },
+    ];
+  });
+};
+
+const mergeListChats = (
+  groups: readonly GeminiPrivateApiListChat[][],
+): GeminiPrivateApiListChat[] => {
+  const seen = new Set<string>();
+  const chats: GeminiPrivateApiListChat[] = [];
+  for (const group of groups) {
+    for (const chat of group) {
+      if (seen.has(chat.chatId)) continue;
+      seen.add(chat.chatId);
+      chats.push(chat);
+    }
+  }
+  return chats;
+};
+
 export const readGeminiPrivateChat = async ({
   chatId: rawChatId,
   title,
@@ -171,19 +336,26 @@ export const readGeminiPrivateChat = async ({
   }
 
   try {
-    const appResponse = await fetchImpl(canonicalGeminiChatUrl(chatId), {
-      credentials: 'include',
-    });
-    if (!appResponse.ok) {
+    const app = await fetchGeminiAppSession(fetchImpl);
+    if (!app.ok) {
       return failure(
         'private_api_app_fetch_failed',
         'Nao consegui carregar a pagina autenticada do Gemini para obter token de sessao.',
         chatId,
-        appResponse.status,
+        app.response.status,
       );
     }
 
-    const session = extractGeminiPrivateSessionFields(await appResponse.text());
+    if (looksLikeGoogleVerificationHtml(app.html)) {
+      return failure(
+        'google_verification_required',
+        'O Google exigiu verificacao antes de liberar o endpoint privado do Gemini.',
+        chatId,
+        app.response.status,
+      );
+    }
+
+    const session = app.session;
     if (!session.at) {
       return failure(
         'private_api_token_missing',
@@ -259,7 +431,7 @@ export const readGeminiPrivateChat = async ({
       markdown: renderChatSnapshotMarkdown({ snapshot }),
       transport: {
         source: 'extension-background-fetch',
-        appStatus: appResponse.status,
+        appStatus: app.response.status,
         rpcStatus: payload.status,
       },
       adapterPlan: privateApiAdapterPlan(),
@@ -269,6 +441,143 @@ export const readGeminiPrivateChat = async ({
       'private_api_request_failed',
       err instanceof Error ? err.message : String(err),
       chatId as ChatId,
+    );
+  }
+};
+
+export const listGeminiPrivateChats = async ({
+  fetchImpl = fetch as FetchLike,
+  requestId = Date.now() % 100000,
+  limit = 200,
+}: ListGeminiPrivateChatsInput = {}): Promise<GeminiPrivateApiListChatsResult> => {
+  try {
+    const app = await fetchGeminiAppSession(fetchImpl);
+    if (!app.ok) {
+      return listFailure(
+        'private_api_app_fetch_failed',
+        'Nao consegui carregar a pagina autenticada do Gemini para obter token de sessao.',
+        app.response.status,
+      );
+    }
+    if (looksLikeGoogleVerificationHtml(app.html)) {
+      return listFailure(
+        'google_verification_required',
+        'O Google exigiu verificacao antes de liberar o endpoint privado do Gemini.',
+        app.response.status,
+      );
+    }
+    const session = app.session;
+    if (!session.at) {
+      return listFailure(
+        'private_api_token_missing',
+        'A pagina autenticada do Gemini nao trouxe o token necessario para LIST_CHATS.',
+      );
+    }
+
+    const groups: GeminiPrivateApiListChat[][] = [];
+    const statuses: (number | null)[] = [];
+    for (const source of [1, 0]) {
+      const request = buildGeminiPrivateBatchRequest({
+        rpcId: GEMINI_PRIVATE_RPC.LIST_CHATS,
+        payload: buildGeminiPrivateListChatsPayload({ limit, source }),
+        session,
+        requestId: requestId + source,
+        sourcePath: '/app',
+      });
+      const rpcResponse = await fetchImpl(request.url, {
+        method: request.method,
+        headers: request.headers,
+        body: request.body,
+        credentials: 'include',
+      });
+      statuses.push(rpcResponse.status);
+      if (!rpcResponse.ok) {
+        return listFailure(
+          'private_api_rpc_fetch_failed',
+          'O endpoint privado LIST_CHATS respondeu com erro HTTP.',
+          rpcResponse.status,
+        );
+      }
+
+      const rpcText = await rpcResponse.text();
+      if (looksLikeGoogleVerificationHtml(rpcText)) {
+        return listFailure(
+          'google_verification_required',
+          'O Google exigiu verificacao antes de liberar o endpoint privado do Gemini.',
+          rpcResponse.status,
+        );
+      }
+      const decoded = decodeGeminiBatchExecuteResponseWithDiagnostics(rpcText);
+      if (decoded.parseableFrameCount === 0) {
+        return listFailure(
+          'private_api_wire_format_changed',
+          'O endpoint privado LIST_CHATS respondeu em um formato que nao conseguimos decodificar.',
+          rpcResponse.status,
+          summarizeDecodeDiagnostics(decoded),
+        );
+      }
+      const payload = extractGeminiBatchRpcPayload(decoded.frames, GEMINI_PRIVATE_RPC.LIST_CHATS);
+      if (payload.ok) groups.push(listChatsFromPayload(payload));
+    }
+
+    const chats = mergeListChats(groups);
+    return {
+      ok: true,
+      chats,
+      count: chats.length,
+      transport: {
+        source: 'extension-background-fetch',
+        appStatus: app.response.status,
+        rpcStatuses: statuses,
+      },
+      adapterPlan: privateApiAdapterPlan(),
+    };
+  } catch (err) {
+    return listFailure(
+      'private_api_request_failed',
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+};
+
+export const checkGeminiPrivateSession = async ({
+  fetchImpl = fetch as FetchLike,
+}: CheckGeminiPrivateSessionInput = {}): Promise<GeminiPrivateApiSessionStatusResult> => {
+  try {
+    const app = await fetchGeminiAppSession(fetchImpl);
+    if (!app.ok) {
+      return sessionFailure(
+        'private_api_app_fetch_failed',
+        'Nao consegui carregar a pagina autenticada do Gemini.',
+        app.response.status,
+      );
+    }
+    if (looksLikeGoogleVerificationHtml(app.html)) {
+      return sessionFailure(
+        'google_verification_required',
+        'O Google exigiu verificacao antes de liberar o endpoint privado do Gemini.',
+        app.response.status,
+      );
+    }
+    if (!app.session.at) {
+      return sessionFailure(
+        'private_api_token_missing',
+        'A sessao do navegador nao trouxe o token privado do Gemini.',
+      );
+    }
+    return {
+      ok: true,
+      authenticated: true,
+      transport: {
+        source: 'extension-background-fetch',
+        appStatus: app.response.status,
+      },
+      adapterPlan: privateApiAdapterPlan(),
+    };
+  } catch (err) {
+    return sessionFailure(
+      'private_api_request_failed',
+      err instanceof Error ? err.message : String(err),
     );
   }
 };

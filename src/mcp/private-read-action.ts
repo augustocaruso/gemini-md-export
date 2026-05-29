@@ -21,6 +21,7 @@ import type { ChatSnapshot } from '../core/types.js';
 import { validateMcpExportPayloadBeforeWrite } from './export-workflows.js';
 import { runGeminiWebapiPythonReadChat } from './gemini-webapi-python-adapter.js';
 import { buildPrivateApiReadChatCommand } from './private-api-read-chat-command.js';
+import { createPrivateReadExportCollector } from './private-read-export-runtime.js';
 
 type PrivateReadArgs = Readonly<{
   action?: unknown;
@@ -31,6 +32,10 @@ type PrivateReadArgs = Readonly<{
   cookiesJson?: unknown;
   python?: unknown;
   waitMs?: unknown;
+  downloadAssets?: unknown;
+  assetsDir?: unknown;
+  assetsRelDir?: unknown;
+  allowDomFallback?: unknown;
 }>;
 
 type GeminiWebapiPythonRunner = typeof runGeminiWebapiPythonReadChat;
@@ -46,6 +51,15 @@ type PrivateReadDeps = Readonly<{
   summarizeClient: (client: unknown) => unknown;
   runGeminiWebapiPythonReadChat?: GeminiWebapiPythonRunner;
 }>;
+
+type PrivateReadRuntimeDeps = PrivateReadDeps &
+  Readonly<{
+    validateMcpExportPayload: Parameters<
+      typeof createPrivateReadExportCollector
+    >[0]['validateMcpExportPayload'];
+    assertNotAborted: Parameters<typeof createPrivateReadExportCollector>[0]['assertNotAborted'];
+    env?: Parameters<typeof createPrivateReadExportCollector>[0]['env'];
+  }>;
 
 const clientIdOf = (client: unknown): string => {
   const value =
@@ -70,10 +84,11 @@ const timeoutMsOf = (value: unknown): number =>
 const objectOrNull = (value: unknown): Record<string, unknown> | null =>
   value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : null;
 
+const allowsDomFallback = (args: PrivateReadArgs): boolean => args.allowDomFallback === true;
+
 const preferredAdapterForArgs = (args: PrivateReadArgs): ChatReadAdapterKind => {
   if (args.privateApiTransport === 'browser-background') return 'browserBackground';
   if (usesGeminiWebapiPython(args)) return 'privateApiGeminiWebapi';
-  if (parseChatId(args.chatId) || parseChatId(args.url)) return 'privateApiGeminiWebapi';
   return 'browserBackground';
 };
 
@@ -92,12 +107,14 @@ const buildPrivateReadAdapterPlan = (args: PrivateReadArgs): ChatReadAdapterPlan
       }),
       browserBackgroundChatReadCapability({
         available: true,
-        canReadAssets: true,
+        canReadAssets: false,
         reason: 'extension_background_fetch_with_browser_credentials',
       }),
       domChatReadCapability({
-        available: true,
-        reason: 'connected_gemini_content_script_dom_export',
+        available: allowsDomFallback(args),
+        reason: allowsDomFallback(args)
+          ? 'connected_gemini_content_script_dom_export'
+          : 'dom_fallback_disabled_by_private_export_pipeline',
       }),
       takeoutChatReadCapability({
         available: false,
@@ -130,6 +147,11 @@ const failureMessageOf = (adapter: ChatReadAdapterKind, result: unknown): string
 const isOkResult = (result: unknown): boolean => objectOrNull(result)?.ok === true;
 
 const payloadOf = (result: unknown): unknown => objectOrNull(result)?.payload;
+
+const mediaFilesOfResult = (result: unknown): readonly unknown[] => {
+  const record = objectOrNull(result);
+  return Array.isArray(record?.mediaFiles) ? record.mediaFiles : [];
+};
 
 const expectedChatIdOf = (args: PrivateReadArgs): string | null =>
   parseChatId(args.chatId) || parseChatId(args.url);
@@ -175,6 +197,9 @@ export const createMcpPrivateReadAction =
           title: args.title,
           cookiesJson: args.cookiesJson,
           python: args.python,
+          downloadAssets: args.downloadAssets,
+          assetsDir: args.assetsDir,
+          assetsRelDir: args.assetsRelDir,
           timeoutMs: args.waitMs,
         });
       }
@@ -191,10 +216,29 @@ export const createMcpPrivateReadAction =
           command.args,
           { timeoutMs: command.timeoutMs },
         );
-        return {
+        const merged = {
           client: deps.summarizeClient(client),
           ...(objectOrNull(result) || { result }),
         };
+        const enriched = enrichSnapshotResult(merged);
+        const assetPlan = objectOrNull(enriched.assetPlan);
+        const assetRequestCount = Array.isArray(assetPlan?.requests)
+          ? assetPlan.requests.length
+          : 0;
+        if (
+          args.downloadAssets === true &&
+          assetRequestCount > 0 &&
+          mediaFilesOfResult(enriched).length === 0
+        ) {
+          return {
+            ok: false,
+            code: 'browser_background_assets_unavailable',
+            message:
+              'A leitura pelo navegador encontrou assets, mas ainda nao consegue baixa-los; tentando sidecar Python.',
+            chatId: expectedChatIdOf(args),
+          };
+        }
+        return enriched;
       }
 
       if (adapter === 'dom') {
@@ -289,3 +333,16 @@ export const createMcpPrivateReadAction =
       adapterAttempts: state.attempts,
     };
   };
+
+export const createMcpPrivateReadRuntimes = (deps: PrivateReadRuntimeDeps) => {
+  const run = createMcpPrivateReadAction(deps);
+  return {
+    run,
+    collectExport: createPrivateReadExportCollector({
+      runPrivateReadAction: run,
+      validateMcpExportPayload: deps.validateMcpExportPayload,
+      assertNotAborted: deps.assertNotAborted,
+      env: deps.env,
+    }),
+  };
+};

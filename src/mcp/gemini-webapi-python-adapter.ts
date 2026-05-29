@@ -1,4 +1,6 @@
 import { spawn } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { canonicalGeminiChatUrl, parseChatId } from '../core/chat-id.js';
 import {
@@ -7,6 +9,7 @@ import {
   privateApiGeminiWebapiChatReadCapability,
   takeoutChatReadCapability,
 } from '../core/chat-read-adapter.js';
+import { portableIsoSeconds } from '../core/date.js';
 import { toGeminiPrivateChatId } from '../core/gemini-private-protocol.js';
 import { hashText } from '../core/text-hash.js';
 import type { ChatAttachment, ChatId, ChatSnapshot, ChatTurn } from '../core/types.js';
@@ -22,7 +25,20 @@ export type GeminiWebapiPythonReadChatInput = Readonly<{
   timeoutMs?: unknown;
   waitMs?: unknown;
   limit?: unknown;
+  downloadAssets?: unknown;
+  assetsDir?: unknown;
+  assetsRelDir?: unknown;
 }>;
+
+export type GeminiWebapiPythonListChatsInput = Readonly<{
+  cookiesJson?: unknown;
+  python?: unknown;
+  timeoutMs?: unknown;
+  waitMs?: unknown;
+  limit?: unknown;
+}>;
+
+export type GeminiWebapiPythonSessionStatusInput = GeminiWebapiPythonListChatsInput;
 
 export type GeminiWebapiPythonReadChatCommand = Readonly<{
   executable: string;
@@ -31,6 +47,15 @@ export type GeminiWebapiPythonReadChatCommand = Readonly<{
   env: Record<string, string>;
   timeoutMs: number;
   adapterPlan: ReturnType<typeof geminiWebapiPythonAdapterPlan>;
+}>;
+
+export type GeminiWebapiPythonListChat = Readonly<{
+  chatId: string;
+  privateChatId: string;
+  title: string | null;
+  url: string;
+  isPinned: boolean;
+  updatedAt: string | null;
 }>;
 
 export type GeminiWebapiPythonReadChatResult =
@@ -42,6 +67,9 @@ export type GeminiWebapiPythonReadChatResult =
         source: 'gemini_webapi_python';
         privateChatId: string;
       }>;
+      assetReceipts: readonly unknown[];
+      mediaFiles: readonly UnknownRecord[];
+      mediaFailures: readonly UnknownRecord[];
       warnings: readonly string[];
     }>
   | Readonly<{
@@ -49,6 +77,40 @@ export type GeminiWebapiPythonReadChatResult =
       code: string;
       message: string;
       chatId: string | null;
+      stderr?: string;
+      adapterPlan: ReturnType<typeof geminiWebapiPythonAdapterPlan>;
+    }>;
+
+export type GeminiWebapiPythonListChatsResult =
+  | Readonly<{
+      ok: true;
+      adapterPlan: ReturnType<typeof geminiWebapiPythonAdapterPlan>;
+      transport: Readonly<{ source: 'gemini_webapi_python' }>;
+      chats: readonly GeminiWebapiPythonListChat[];
+      count: number;
+      warnings: readonly string[];
+    }>
+  | Readonly<{
+      ok: false;
+      code: string;
+      message: string;
+      stderr?: string;
+      adapterPlan: ReturnType<typeof geminiWebapiPythonAdapterPlan>;
+    }>;
+
+export type GeminiWebapiPythonSessionStatusResult =
+  | Readonly<{
+      ok: true;
+      adapterPlan: ReturnType<typeof geminiWebapiPythonAdapterPlan>;
+      transport: Readonly<{ source: 'gemini_webapi_python' }>;
+      authenticated: true;
+      chatCount: number | null;
+      warnings: readonly string[];
+    }>
+  | Readonly<{
+      ok: false;
+      code: string;
+      message: string;
       stderr?: string;
       adapterPlan: ReturnType<typeof geminiWebapiPythonAdapterPlan>;
     }>;
@@ -78,6 +140,9 @@ const turnRole = (role: unknown): 'user' | 'assistant' => {
 const attachmentKind = (kind: unknown): ChatAttachment['kind'] => {
   const normalized = String(kind || '').toLowerCase();
   if (normalized.includes('image')) return 'image';
+  if (normalized.includes('video')) return 'video';
+  if (normalized.includes('audio')) return 'audio';
+  if (normalized.includes('media')) return 'media';
   if (normalized.includes('document') || normalized.includes('file')) return 'document';
   if (normalized.includes('artifact')) return 'artifact';
   return 'unknown';
@@ -90,12 +155,93 @@ const attachmentsFromSidecar = (value: unknown): ChatAttachment[] => {
     if (!record) return [];
     const label = stringOrNull(record.label) || stringOrNull(record.title) || 'Gemini asset';
     const url = stringOrNull(record.url);
+    const originalUrl = stringOrNull(record.original_url) || stringOrNull(record.originalUrl);
+    const assetId = stringOrNull(record.asset_id) || stringOrNull(record.assetId);
+    const hash = stringOrNull(record.sha256) || stringOrNull(record.hash);
     return [
       {
         kind: attachmentKind(record.kind),
         label,
-        ...(url ? { url, assetRefId: `gemini-webapi:${hashText(url)}` } : {}),
-        ...(!url ? { assetRefId: `gemini-webapi:${index}:${hashText(label)}` } : {}),
+        ...(url ? { url } : {}),
+        ...(hash ? { hash } : {}),
+        assetRefId:
+          assetId ||
+          (url || originalUrl
+            ? `gemini-webapi:${hashText(url || originalUrl)}`
+            : `gemini-webapi:${index}:${hashText(label)}`),
+      },
+    ];
+  });
+};
+
+const mediaFromAssetReceipts = (
+  value: unknown,
+): Readonly<{ mediaFiles: UnknownRecord[]; mediaFailures: UnknownRecord[] }> => {
+  if (!Array.isArray(value)) return { mediaFiles: [], mediaFailures: [] };
+  const mediaFiles: UnknownRecord[] = [];
+  const mediaFailures: UnknownRecord[] = [];
+  for (const item of value) {
+    const receipt = recordOrNull(item);
+    if (!receipt) continue;
+    const assetId = stringOrNull(receipt.asset_id) || stringOrNull(receipt.assetId);
+    const status = stringOrNull(receipt.status);
+    if (status === 'failed') {
+      mediaFailures.push({
+        assetId,
+        kind: stringOrNull(receipt.kind),
+        label: stringOrNull(receipt.label),
+        error: stringOrNull(receipt.error) || 'asset_download_failed',
+      });
+      continue;
+    }
+    const files = Array.isArray(receipt.files) ? receipt.files : [];
+    for (const file of files) {
+      const record = recordOrNull(file);
+      const sourcePath = stringOrNull(record?.path);
+      const filename = stringOrNull(record?.relative_path) || stringOrNull(record?.filename);
+      if (!sourcePath || !filename) continue;
+      try {
+        mediaFiles.push({
+          filename,
+          contentBase64: readFileSync(sourcePath).toString('base64'),
+          contentType: stringOrNull(record?.content_type) || undefined,
+          assetId,
+          sha256: stringOrNull(record?.sha256) || undefined,
+          bytes: Number(record?.bytes) || undefined,
+        });
+      } catch (err) {
+        mediaFailures.push({
+          assetId,
+          filename,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+  return { mediaFiles, mediaFailures };
+};
+
+const assetReceiptsFromSidecar = (value: unknown): UnknownRecord[] => {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    const record = recordOrNull(item);
+    if (!record) return [];
+    const files: UnknownRecord[] = Array.isArray(record.files)
+      ? record.files.filter((file): file is UnknownRecord => recordOrNull(file) !== null)
+      : [];
+    const firstFile = files[0] || null;
+    const assetId = stringOrNull(record.asset_id) || stringOrNull(record.assetId);
+    if (!assetId) return [];
+    const status = stringOrNull(record.status);
+    return [
+      {
+        ok: status !== 'failed',
+        refId: assetId,
+        status:
+          status === 'downloaded' ? 'downloaded' : status === 'failed' ? 'failed' : 'metadata_only',
+        filePath: stringOrNull(firstFile?.relative_path) || null,
+        contentHash: stringOrNull(firstFile?.sha256) || null,
+        warning: stringOrNull(record.error) || null,
       },
     ];
   });
@@ -112,8 +258,8 @@ const geminiWebapiPythonAdapterPlan = () =>
         reason: 'gemini_webapi_python_sidecar',
       }),
       domChatReadCapability({
-        available: true,
-        reason: 'dom_export_fallback_available_from_connected_content_script',
+        available: false,
+        reason: 'dom_export_fallback_requires_explicit_mcp_request',
       }),
       takeoutChatReadCapability({
         available: false,
@@ -121,6 +267,38 @@ const geminiWebapiPythonAdapterPlan = () =>
       }),
     ],
   });
+
+const buildGeminiWebapiBaseCommand = ({
+  action,
+  timeoutMs,
+  python,
+  request,
+}: Readonly<{
+  action: 'list_chats' | 'session_status';
+  timeoutMs: unknown;
+  python?: unknown;
+  request?: Record<string, unknown>;
+}>): GeminiWebapiPythonReadChatCommand => {
+  const resolvedTimeoutMs = numberInRange(timeoutMs, 45_000, 5_000, 120_000);
+  const explicitPython = stringOrNull(python) || process.env.GME_GEMINI_WEBAPI_PYTHON;
+  const executable = explicitPython || process.env.GME_GEMINI_WEBAPI_RUNNER || 'uv';
+  const args = explicitPython
+    ? ['-m', 'gemini_md_export.gemini_webapi_adapter']
+    : ['run', '--project', ROOT_DIR, 'gemini-md-export-gemini-webapi-adapter'];
+
+  return {
+    executable,
+    args,
+    stdin: JSON.stringify({
+      action,
+      ...(request || {}),
+      timeout_ms: resolvedTimeoutMs,
+    }),
+    env: pythonPathEnv(),
+    timeoutMs: resolvedTimeoutMs,
+    adapterPlan: geminiWebapiPythonAdapterPlan(),
+  };
+};
 
 const pythonPathEnv = (baseEnv: NodeJS.ProcessEnv = process.env): Record<string, string> => {
   const existing = baseEnv.PYTHONPATH
@@ -140,6 +318,9 @@ export const buildGeminiWebapiPythonReadChatCommand = (
     chat_id: toGeminiPrivateChatId(chatId),
     title: stringOrNull(input.title),
     cookies_json: stringOrNull(input.cookiesJson),
+    download_assets: input.downloadAssets === true,
+    assets_dir: stringOrNull(input.assetsDir),
+    assets_rel_dir: stringOrNull(input.assetsRelDir),
     limit: numberInRange(input.limit, 200, 1, 2000),
     timeout_ms: timeoutMs,
   };
@@ -160,6 +341,31 @@ export const buildGeminiWebapiPythonReadChatCommand = (
   };
 };
 
+export const buildGeminiWebapiPythonListChatsCommand = (
+  input: GeminiWebapiPythonListChatsInput = {},
+): GeminiWebapiPythonReadChatCommand =>
+  buildGeminiWebapiBaseCommand({
+    action: 'list_chats',
+    timeoutMs: input.timeoutMs ?? input.waitMs,
+    python: input.python,
+    request: {
+      cookies_json: stringOrNull(input.cookiesJson),
+      limit: numberInRange(input.limit, 200, 1, 2000),
+    },
+  });
+
+export const buildGeminiWebapiPythonSessionStatusCommand = (
+  input: GeminiWebapiPythonSessionStatusInput = {},
+): GeminiWebapiPythonReadChatCommand =>
+  buildGeminiWebapiBaseCommand({
+    action: 'session_status',
+    timeoutMs: input.timeoutMs ?? input.waitMs,
+    python: input.python,
+    request: {
+      cookies_json: stringOrNull(input.cookiesJson),
+    },
+  });
+
 const failure = (
   code: string,
   message: string,
@@ -170,6 +376,30 @@ const failure = (
   code,
   message,
   chatId,
+  ...(stderr ? { stderr } : {}),
+  adapterPlan: geminiWebapiPythonAdapterPlan(),
+});
+
+const listFailure = (
+  code: string,
+  message: string,
+  stderr?: string,
+): GeminiWebapiPythonListChatsResult => ({
+  ok: false,
+  code,
+  message,
+  ...(stderr ? { stderr } : {}),
+  adapterPlan: geminiWebapiPythonAdapterPlan(),
+});
+
+const sessionFailure = (
+  code: string,
+  message: string,
+  stderr?: string,
+): GeminiWebapiPythonSessionStatusResult => ({
+  ok: false,
+  code,
+  message,
   ...(stderr ? { stderr } : {}),
   adapterPlan: geminiWebapiPythonAdapterPlan(),
 });
@@ -217,6 +447,7 @@ export const parseGeminiWebapiPythonReadChatResponse = (
     ? record.turns.flatMap((item, index) => {
         const turn = recordOrNull(item);
         const markdown = stringOrNull(turn?.markdown) || stringOrNull(turn?.text);
+        const createdAt = portableIsoSeconds(turn?.created_at || turn?.createdAt);
         if (!turn || !markdown) return [];
         return [
           {
@@ -224,15 +455,27 @@ export const parseGeminiWebapiPythonReadChatResponse = (
             markdown,
             textHash: hashText(markdown),
             sourceOrder: index,
+            ...(createdAt ? { createdAt } : {}),
             attachments: attachmentsFromSidecar(turn.attachments),
           },
         ];
       })
     : [];
+  const turnDates = turns.flatMap((turn) => (turn.createdAt ? [turn.createdAt] : [])).sort();
+  const dateCreated =
+    portableIsoSeconds(record.date_created || record.dateCreated) || turnDates[0] || null;
+  const dateLastMessage =
+    portableIsoSeconds(record.date_last_message || record.dateLastMessage) ||
+    turnDates.at(-1) ||
+    null;
   const assistantMarkdown = turns
     .filter((turn) => turn.role === 'assistant')
     .map((turn) => turn.markdown)
     .join('\n\n');
+  const assetReceipts = assetReceiptsFromSidecar(record.asset_receipts || record.assetReceipts);
+  const { mediaFiles, mediaFailures } = mediaFromAssetReceipts(
+    record.asset_receipts || record.assetReceipts,
+  );
   const snapshot: ChatSnapshot = {
     chatId: chatId as ChatId,
     title: stringOrNull(record.title) || String(chatId),
@@ -240,6 +483,8 @@ export const parseGeminiWebapiPythonReadChatResponse = (
     turns,
     metadata: {
       assistantTurnCount: turns.filter((turn) => turn.role === 'assistant').length,
+      ...(dateCreated ? { dateCreated } : {}),
+      ...(dateLastMessage ? { dateLastMessage } : {}),
     },
     evidence: [
       {
@@ -261,25 +506,111 @@ export const parseGeminiWebapiPythonReadChatResponse = (
       source: 'gemini_webapi_python',
       privateChatId: stringOrNull(record.private_chat_id) || `c_${chatId}`,
     },
+    assetReceipts,
+    mediaFiles,
+    mediaFailures,
     warnings: Array.isArray(record.warnings) ? record.warnings.map(String) : [],
   };
 };
 
-export const runGeminiWebapiPythonReadChat = async (
-  input: GeminiWebapiPythonReadChatInput,
-): Promise<GeminiWebapiPythonReadChatResult> => {
-  let command: GeminiWebapiPythonReadChatCommand;
+const parseJsonEnvelope = (
+  stdout: string,
+): UnknownRecord | { parseError: true; message: string } => {
+  let payload: unknown;
   try {
-    command = buildGeminiWebapiPythonReadChatCommand(input);
-  } catch (err) {
-    return failure(
-      'invalid_gemini_webapi_chat_id',
-      err instanceof Error ? err.message : String(err),
-      null,
+    payload = JSON.parse(String(stdout || '').trim());
+  } catch {
+    return {
+      parseError: true,
+      message: 'O adapter Python gemini_webapi nao retornou JSON valido.',
+    };
+  }
+  const record = recordOrNull(payload);
+  if (!record) {
+    return {
+      parseError: true,
+      message: 'O adapter Python gemini_webapi retornou um envelope invalido.',
+    };
+  }
+  return record;
+};
+
+export const parseGeminiWebapiPythonListChatsResponse = (
+  stdout: string,
+): GeminiWebapiPythonListChatsResult => {
+  const record = parseJsonEnvelope(stdout);
+  if ('parseError' in record) {
+    return listFailure('gemini_webapi_python_invalid_json', String(record.message));
+  }
+
+  if (record.ok !== true) {
+    return listFailure(
+      stringOrNull(record.code) || 'gemini_webapi_python_failed',
+      stringOrNull(record.message) || 'O adapter Python gemini_webapi falhou.',
     );
   }
 
-  return new Promise((resolvePromise) => {
+  const chats = Array.isArray(record.chats)
+    ? record.chats.flatMap((item): GeminiWebapiPythonListChat[] => {
+        const chat = recordOrNull(item);
+        const chatId = parseChatId(chat?.chat_id) || parseChatId(chat?.chatId);
+        if (!chat || !chatId) return [];
+        return [
+          {
+            chatId,
+            privateChatId: stringOrNull(chat.private_chat_id) || `c_${chatId}`,
+            title: stringOrNull(chat.title),
+            url: stringOrNull(chat.url) || canonicalGeminiChatUrl(chatId as ChatId),
+            isPinned: chat.is_pinned === true || chat.isPinned === true,
+            updatedAt: portableIsoSeconds(chat.updated_at || chat.updatedAt),
+          },
+        ];
+      })
+    : [];
+
+  return {
+    ok: true,
+    adapterPlan: geminiWebapiPythonAdapterPlan(),
+    transport: { source: 'gemini_webapi_python' },
+    chats,
+    count: chats.length,
+    warnings: Array.isArray(record.warnings) ? record.warnings.map(String) : [],
+  };
+};
+
+export const parseGeminiWebapiPythonSessionStatusResponse = (
+  stdout: string,
+): GeminiWebapiPythonSessionStatusResult => {
+  const record = parseJsonEnvelope(stdout);
+  if ('parseError' in record) {
+    return sessionFailure('gemini_webapi_python_invalid_json', String(record.message));
+  }
+
+  if (record.ok !== true) {
+    return sessionFailure(
+      stringOrNull(record.code) || 'gemini_webapi_python_failed',
+      stringOrNull(record.message) || 'O adapter Python gemini_webapi falhou.',
+    );
+  }
+
+  return {
+    ok: true,
+    adapterPlan: geminiWebapiPythonAdapterPlan(),
+    transport: { source: 'gemini_webapi_python' },
+    authenticated: true,
+    chatCount: Number.isFinite(Number(record.chat_count)) ? Number(record.chat_count) : null,
+    warnings: Array.isArray(record.warnings) ? record.warnings.map(String) : [],
+  };
+};
+
+const runGeminiWebapiPythonCommand = async <Result>(
+  command: GeminiWebapiPythonReadChatCommand,
+  parse: (stdout: string) => Result,
+  onSpawnFailure: (message: string, stderr?: string) => Result,
+  onTimeout: (stderr?: string) => Result,
+  onExitFailure: (parsed: Result, stderr?: string) => Result,
+): Promise<Result> =>
+  new Promise((resolvePromise) => {
     const child = spawn(command.executable, [...command.args], {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {
@@ -291,14 +622,7 @@ export const runGeminiWebapiPythonReadChat = async (
     let stderr = '';
     const timer = setTimeout(() => {
       child.kill('SIGTERM');
-      resolvePromise(
-        failure(
-          'gemini_webapi_python_timeout',
-          'O adapter Python gemini_webapi excedeu o tempo limite.',
-          parseChatId(input.chatId) || parseChatId(input.url),
-          stderr,
-        ),
-      );
+      resolvePromise(onTimeout(stderr));
     }, command.timeoutMs + 1000);
     child.stdout.on('data', (chunk) => {
       stdout += String(chunk);
@@ -308,26 +632,122 @@ export const runGeminiWebapiPythonReadChat = async (
     });
     child.on('error', (err) => {
       clearTimeout(timer);
-      resolvePromise(
-        failure(
-          'gemini_webapi_python_spawn_failed',
-          err instanceof Error ? err.message : String(err),
-          parseChatId(input.chatId) || parseChatId(input.url),
-          stderr,
-        ),
-      );
+      resolvePromise(onSpawnFailure(err instanceof Error ? err.message : String(err), stderr));
     });
     child.on('close', (code) => {
       clearTimeout(timer);
-      const parsed = parseGeminiWebapiPythonReadChatResponse(stdout);
-      if (code === 0 || parsed.ok) {
+      const parsed = parse(stdout);
+      if (code === 0 || recordOrNull(parsed)?.ok === true) {
         resolvePromise(parsed);
         return;
       }
-      resolvePromise(
-        failure(parsed.code, parsed.message, parsed.chatId, stderr.trim() || undefined),
-      );
+      resolvePromise(onExitFailure(parsed, stderr.trim() || undefined));
     });
     child.stdin.end(command.stdin);
   });
+
+export const runGeminiWebapiPythonReadChat = async (
+  input: GeminiWebapiPythonReadChatInput,
+): Promise<GeminiWebapiPythonReadChatResult> => {
+  let command: GeminiWebapiPythonReadChatCommand;
+  const tempAssetsDir =
+    input.downloadAssets === true && !stringOrNull(input.assetsDir)
+      ? mkdtempSync(resolve(tmpdir(), 'gme-webapi-assets-'))
+      : null;
+  const cleanupTempAssets = () => {
+    if (tempAssetsDir) rmSync(tempAssetsDir, { recursive: true, force: true });
+  };
+  try {
+    command = buildGeminiWebapiPythonReadChatCommand({
+      ...input,
+      ...(tempAssetsDir ? { assetsDir: tempAssetsDir } : {}),
+    });
+  } catch (err) {
+    cleanupTempAssets();
+    return failure(
+      'invalid_gemini_webapi_chat_id',
+      err instanceof Error ? err.message : String(err),
+      null,
+    );
+  }
+
+  const result = await runGeminiWebapiPythonCommand(
+    command,
+    parseGeminiWebapiPythonReadChatResponse,
+    (message, stderr) =>
+      failure(
+        'gemini_webapi_python_spawn_failed',
+        message,
+        parseChatId(input.chatId) || parseChatId(input.url),
+        stderr,
+      ),
+    (stderr) =>
+      failure(
+        'gemini_webapi_python_timeout',
+        'O adapter Python gemini_webapi excedeu o tempo limite.',
+        parseChatId(input.chatId) || parseChatId(input.url),
+        stderr,
+      ),
+    (parsed, stderr) => {
+      const record = recordOrNull(parsed) || {};
+      return failure(
+        stringOrNull(record.code) || 'gemini_webapi_python_failed',
+        stringOrNull(record.message) || 'O adapter Python gemini_webapi falhou.',
+        parseChatId(record.chatId) || parseChatId(record.chat_id),
+        stderr,
+      );
+    },
+  );
+  cleanupTempAssets();
+  return result;
+};
+
+export const runGeminiWebapiPythonListChats = async (
+  input: GeminiWebapiPythonListChatsInput = {},
+): Promise<GeminiWebapiPythonListChatsResult> => {
+  const command = buildGeminiWebapiPythonListChatsCommand(input);
+  return runGeminiWebapiPythonCommand(
+    command,
+    parseGeminiWebapiPythonListChatsResponse,
+    (message, stderr) => listFailure('gemini_webapi_python_spawn_failed', message, stderr),
+    (stderr) =>
+      listFailure(
+        'gemini_webapi_python_timeout',
+        'O adapter Python gemini_webapi excedeu o tempo limite.',
+        stderr,
+      ),
+    (parsed, stderr) => {
+      const record = recordOrNull(parsed) || {};
+      return listFailure(
+        stringOrNull(record.code) || 'gemini_webapi_python_failed',
+        stringOrNull(record.message) || 'O adapter Python gemini_webapi falhou.',
+        stderr,
+      );
+    },
+  );
+};
+
+export const runGeminiWebapiPythonSessionStatus = async (
+  input: GeminiWebapiPythonSessionStatusInput = {},
+): Promise<GeminiWebapiPythonSessionStatusResult> => {
+  const command = buildGeminiWebapiPythonSessionStatusCommand(input);
+  return runGeminiWebapiPythonCommand(
+    command,
+    parseGeminiWebapiPythonSessionStatusResponse,
+    (message, stderr) => sessionFailure('gemini_webapi_python_spawn_failed', message, stderr),
+    (stderr) =>
+      sessionFailure(
+        'gemini_webapi_python_timeout',
+        'O adapter Python gemini_webapi excedeu o tempo limite.',
+        stderr,
+      ),
+    (parsed, stderr) => {
+      const record = recordOrNull(parsed) || {};
+      return sessionFailure(
+        stringOrNull(record.code) || 'gemini_webapi_python_failed',
+        stringOrNull(record.message) || 'O adapter Python gemini_webapi falhou.',
+        stderr,
+      );
+    },
+  );
 };

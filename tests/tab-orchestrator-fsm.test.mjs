@@ -1363,6 +1363,14 @@ test('activity scan plan blocks stale runtime and emits recovery effects', () =>
 
   assert.equal(result.ready, false);
   assert.equal(result.blocker?.code, 'runtime_epoch_not_ready');
+  assert.deepEqual(
+    result.effects.find((effect) => effect.type === 'extension.reloadSelf'),
+    {
+      type: 'extension.reloadSelf',
+      reason: 'runtime_epoch_mismatch',
+      clientId: 'old-activity',
+    },
+  );
   assert.equal(
     result.effects.some((effect) => effect.type === 'diagnostic.record'),
     true,

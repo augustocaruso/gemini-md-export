@@ -10,6 +10,7 @@
   },
   "scripts": {
     "test": "npm run build && node scripts/run-tests.mjs",
+    "test:browser-authority": "npm run build:ts && node --test tests/browser-authority-fsm.test.mjs tests/browser-authority-lease-gate.test.mjs tests/browser-authority-mcp-runtime.test.mjs tests/browser-authority-bypass.test.mjs tests/browser-side-effects.test.mjs tests/export-adapter-policy.test.mjs tests/private-api-selected-export.test.mjs tests/fix-vault-flow.test.mjs",
     "build": "npm run build:ts && node scripts/build.mjs",
     "build:ts": "tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -37,6 +38,10 @@
     "node": ">=20"
   },
   "dependencies": {
+    "mddb": "^0.9.5",
     "turndown": "^7.2.4"
+  },
+  "overrides": {
+    "sqlite3": "6.0.1"
   }
 }

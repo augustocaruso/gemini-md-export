@@ -134,6 +134,31 @@ test('MCP validates export payload before writing files', () => {
   assert.match(source, /shouldRequireNativeExportTabLease/);
 });
 
+test('MCP export prefers private read before falling back to DOM command', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
+  const collectBlock = source.match(
+    /const collectConversationItemPayloadForClient = async[\s\S]*?\nconst saveCollectedConversationPayload/,
+  )?.[0];
+
+  assert.ok(collectBlock, 'collectConversationItemPayloadForClient deve existir');
+
+  const privateAttemptIndex = collectBlock.indexOf('privateRead.collectExport');
+  const prepareIndex = collectBlock.indexOf('ensureClientActiveForExport(client, args)');
+  const domCommandIndex = collectBlock.indexOf("'get-chat-by-id'");
+  assert.ok(privateAttemptIndex > -1, 'export real deve tentar private_read antes do DOM');
+  assert.ok(prepareIndex > -1, 'fallback DOM ainda deve preparar a aba quando necessario');
+  assert.ok(domCommandIndex > -1, 'fallback DOM deve continuar existindo');
+  assert.ok(
+    privateAttemptIndex < prepareIndex,
+    'private_read precisa rodar antes de ativar/preparar aba para fallback DOM',
+  );
+  assert.ok(
+    privateAttemptIndex < domCommandIndex,
+    'private_read precisa rodar antes do comando DOM get-chat-by-id',
+  );
+  assert.match(source, /createMcpPrivateReadRuntimes/);
+});
+
 test('recent export report preserves activity companion evidence', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const reportSource = readFileSync(resolve(ROOT, 'src', 'mcp', 'export-job-reports.ts'), 'utf-8');

@@ -19,6 +19,8 @@ export type BrowserExportPayload = {
   content?: unknown;
   contentBase64?: unknown;
   turns?: unknown;
+  mediaFiles?: unknown;
+  mediaFailures?: unknown;
   metrics?: {
     counters?: {
       turnCount?: unknown;

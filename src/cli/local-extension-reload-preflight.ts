@@ -1,4 +1,8 @@
 import {
+  type LocalExtensionCdpReloadResult,
+  runLocalExtensionCdpReload,
+} from './local-extension-cdp-reload.js';
+import {
   evaluateLocalExtensionSync,
   type LocalExtensionSyncResult,
   resolveSourceExtensionDir,
@@ -25,6 +29,17 @@ type ActiveJobProbe = Readonly<{
   error?: string | null;
 }>;
 
+type BridgeRequestJson = (
+  bridgeUrl: string,
+  path: string,
+  options: Readonly<{
+    method?: string;
+    body?: unknown;
+    timeoutMs?: number;
+    operation?: string;
+  }>,
+) => Promise<unknown>;
+
 export type LocalExtensionReloadPreflightInput = Readonly<{
   allowReload?: boolean;
   packageRoot: string;
@@ -33,6 +48,7 @@ export type LocalExtensionReloadPreflightInput = Readonly<{
 export type LocalExtensionReloadPreflightPorts = Readonly<{
   fetchActiveJobCount: () => Promise<ActiveJobProbe>;
   buildLocalDoctorReport: () => LocalDoctorReport;
+  runLocalExtensionCdpReload?: typeof runLocalExtensionCdpReload;
 }>;
 
 type SyncResultWithContext = LocalExtensionSyncResult &
@@ -40,6 +56,7 @@ type SyncResultWithContext = LocalExtensionSyncResult &
     browser?: string | null;
     profileDirectory?: string | null;
     extensionId?: string | null;
+    cdpReload?: LocalExtensionCdpReloadResult | null;
   }>;
 
 export type LocalExtensionReloadPreflightResult =
@@ -60,6 +77,57 @@ const issueCode = (issue: unknown): string => {
   if (typeof issue !== 'object') return String(issue);
   const record = issue as Record<string, unknown>;
   return String(record.code || record.reason || record.type || record.message || '').trim();
+};
+
+const shouldRunCdpReloadAfterSync = (result: SyncResultWithContext): boolean =>
+  ['synced', 'skipped-up-to-date'].includes(String(result.status || '')) &&
+  result.shouldReloadExistingTabs !== false &&
+  !!result.extensionId;
+
+export const createBridgeLocalExtensionCdpReloadPort =
+  (
+    bridgeUrl: string,
+    flags: Readonly<{ allowReload?: boolean }>,
+    requestJson: BridgeRequestJson,
+  ): NonNullable<LocalExtensionReloadPreflightPorts['runLocalExtensionCdpReload']> =>
+  async (args) => {
+    try {
+      return (await requestJson(bridgeUrl, '/agent/cdp/extension-reload', {
+        method: 'POST',
+        body: { ...args, allowReload: flags.allowReload === true },
+        timeoutMs: 20_000,
+        operation: 'local-extension-cdp-extension-reload',
+      })) as LocalExtensionCdpReloadResult;
+    } catch (err) {
+      const issue =
+        err && typeof err === 'object' ? (err as { code?: unknown; message?: unknown }) : {};
+      return {
+        ok: false,
+        attempted: true,
+        mode: 'cdp-browser-websocket',
+        extensionId: String(args.extensionId || ''),
+        targetId: '',
+        targetUrl: '',
+        devToolsActivePortFile: '',
+        code: String(issue.code || 'bridge_cdp_extension_reload_failed'),
+        error: String(issue.message || err),
+      };
+    }
+  };
+
+const attachCdpReload = async (
+  result: SyncResultWithContext,
+  input: LocalExtensionReloadPreflightInput,
+  ports: LocalExtensionReloadPreflightPorts,
+): Promise<SyncResultWithContext> => {
+  if (input.allowReload !== true || !shouldRunCdpReloadAfterSync(result)) return result;
+  const runReload = ports.runLocalExtensionCdpReload || runLocalExtensionCdpReload;
+  const cdpReload = await runReload({
+    allowReload: true,
+    browser: result.browser || null,
+    extensionId: result.extensionId || null,
+  });
+  return { ...result, cdpReload };
 };
 
 export const readyHasExtensionMismatchClients = (ready: unknown): boolean => {
@@ -109,12 +177,16 @@ export const runLocalExtensionReloadPreflight = async (
       sourceDir,
       loadedExtension,
     });
-    return {
-      ...result,
-      browser: local.browser || null,
-      profileDirectory: local.profileDirectory || null,
-      extensionId: loadedExtension?.id || null,
-    };
+    return attachCdpReload(
+      {
+        ...result,
+        browser: local.browser || null,
+        profileDirectory: local.profileDirectory || null,
+        extensionId: loadedExtension?.id || null,
+      },
+      input,
+      ports,
+    );
   }
 
   const activeJobs = await ports.fetchActiveJobCount();
@@ -136,12 +208,16 @@ export const runLocalExtensionReloadPreflight = async (
     loadedExtension,
   });
 
-  return {
-    ...result,
-    browser: local.browser || null,
-    profileDirectory: local.profileDirectory || null,
-    extensionId: loadedExtension?.id || null,
-  };
+  return attachCdpReload(
+    {
+      ...result,
+      browser: local.browser || null,
+      profileDirectory: local.profileDirectory || null,
+      extensionId: loadedExtension?.id || null,
+    },
+    input,
+    ports,
+  );
 };
 
 export const localExtensionReloadPreflightCliLine = (

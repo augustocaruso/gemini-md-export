@@ -71,6 +71,7 @@ const RECOVERABLE_NATIVE_RELOAD_CODES = new Set([
   'extension_context_invalidated',
   'extension_request_timeout',
 ]);
+const HTTP_FALLBACK_RELOAD_WAIT_MS = 12_000;
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   !!value && typeof value === 'object' && !Array.isArray(value);
@@ -412,6 +413,61 @@ export const reloadSideEffectExplicitlyAllowed = (args: Record<string, unknown> 
   args.intent === 'tab_management' ||
   args.diagnostic === true;
 
+export const existingTabsReloadHttpFallbackArgs = (
+  args: Record<string, unknown> = {},
+): Record<string, unknown> => ({
+  ...args,
+  allowHttpBrowserFallback: args.allowHttpBrowserFallback !== false,
+  reloadWaitMs: args.reloadWaitMs ?? args.waitMs ?? HTTP_FALLBACK_RELOAD_WAIT_MS,
+});
+
+export const shouldUseDirectPageReloadForExistingTabs = ({
+  liveClientCount = 0,
+  matchingRuntimeClientCount = 0,
+}: Readonly<{
+  liveClientCount?: number;
+  matchingRuntimeClientCount?: number;
+}> = {}): boolean => liveClientCount > 0 && matchingRuntimeClientCount === 0;
+
+export const runExistingTabsControllerReloadCommand = async ({
+  useDirectPageReload = false,
+  controllerClientId,
+  reason,
+  enqueueCommand,
+}: Readonly<{
+  useDirectPageReload?: boolean;
+  controllerClientId?: string;
+  reason?: unknown;
+  enqueueCommand(
+    clientId: string,
+    commandType: string,
+    args?: Record<string, unknown>,
+    options?: Record<string, unknown>,
+  ): Promise<Record<string, any>>;
+}>): Promise<Record<string, any>> => {
+  if (useDirectPageReload || !controllerClientId) {
+    return {
+      ok: false,
+      skipped: true,
+      reason: 'all_clients_outside_expected_runtime',
+    };
+  }
+  return enqueueCommand(
+    controllerClientId,
+    'reload-gemini-tabs',
+    {
+      reason: stringValue(reason) || 'mcp-command',
+      explicit: true,
+      explicitBrowserSideEffect: true,
+    },
+    {
+      timeoutMs: 10_000,
+      dispatchTimeoutMs: 3000,
+      browserSideEffectExplicit: true,
+    },
+  );
+};
+
 export const refreshExistingTabsExtensionRuntimeBeforeReload = async (
   args: Record<string, unknown> = {},
   deps: {
@@ -616,7 +672,7 @@ export const reloadExtensionForExistingTabs = async (
       allowReload: args.allowReload === true,
       config: {
         initialConnectTimeoutMs: 0,
-        reloadTimeoutMs: normalizeReloadWaitMs(args.reloadWaitMs, reloadTimeoutMs),
+        reloadTimeoutMs: normalizeReloadWaitMs(args.reloadWaitMs ?? args.waitMs, reloadTimeoutMs),
       },
     });
     return {

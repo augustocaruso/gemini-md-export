@@ -1,4 +1,8 @@
 import {
+  type CdpRuntimeSessionOwner,
+  createCdpRuntimeSessionOwner,
+} from './runtime-session-owner.js';
+import {
   activateExtensionClientWithCdp,
   buildCdpControlSnapshot,
   type CdpActivationResult,
@@ -68,6 +72,45 @@ export const activateRuntimeExtensionClientWithCdp = (
   deps: CdpTabSessionBrokerDeps = {},
 ): Promise<CdpActivationResult | null> =>
   activateExtensionClientWithCdp(client, cdpRuntimeInputForArgs(args, options), deps);
+
+const ownedCdpRuntimeSessionOwner: CdpRuntimeSessionOwner = createCdpRuntimeSessionOwner();
+
+export const buildOwnedRuntimeCdpControlSnapshot = (
+  args: CdpRuntimeArgs = {},
+  options: CdpRuntimeOptions = {},
+) => buildRuntimeCdpControlSnapshot(args, options, ownedCdpRuntimeSessionOwner);
+
+export const activateOwnedRuntimeExtensionClientWithCdp = (
+  client: ExtensionClientForCdp | null | undefined,
+  args: CdpRuntimeArgs = {},
+  options: CdpRuntimeOptions = {},
+): Promise<CdpActivationResult | null> =>
+  activateRuntimeExtensionClientWithCdp(client, args, options, ownedCdpRuntimeSessionOwner);
+
+export const reloadExtensionFromOwnedDevToolsActivePort: CdpRuntimeSessionOwner['reloadExtensionFromDevToolsActivePort'] =
+  (args) => ownedCdpRuntimeSessionOwner.reloadExtensionFromDevToolsActivePort(args);
+
+export const closeOwnedCdpRuntimeSessionOwner = (): void => ownedCdpRuntimeSessionOwner.closeAll();
+
+export type OwnedCdpRuntimePorts = Readonly<{
+  buildSnapshot(args?: CdpRuntimeArgs): ReturnType<typeof buildRuntimeCdpControlSnapshot>;
+  activateClient(
+    client: ExtensionClientForCdp | null | undefined,
+    args?: CdpRuntimeArgs,
+  ): Promise<CdpActivationResult | null>;
+  close(): void;
+}>;
+
+export const createOwnedCdpRuntimePorts = (
+  options: CdpRuntimeOptions = {},
+): OwnedCdpRuntimePorts => ({
+  buildSnapshot: (args = {}) => buildOwnedRuntimeCdpControlSnapshot(args, options),
+  activateClient: (client, args = {}) =>
+    activateOwnedRuntimeExtensionClientWithCdp(client, args, options),
+  close: closeOwnedCdpRuntimeSessionOwner,
+});
+
+export const cdpRuntime = createOwnedCdpRuntimePorts();
 
 export const browserControlParamsFromFlags = (
   flags: Readonly<{

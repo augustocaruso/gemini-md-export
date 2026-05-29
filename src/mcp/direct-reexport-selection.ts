@@ -61,6 +61,9 @@ export const normalizeDirectReexportSelection = (
       chatId: key,
       title,
       url: canonicalGeminiChatUrl(chatId),
+      filename: item.filename || item.outputFilename || null,
+      outputDir: item.outputDir || null,
+      sourcePath: item.sourcePath || item.path || null,
       current: false,
       source: item.source || 'direct-url',
       request: {

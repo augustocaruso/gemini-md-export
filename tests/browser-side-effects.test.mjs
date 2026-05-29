@@ -217,6 +217,7 @@ test('browser side effect command args carry explicit runtime intent for content
     delayMs: 250,
     explicit: true,
     explicitBrowserSideEffect: true,
+    browserAuthorityLeaseId: 'explicit-reload-page',
   });
   assert.deepEqual(markBrowserSideEffectCommandArgs('get-extension-info', {}, true), {});
   assert.deepEqual(markBrowserSideEffectCommandArgs('reload-page', { delayMs: 250 }, false), {
@@ -245,11 +246,21 @@ test('content script does not forward tab reload command without explicit intent
 
   assert.match(source, /const browserSideEffectCommands = new Set\(\[[\s\S]*'get-chat-by-id'[\s\S]*'reload-page'/);
   assert.match(source, /explicitBrowserCommandIntentRequired/);
+  assert.match(source, /browserAuthorityLeaseRequired/);
+  assert.match(source, /hasBridgeBrowserAuthorityLease/);
   assert.match(block, /command\.args\?\.explicit !== true && command\.args\?\.force !== true/);
   assert.match(block, /status: 'explicit-reload-required'/);
   assert.match(block, /skipped: true/);
   assert.match(block, /explicit: command\.args\?\.explicit === true/);
   assert.match(block, /force: command\.args\?\.force === true/);
+});
+
+test('shared tab commands require browser authority lease for mutating commands', () => {
+  const source = readFileSync(resolve(import.meta.dirname, '..', 'src', 'browser', 'shared', 'tab-commands.ts'), 'utf-8');
+
+  assert.match(source, /browserAuthorityLeaseId/);
+  assert.match(source, /browser_authority_lease_missing/);
+  assert.match(source, /sharedTabCommandAuthorityLeaseRequired/);
 });
 
 test('MCP marks explicit browser side effect command args before dispatch', () => {

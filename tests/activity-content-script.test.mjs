@@ -623,11 +623,17 @@ test('activity content script reaproveita claim visual da extensao', async () =>
       color: 'blue',
       expiresAt: '2026-05-18T01:10:00Z',
       explicit: true,
+      browserAuthorityLeaseId: 'lease-activity-claim',
     },
   });
   const release = await debug.executeCommand({
     type: 'release-tab-claim',
-    args: { claimId: 'claim-activity-test', reason: 'test', explicit: true },
+    args: {
+      claimId: 'claim-activity-test',
+      reason: 'test',
+      explicit: true,
+      browserAuthorityLeaseId: 'lease-activity-release',
+    },
   });
 
   assert.equal(info.tabId, 42);
@@ -662,6 +668,7 @@ test('activity content script aceita reload-extension-self para self-heal do run
       expectedProtocolVersion: 2,
       expectedBuildStamp: 'build-test',
       explicit: true,
+      browserAuthorityLeaseId: 'lease-activity-reload',
     },
   });
 
@@ -706,6 +713,7 @@ test('activity content script pode ativar outra aba gerenciada como broker leve'
       reason: 'test-broker-activation',
       focusWindow: true,
       explicit: true,
+      browserAuthorityLeaseId: 'lease-activity-activate',
     },
   });
 

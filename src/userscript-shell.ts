@@ -4912,7 +4912,7 @@
         version: bridgeState.extensionVersion || SCRIPT_VERSION,
         extensionVersion: bridgeState.extensionVersion || SCRIPT_VERSION,
         protocolVersion: bridgeState.protocolVersion ?? EXTENSION_PROTOCOL_VERSION,
-        extensionId: null,
+        extensionId: chrome.runtime?.id || null,
         manifestVersion: 3,
         tabId: bridgeState.tabId ?? null,
         windowId: bridgeState.windowId ?? null,
@@ -4986,10 +4986,22 @@
     command.args?.browserSideEffectExplicit === true ||
     command.args?.force === true;
 
+  const hasBridgeBrowserAuthorityLease = (command) =>
+    typeof command.args?.browserAuthorityLeaseId === 'string' &&
+    command.args.browserAuthorityLeaseId.trim().length > 0;
+
   const explicitBrowserCommandIntentRequired = (command) => ({
     ok: false,
     code: 'explicit_browser_intent_required',
     status: 'explicit-browser-intent-required',
+    reason: command.args?.reason || 'bridge-command',
+    skipped: true,
+  });
+
+  const browserAuthorityLeaseRequired = (command) => ({
+    ok: false,
+    code: 'browser_authority_lease_missing',
+    status: 'browser-authority-lease-missing',
     reason: command.args?.reason || 'bridge-command',
     skipped: true,
   });
@@ -5225,6 +5237,12 @@
     ) {
       return explicitBrowserCommandIntentRequired(command);
     }
+    if (
+      browserSideEffectCommands.has(String(command.type || '')) &&
+      !hasBridgeBrowserAuthorityLease(command)
+    ) {
+      return browserAuthorityLeaseRequired(command);
+    }
 
     if (command.type === 'ping' || command.type === 'snapshot') {
       let hostStyles = null;
@@ -5444,6 +5462,36 @@
         ok: false,
         code: 'private_api_empty_extension_response',
         error: 'A extensão não retornou resposta da leitura privada.',
+      };
+    }
+
+    if (command.type === 'private-api-list-chats') {
+      const response = await extensionSendMessage(
+        {
+          type: 'gemini-md-export/private-api-list-chats',
+          limit: command.args?.limit || 200,
+        },
+        { timeoutMs: Math.max(5000, Number(command.args?.timeoutMs || 30_000)) },
+      );
+      return response || {
+        ok: false,
+        code: 'private_api_empty_extension_response',
+        error: 'A extensão não retornou resposta da listagem privada.',
+      };
+    }
+
+    if (command.type === 'private-api-session-status') {
+      const response = await extensionSendMessage(
+        {
+          type: 'gemini-md-export/private-api-session-status',
+        },
+        { timeoutMs: Math.max(5000, Number(command.args?.timeoutMs || 20_000)) },
+      );
+      return response || {
+        ok: false,
+        authenticated: false,
+        code: 'private_api_empty_extension_response',
+        error: 'A extensão não retornou status de sessão.',
       };
     }
 
@@ -6963,6 +7011,29 @@
       return;
     }
 
+    if (isExtensionContext) {
+      try {
+        await startMcpSelectedExport(
+          [
+            {
+              chatId,
+              title: scrapeTitleFromDocument(document) || scrapeTitle() || chatId,
+              url: location.href,
+            },
+          ],
+          { label: 'Preparando export privado da conversa atual...' },
+        );
+      } catch (err) {
+        warn('Falha ao iniciar export privado pelo MCP.', err);
+        clearMcpProgressState();
+        showToast(
+          'Não consegui iniciar o export privado pela ferramenta local. Reabra o Gemini CLI e tente de novo.',
+          'error',
+        );
+      }
+      return;
+    }
+
     if (scrapeTurns(document).length === 0) {
       const message =
         'Nenhum turno detectado. Veja o console e use window.__geminiMdExportDebug.snapshot() para inspecionar o DOM.';
@@ -7918,6 +7989,74 @@
     });
   };
 
+  const mcpExportItemForConversation = (item) => {
+    const chatId = normalizeExpectedChatId(item);
+    if (!chatId) return null;
+    return {
+      chatId,
+      title: item.title || chatId,
+      url: item.url || `https://gemini.google.com/app/${chatId}`,
+      ...(item.filename ? { filename: item.filename } : {}),
+      ...(item.sourcePath ? { sourcePath: item.sourcePath } : {}),
+    };
+  };
+
+  const startMcpSelectedExport = async (items, { label = 'Preparando export...' } = {}) => {
+    const exportItems = (Array.isArray(items) ? items : [])
+      .map(mcpExportItemForConversation)
+      .filter(Boolean);
+    if (exportItems.length === 0) {
+      showToast('Nenhuma conversa selecionada pôde ser baixada.', 'error');
+      return null;
+    }
+
+    hideExportModal();
+    const initialProgress = {
+      source: 'mcp',
+      kind: 'direct-chats-export',
+      workflow: 'direct-reexport',
+      status: 'queued',
+      phase: 'queued',
+      total: exportItems.length,
+      current: 0,
+      completed: 0,
+      position: 0,
+      label,
+      errorCount: 0,
+    };
+    handleMcpJobProgressBroadcast(initialProgress);
+
+    const response = await bridgeRequest('/agent/reexport-chats', {
+      method: 'POST',
+      timeoutMs: 30_000,
+      payload: {
+        clientId: bridgeState.clientId || undefined,
+        tabId: bridgeState.tabId ?? undefined,
+        claimId: state.tabClaim?.claimId || undefined,
+        sessionId: state.tabClaim?.sessionId || undefined,
+        outputDir: state.bridgeOutputDir || undefined,
+        items: exportItems,
+        expectedCount: exportItems.length,
+        privateReadExport: true,
+        allowDomFallback: false,
+      },
+    });
+
+    handleMcpJobProgressBroadcast({
+      ...initialProgress,
+      ...response,
+      jobId: response?.jobId || null,
+      status: response?.status || 'running',
+      phase: response?.phase || 'queued',
+      total: response?.requested || exportItems.length,
+      current: response?.completed || 0,
+      completed: response?.completed || 0,
+      label: response?.decisionSummary?.headline || label,
+    });
+    showToast('Export iniciado. Vou mostrar o progresso aqui embaixo.', 'info');
+    return response;
+  };
+
   const runBatchExport = async (
     items,
     {
@@ -8822,26 +8961,18 @@
           );
           return;
         }
-        const originalChatId = currentChatId();
-        const originalWasNotebook = isNotebookPage();
-        const originalNotebookReturnItem = originalWasNotebook
-          ? selected.find((item) => item.source === 'notebook') || {
-              source: 'notebook',
-              title: 'caderno',
-              notebookUrl: location.href,
-              url: location.href,
-              notebookId: currentNotebookId(),
-              rowIndex: 0,
-            }
-          : null;
-        const originalItem = state.conversations.find(
-          (item) => item.chatId === originalChatId || item.id === originalChatId,
-        );
-        await runBatchExport(selected, {
-          originalItem,
-          originalWasNotebook,
-          originalNotebookReturnItem,
-        });
+        try {
+          await startMcpSelectedExport(selected, {
+            label: 'Preparando export privado das conversas selecionadas...',
+          });
+        } catch (err) {
+          warn('Falha ao iniciar export privado pelo MCP.', err);
+          clearMcpProgressState();
+          showToast(
+            'Não consegui iniciar o export privado pela ferramenta local. Reabra o Gemini CLI e tente de novo.',
+            'error',
+          );
+        }
       }
     });
 

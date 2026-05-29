@@ -468,6 +468,7 @@ test('CLI fix-vault com Takeout diagnostica, repara e só depois escreve datas',
   const takeoutPath = resolve(vault, 'Minhaatividade.html');
   const repairScript = resolve(vault, 'fake-repair.mjs');
   const metadataScript = resolve(vault, 'fake-metadata.mjs');
+  const privateApiRunner = resolve(vault, 'fake-private-api.mjs');
   const eventsPath = resolve(vault, 'events.jsonl');
   const chatPath = resolve(vault, 'cccccccccccc.md');
   writeFileSync(
@@ -487,7 +488,7 @@ test('CLI fix-vault com Takeout diagnostica, repara e só depois escreve datas',
       '',
       '## 🤖 Gemini',
       '',
-      'resposta raw suspeita',
+      'resposta raw suspeita ![imagem faltando](assets/cccccccccccc/missing.png)',
       '',
     ].join('\n'),
     'utf-8',
@@ -607,11 +608,58 @@ else if (diagnoseOnly) process.exitCode = 2;
 `,
   );
 
+  writeExecutableScript(
+    privateApiRunner,
+    `#!/usr/bin/env node
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+const eventsPath = process.env.GME_FAKE_EVENTS;
+const request = JSON.parse(readFileSync(0, 'utf-8'));
+const chatId = String(request.chat_id || '').replace(/^c_/, '');
+const assetsRelDir = request.assets_rel_dir || 'assets/' + chatId;
+const assetPath = resolve(request.assets_dir, 'turn-0001-asset-00.png');
+mkdirSync(dirname(assetPath), { recursive: true });
+writeFileSync(assetPath, Buffer.from([1, 2, 3, 4]));
+writeFileSync(resolve(dirname(eventsPath), 'repair-done'), 'ok');
+appendFileSync(eventsPath, JSON.stringify({ tool: 'private-api', chatId, assetsRelDir }) + '\\n');
+process.stdout.write(JSON.stringify({
+  ok: true,
+  chat_id: chatId,
+  private_chat_id: 'c_' + chatId,
+  title: 'Pergunta correta reexportada pelo chatId',
+  date_created: '2026-05-10T09:46:09Z',
+  date_last_message: '2026-05-10T09:46:09Z',
+  turns: [
+    { role: 'user', markdown: 'Pergunta correta reexportada pelo chatId', created_at: '2026-05-10T09:46:09Z' },
+    {
+      role: 'assistant',
+      markdown: 'Resposta correta reexportada pelo chatId.',
+      created_at: '2026-05-10T09:46:09Z',
+      attachments: [{ kind: 'image', label: 'Imagem reexportada', url: assetsRelDir + '/turn-0001-asset-00.png', asset_id: 'turn-0001-asset-00' }]
+    }
+  ],
+  asset_receipts: [{
+    asset_id: 'turn-0001-asset-00',
+    status: 'downloaded',
+    files: [{
+      path: assetPath,
+      relative_path: assetsRelDir + '/turn-0001-asset-00.png',
+      content_type: 'image/png',
+      bytes: 4,
+      sha256: 'sha256-fixture'
+    }]
+  }],
+  warnings: []
+}) + '\\n');
+`,
+  );
+
   try {
     await withEnv(
       {
         GEMINI_MD_EXPORT_REPAIR_SCRIPT: repairScript,
         GEMINI_MD_EXPORT_METADATA_SCRIPT: metadataScript,
+        GME_GEMINI_WEBAPI_RUNNER: privateApiRunner,
         GEMINI_MD_EXPORT_PROGRESS_TICK_MS: '10',
         GME_FAKE_DELAY_MS: '350',
         GME_FAKE_EVENTS: eventsPath,
@@ -633,7 +681,7 @@ else if (diagnoseOnly) process.exitCode = 2;
         );
         assert.equal(run.exitCode, 0);
         assert.match(stdout.text(), /Diagnosticando Takeout e chats do vault/);
-        assert.match(stdout.text(), /Reparando exports suspeitos/);
+        assert.match(stdout.text(), /Reparando exports e assets pela API privada/);
         assert.match(stdout.text(), /Atualizando datas do vault/);
         assert.match(stdout.text(), /Validando vault atualizado/);
         assert.match(stdout.text(), /em andamento/);
@@ -647,12 +695,22 @@ else if (diagnoseOnly) process.exitCode = 2;
       .split('\n')
       .map((line) => JSON.parse(line));
     assert.deepEqual(
-      events.map((event) => `${event.tool}:${event.tool === 'metadata' ? event.diagnoseOnly : event.dryRun}`),
-      ['repair:true', 'metadata:true', 'repair:false', 'metadata:false'],
+      events.map((event) =>
+        event.tool === 'metadata'
+          ? `${event.tool}:${event.diagnoseOnly}`
+          : event.tool === 'repair'
+            ? `${event.tool}:${event.dryRun}`
+            : `${event.tool}:${event.chatId}`,
+      ),
+      ['repair:true', 'metadata:true', 'private-api:cccccccccccc', 'metadata:false'],
     );
-    assert.equal(events[2].paths.length, 1);
-    assert.equal(events[2].paths[0], chatPath);
+    assert.equal(events[2].assetsRelDir, 'assets/cccccccccccc');
     assert.equal(events[3].repairDone, true);
+    assert.match(readFileSync(chatPath, 'utf-8'), /Resposta correta reexportada pelo chatId/);
+    assert.deepEqual(
+      [...readFileSync(resolve(vault, 'assets/cccccccccccc/turn-0001-asset-00.png'))],
+      [1, 2, 3, 4],
+    );
 
     const report = JSON.parse(readFileSync(reportPath, 'utf-8'));
     assert.equal(report.ok, true);
@@ -2069,7 +2127,17 @@ test('CLI RESULT_JSON trata datas pendentes como export não concluído e orient
     const stdout = captureStream();
     const stderr = captureStream();
     const run = await main(
-      ['export', 'recent', '--bridge-url', bridgeUrl, '--plain', '--result-json', '--poll-ms', '10'],
+      [
+        'export',
+        'recent',
+        '--browser-export',
+        '--bridge-url',
+        bridgeUrl,
+        '--plain',
+        '--result-json',
+        '--poll-ms',
+        '10',
+      ],
       { stdout, stderr },
     );
 
@@ -2249,6 +2317,7 @@ test('CLI export cancela job e libera claim ao receber SIGTERM externo', { timeo
           resolve(ROOT, 'bin', 'gemini-md-export.mjs'),
           'export',
           'recent',
+          '--browser-export',
           '--bridge-url',
           bridgeUrl,
           '--plain',
@@ -3141,6 +3210,7 @@ test('CLI export recent recarrega abas existentes automaticamente antes de inici
           [
             'export',
             'recent',
+            '--browser-export',
             '--bridge-url',
             bridgeUrl,
             '--plain',
@@ -3207,6 +3277,7 @@ test('CLI export recent respeita opt-out explicito de ativacao de aba', async ()
       [
         'export',
         'recent',
+        '--browser-export',
         '--bridge-url',
         bridgeUrl,
         '--plain',
@@ -3259,6 +3330,7 @@ test('CLI export recent preserva opt-in explicito de ativacao de aba', async () 
       [
         'export',
         'recent',
+        '--browser-export',
         '--bridge-url',
         bridgeUrl,
         '--plain',
@@ -3348,6 +3420,7 @@ test('CLI export recent adota job ativo quando start retorna aba ocupada', async
       [
         'export',
         'recent',
+        '--browser-export',
         '--bridge-url',
         bridgeUrl,
         '--plain',
@@ -3550,7 +3623,16 @@ test('CLI prints native broker next action for strict release blocker', async ()
     await assert.rejects(
       () =>
         main(
-          ['export', 'recent', '--bridge-url', bridgeUrl, '--plain', '--max-chats', '1'],
+          [
+            'export',
+            'recent',
+            '--browser-export',
+            '--bridge-url',
+            bridgeUrl,
+            '--plain',
+            '--max-chats',
+            '1',
+          ],
           { stdout, stderr },
         ),
       /Recarregue a extensão ou rode doctor para ver o native broker/,
@@ -3988,6 +4070,7 @@ test('CLI readiness imprime blockingIssue estruturado sem [object Object]', asyn
           [
             'export',
             'recent',
+            '--browser-export',
             '--bridge-url',
             bridgeUrl,
             '--plain',
@@ -4284,6 +4367,7 @@ test('CLI plain progress não duplica contador no texto', async () => {
       [
         'export',
         'recent',
+        '--browser-export',
         '--bridge-url',
         bridgeUrl,
         '--no-start-bridge',
@@ -4322,6 +4406,7 @@ test('CLI export selected e notebook usam endpoints diretos da bridge', async ()
             '/vault/staging',
             '--expected-count',
             '2',
+            '--browser-export',
             '--resume-report-file',
             '/vault/staging/partial-direct-report.json',
             '--hydration-timeout-ms',
@@ -4365,6 +4450,25 @@ test('CLI export selected e notebook usam endpoints diretos da bridge', async ()
     const notebookRequest = requests.find((item) => item.pathname === '/agent/export-notebook');
     assert.equal(notebookRequest.searchParams.get('startIndex'), '2');
   });
+});
+
+test('CLI export selected usa API privada por padrão e exige opt-out para bridge', () => {
+  const source = readFileSync(resolve(ROOT, 'bin', 'gemini-md-export.mjs'), 'utf-8');
+  const runExportBlock =
+    source.match(/const runExport = async \(parsed, streams = \{\}\) => \{[\s\S]*?\n\};\n\nconst runJob/)?.[0] ||
+    '';
+
+  assert.match(source, /--browser-export/);
+  assert.match(source, /--no-private-api/);
+  assert.match(
+    runExportBlock,
+    /\(isSelectedExport \|\| subcommand === 'recent'\) && flags\.privateApi !== false/,
+  );
+  assert.ok(
+    runExportBlock.indexOf('runPrivateApiSelectedExportCommand') <
+      runExportBlock.indexOf('ensureBridgeAvailable'),
+    'export selected/recent precisa tentar API privada antes de bridge/aba',
+  );
 });
 
 test('CLI export selected falha antes da bridge quando expected-count nao bate', async () => {
@@ -4419,6 +4523,7 @@ test('CLI export selected usa selection-file sem duplicar chatIds do manifesto',
           'selected',
           '--selection-file',
           selectionFile,
+          '--browser-export',
           '--bridge-url',
           bridgeUrl,
           '--plain',
@@ -4450,6 +4555,7 @@ test('CLI export reexport legado avisa em saida humana sem quebrar JSON', async 
         'reexport',
         '--chat-id',
         'abc123abc123',
+        '--browser-export',
         '--bridge-url',
         bridgeUrl,
         '--plain',
@@ -4469,6 +4575,7 @@ test('CLI export reexport legado avisa em saida humana sem quebrar JSON', async 
         'reexport',
         '--chat-id',
         'def456def456',
+        '--browser-export',
         '--bridge-url',
         bridgeUrl,
         '--json',

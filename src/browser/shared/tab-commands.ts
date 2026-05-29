@@ -3,6 +3,11 @@ type BridgeCommand = {
   args?: Record<string, unknown>;
 };
 
+export type BrowserAuthorityCommandArgs = Readonly<{
+  browserAuthorityLeaseId?: string;
+  explicitBrowserSideEffect?: true;
+}>;
+
 type TabCommandState = {
   tabId?: number | null;
   windowId?: number | null;
@@ -68,10 +73,22 @@ const hasExplicitBrowserIntent = (args: Record<string, unknown>): boolean =>
   args.explicitBrowserSideEffect === true ||
   args.browserSideEffectExplicit === true;
 
+const hasBrowserAuthorityLease = (args: Record<string, unknown>): boolean =>
+  typeof args.browserAuthorityLeaseId === 'string' &&
+  args.browserAuthorityLeaseId.trim().length > 0;
+
 const sharedTabCommandExplicitIntentRequired = (command: BridgeCommand) => ({
   ok: false,
   code: 'explicit_browser_intent_required',
   status: 'explicit-browser-intent-required',
+  reason: command.args?.reason || 'bridge-command',
+  skipped: true,
+});
+
+const sharedTabCommandAuthorityLeaseRequired = (command: BridgeCommand) => ({
+  ok: false,
+  code: 'browser_authority_lease_missing',
+  status: 'browser-authority-lease-missing',
   reason: command.args?.reason || 'bridge-command',
   skipped: true,
 });
@@ -120,6 +137,12 @@ export const createSharedTabCommandHandlers = (options: SharedTabCommandOptions)
       !hasExplicitBrowserIntent(args)
     ) {
       return sharedTabCommandExplicitIntentRequired(command);
+    }
+    if (
+      sharedTabCommandSideEffectCommands.has(String(command.type || '')) &&
+      !hasBrowserAuthorityLease(args)
+    ) {
+      return sharedTabCommandAuthorityLeaseRequired(command);
     }
 
     if (command.type === 'reload-extension-self') {
