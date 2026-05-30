@@ -7,7 +7,15 @@ import test from 'node:test';
 import {
   importRuntimeNodeDependency,
   loadMarkdownDbFixVaultRecords,
+  runtimeDependencyInstallCommand,
 } from '../build/ts/mcp/markdown-db-vault-adapter.js';
+
+test('MarkdownDB runtime installer routes npm through cmd.exe on Windows', () => {
+  assert.deepEqual(runtimeDependencyInstallCommand('win32', { ComSpec: 'C:\\Windows\\System32\\cmd.exe' }), {
+    file: 'C:\\Windows\\System32\\cmd.exe',
+    args: ['/d', '/s', '/c', 'npm', 'install', '--omit=dev'],
+  });
+});
 
 test('MarkdownDB adapter bootstraps runtime npm dependencies when mddb is not installed', async () => {
   const calls = [];

@@ -38,6 +38,11 @@ type RuntimeNodeDependencyImportDeps = {
   installRuntimeDependencies?: (packageRoot: string) => Promise<void>;
 };
 
+type RuntimeDependencyInstallCommand = Readonly<{
+  file: string;
+  args: readonly string[];
+}>;
+
 type MarkdownAstNode = {
   type?: unknown;
   url?: unknown;
@@ -86,13 +91,25 @@ const isMissingNodePackageError = (err: unknown, packageName: string): boolean =
   return String((record as { message?: unknown }).message || '').includes(packageName);
 };
 
-const npmExecutable = (): string => (process.platform === 'win32' ? 'npm.cmd' : 'npm');
+export const runtimeDependencyInstallCommand = (
+  platform: NodeJS.Platform = process.platform,
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): RuntimeDependencyInstallCommand => {
+  if (platform === 'win32') {
+    return {
+      file: env.ComSpec || env.COMSPEC || 'cmd.exe',
+      args: ['/d', '/s', '/c', 'npm', 'install', '--omit=dev'],
+    };
+  }
+  return { file: 'npm', args: ['install', '--omit=dev'] };
+};
 
 const installRuntimeDependencies = (packageRoot: string): Promise<void> =>
   new Promise((resolveInstall, rejectInstall) => {
+    const command = runtimeDependencyInstallCommand();
     const child = execFile(
-      npmExecutable(),
-      ['install', '--omit=dev'],
+      command.file,
+      [...command.args],
       {
         cwd: packageRoot,
         timeout: 180_000,
