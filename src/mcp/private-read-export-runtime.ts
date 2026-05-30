@@ -240,6 +240,8 @@ export const privateReadExportResultToCollectedPayload = ({
   const mediaFailures = arrayOf(record.mediaFailures);
   const fallbackWarnings = arrayOf(record.fallbackWarnings);
   const adapterAttempts = arrayOf(record.adapterAttempts);
+  const conversationRecord = isRecord(conversation) ? conversation : {};
+  const filename = stringOrNull(conversationRecord.filename) || `${chatId}.md`;
   const privateReadMs = nonNegativeElapsed(privateReadStartedAt, privateReadFinishedAt);
   const assistantTurnCount = assistantTurnCountForSnapshot(snapshot);
   const metrics: PrivateReadExportPayloadMetrics = {
@@ -271,7 +273,7 @@ export const privateReadExportResultToCollectedPayload = ({
     chatId,
     title: snapshot.title,
     url: snapshot.url || `https://gemini.google.com/app/${chatId}`,
-    filename: `${chatId}.md`,
+    filename,
     content: markdown,
     turns: snapshot.turns,
     ...(mediaFiles.length ? { mediaFiles } : {}),

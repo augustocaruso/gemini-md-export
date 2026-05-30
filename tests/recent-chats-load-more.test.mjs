@@ -1030,6 +1030,31 @@ test('reexport direto retoma pelo relatório sem baixar tudo de novo', () => {
   assert.match(source, /expectedCount: job\.expectedCount/);
 });
 
+test('reexport direto preserva destino por item para reparos do vault', () => {
+  const selectionSource = readFileSync(
+    resolve(ROOT, 'src', 'mcp', 'direct-reexport-selection.ts'),
+    'utf-8',
+  );
+  const recordingSource = readFileSync(
+    resolve(ROOT, 'src', 'mcp', 'export-job-recording.ts'),
+    'utf-8',
+  );
+  const dateImportRuntimeSource = readFileSync(
+    resolve(ROOT, 'src', 'mcp', 'export-date-import-runtime.ts'),
+    'utf-8',
+  );
+
+  assert.match(selectionSource, /outputDirForDirectReexportItem/);
+  assert.match(
+    dateImportRuntimeSource,
+    /outputDirForDirectReexportItem\(collected\.conversation, args\.outputDir\)/,
+  );
+  assert.match(
+    recordingSource,
+    /outputDirForDirectReexportItem\(conversation, input\.job\.outputDir\)/,
+  );
+});
+
 test('reexport direto preserva origem sidebar para navegação SPA', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp', 'direct-reexport-selection.ts'), 'utf-8');
   const normalizeBlock = source.match(

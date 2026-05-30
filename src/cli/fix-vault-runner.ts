@@ -283,10 +283,16 @@ const runPrivateApiRepair = async ({
       filename: target.filename,
     })),
     expectedCount: targets.length,
+    bridgeUrl: parsed.flags.bridgeUrl,
     limit: parsed.flags.limit,
     waitMs: parsed.flags.waitMs,
     privateReadWaitMs: parsed.flags.privateReadWaitMs,
     timeoutMs: parsed.flags.timeoutMs,
+    pollMs: parsed.flags.pollMs,
+    clientId: parsed.flags.clientId,
+    tabId: parsed.flags.tabId,
+    claimId: parsed.flags.claimId,
+    sessionId: parsed.flags.sessionId || parsed.flags.session,
     bootstrapTimeoutMs: parsed.flags.bootstrapTimeoutMs,
     python: parsed.flags.python,
     cookiesJson: parsed.flags.cookiesJson,
@@ -297,12 +303,23 @@ const runPrivateApiRepair = async ({
       const key = `${progress.status}:${progress.completed}:${progress.current?.chatId || ''}:${progress.progressMessage}`;
       if (key === lastProgressKey) return;
       lastProgressKey = key;
-      const message =
-        progress.progressMessage === 'Preparando API privada' ||
-        progress.progressMessage === 'Preparacao da API privada falhou' ||
-        progress.progressMessage === 'Listando conversas pela API privada'
-          ? `${progress.progressMessage} (${count}/${progress.requested})`
-          : `Reparando exports/assets pela API privada (${count}/${progress.requested})`;
+      const unifiedPrepMessages = new Set([
+        'Lendo conversa pela API privada',
+        'Export privado em andamento',
+        'Export privado unificado',
+      ]);
+      const pythonPrepMessages = new Set([
+        'Preparando API privada',
+        'Preparacao da API privada falhou',
+        'Listando conversas pela API privada',
+      ]);
+      const message = unifiedPrepMessages.has(progress.progressMessage)
+        ? `Preparando export privado unificado (${count}/${progress.requested})`
+        : progress.progressMessage === 'Export privado concluido'
+          ? `Export privado unificado concluido (${count}/${progress.requested})`
+          : pythonPrepMessages.has(progress.progressMessage)
+            ? `${progress.progressMessage} (${count}/${progress.requested})`
+            : `Reparando exports/assets pela API privada (${count}/${progress.requested})`;
       stdout.write(
         formatFixVaultProgressLine({
           format,

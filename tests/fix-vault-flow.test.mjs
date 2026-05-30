@@ -112,15 +112,37 @@ test('fix-vault monta fila da API privada a partir dos registros do indice Markd
   }
 });
 
-test('fix-vault private repair progress surfaces Python bootstrap distinctly', () => {
+test('fix-vault private repair progress surfaces unified export and Python fallback distinctly', () => {
   const source = readFileSync(
     resolve(import.meta.dirname, '..', 'src', 'cli', 'fix-vault-runner.ts'),
     'utf-8',
   );
 
   assert.match(source, /progress\.progressMessage/);
-  assert.match(source, /Preparando API privada/);
+  assert.match(source, /Preparando export privado unificado/);
   assert.match(source, /Reparando exports\/assets pela API privada/);
+});
+
+test('fix-vault private repair delegates to the unified private export workflow', () => {
+  const fixVaultSource = readFileSync(
+    resolve(import.meta.dirname, '..', 'src', 'cli', 'fix-vault-runner.ts'),
+    'utf-8',
+  );
+  const exportSource = readFileSync(
+    resolve(import.meta.dirname, '..', 'src', 'cli', 'private-api-selected-export.ts'),
+    'utf-8',
+  );
+  const bridgeCall = exportSource.indexOf('return await runPrivateApiSelectedExportViaBridge');
+  const pythonCall = exportSource.indexOf('const bootstrapResult = await runtimeDeps.bootstrapPythonSidecar');
+
+  assert.match(fixVaultSource, /runPrivateApiSelectedExport\(\{/);
+  assert.match(fixVaultSource, /bridgeUrl: parsed\.flags\.bridgeUrl/);
+  assert.ok(bridgeCall > 0, 'export privado deve tentar a bridge/extensao');
+  assert.ok(pythonCall > 0, 'export privado ainda deve manter fallback Python interno');
+  assert.ok(
+    bridgeCall < pythonCall,
+    'export privado deve tentar browser/background via bridge antes do sidecar Python',
+  );
 });
 
 test('fix-vault adapter plan prefers private API and avoids browser lease for known targets', () => {

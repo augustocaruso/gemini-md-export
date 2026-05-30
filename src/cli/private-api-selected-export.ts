@@ -14,6 +14,7 @@ import {
   runGeminiWebapiPythonReadChat,
 } from '../mcp/gemini-webapi-python-adapter.js';
 import { privateReadExportResultToCollectedPayload } from '../mcp/private-read-export-runtime.js';
+import { runPrivateApiSelectedExportViaBridge } from './private-api-bridge-export.js';
 
 type AnyRecord = Record<string, any>;
 
@@ -100,6 +101,13 @@ export type PrivateApiSelectedExportArgs = Readonly<{
   python?: unknown;
   cookiesJson?: unknown;
   delayMs?: unknown;
+  bridgeUrl?: unknown;
+  pollMs?: unknown;
+  preferBridge?: unknown;
+  clientId?: unknown;
+  tabId?: unknown;
+  claimId?: unknown;
+  sessionId?: unknown;
   maxItems?: unknown;
   recent?: unknown;
   startIndex?: unknown;
@@ -127,6 +135,27 @@ const defaultDeps: PrivateApiSelectedExportDeps = {
   runListChats: runGeminiWebapiPythonListChats,
   now: () => new Date(),
   sleep: (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms)),
+};
+
+const shouldAttemptBridgePrivateExport = (
+  args: PrivateApiSelectedExportArgs,
+  items: readonly PrivateApiSelectedExportItem[],
+): boolean => {
+  if (args.preferBridge === false) return false;
+  if (args.recent === true) return false;
+  if (items.length === 0) return false;
+  return !!stringOrNull(args.bridgeUrl);
+};
+
+const bridgePrivateExportStartAllowsPythonFallback = (err: unknown): boolean => {
+  const record = err && typeof err === 'object' ? (err as AnyRecord) : {};
+  const code = stringOrNull(record.code || record.data?.code);
+  return (
+    code === 'bridge_private_export_unavailable' ||
+    code === 'no_command_client_available' ||
+    code === 'no_healthy_command_client' ||
+    code === 'ambiguous_gemini_tabs'
+  );
 };
 
 const numberInRange = (value: unknown, fallback: number, min: number, max: number): number => {
@@ -402,6 +431,32 @@ export const runPrivateApiSelectedExport = async (
   }
   const outputDir = resolveOutputDir(args.outputDir);
   mkdirSync(outputDir, { recursive: true });
+
+  if (shouldAttemptBridgePrivateExport(args, items)) {
+    try {
+      return await runPrivateApiSelectedExportViaBridge({
+        bridgeUrl: args.bridgeUrl,
+        items,
+        expectedCount: args.expectedCount,
+        outputDir,
+        limit: args.limit,
+        waitMs: args.waitMs,
+        privateReadWaitMs: args.privateReadWaitMs,
+        timeoutMs: args.timeoutMs,
+        pollMs: args.pollMs,
+        delayMs: args.delayMs,
+        clientId: args.clientId,
+        tabId: args.tabId,
+        claimId: args.claimId,
+        sessionId: args.sessionId,
+        python: args.python,
+        cookiesJson: args.cookiesJson,
+        onProgress: args.onProgress,
+      });
+    } catch (err) {
+      if (!bridgePrivateExportStartAllowsPythonFallback(err)) throw err;
+    }
+  }
 
   let requested = Math.max(
     items.length,

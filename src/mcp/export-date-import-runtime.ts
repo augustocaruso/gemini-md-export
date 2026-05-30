@@ -1,5 +1,6 @@
 import { basename } from 'node:path';
 import type { MetadataEvidence } from '../core/types.js';
+import { outputDirForDirectReexportItem } from './direct-reexport-selection.js';
 import {
   buildExportDateImportActivityScanCandidates,
   buildExportDateImportBatchEvidence,
@@ -278,7 +279,9 @@ export const saveCollectedConversationPayloadRuntime = async (
   }
 
   const saveStartedAt = Date.now();
-  const saved = deps.writeExportPayloadBundle(dateImport.payload, { outputDir: args.outputDir });
+  const saved = deps.writeExportPayloadBundle(dateImport.payload, {
+    outputDir: outputDirForDirectReexportItem(collected.conversation, args.outputDir),
+  });
   const saveFilesMs = Date.now() - saveStartedAt;
   const savedMediaBytes = Array.isArray(saved.mediaFiles)
     ? saved.mediaFiles.reduce((sum: number, file: RuntimeArgs) => sum + Number(file.bytes || 0), 0)

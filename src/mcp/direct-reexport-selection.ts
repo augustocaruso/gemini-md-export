@@ -6,6 +6,16 @@ type DirectReexportSelectionOptions = {
   maxItems: number;
 };
 
+const stringOrNull = (value: unknown): string | null => {
+  const text = String(value ?? '').trim();
+  return text || null;
+};
+
+export const outputDirForDirectReexportItem = (
+  item: AnyRecord | null | undefined,
+  fallbackOutputDir: unknown,
+): string => stringOrNull(item?.outputDir) || stringOrNull(fallbackOutputDir) || '';
+
 const collectRawDirectReexportItems = (args: AnyRecord = {}) => {
   const rawItems: any[] = [];
   if (Array.isArray(args.chatIds)) {

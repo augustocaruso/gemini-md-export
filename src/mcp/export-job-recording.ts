@@ -1,3 +1,5 @@
+import { outputDirForDirectReexportItem } from './direct-reexport-selection.js';
+
 type AnyRecord = Record<string, any>;
 
 export type ExportJobRecordingDeps = {
@@ -211,7 +213,7 @@ export const saveDeferredDateImportExports = async (
       try {
         const result = await deps.saveCollectedConversationPayload(collected, {
           ...input.args,
-          outputDir: input.job.outputDir,
+          outputDir: outputDirForDirectReexportItem(conversation, input.job.outputDir),
         });
         const resultClient = result.client?.clientId
           ? deps.getClientById(result.client.clientId)

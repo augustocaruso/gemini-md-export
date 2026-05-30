@@ -160,3 +160,27 @@ test('private read success becomes the collected export payload shape', () => {
   assert.equal(collected.result.payload.mediaFiles[0].contentBase64, 'AQIDBA==');
   assert.equal(collected.result.payload.mediaFailures[0].error, 'fixture failure');
 });
+
+test('private read export preserves an explicit target filename from the workflow item', () => {
+  const collected = privateReadExportResultToCollectedPayload({
+    activeClient: { clientId: 'client-1' },
+    conversation: {
+      ...conversation,
+      filename: 'Estudos/Gemini/private-export-original.md',
+    },
+    privateReadStartedAt: 1_000,
+    privateReadFinishedAt: 1_025,
+    result: {
+      ok: true,
+      adapter: 'browserBackground',
+      snapshot,
+      markdown: null,
+      fallbackWarnings: [],
+      adapterAttempts: [],
+      mediaFiles: [],
+      mediaFailures: [],
+    },
+  });
+
+  assert.equal(collected.result.payload.filename, 'Estudos/Gemini/private-export-original.md');
+});
