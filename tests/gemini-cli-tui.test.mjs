@@ -632,6 +632,11 @@ import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path';
 const eventsPath = process.env.GME_FAKE_EVENTS;
 const request = JSON.parse(readFileSync(0, 'utf-8'));
+if (request.action === 'bootstrap') {
+  appendFileSync(eventsPath, JSON.stringify({ tool: 'private-api-bootstrap' }) + '\\n');
+  process.stdout.write(JSON.stringify({ ok: true, source: 'gemini_webapi_python', warnings: [] }) + '\\n');
+  process.exit(0);
+}
 const chatId = String(request.chat_id || '').replace(/^c_/, '');
 const assetsRelDir = request.assets_rel_dir || 'assets/' + chatId;
 const assetPath = resolve(request.assets_dir, 'turn-0001-asset-00.png');
@@ -719,10 +724,16 @@ process.stdout.write(JSON.stringify({
             ? `${event.tool}:${event.dryRun}`
             : `${event.tool}:${event.chatId}`,
       ),
-      ['repair:true', 'metadata:true', 'private-api:cccccccccccc', 'metadata:false'],
+      [
+        'repair:true',
+        'metadata:true',
+        'private-api-bootstrap:undefined',
+        'private-api:cccccccccccc',
+        'metadata:false',
+      ],
     );
-    assert.equal(events[2].assetsRelDir, 'assets/cccccccccccc');
-    assert.equal(events[3].repairDone, true);
+    assert.equal(events[3].assetsRelDir, 'assets/cccccccccccc');
+    assert.equal(events[4].repairDone, true);
     assert.match(readFileSync(chatPath, 'utf-8'), /Resposta correta reexportada pelo chatId/);
     assert.deepEqual(
       [...readFileSync(resolve(vault, 'assets/cccccccccccc/turn-0001-asset-00.png'))],

@@ -5,9 +5,12 @@ import { planExportAdapters } from '../core/export-adapter-policy.js';
 import { normalizeDirectReexportSelection } from '../mcp/direct-reexport-selection.js';
 import { validateMcpExportPayloadBeforeWrite } from '../mcp/export-workflows.js';
 import {
-  runGeminiWebapiPythonListChats,
+  ensureGeminiWebapiPythonBootstrap,
+  type GeminiWebapiPythonBootstrapInput,
+  type GeminiWebapiPythonBootstrapResult,
   type GeminiWebapiPythonReadChatInput,
   type GeminiWebapiPythonReadChatResult,
+  runGeminiWebapiPythonListChats,
   runGeminiWebapiPythonReadChat,
 } from '../mcp/gemini-webapi-python-adapter.js';
 import { privateReadExportResultToCollectedPayload } from '../mcp/private-read-export-runtime.js';
@@ -93,6 +96,7 @@ export type PrivateApiSelectedExportArgs = Readonly<{
   waitMs?: unknown;
   privateReadWaitMs?: unknown;
   timeoutMs?: unknown;
+  bootstrapTimeoutMs?: unknown;
   python?: unknown;
   cookiesJson?: unknown;
   delayMs?: unknown;
@@ -103,6 +107,9 @@ export type PrivateApiSelectedExportArgs = Readonly<{
 }>;
 
 type PrivateApiSelectedExportDeps = Readonly<{
+  bootstrapPythonSidecar(
+    input: GeminiWebapiPythonBootstrapInput,
+  ): Promise<GeminiWebapiPythonBootstrapResult>;
   runReadChat(input: GeminiWebapiPythonReadChatInput): Promise<GeminiWebapiPythonReadChatResult>;
   runListChats(input: {
     limit?: unknown;
@@ -115,6 +122,7 @@ type PrivateApiSelectedExportDeps = Readonly<{
 }>;
 
 const defaultDeps: PrivateApiSelectedExportDeps = {
+  bootstrapPythonSidecar: ensureGeminiWebapiPythonBootstrap,
   runReadChat: runGeminiWebapiPythonReadChat,
   runListChats: runGeminiWebapiPythonListChats,
   now: () => new Date(),
@@ -383,11 +391,104 @@ const listRecentItems = async (
 
 export const runPrivateApiSelectedExport = async (
   args: PrivateApiSelectedExportArgs,
-  deps: PrivateApiSelectedExportDeps = defaultDeps,
+  deps: Partial<PrivateApiSelectedExportDeps> = {},
 ): Promise<PrivateApiSelectedExportJob> => {
+  const runtimeDeps: PrivateApiSelectedExportDeps = { ...defaultDeps, ...deps };
   let items = args.recent === true ? [] : normalizeItems(args);
+  if (items.length === 0 && args.recent !== true) {
+    throw Object.assign(new Error('Nenhuma conversa selecionada para exportar.'), {
+      code: 'private_api_selection_empty',
+    });
+  }
+  const outputDir = resolveOutputDir(args.outputDir);
+  mkdirSync(outputDir, { recursive: true });
+
+  let requested = Math.max(
+    items.length,
+    numberInRange(
+      args.expectedCount ?? (args.recent === true ? args.limit : 0),
+      args.recent === true ? 10 : 0,
+      0,
+      2000,
+    ),
+  );
+  const savedFiles: PrivateApiSelectedExportSavedFile[] = [];
+  const failures: PrivateApiSelectedExportFailure[] = [];
+  const startedAt = runtimeDeps.now().toISOString();
+  const jobId = `private-api-${Date.now().toString(36)}`;
+  const emit = (
+    status: PrivateApiSelectedExportJob['status'],
+    current: PrivateApiSelectedExportJob['current'],
+    progressMessage: string,
+    finishedAt?: string,
+  ) => {
+    const job = makeJob({
+      jobId,
+      status,
+      outputDir,
+      requested,
+      completed: savedFiles.length + failures.length,
+      current,
+      savedFiles: [...savedFiles],
+      failures: [...failures],
+      progressMessage,
+      startedAt,
+      updatedAt: runtimeDeps.now().toISOString(),
+      finishedAt,
+    });
+    args.onProgress?.(job);
+    return job;
+  };
+
+  let latestJob = emit('running', null, 'Preparando API privada');
+  const bootstrapTimeoutMs = numberInRange(
+    args.bootstrapTimeoutMs ?? process.env.GME_GEMINI_WEBAPI_BOOTSTRAP_TIMEOUT_MS,
+    180_000,
+    30_000,
+    300_000,
+  );
+  const bootstrapResult = await runtimeDeps.bootstrapPythonSidecar({
+    timeoutMs: bootstrapTimeoutMs,
+    python: args.python,
+  });
+  if (!bootstrapResult.ok) {
+    failures.push({
+      index: 0,
+      chatId: null,
+      title: null,
+      error: bootstrapResult.message,
+      code: bootstrapResult.code,
+    });
+    return emit(
+      'failed',
+      null,
+      'Preparacao da API privada falhou',
+      runtimeDeps.now().toISOString(),
+    );
+  }
+
   if (items.length === 0 && args.recent === true) {
-    items = await listRecentItems(args, deps);
+    latestJob = emit('running', null, 'Listando conversas pela API privada');
+    try {
+      items = await listRecentItems(args, runtimeDeps);
+      requested = items.length;
+    } catch (err) {
+      const record = err && typeof err === 'object' ? (err as AnyRecord) : {};
+      failures.push({
+        index: 0,
+        chatId: null,
+        title: null,
+        error:
+          err instanceof Error ? err.message : String(record.message || err || 'erro sem detalhe'),
+        code: stringOrNull(record.code) || null,
+      });
+      return emit(
+        'failed',
+        null,
+        'Listagem pela API privada falhou',
+        runtimeDeps.now().toISOString(),
+      );
+    }
   }
   if (items.length === 0) {
     throw Object.assign(new Error('Nenhuma conversa selecionada para exportar.'), {
@@ -407,39 +508,7 @@ export const runPrivateApiSelectedExport = async (
       code: adapterPlan.blocker.code,
     });
   }
-  const outputDir = resolveOutputDir(args.outputDir);
-  mkdirSync(outputDir, { recursive: true });
 
-  const requested = items.length;
-  const savedFiles: PrivateApiSelectedExportSavedFile[] = [];
-  const failures: PrivateApiSelectedExportFailure[] = [];
-  const startedAt = deps.now().toISOString();
-  const jobId = `private-api-${Date.now().toString(36)}`;
-  const emit = (
-    status: PrivateApiSelectedExportJob['status'],
-    current: PrivateApiSelectedExportJob['current'],
-    progressMessage: string,
-    finishedAt?: string,
-  ) => {
-    const job = makeJob({
-      jobId,
-      status,
-      outputDir,
-      requested,
-      completed: savedFiles.length + failures.length,
-      current,
-      savedFiles: [...savedFiles],
-      failures: [...failures],
-      progressMessage,
-      startedAt,
-      updatedAt: deps.now().toISOString(),
-      finishedAt,
-    });
-    args.onProgress?.(job);
-    return job;
-  };
-
-  let latestJob = emit('running', null, 'Preparando export privado');
   const readTimeoutMs = numberInRange(
     args.privateReadWaitMs ?? args.waitMs ?? args.timeoutMs,
     45_000,
@@ -460,7 +529,7 @@ export const runPrivateApiSelectedExport = async (
     try {
       latestJob = emit('running', current, 'Lendo conversa pela API privada');
       const readStartedAt = Date.now();
-      const readResult = await deps.runReadChat({
+      const readResult = await runtimeDeps.runReadChat({
         chatId: item.chatId,
         url: item.url || undefined,
         title: item.title || undefined,
@@ -522,10 +591,10 @@ export const runPrivateApiSelectedExport = async (
       latestJob = emit('running', current, 'Falha registrada; seguindo para o proximo chat');
     }
 
-    if (delayMs > 0 && index < items.length - 1) await deps.sleep(delayMs);
+    if (delayMs > 0 && index < items.length - 1) await runtimeDeps.sleep(delayMs);
   }
 
-  const finishedAt = deps.now().toISOString();
+  const finishedAt = runtimeDeps.now().toISOString();
   const status =
     failures.length === 0
       ? 'completed'

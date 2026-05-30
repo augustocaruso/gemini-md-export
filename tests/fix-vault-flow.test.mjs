@@ -112,6 +112,17 @@ test('fix-vault monta fila da API privada a partir dos registros do indice Markd
   }
 });
 
+test('fix-vault private repair progress surfaces Python bootstrap distinctly', () => {
+  const source = readFileSync(
+    resolve(import.meta.dirname, '..', 'src', 'cli', 'fix-vault-runner.ts'),
+    'utf-8',
+  );
+
+  assert.match(source, /progress\.progressMessage/);
+  assert.match(source, /Preparando API privada/);
+  assert.match(source, /Reparando exports\/assets pela API privada/);
+});
+
 test('fix-vault adapter plan prefers private API and avoids browser lease for known targets', () => {
   const plan = buildFixVaultRepairAdapterPlan({
     flags: { privateApi: true, openIfMissing: false },

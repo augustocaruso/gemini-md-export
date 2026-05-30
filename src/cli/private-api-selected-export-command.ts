@@ -122,6 +122,7 @@ export const runPrivateApiSelectedExportCommand = async ({ flags, streams = {} }
       waitMs: flags.waitMs,
       privateReadWaitMs: flags.privateReadWaitMs,
       timeoutMs: flags.timeoutMs,
+      bootstrapTimeoutMs: flags.bootstrapTimeoutMs,
       python: flags.python,
       cookiesJson: flags.cookiesJson,
       delayMs: flags.delayMs,

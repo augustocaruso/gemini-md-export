@@ -287,6 +287,7 @@ const runPrivateApiRepair = async ({
     waitMs: parsed.flags.waitMs,
     privateReadWaitMs: parsed.flags.privateReadWaitMs,
     timeoutMs: parsed.flags.timeoutMs,
+    bootstrapTimeoutMs: parsed.flags.bootstrapTimeoutMs,
     python: parsed.flags.python,
     cookiesJson: parsed.flags.cookiesJson,
     delayMs: parsed.flags.delayMs,
@@ -296,12 +297,18 @@ const runPrivateApiRepair = async ({
       const key = `${progress.status}:${progress.completed}:${progress.current?.chatId || ''}:${progress.progressMessage}`;
       if (key === lastProgressKey) return;
       lastProgressKey = key;
+      const message =
+        progress.progressMessage === 'Preparando API privada' ||
+        progress.progressMessage === 'Preparacao da API privada falhou' ||
+        progress.progressMessage === 'Listando conversas pela API privada'
+          ? `${progress.progressMessage} (${count}/${progress.requested})`
+          : `Reparando exports/assets pela API privada (${count}/${progress.requested})`;
       stdout.write(
         formatFixVaultProgressLine({
           format,
           current: 3,
           total: 5,
-          message: `Reparando exports/assets pela API privada (${count}/${progress.requested})`,
+          message,
         }),
       );
     },

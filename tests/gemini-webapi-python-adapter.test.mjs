@@ -1,16 +1,19 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import test from 'node:test';
 
 import {
+  buildGeminiWebapiPythonBootstrapCommand,
   buildGeminiWebapiPythonListChatsCommand,
   buildGeminiWebapiPythonReadChatCommand,
   buildGeminiWebapiPythonSessionStatusCommand,
+  parseGeminiWebapiPythonBootstrapResponse,
   parseGeminiWebapiPythonListChatsResponse,
   parseGeminiWebapiPythonReadChatResponse,
   parseGeminiWebapiPythonSessionStatusResponse,
+  runGeminiWebapiPythonSessionStatus,
 } from '../build/ts/mcp/gemini-webapi-python-adapter.js';
 
 const ROOT = resolve(import.meta.dirname, '..');
@@ -42,6 +45,34 @@ test('Gemini Web API Python adapter builds an isolated JSON sidecar command', ()
   assert.equal(request.assets_dir, '/tmp/gme-assets');
   assert.equal(request.assets_rel_dir, 'assets/dbe5dd4b50b09c74');
   assert.equal(JSON.stringify(request).includes('__Secure-1PSID'), false);
+});
+
+test('Gemini Web API Python adapter prewarms dependencies without cookies', () => {
+  const command = buildGeminiWebapiPythonBootstrapCommand({
+    timeoutMs: 999999,
+  });
+
+  assert.equal(command.executable, 'uv');
+  assert.deepEqual(command.args.slice(0, 2), ['run', '--project']);
+  assert.deepEqual(command.args.slice(3, 5), ['python', '-c']);
+  assert.match(command.args.at(-1), /gemini_webapi/);
+  assert.equal(command.timeoutMs, 300000);
+  assert.equal(command.adapterPlan.selectedAdapter, 'privateApiGeminiWebapi');
+  assert.equal(JSON.parse(command.stdin).action, 'bootstrap');
+  assert.equal(JSON.stringify(command).includes('__Secure-1PSID'), false);
+  assert.equal(JSON.stringify(command).includes('cookies_json'), false);
+
+  const parsed = parseGeminiWebapiPythonBootstrapResponse(
+    JSON.stringify({
+      ok: true,
+      source: 'gemini_webapi_python',
+      warnings: ['venv_created'],
+    }),
+  );
+
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.transport.source, 'gemini_webapi_python');
+  assert.equal(parsed.warnings[0], 'venv_created');
 });
 
 test('Gemini Web API Python adapter parses only typed JSON envelopes', () => {
@@ -117,6 +148,44 @@ test('Gemini Web API Python adapter parses list and session status envelopes', (
   assert.equal(status.ok, true);
   assert.equal(status.authenticated, true);
   assert.equal(status.chatCount, 1);
+});
+
+test('Gemini Web API Python adapter prewarms before direct session status', async () => {
+  const tempDir = mkdtempSync(resolve(tmpdir(), 'gme-webapi-bootstrap-runner-'));
+  const runnerPath = resolve(tempDir, 'fake-runner.mjs');
+  const logPath = resolve(tempDir, 'actions.jsonl');
+  writeFileSync(
+    runnerPath,
+    `#!/usr/bin/env node
+import { appendFileSync, readFileSync } from 'node:fs';
+const request = JSON.parse(readFileSync(0, 'utf-8') || '{}');
+appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({ action: request.action }) + '\\n');
+if (request.action === 'bootstrap') {
+  process.stdout.write(JSON.stringify({ ok: true, source: 'gemini_webapi_python' }) + '\\n');
+  process.exit(0);
+}
+process.stdout.write(JSON.stringify({ ok: true, source: 'gemini_webapi_python', authenticated: true, chat_count: 2 }) + '\\n');
+`,
+    'utf-8',
+  );
+  chmodSync(runnerPath, 0o755);
+  const previousRunner = process.env.GME_GEMINI_WEBAPI_RUNNER;
+  process.env.GME_GEMINI_WEBAPI_RUNNER = runnerPath;
+  try {
+    const result = await runGeminiWebapiPythonSessionStatus({ timeoutMs: 5000 });
+    assert.equal(result.ok, true);
+    assert.equal(result.chatCount, 2);
+    assert.deepEqual(
+      readFileSync(logPath, 'utf-8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line).action),
+      ['bootstrap', 'session_status'],
+    );
+  } finally {
+    if (previousRunner === undefined) delete process.env.GME_GEMINI_WEBAPI_RUNNER;
+    else process.env.GME_GEMINI_WEBAPI_RUNNER = previousRunner;
+  }
 });
 
 test('Gemini Web API Python adapter derives snapshot dates from turn dates', () => {

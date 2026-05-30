@@ -45,10 +45,18 @@ const snapshotFor = (chatId) => ({
   evidence: [{ source: 'gemini-private-api', kind: 'fixture', confidence: 'strong', warnings: [] }],
 });
 
+const bootstrapOk = async () => ({
+  ok: true,
+  adapterPlan: { selectedAdapter: 'privateApiGeminiWebapi' },
+  transport: { source: 'gemini_webapi_python' },
+  warnings: [],
+});
+
 test('private API selected export writes Markdown with dates and emits progress', async () => {
   const outputDir = mkdtempSync(resolve(tmpdir(), 'gme-private-api-selected-'));
   const events = [];
   const calls = [];
+  const sequence = [];
   const job = await runPrivateApiSelectedExport(
     {
       chatIds: ['88a98a108cdcfb61'],
@@ -58,7 +66,12 @@ test('private API selected export writes Markdown with dates and emits progress'
     {
       now: () => new Date('2026-05-28T23:10:00Z'),
       sleep: async () => {},
+      bootstrapPythonSidecar: async () => {
+        sequence.push('bootstrap');
+        return bootstrapOk();
+      },
       runReadChat: async (input) => {
+        sequence.push('read');
         calls.push(input);
         return {
           ok: true,
@@ -92,10 +105,12 @@ test('private API selected export writes Markdown with dates and emits progress'
   assert.equal(job.status, 'completed');
   assert.equal(job.successCount, 1);
   assert.equal(job.failureCount, 0);
+  assert.deepEqual(sequence, ['bootstrap', 'read']);
   assert.equal(calls[0].chatId, '88a98a108cdcfb61');
   assert.equal(calls[0].downloadAssets, true);
   assert.equal(calls[0].assetsRelDir, 'assets/88a98a108cdcfb61');
   assert.equal(events.some((event) => event.phase === 'exporting'), true);
+  assert.equal(events[0].progressMessage, 'Preparando API privada');
 
   const filePath = resolve(outputDir, '88a98a108cdcfb61.md');
   const markdown = readFileSync(filePath, 'utf-8');
@@ -131,6 +146,7 @@ test('private API selected export records failures and continues the batch', asy
     {
       now: () => new Date('2026-05-28T23:10:00Z'),
       sleep: async () => {},
+      bootstrapPythonSidecar: bootstrapOk,
       runReadChat: async (input) => {
         if (input.chatId === 'dbe5dd4b50b09c74') {
           return {
@@ -165,6 +181,7 @@ test('private API recent export lists inventory before selected export without b
   const outputDir = mkdtempSync(resolve(tmpdir(), 'gme-private-api-recent-'));
   const listCalls = [];
   const readCalls = [];
+  const sequence = [];
   const job = await runPrivateApiSelectedExport(
     {
       recent: true,
@@ -175,7 +192,12 @@ test('private API recent export lists inventory before selected export without b
     {
       now: () => new Date('2026-05-28T23:10:00Z'),
       sleep: async () => {},
+      bootstrapPythonSidecar: async () => {
+        sequence.push('bootstrap');
+        return bootstrapOk();
+      },
       runListChats: async (input) => {
+        sequence.push('list');
         listCalls.push(input);
         return {
           ok: true,
@@ -187,6 +209,7 @@ test('private API recent export lists inventory before selected export without b
         };
       },
       runReadChat: async (input) => {
+        sequence.push(`read:${input.chatId}`);
         readCalls.push(input);
         return {
           ok: true,
@@ -204,10 +227,55 @@ test('private API recent export lists inventory before selected export without b
 
   assert.equal(job.status, 'completed');
   assert.equal(job.successCount, 2);
+  assert.deepEqual(sequence, [
+    'bootstrap',
+    'list',
+    'read:88a98a108cdcfb61',
+    'read:dbe5dd4b50b09c74',
+  ]);
   assert.equal(listCalls[0].limit, 3);
   assert.deepEqual(
     readCalls.map((call) => call.chatId),
     ['88a98a108cdcfb61', 'dbe5dd4b50b09c74'],
+  );
+});
+
+test('private API selected export fails before reads when sidecar bootstrap fails', async () => {
+  const outputDir = mkdtempSync(resolve(tmpdir(), 'gme-private-api-selected-bootstrap-'));
+  const events = [];
+  let readCalled = false;
+  const job = await runPrivateApiSelectedExport(
+    {
+      chatIds: ['88a98a108cdcfb61'],
+      outputDir,
+      onProgress: (event) => events.push(event),
+    },
+    {
+      now: () => new Date('2026-05-28T23:10:00Z'),
+      sleep: async () => {},
+      bootstrapPythonSidecar: async (input) => {
+        assert.equal(input.timeoutMs, 180000);
+        return {
+          ok: false,
+          code: 'gemini_webapi_python_bootstrap_timeout',
+          message: 'A preparacao da API privada Python demorou demais.',
+          adapterPlan: { selectedAdapter: 'privateApiGeminiWebapi' },
+        };
+      },
+      runReadChat: async () => {
+        readCalled = true;
+        throw new Error('read should not run');
+      },
+    },
+  );
+
+  assert.equal(job.status, 'failed');
+  assert.equal(job.failureCount, 1);
+  assert.equal(job.failures[0].code, 'gemini_webapi_python_bootstrap_timeout');
+  assert.equal(readCalled, false);
+  assert.deepEqual(
+    events.map((event) => event.progressMessage),
+    ['Preparando API privada', 'Preparacao da API privada falhou'],
   );
 });
 

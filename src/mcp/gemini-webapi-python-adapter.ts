@@ -40,7 +40,13 @@ export type GeminiWebapiPythonListChatsInput = Readonly<{
 
 export type GeminiWebapiPythonSessionStatusInput = GeminiWebapiPythonListChatsInput;
 
-export type GeminiWebapiPythonReadChatCommand = Readonly<{
+export type GeminiWebapiPythonBootstrapInput = Readonly<{
+  python?: unknown;
+  timeoutMs?: unknown;
+  waitMs?: unknown;
+}>;
+
+export type GeminiWebapiPythonCommand = Readonly<{
   executable: string;
   args: readonly string[];
   stdin: string;
@@ -48,6 +54,8 @@ export type GeminiWebapiPythonReadChatCommand = Readonly<{
   timeoutMs: number;
   adapterPlan: ReturnType<typeof geminiWebapiPythonAdapterPlan>;
 }>;
+
+export type GeminiWebapiPythonReadChatCommand = GeminiWebapiPythonCommand;
 
 export type GeminiWebapiPythonListChat = Readonly<{
   chatId: string;
@@ -115,8 +123,29 @@ export type GeminiWebapiPythonSessionStatusResult =
       adapterPlan: ReturnType<typeof geminiWebapiPythonAdapterPlan>;
     }>;
 
+export type GeminiWebapiPythonBootstrapResult =
+  | Readonly<{
+      ok: true;
+      adapterPlan: ReturnType<typeof geminiWebapiPythonAdapterPlan>;
+      transport: Readonly<{ source: 'gemini_webapi_python' }>;
+      warnings: readonly string[];
+    }>
+  | Readonly<{
+      ok: false;
+      code: string;
+      message: string;
+      stderr?: string;
+      adapterPlan: ReturnType<typeof geminiWebapiPythonAdapterPlan>;
+    }>;
+
 const ROOT_DIR = resolve(import.meta.dirname, '..', '..', '..');
 const PYTHON_PACKAGE_DIR = resolve(ROOT_DIR, 'python');
+const PYTHON_BOOTSTRAP_CODE = [
+  'import json',
+  'import gemini_webapi',
+  'import pydantic',
+  'print(json.dumps({"ok": True, "source": "gemini_webapi_python"}))',
+].join('; ');
 
 const stringOrNull = (value: unknown): string | null => {
   const text = String(value ?? '').trim();
@@ -307,6 +336,34 @@ const pythonPathEnv = (baseEnv: NodeJS.ProcessEnv = process.env): Record<string,
   return { PYTHONPATH: existing };
 };
 
+export const buildGeminiWebapiPythonBootstrapCommand = (
+  input: GeminiWebapiPythonBootstrapInput = {},
+): GeminiWebapiPythonCommand => {
+  const timeoutMs = numberInRange(
+    input.timeoutMs ?? input.waitMs ?? process.env.GME_GEMINI_WEBAPI_BOOTSTRAP_TIMEOUT_MS,
+    180_000,
+    30_000,
+    300_000,
+  );
+  const explicitPython = stringOrNull(input.python) || process.env.GME_GEMINI_WEBAPI_PYTHON;
+  const executable = explicitPython || process.env.GME_GEMINI_WEBAPI_RUNNER || 'uv';
+  const args = explicitPython
+    ? ['-c', PYTHON_BOOTSTRAP_CODE]
+    : ['run', '--project', ROOT_DIR, 'python', '-c', PYTHON_BOOTSTRAP_CODE];
+
+  return {
+    executable,
+    args,
+    stdin: JSON.stringify({
+      action: 'bootstrap',
+      timeout_ms: timeoutMs,
+    }),
+    env: pythonPathEnv(),
+    timeoutMs,
+    adapterPlan: geminiWebapiPythonAdapterPlan(),
+  };
+};
+
 export const buildGeminiWebapiPythonReadChatCommand = (
   input: GeminiWebapiPythonReadChatInput = {},
 ): GeminiWebapiPythonReadChatCommand => {
@@ -397,6 +454,18 @@ const sessionFailure = (
   message: string,
   stderr?: string,
 ): GeminiWebapiPythonSessionStatusResult => ({
+  ok: false,
+  code,
+  message,
+  ...(stderr ? { stderr } : {}),
+  adapterPlan: geminiWebapiPythonAdapterPlan(),
+});
+
+const bootstrapFailure = (
+  code: string,
+  message: string,
+  stderr?: string,
+): GeminiWebapiPythonBootstrapResult => ({
   ok: false,
   code,
   message,
@@ -535,6 +604,29 @@ const parseJsonEnvelope = (
   return record;
 };
 
+export const parseGeminiWebapiPythonBootstrapResponse = (
+  stdout: string,
+): GeminiWebapiPythonBootstrapResult => {
+  const record = parseJsonEnvelope(stdout);
+  if ('parseError' in record) {
+    return bootstrapFailure('gemini_webapi_python_bootstrap_invalid_json', String(record.message));
+  }
+
+  if (record.ok !== true) {
+    return bootstrapFailure(
+      stringOrNull(record.code) || 'gemini_webapi_python_bootstrap_failed',
+      stringOrNull(record.message) || 'Nao consegui preparar a API privada Python.',
+    );
+  }
+
+  return {
+    ok: true,
+    adapterPlan: geminiWebapiPythonAdapterPlan(),
+    transport: { source: 'gemini_webapi_python' },
+    warnings: Array.isArray(record.warnings) ? record.warnings.map(String) : [],
+  };
+};
+
 export const parseGeminiWebapiPythonListChatsResponse = (
   stdout: string,
 ): GeminiWebapiPythonListChatsResult => {
@@ -604,7 +696,7 @@ export const parseGeminiWebapiPythonSessionStatusResponse = (
 };
 
 const runGeminiWebapiPythonCommand = async <Result>(
-  command: GeminiWebapiPythonReadChatCommand,
+  command: GeminiWebapiPythonCommand,
   parse: (stdout: string) => Result,
   onSpawnFailure: (message: string, stderr?: string) => Result,
   onTimeout: (stderr?: string) => Result,
@@ -646,6 +738,54 @@ const runGeminiWebapiPythonCommand = async <Result>(
     child.stdin.end(command.stdin);
   });
 
+export const runGeminiWebapiPythonBootstrap = async (
+  input: GeminiWebapiPythonBootstrapInput = {},
+): Promise<GeminiWebapiPythonBootstrapResult> => {
+  const command = buildGeminiWebapiPythonBootstrapCommand(input);
+  return runGeminiWebapiPythonCommand(
+    command,
+    parseGeminiWebapiPythonBootstrapResponse,
+    (message, stderr) =>
+      bootstrapFailure('gemini_webapi_python_bootstrap_spawn_failed', message, stderr),
+    (stderr) =>
+      bootstrapFailure(
+        'gemini_webapi_python_bootstrap_timeout',
+        'A preparacao da API privada Python demorou demais. Rode novamente; as dependencias costumam ficar prontas na segunda tentativa.',
+        stderr,
+      ),
+    (parsed, stderr) => {
+      const record = recordOrNull(parsed) || {};
+      return bootstrapFailure(
+        stringOrNull(record.code) || 'gemini_webapi_python_bootstrap_failed',
+        stringOrNull(record.message) || 'Nao consegui preparar a API privada Python.',
+        stderr,
+      );
+    },
+  );
+};
+
+const bootstrapCache = new Map<string, Promise<GeminiWebapiPythonBootstrapResult>>();
+
+const bootstrapCacheKey = (input: GeminiWebapiPythonBootstrapInput = {}): string =>
+  JSON.stringify({
+    python: stringOrNull(input.python) || process.env.GME_GEMINI_WEBAPI_PYTHON || null,
+    runner: process.env.GME_GEMINI_WEBAPI_RUNNER || null,
+  });
+
+export const ensureGeminiWebapiPythonBootstrap = async (
+  input: GeminiWebapiPythonBootstrapInput = {},
+): Promise<GeminiWebapiPythonBootstrapResult> => {
+  const key = bootstrapCacheKey(input);
+  const cached = bootstrapCache.get(key);
+  if (cached) return cached;
+  const pending = runGeminiWebapiPythonBootstrap(input).then((result) => {
+    if (!result.ok) bootstrapCache.delete(key);
+    return result;
+  });
+  bootstrapCache.set(key, pending);
+  return pending;
+};
+
 export const runGeminiWebapiPythonReadChat = async (
   input: GeminiWebapiPythonReadChatInput,
 ): Promise<GeminiWebapiPythonReadChatResult> => {
@@ -668,6 +808,19 @@ export const runGeminiWebapiPythonReadChat = async (
       'invalid_gemini_webapi_chat_id',
       err instanceof Error ? err.message : String(err),
       null,
+    );
+  }
+
+  const bootstrapResult = await ensureGeminiWebapiPythonBootstrap({
+    python: input.python,
+  });
+  if (!bootstrapResult.ok) {
+    cleanupTempAssets();
+    return failure(
+      bootstrapResult.code,
+      bootstrapResult.message,
+      parseChatId(input.chatId) || parseChatId(input.url),
+      bootstrapResult.stderr,
     );
   }
 
@@ -705,6 +858,12 @@ export const runGeminiWebapiPythonReadChat = async (
 export const runGeminiWebapiPythonListChats = async (
   input: GeminiWebapiPythonListChatsInput = {},
 ): Promise<GeminiWebapiPythonListChatsResult> => {
+  const bootstrapResult = await ensureGeminiWebapiPythonBootstrap({
+    python: input.python,
+  });
+  if (!bootstrapResult.ok) {
+    return listFailure(bootstrapResult.code, bootstrapResult.message, bootstrapResult.stderr);
+  }
   const command = buildGeminiWebapiPythonListChatsCommand(input);
   return runGeminiWebapiPythonCommand(
     command,
@@ -730,6 +889,12 @@ export const runGeminiWebapiPythonListChats = async (
 export const runGeminiWebapiPythonSessionStatus = async (
   input: GeminiWebapiPythonSessionStatusInput = {},
 ): Promise<GeminiWebapiPythonSessionStatusResult> => {
+  const bootstrapResult = await ensureGeminiWebapiPythonBootstrap({
+    python: input.python,
+  });
+  if (!bootstrapResult.ok) {
+    return sessionFailure(bootstrapResult.code, bootstrapResult.message, bootstrapResult.stderr);
+  }
   const command = buildGeminiWebapiPythonSessionStatusCommand(input);
   return runGeminiWebapiPythonCommand(
     command,
