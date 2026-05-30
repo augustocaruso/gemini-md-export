@@ -382,15 +382,32 @@ test('CLI fix-vault expõe ajuda pública única e executa backfill com Takeout'
   try {
     const stdout = captureStream();
     const run = await main(
-      ['fix-vault', vault, '--takeout', takeoutPath, '--report', reportPath, '--no-open-if-missing'],
+      [
+        'fix-vault',
+        vault,
+        '--takeout',
+        takeoutPath,
+        '--report',
+        reportPath,
+        '--no-open-if-missing',
+        '--result-json',
+      ],
       {
-      stdout,
-      stderr: captureStream(),
+        stdout,
+        stderr: captureStream(),
       },
     );
     assert.equal(run.exitCode, 0);
     assert.match(stdout.text(), /Fix vault/);
     assert.match(stdout.text(), /My Activity/);
+    const resultLine = stdout
+      .text()
+      .split(/\r?\n/)
+      .find((line) => line.startsWith('RESULT_JSON '));
+    assert.ok(resultLine);
+    const result = JSON.parse(resultLine.replace('RESULT_JSON ', ''));
+    assert.equal(result.schema, 'gemini-md-export.fix-vault-report.v1');
+    assert.equal(result.ok, true);
     assert.doesNotMatch(stdout.text(), /preliminaryReportPath/);
     const updated = readFileSync(chatPath, 'utf-8');
     assert.match(updated, /^---\ntype: gemini_chat\n/);

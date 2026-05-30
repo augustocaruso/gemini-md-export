@@ -23,14 +23,17 @@ derived from the wrong Gemini chat.
 
 ## Preferred Runner
 
-Prefer the bundled script:
+For the public product flow, prefer the bundled CLI runner. It audits integrity,
+repairs raw exports/assets through the private API when possible, and only then
+normalizes dates with Takeout/My Activity:
 
 ```bash
-node scripts/vault-repair.mjs /path/to/vault
+node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" fix-vault "/path/to/vault" --takeout "/path/to/Minhaatividade.html" --report "/path/to/vault/.gemini-md-export-fix/fix-vault.json" --tui --result-json
 ```
 
-The script audits notes, reexports exact chat IDs, validates staged Markdown,
-creates backups, and writes a report.
+Use the packaged `scripts/vault-repair.mjs` only as an internal implementation
+detail or narrow diagnostic. Do not present `repair-vault` as the normal user
+workflow.
 
 ## Browser Checks
 
@@ -40,10 +43,10 @@ Before browser work:
 { "tool": "gemini_ready", "arguments": { "action": "status", "diagnostic": true } }
 ```
 
-For known suspect IDs, prefer the runner above or the CLI:
+For known suspect IDs, prefer `fix-vault` or the CLI:
 
 ```bash
-node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" export reexport --chat-id "<chatId>" --output-dir "/path/to/staging" --plain
+node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" export reexport --chat-id "<chatId>" --output-dir "/path/to/staging" --tui --result-json
 ```
 
 MCP `gemini_export` is CLI-first in v0.7.0 and should return `code: "use_cli"`
@@ -52,7 +55,7 @@ instead of starting hidden long jobs.
 For one-off checks, stay CLI-first:
 
 ```bash
-node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" export reexport --chat-id "<chatId>" --output-dir "/path/to/staging" --plain
+node "$HOME/.gemini/extensions/gemini-md-export/bin/gemini-md-export.mjs" export reexport --chat-id "<chatId>" --output-dir "/path/to/staging" --tui --result-json
 ```
 
 `gemini_chats` download is intentionally blocked in the public MCP surface and

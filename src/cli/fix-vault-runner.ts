@@ -526,5 +526,8 @@ export const runFixVaultCommand = async ({
   stdout.write(`Fix vault: relatorio combinado em ${reportPath}\n`);
 
   const exitCode = repair.exitCode || webRepair.exitCode || metadata.exitCode || 0;
+  if (parsed.flags.resultJson === true) {
+    stdout.write(`RESULT_JSON ${JSON.stringify(combined)}\n`);
+  }
   return { exitCode, result: combined };
 };

@@ -1,8 +1,9 @@
 # Gemini Markdown Export
 
-Exports Gemini Web conversations to Markdown through the visible DOM, local MCP
-bridge, and Chrome/Edge extension. No private APIs, cookies, tokens,
-`chrome.debugger`, screenshots, or capture fallbacks.
+Exports Gemini Web conversations to Markdown through a private-API-first CLI,
+local MCP bridge, and Chrome/Edge extension, with DOM export only as controlled
+fallback. Browser session supplies auth; request cookies only through a
+supported diagnostic flow.
 
 ## Public MCP Tools
 
@@ -88,7 +89,7 @@ bridges unless `--no-exit-when-idle` is set.
 - CLI subcommands include `browser status`, `diagnose page`, `tabs`,
   `chats count`, `chats list`, `export ...`, `job ...`, `export-dir`, `cleanup`,
   `fix-vault`, and `telemetry enable/status/preview/send/disable`.
-- Fix vault: `gemini-md-export fix-vault <vaultDir> --takeout <Minhaatividade.html|MyActivity.json> --report <report.json>`.
+- Fix vault: `gemini-md-export fix-vault <vaultDir> --takeout <Minhaatividade.html|MyActivity.json> --report <report.json> --tui --result-json`.
   It uses Takeout first, then My Activity for remaining dates. New My Activity
   permission may require extension-card reload. Reports: hashes, sizes, scores,
   counts, dates and status only.
