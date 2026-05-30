@@ -4,7 +4,46 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import test from 'node:test';
 
-import { loadMarkdownDbFixVaultRecords } from '../build/ts/mcp/markdown-db-vault-adapter.js';
+import {
+  importRuntimeNodeDependency,
+  loadMarkdownDbFixVaultRecords,
+} from '../build/ts/mcp/markdown-db-vault-adapter.js';
+
+test('MarkdownDB adapter bootstraps runtime npm dependencies when mddb is not installed', async () => {
+  const calls = [];
+  const root = resolve(tmpdir(), `gme-markdown-db-runtime-${process.pid}-${Date.now()}`);
+  mkdirSync(root, { recursive: true });
+  writeFileSync(
+    join(root, 'package.json'),
+    JSON.stringify({ name: 'gemini-md-export', dependencies: { mddb: '^0.9.5' } }),
+    'utf-8',
+  );
+
+  const moduleDir = join(root, 'build', 'ts', 'mcp');
+  mkdirSync(moduleDir, { recursive: true });
+  try {
+    const result = await importRuntimeNodeDependency('mddb', {
+      moduleDir,
+      importModule: async (name) => {
+        calls.push(`import:${name}`);
+        if (calls.length === 1) {
+          throw Object.assign(new Error("Cannot find package 'mddb'"), {
+            code: 'ERR_MODULE_NOT_FOUND',
+          });
+        }
+        return { MarkdownDB: class FixtureMarkdownDb {} };
+      },
+      installRuntimeDependencies: async (packageRoot) => {
+        calls.push(`install:${packageRoot}`);
+      },
+    });
+
+    assert.equal(typeof result.MarkdownDB, 'function');
+    assert.deepEqual(calls, ['import:mddb', `install:${root}`, 'import:mddb']);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test('MarkdownDB adapter indexes Gemini exports and reports missing local assets', async () => {
   const root = resolve(tmpdir(), `gme-markdown-db-${process.pid}-${Date.now()}`);

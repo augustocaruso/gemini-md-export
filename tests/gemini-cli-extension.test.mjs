@@ -36,6 +36,7 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   const extensionDir = resolve(ROOT, 'dist', 'gemini-cli-extension');
   const manifestPath = resolve(extensionDir, 'gemini-extension.json');
   const packagePath = resolve(extensionDir, 'package.json');
+  const packageLockPath = resolve(extensionDir, 'package-lock.json');
   const contextPath = resolve(extensionDir, 'GEMINI.md');
   const serverPath = resolve(extensionDir, 'src', 'mcp-server.js');
   const bridgeServerPath = resolve(extensionDir, 'src', 'bridge-server.js');
@@ -211,6 +212,7 @@ test('build gera bundle da extensao do Gemini CLI com contexto proprio', () => {
   const browserManifest = JSON.parse(readFileSync(browserManifestPath, 'utf-8'));
   assert.equal(manifest.contextFileName, 'GEMINI.md');
   assert.equal(packageJson.dependencies?.mddb, '^0.9.5');
+  assert.equal(existsSync(packageLockPath), true);
   assert.equal(manifest.hooks, undefined);
   assert.equal(manifest.agents, undefined);
   assert.equal(typeof manifest.mcpServers?.['gemini-md-export']?.command, 'string');

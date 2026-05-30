@@ -1,5 +1,7 @@
-import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { canonicalGeminiChatUrl, parseChatId } from '../core/chat-id.js';
 import type { FixVaultPrivateRepairRecord } from '../core/fix-vault-flow.js';
 
@@ -30,6 +32,12 @@ type MarkdownDbModule = {
   MarkdownDB: new (config: UnknownRecord) => MarkdownDbInstance;
 };
 
+type RuntimeNodeDependencyImportDeps = {
+  moduleDir?: string;
+  importModule?: (packageName: string) => Promise<unknown>;
+  installRuntimeDependencies?: (packageRoot: string) => Promise<void>;
+};
+
 type MarkdownAstNode = {
   type?: unknown;
   url?: unknown;
@@ -47,9 +55,76 @@ export type MarkdownDbVaultLoadResult = Readonly<{
 
 const MARKDOWN_DB_CACHE_DIR = '.gemini-md-export/markdown-db';
 
+const moduleDir = dirname(fileURLToPath(import.meta.url));
+
+const readPackageName = (filePath: string): string | null => {
+  try {
+    const parsed = JSON.parse(readFileSync(filePath, 'utf-8')) as { name?: unknown };
+    return stringOrNull(parsed.name);
+  } catch {
+    return null;
+  }
+};
+
+const packageRootFromModuleDir = (startDir: string): string | null => {
+  let current = resolve(startDir);
+  for (let depth = 0; depth < 8; depth += 1) {
+    const packagePath = resolve(current, 'package.json');
+    if (existsSync(packagePath) && readPackageName(packagePath) === 'gemini-md-export') {
+      return current;
+    }
+    const parent = dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  return null;
+};
+
+const isMissingNodePackageError = (err: unknown, packageName: string): boolean => {
+  const record = err && typeof err === 'object' ? (err as UnknownRecord) : {};
+  if (record.code !== 'ERR_MODULE_NOT_FOUND') return false;
+  return String((record as { message?: unknown }).message || '').includes(packageName);
+};
+
+const npmExecutable = (): string => (process.platform === 'win32' ? 'npm.cmd' : 'npm');
+
+const installRuntimeDependencies = (packageRoot: string): Promise<void> =>
+  new Promise((resolveInstall, rejectInstall) => {
+    const child = execFile(
+      npmExecutable(),
+      ['install', '--omit=dev'],
+      {
+        cwd: packageRoot,
+        timeout: 180_000,
+        windowsHide: true,
+      },
+      (err) => {
+        if (err) rejectInstall(err);
+        else resolveInstall();
+      },
+    );
+    child.stdin?.end();
+  });
+
+export const importRuntimeNodeDependency = async (
+  packageName: string,
+  deps: RuntimeNodeDependencyImportDeps = {},
+): Promise<UnknownRecord> => {
+  const importModule = deps.importModule || ((name: string) => import(name));
+  try {
+    return (await importModule(packageName)) as UnknownRecord;
+  } catch (err) {
+    if (!isMissingNodePackageError(err, packageName)) throw err;
+    const packageRoot = packageRootFromModuleDir(deps.moduleDir || moduleDir);
+    if (!packageRoot) throw err;
+    const installer = deps.installRuntimeDependencies || installRuntimeDependencies;
+    await installer(packageRoot);
+    return (await importModule(packageName)) as UnknownRecord;
+  }
+};
+
 const loadMarkdownDb = async (): Promise<MarkdownDbModule> => {
-  const packageName = 'mddb';
-  return (await import(packageName)) as MarkdownDbModule;
+  return (await importRuntimeNodeDependency('mddb')) as MarkdownDbModule;
 };
 
 const stringOrNull = (value: unknown): string | null => {

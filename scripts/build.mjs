@@ -429,6 +429,9 @@ writeFileSync(
   JSON.stringify(pkg, null, 2) + '\n',
   'utf-8',
 );
+if (existsSync(resolve(ROOT, 'package-lock.json'))) {
+  cpSync(resolve(ROOT, 'package-lock.json'), resolve(geminiCliExtensionDir, 'package-lock.json'));
+}
 writeFileSync(
   resolve(geminiCliExtensionDir, 'bridge-version.json'),
   JSON.stringify({ ...bridgeVersion, buildStamp }, null, 2) + '\n',
@@ -574,6 +577,9 @@ if (existsSync(resolve(ROOT, 'native-messaging'))) {
 console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'gemini-extension.json')}`);
 console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'GEMINI.md')}`);
 console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'package.json')}`);
+if (existsSync(resolve(geminiCliExtensionDir, 'package-lock.json'))) {
+  console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'package-lock.json')}`);
+}
 console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'bridge-version.json')}`);
 if (existsSync(resolve(geminiCliExtensionDir, 'hooks'))) {
   console.log(`[build] wrote ${resolve(geminiCliExtensionDir, 'hooks')}`);
