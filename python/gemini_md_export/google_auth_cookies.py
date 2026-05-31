@@ -7,10 +7,11 @@ MIT License
 Copyright (c) 2026 Teng Lin
 
 The original project treats Google cookie auth as a product surface: validate
-required cookies before RPC calls, explain incomplete browser extraction, and
-rotate ``__Secure-1PSIDTS`` when the rest of the Google binding is present.
-This adapter keeps the same discipline while returning redacted, structured
-results for gemini-md-export.
+required cookies before RPC calls, extract installed-browser cookies with
+``rookiepy`` when available, explain incomplete browser extraction, and rotate
+``__Secure-1PSIDTS`` when the rest of the Google binding is present. This
+adapter keeps the same discipline while returning redacted, structured results
+for gemini-md-export.
 """
 
 from __future__ import annotations
@@ -44,6 +45,13 @@ ROTATE_COOKIES_HEADERS = {
     "Origin": "https://accounts.google.com",
 }
 ROTATE_COOKIES_BODY = '[000,"-0000000000000000000"]'
+ROOKIEPY_BROWSER_ALIASES = ("chrome", "edge", "brave", "firefox", "auto")
+ROOKIEPY_COOKIE_DOMAINS = (
+    ".google.com",
+    "google.com",
+    "accounts.google.com",
+    "gemini.google.com",
+)
 
 
 class GoogleCookie(BaseModel):
@@ -191,6 +199,61 @@ def _coerce_cookie_entries(data: Any, *, default_domain: str = ".google.com") ->
                 )
             )
     return entries
+
+
+def _cookie_value(item: Mapping[str, Any], *names: str) -> Any:
+    for name in names:
+        value = item.get(name)
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def _coerce_rookiepy_cookie(item: Mapping[str, Any]) -> GoogleCookie | None:
+    name = _cookie_value(item, "name")
+    value = _cookie_value(item, "value")
+    if not isinstance(name, str) or not isinstance(value, str) or not value:
+        return None
+    expires = _cookie_value(item, "expires", "expiry", "expirationDate", "expires_utc")
+    return GoogleCookie(
+        name=name,
+        value=value,
+        domain=_normalize_domain(_cookie_value(item, "domain", "host", "host_key")),
+        path=str(_cookie_value(item, "path") or "/"),
+        expires=expires if isinstance(expires, int | float) else None,
+    )
+
+
+def _coerce_rookiepy_cookies(raw_cookies: Iterable[Any]) -> list[GoogleCookie]:
+    entries: list[GoogleCookie] = []
+    for raw in raw_cookies:
+        if not isinstance(raw, Mapping):
+            continue
+        cookie = _coerce_rookiepy_cookie(raw)
+        if cookie is not None:
+            entries.append(cookie)
+    return entries
+
+
+def _load_rookiepy_cookie_entries() -> tuple[list[GoogleCookie], list[str]]:
+    try:
+        import rookiepy
+    except ModuleNotFoundError:
+        return [], ["rookiepy indisponivel no ambiente Python."]
+
+    entries: list[GoogleCookie] = []
+    diagnostics: list[str] = []
+    for browser_name in ROOKIEPY_BROWSER_ALIASES:
+        try:
+            cookie_fn = rookiepy.load if browser_name == "auto" else getattr(rookiepy, browser_name)
+            raw_cookies = cookie_fn(domains=list(ROOKIEPY_COOKIE_DOMAINS))
+        except Exception as exc:  # pragma: no cover - depends on host browsers.
+            diagnostics.append(f"rookiepy:{browser_name}: {type(exc).__name__}: {str(exc)[:160]}")
+            continue
+        browser_entries = _coerce_rookiepy_cookies(raw_cookies)
+        entries.extend(browser_entries)
+        diagnostics.append(f"rookiepy:{browser_name}: {len(browser_entries)} cookie(s)")
+    return entries, diagnostics
 
 
 def _index_cookie_entries(
@@ -400,13 +463,17 @@ def _read_cookie_json(path: str | None) -> Any:
 
 
 def _load_browser_cookie_entries() -> tuple[list[GoogleCookie], list[str]]:
+    rookie_entries, rookie_diagnostics = _load_rookiepy_cookie_entries()
+    if rookie_entries:
+        return rookie_entries, rookie_diagnostics
+
     try:
         import browser_cookie3 as bc3
     except ModuleNotFoundError:
-        return [], ["browser-cookie3 indisponivel no ambiente Python."]
+        return [], [*rookie_diagnostics, "browser-cookie3 indisponivel no ambiente Python."]
 
     entries: list[GoogleCookie] = []
-    diagnostics: list[str] = []
+    diagnostics: list[str] = [*rookie_diagnostics]
     browser_fns: list[Callable[..., Any]] = [
         bc3.chrome,
         bc3.chromium,

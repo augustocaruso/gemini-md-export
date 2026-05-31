@@ -268,8 +268,15 @@ test('script renderiza manifesto native host com caminho Windows escapado', asyn
 });
 
 test('script conhece caminho Dia para native messaging no macOS', () => {
-  const source = readFileSync(resolve(ROOT, 'scripts', 'native-host-manifest.mjs'), 'utf-8');
+  const source = readFileSync(resolve(ROOT, 'src', 'native', 'native-host-manifest.ts'), 'utf-8');
   assert.match(source, /chrome\|edge\|brave\|dia/);
   assert.match(source, /browser === 'dia'\s*\?\s*'Dia'/);
   assert.match(source, /Software\\\\Dia\\\\NativeMessagingHosts/);
+});
+
+test('script usa launcher exe no Windows para Native Messaging', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'native', 'native-host-manifest.ts'), 'utf-8');
+  assert.match(source, /gemini-md-export-native-host\.exe/);
+  assert.match(source, /CreateProcessW/);
+  assert.match(source, /STARTF_USESTDHANDLES/);
 });

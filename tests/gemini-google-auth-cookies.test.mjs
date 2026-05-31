@@ -180,6 +180,87 @@ print(json.dumps({
   assert.deepEqual(data.diagnostics, ['chrome: 3 cookie(s)']);
 });
 
+test('Google auth loader prefers rookiepy browser extraction when available', () => {
+  const data = runPython(`
+import json
+import sys
+import types
+from gemini_md_export import google_auth_cookies as mod
+
+fake_rookiepy = types.SimpleNamespace(
+    chrome=lambda domains: [
+        {"name": "SID", "value": "sid", "domain": ".google.com", "path": "/", "expires": -1},
+        {"name": "__Secure-1PSID", "value": "psid", "domain": ".google.com", "path": "/", "expires": -1},
+        {"name": "__Secure-1PSIDTS", "value": "psidts", "domain": ".google.com", "path": "/", "expires": -1},
+        {"name": "OSID", "value": "osid", "domain": "accounts.google.com", "path": "/", "expires": -1},
+    ],
+    edge=lambda domains: [],
+    brave=lambda domains: [],
+    firefox=lambda domains: [],
+    load=lambda domains: [],
+)
+sys.modules["rookiepy"] = fake_rookiepy
+entries, diagnostics = mod._load_browser_cookie_entries()
+snapshot = mod._snapshot_from_entries(entries, source="browser_import", browser_diagnostics=diagnostics)
+print(json.dumps({
+  "ok": snapshot.ok,
+  "names": sorted(snapshot.cookies),
+  "diagnostics": diagnostics,
+}))
+`);
+
+  assert.equal(data.ok, true);
+  assert.deepEqual(data.names, ['OSID', 'SID', '__Secure-1PSID', '__Secure-1PSIDTS']);
+  assert.ok(data.diagnostics.some((line) => line === 'rookiepy:chrome: 4 cookie(s)'));
+});
+
+test('Google auth loader falls back to browser-cookie3 diagnostics when rookiepy fails', () => {
+  const data = runPython(`
+import json
+import sys
+import types
+from gemini_md_export import google_auth_cookies as mod
+
+def fail(domains):
+    raise RuntimeError("decrypt_encrypted_value failed")
+
+fake_rookiepy = types.SimpleNamespace(
+    chrome=fail,
+    edge=fail,
+    brave=fail,
+    firefox=lambda domains: [],
+    load=lambda domains: [],
+)
+def chrome(domain_name=None):
+    return []
+
+fake_browser_cookie3 = types.SimpleNamespace(
+    chrome=chrome,
+    chromium=chrome,
+    opera=chrome,
+    opera_gx=chrome,
+    brave=chrome,
+    edge=chrome,
+    vivaldi=chrome,
+    firefox=chrome,
+    librewolf=chrome,
+    safari=chrome,
+)
+sys.modules["rookiepy"] = fake_rookiepy
+sys.modules["browser_cookie3"] = fake_browser_cookie3
+entries, diagnostics = mod._load_browser_cookie_entries()
+print(json.dumps({
+  "count": len(entries),
+  "has_rookiepy_error": any("rookiepy:chrome: RuntimeError" in item for item in diagnostics),
+  "has_browser_cookie3": any(item.startswith("chrome:") for item in diagnostics),
+}))
+`);
+
+  assert.equal(data.count, 0);
+  assert.equal(data.has_rookiepy_error, true);
+  assert.equal(data.has_browser_cookie3, true);
+});
+
 test('gemini_webapi sidecar preflights explicit cookies before initializing network client', () => {
   const dir = mkdtempSync(resolve(tmpdir(), 'gme-auth-'));
   const storagePath = resolve(dir, 'storage_state.json');

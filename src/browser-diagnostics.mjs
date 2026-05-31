@@ -372,7 +372,13 @@ export const diagnoseNativeHost = ({
 } = {}) => {
   const key = normalizeBrowserKey(browser);
   const manifestPath = nativeHostManifestPath({ browser: key, platform, home, env });
-  const expectedHostPath = resolve(packageRoot, 'bin', 'gemini-md-export-native-host.mjs');
+  const expectedHostPath = resolve(
+    packageRoot,
+    'bin',
+    platform === 'win32'
+      ? 'gemini-md-export-native-host.exe'
+      : 'gemini-md-export-native-host.mjs',
+  );
   const registryKey = platform === 'win32' ? nativeHostRegistryKey({ browser: key }) : null;
   if (!existsSync(manifestPath)) {
     return {
