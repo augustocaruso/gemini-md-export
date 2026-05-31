@@ -108,6 +108,10 @@ export type PrivateApiSelectedExportArgs = Readonly<{
   tabId?: unknown;
   claimId?: unknown;
   sessionId?: unknown;
+  openIfMissing?: unknown;
+  wakeBrowser?: unknown;
+  activateTab?: unknown;
+  allowReload?: unknown;
   maxItems?: unknown;
   recent?: unknown;
   startIndex?: unknown;
@@ -449,6 +453,10 @@ export const runPrivateApiSelectedExport = async (
         tabId: args.tabId,
         claimId: args.claimId,
         sessionId: args.sessionId,
+        openIfMissing: args.openIfMissing,
+        wakeBrowser: args.wakeBrowser,
+        activateTab: args.activateTab,
+        allowReload: args.allowReload,
         python: args.python,
         cookiesJson: args.cookiesJson,
         onProgress: args.onProgress,

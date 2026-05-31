@@ -141,12 +141,15 @@ test('bridge private export starts the same direct reexport job and returns the 
       outputDir,
       pollMs: 5,
       timeoutMs: 1_000,
+      wakeBrowser: true,
       onProgress: (event) => progress.push(event),
     });
 
     assert.equal(requests.length, 1);
     assert.equal(requests[0].privateReadExport, true);
     assert.equal(requests[0].allowDomFallback, false);
+    assert.equal(requests[0].openIfMissing, true);
+    assert.equal(requests[0].wakeBrowser, true);
     assert.equal(requests[0].privateApiTransport, undefined);
     assert.equal(requests[0].items[0].outputDir, outputDir);
     assert.equal(requests[0].items[0].filename, 'original.md');

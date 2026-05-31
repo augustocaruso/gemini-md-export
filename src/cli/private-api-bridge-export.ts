@@ -24,6 +24,10 @@ type BridgePrivateExportArgs = Readonly<{
   tabId?: unknown;
   claimId?: unknown;
   sessionId?: unknown;
+  openIfMissing?: unknown;
+  wakeBrowser?: unknown;
+  activateTab?: unknown;
+  allowReload?: unknown;
   python?: unknown;
   cookiesJson?: unknown;
   onProgress?: (job: PrivateApiSelectedExportJob) => void;
@@ -267,6 +271,10 @@ const requestBodyForBridgePrivateExport = (args: BridgePrivateExportArgs): AnyRe
   tabId: args.tabId,
   claimId: args.claimId,
   sessionId: args.sessionId,
+  openIfMissing: args.openIfMissing === true || args.wakeBrowser === true,
+  wakeBrowser: args.wakeBrowser === true,
+  activateTab: args.activateTab === true,
+  allowReload: args.allowReload === true,
   python: args.python,
   cookiesJson: args.cookiesJson,
   privateReadExport: true,
