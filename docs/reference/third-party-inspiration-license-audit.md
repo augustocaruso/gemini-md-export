@@ -27,7 +27,7 @@ licenca precisa permitir reuso e as obrigacoes precisam estar rastreadas.
 | Fonte | Licenca observada | Pode copiar codigo? | Uso recomendado |
 | --- | --- | --- | --- |
 | `amazingpaddy/ai-chat-exporter` | Apache-2.0 | Sim, com obrigacoes Apache-2.0 | Referencia de UX/DOM/Turndown; evitar copiar UI ou scraping diretamente. |
-| `teng-lin/notebooklm-py` | MIT | Sim, com aviso MIT | Referencia principal para protocolo privado, autenticacao via sessao e tratamento de bloqueios; reimplementar contratos em TS. |
+| `teng-lin/notebooklm-py` | MIT | Sim, com aviso MIT | Referencia principal para protocolo privado, autenticacao via sessao e tratamento de bloqueios; auth/cookie lifecycle adaptado em `python/gemini_md_export/google_auth_cookies.py` com aviso MIT no arquivo. |
 | `HanaokaYuzu/Gemini-API` (`gemini_webapi`) | AGPL-3.0 | Nao copiar para o core | Dependencia opcional via sidecar Python isolado; usar como adapter de shell para API Gemini Web, com contrato JSON e sem importar no core TS. |
 | `pasky/chrome-cdp-skill` | MIT | Sim, com aviso MIT | Referencia para lifecycle de daemon/CDP, session reuse e idle timeout; reimplementar como FSM/adapter. |
 | `microsoft/playwright` | Apache-2.0 | Sim, com obrigacoes Apache-2.0 | Referencia de arquitetura/testes/auto-wait; preferir depender de Playwright quando for browser automation. |
@@ -58,3 +58,10 @@ Para o pacote atual, a implementacao deve ser nossa:
 
 Se algum trecho concreto for copiado ou adaptado de forma substancial, adicionar uma secao de
 atribuicao no arquivo novo ou em um `NOTICE`/documento equivalente antes de merge/release.
+
+## Atribuicoes adicionadas
+
+- `python/gemini_md_export/google_auth_cookies.py`: politica de cookies minimos,
+  diagnostico de binding secundario e recuperacao de `__Secure-1PSIDTS` adaptados de
+  `teng-lin/notebooklm-py` (MIT, Copyright 2026 Teng Lin). O arquivo preserva aviso MIT e
+  retorna mensagens/contratos proprios do `gemini-md-export`.

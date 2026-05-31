@@ -42,6 +42,13 @@ import {
   buildProgressViewModel,
 } from '../build/ts/core/progress-view-model.js';
 import {
+  buildUsageHelp,
+  commonOptionHelp,
+  exitCodeHelp,
+  jobOptionHelp,
+  outputModeHelp,
+} from '../build/ts/cli/help-text.js';
+import {
   shouldReloadExistingTabsForReady,
   shouldWaitForExistingTabsForReady,
   shouldWakeBrowserForReady,
@@ -68,6 +75,10 @@ import {
   evaluateCliBrowserLaunchGate,
   observeCliBrowserLaunchResultState,
 } from '../build/ts/cli/browser-launch-lifecycle.js';
+import {
+  buildAuthHelp,
+  runAuthStatusCommand,
+} from '../build/ts/cli/auth-status-command.js';
 import { buildBridgeOnlyChildEnv } from '../build/ts/mcp/browser-runtime-env.js';
 
 const DEFAULT_BRIDGE_URL = 'http://127.0.0.1:47283';
@@ -173,154 +184,7 @@ const ANSI = {
   clearBelow: '\x1b[J',
 };
 
-const outputModeHelp = () => [
-  'Formatos de saida:',
-  '  --tui     UI humana com barra de progresso ANSI. Use em terminal/pty.',
-  '  --plain   Linhas humanas estaveis, sem ANSI.',
-  '  --json    JSON final puro, sem texto humano.',
-  '  --jsonl   Eventos JSONL durante o progresso.',
-  '  --result-json  Acrescenta RESULT_JSON nos modos humanos quando necessario.',
-];
-
-const exitCodeHelp = () => [
-  'Exit codes:',
-  '  0   sucesso completo',
-  '  1   concluido com warnings',
-  '  2   acao manual necessaria ou job cancelado',
-  '  3   bridge indisponivel ou timeout local',
-  '  4   extensao/aba Gemini nao pronta',
-  '  5   job falhou',
-  '  64  uso invalido',
-];
-
-const commonOptionHelp = () => [
-  'Opcoes comuns:',
-  '  --bridge-url <url>       Bridge local. Default: http://127.0.0.1:47283.',
-  '  --cdp-url <url>          DevTools Protocol para controle de abas. Ex: http://127.0.0.1:9222.',
-  '  --no-start-bridge       Nao iniciar bridge local automaticamente.',
-  '  --bridge-start-wait-ms <ms> Quanto esperar a bridge iniciar. Default: 6000.',
-  '  --bridge-keep-alive-ms <ms> Quanto a bridge iniciada pela CLI fica viva sem uso.',
-  '  --no-exit-when-idle     Bridge iniciada pela CLI nao encerra sozinha por idle.',
-  '  --browser <name>         Navegador alvo: chrome, edge, brave ou dia.',
-  '  --profile-directory <name> Perfil Chromium. Default: Default.',
-  '  --extension-id <id>      ID conhecido da extensao carregada.',
-  '  --ready-wait-ms <ms>     Quanto esperar a aba/extensao ficar pronta.',
-  '  --client-id <id>         Escolhe uma aba Gemini pelo clientId.',
-  '  --tab-id <id>            Escolhe uma aba Gemini pelo tabId do navegador.',
-  '  --claim-id <id>          Usa uma claim criada por gemini-md-export tabs claim.',
-  '  --session <nome>         Sessao nomeada reutilizavel para claim/export.',
-  '  --keep-claim             Nao libera --claim-id automaticamente apos chats/sync/export.',
-  '  --wake                   Pode abrir/acordar o navegador se nenhuma aba estiver conectada.',
-  '  --no-wake                Nao abrir/acordar o navegador. Default.',
-  '  --activate-tab           Pode tornar a aba Gemini alvo ativa dentro do navegador.',
-  '  --no-activate-tab        Nao ativar aba automaticamente. Em export/sync, opt-out explicito.',
-  '  --focus-window           Pode trazer a janela do navegador para frente.',
-  '  --no-focus-window        Nao focar janela do navegador. Default.',
-  '  --no-self-heal           Nao tentar auto-recuperacao da extensao.',
-  '  --allow-reload           Permite reload da extensao e abas ja existentes; nao abre abas novas.',
-  '  --allow-http-browser-fallback  Diagnostico: permite fallback legado por content script quando native broker falha.',
-  '  --no-reload              Nao pedir reload da extensao. Em export/sync, desliga a autocura.',
-  '  --no-color               Desliga ANSI.',
-  '  --help, -h               Mostra ajuda.',
-  '  --version, -v            Mostra versao.',
-];
-
-const jobOptionHelp = () => [
-  'Opcoes de job:',
-  '  --output-dir <path>          Destino dos Markdown/assets.',
-  '  --resume-report-file <path>  Retoma relatorio incremental anterior.',
-  '  --max-chats <n>              Limita quantidade de conversas.',
-  '  --limit <n>                  Alias de --max-chats.',
-  '  --batch-size <n>             Tamanho de lote do export.',
-  '  --start-index <n>            Primeira posicao para export notebook/recent.',
-  '  --chat-id <id>               Chat ID para export selected; pode repetir.',
-  '  --selection-file <path>      Manifesto criado por chats list --save-selection.',
-  '  --expected-count <n>         Falha antes de iniciar se a selecao tiver outra quantidade.',
-  '  --private-api                Export selected direto pela API privada. Hoje e o default.',
-  '  --browser-export             Diagnostico: forca fluxo antigo via bridge/aba.',
-  '  --delay-ms <ms>              Pausa entre chats selecionados.',
-  '  --takeout <file.zip|html|json> Usa Takeout como fonte offline; My Activity cobre o restante.',
-  '  --no-my-activity           Nao tenta My Activity para datas (diagnostico avancado).',
-  '  --max-load-more-rounds <n>   Rodadas maximas para puxar historico.',
-  '  --load-more-attempts <n>     Tentativas de scroll por rodada.',
-  '  --max-no-growth-rounds <n>   Rodadas sem crescimento antes de desistir.',
-  '  --load-more-browser-rounds <n> Rodadas internas no navegador por comando.',
-  '  --load-more-browser-timeout-ms <ms> Timeout do carregamento no navegador.',
-  '  --load-more-timeout-ms <ms>  Timeout total do comando de carregamento.',
-  '  --hydration-timeout-ms <ms>  Limite para hidratar uma conversa gigante.',
-  '  --hydration-stall-ms <ms>    Desiste se a conversa nao crescer por esse tempo.',
-  '  --hydration-wait-ms <ms>     Espera por cada leva nova de turns.',
-  '  --export-browser-timeout-ms <ms> Timeout do comando de export no navegador.',
-  '  --refresh                    Forca refresh/carregamento.',
-  '  --no-refresh                 Usa cache quando possivel.',
-  '  --poll-ms <ms>               Intervalo de polling. Default: 1200.',
-  '  --timeout-ms <ms>            Timeout total do job.',
-];
-
-const usage = () =>
-  [
-    `gemini-md-export ${VERSION}`,
-    '',
-    'Uso:',
-    '  gemini-md-export <comando> [opcoes]',
-    '  gemini-md-export help [comando]',
-    '  gemini-md-export --version',
-    '',
-    'Comandos:',
-    '  sync [vaultDir]       Sincroniza o vault com conversas novas/faltantes.',
-    '  doctor                Verifica bridge, extensao Chrome e aba Gemini.',
-    '  diagnose page <url>   Diagnostica artefatos/iframes de uma conversa Gemini.',
-    '  browser status        Mostra prontidao da bridge/extensao/abas.',
-    '  browser side-effects  Consulta/liga/desliga o freio local do navegador.',
-    '  tabs list|claim       Lista/reivindica abas Gemini pela CLI.',
-    '  chats count           Conta chats carregaveis sem despejar lista no chat.',
-    '  chats list            Lista uma pagina e pode salvar selecao de chatIds.',
-    '  export recent         Exporta historico recente carregavel.',
-    '  export missing        Exporta apenas chats ausentes no vault.',
-    '  export resume         Retoma export por relatorio incremental.',
-    '  export selected       Baixa uma selecao explicita de conversas.',
-    '  export reexport       Legado: alias antigo de export selected.',
-    '  export notebook       Exporta caderno Gemini carregado.',
-    '  job list              Lista jobs ativos/recentes.',
-    '  job status <jobId>    Consulta progresso de um job.',
-    '  job cancel <jobId>    Cancela um job.',
-    '  job trace <jobId>     Resume o trace tecnico sanitizado de um job.',
-    '  export-dir get|set    Consulta ou altera diretorio de export.',
-    '  cleanup stale-processes Diagnostica/limpa processos antigos seguros.',
-    '  fix-vault <path>      Corrige o back catalog: auditoria, YAML e datas.',
-    '  telemetry enable|status|preview|send|disable  Telemetria, status e opt-out.',
-    '  help [comando]        Mostra ajuda global ou de um comando.',
-    '',
-    'Exemplos:',
-    '  gemini-md-export sync "/path/to/vault" --tui',
-    '  gemini-md-export doctor --tui --result-json',
-    '  gemini-md-export diagnose page "https://gemini.google.com/app/<chatId>" --tui --result-json',
-    '  gemini-md-export tabs list --tui --result-json',
-    '  gemini-md-export chats count --tui --result-json',
-    '  gemini-md-export chats list --limit 10 --save-selection --tui --result-json',
-    '  gemini-md-export export missing "/path/to/vault" --tui',
-    '  gemini-md-export job list --active --tui --result-json',
-    '  gemini-md-export job status job-123 --json',
-    '  gemini-md-export job trace job-123 --tui --result-json',
-    '  gemini-md-export export selected --selection-file ~/.gemini-md-export/selections/latest.json --expected-count 10 --tui',
-    '  gemini-md-export fix-vault "/path/to/vault" --takeout "/path/to/Minhaatividade.html" --report report.json',
-    '  gemini-md-export telemetry status --tui --result-json',
-    '',
-    'Dentro do Gemini CLI:',
-    '  - Use --tui por padrao no shell interativo/node-pty.',
-    '  - Dentro do Gemini CLI, --tui usa a TUI ANSI completa; se precisar, GEMINI_MD_EXPORT_TUI_MODE=stream troca para modo compacto.',
-    '  - Para export/sync, rode a CLI direto; evite despejar gemini_ready/gemini_tabs no chat.',
-    '  - Use --tui --result-json quando precisar ler resultado final; --plain so em shell capturado.',
-    '',
-    ...outputModeHelp(),
-    '',
-    ...exitCodeHelp(),
-    '',
-    'Ajuda por comando:',
-    '  gemini-md-export sync --help',
-    '  gemini-md-export doctor --help',
-    '  gemini-md-export job status --help',
-  ].join('\n');
+const usage = () => buildUsageHelp({ version: VERSION });
 
 const syncHelp = () =>
   [
@@ -358,6 +222,9 @@ const syncHelp = () =>
     '  Em Gemini CLI interativo, use --tui --result-json e leia a ultima linha RESULT_JSON {...}.',
     '  Use --plain somente em shell capturado; use --json apenas quando precisar de JSON final puro.',
   ].join('\n');
+
+const authHelp = () =>
+  buildAuthHelp({ commonOptions: commonOptionHelp(), outputModes: outputModeHelp() });
 
 const doctorHelp = () =>
   [
@@ -843,6 +710,7 @@ const helpForParsed = (parsed) => {
   if (!command) return usage();
   if (command === 'sync') return syncHelp();
   if (command === 'doctor') return doctorHelp();
+  if (command === 'auth') return authHelp();
   if (command === 'diagnose') return diagnoseHelp();
   if (command === 'browser') return browserHelp();
   if (command === 'tabs') return tabsHelp();
@@ -1036,6 +904,8 @@ const parseArgs = (argv) => {
     else if (arg === '--use-my-activity') out.flags.useMyActivity = true;
     else if (arg === '--no-my-activity') out.flags.noMyActivity = true;
     else if (arg === '--takeout') out.flags.takeout = value();
+    else if (arg === '--cookies-json' || arg === '--cookies') out.flags.cookiesJson = value();
+    else if (arg === '--python') out.flags.python = value();
     else if (arg === '--skip-browser-check') out.flags.skipBrowserCheck = true;
     else if (arg === '--audit-only' || arg === '--include-notes') out.flags.extraRepairArgs.push(arg);
     else if (arg === '--report') {
@@ -3450,6 +3320,27 @@ const writeStructuredResult = (ui, result, { label = null, includeResultJson = t
   }
 };
 
+const runAuth = async (parsed, streams = {}) => {
+  const flags = parsed.flags;
+  const ui = makeUi(flags, streams);
+  warnTuiFallback(ui);
+  return runAuthStatusCommand({
+    subcommand: parsed.positionals[0] || 'status',
+    flags,
+    ui,
+    dependencies: {
+      ensureBridgeAvailable,
+      readyWithCliWake,
+      requestJson,
+      writeStructuredResult,
+    },
+    exitCodes: {
+      ok: EXIT.OK,
+      manualAction: EXIT.MANUAL_ACTION,
+    },
+  });
+};
+
 const announceJobStarted = (ui, job = {}) => {
   if (!job?.jobId) return;
   if (ui.format === 'json') return;
@@ -4719,6 +4610,7 @@ export const main = async (argv = process.argv.slice(2), streams = {}) => {
 const runParsedCommand = (parsed, streams = {}) => {
   if (parsed.command === 'sync') return runSync(parsed, streams);
   if (parsed.command === 'doctor') return runDoctor(parsed, streams);
+  if (parsed.command === 'auth') return runAuth(parsed, streams);
   if (parsed.command === 'diagnose') return runDiagnose(parsed, streams);
   if (parsed.command === 'browser') return runBrowser(parsed, streams);
   if (parsed.command === 'tabs') return runTabs(parsed, streams);

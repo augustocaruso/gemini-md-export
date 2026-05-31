@@ -20,6 +20,8 @@ from typing import Any, Literal, cast
 
 from pydantic import BaseModel, Field, ValidationError
 
+from .google_auth_cookies import GoogleAuthCookieSnapshot, load_google_auth_cookies
+
 
 class AdapterRequest(BaseModel):
     action: Literal["read_chat", "list_chats", "session_status"]
@@ -124,8 +126,14 @@ def _emit(payload: BaseModel) -> int:
     return 0 if getattr(payload, "ok", False) is True else 1
 
 
-def _failure(code: str, message: str, chat_id: str | None = None) -> AdapterFailure:
-    return AdapterFailure(code=code, message=message, chat_id=chat_id)
+def _failure(
+    code: str,
+    message: str,
+    chat_id: str | None = None,
+    *,
+    warnings: list[str] | None = None,
+) -> AdapterFailure:
+    return AdapterFailure(code=code, message=message, chat_id=chat_id, warnings=warnings or [])
 
 
 def _normalize_private_chat_id(value: str) -> str:
@@ -298,26 +306,23 @@ async def _download_asset(
         )
 
 
-def _load_cookie_values(path: str | None) -> tuple[str | None, str | None, dict[str, str] | None]:
-    if not path:
-        return None, None, None
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
-    if isinstance(data, dict) and isinstance(data.get("cookies"), dict):
-        data = data["cookies"]
-    cookies: dict[str, str] = {}
-    if isinstance(data, dict):
-        cookies = {str(key): str(value) for key, value in data.items() if isinstance(value, str)}
-    elif isinstance(data, list):
-        for item in data:
-            if isinstance(item, dict) and isinstance(item.get("name"), str):
-                value = item.get("value")
-                if isinstance(value, str):
-                    cookies[item["name"]] = value
-    return (
-        cookies.get("__Secure-1PSID"),
-        cookies.get("__Secure-1PSIDTS"),
-        {k: v for k, v in cookies.items() if k not in {"__Secure-1PSID", "__Secure-1PSIDTS"}}
-        or None,
+def _cookie_failure(
+    snapshot: GoogleAuthCookieSnapshot,
+    chat_id: str | None = None,
+) -> AdapterFailure:
+    return _failure(
+        snapshot.code or "google_auth_cookies_unavailable",
+        snapshot.message or "Nao encontrei uma sessao Google utilizavel para a API privada.",
+        chat_id,
+        warnings=[*snapshot.warnings, *snapshot.browser_diagnostics],
+    )
+
+
+def _auth_snapshot_for_request(request: AdapterRequest) -> GoogleAuthCookieSnapshot:
+    return load_google_auth_cookies(
+        request.cookies_json,
+        recover_psidts=True,
+        allow_browser_import=not request.cookies_json,
     )
 
 
@@ -334,15 +339,18 @@ async def _init_client(request: AdapterRequest) -> tuple[Any | None, AdapterFail
         )
 
     set_log_level("WARNING")
-    secure_1psid, secure_1psidts, extra_cookies = _load_cookie_values(request.cookies_json)
+    auth_snapshot = _auth_snapshot_for_request(request)
+    chat_id = _strip_private_chat_id(_normalize_private_chat_id(request.chat_id or ""))
+    if request.cookies_json and not auth_snapshot.ok:
+        return None, _cookie_failure(auth_snapshot, chat_id)
 
     try:
-        if secure_1psid:
+        if auth_snapshot.ok and auth_snapshot.secure_1psid:
             client = GeminiClient(
-                secure_1psid=secure_1psid,
-                secure_1psidts=secure_1psidts or "",
-                cookies=extra_cookies,
+                secure_1psid=auth_snapshot.secure_1psid,
+                secure_1psidts=auth_snapshot.secure_1psidts or "",
             )
+            client.cookies = auth_snapshot.cookies
         else:
             # gemini_webapi[browser] can import cookies from the local browser profile.
             client = GeminiClient()
@@ -353,10 +361,10 @@ async def _init_client(request: AdapterRequest) -> tuple[Any | None, AdapterFail
         )
         return client, None
     except AuthError as exc:
-        chat_id = _strip_private_chat_id(_normalize_private_chat_id(request.chat_id or ""))
+        if not request.cookies_json and not auth_snapshot.ok:
+            return None, _cookie_failure(auth_snapshot, chat_id)
         return None, _failure("gemini_webapi_auth_failed", str(exc), chat_id)
     except Exception as exc:
-        chat_id = _strip_private_chat_id(_normalize_private_chat_id(request.chat_id or ""))
         return None, _failure("gemini_webapi_init_failed", str(exc), chat_id)
 
 

@@ -2552,6 +2552,56 @@ test('CLI browser status nao recarrega varias abas quando falta aba Gemini ativa
   );
 });
 
+test('CLI auth status chama o session_status unificado da bridge', async () => {
+  await withServer((req, res, url, requestRecord) => {
+    if (url.pathname === '/healthz') {
+      sendJson(res, 200, { ok: true, bridgeRole: 'primary' });
+      return;
+    }
+    if (url.pathname === '/agent/mcp-tool-call') {
+      assert.equal(requestRecord.jsonBody.name, 'gemini_support');
+      assert.equal(requestRecord.jsonBody.arguments.action, 'session_status');
+      assert.equal(requestRecord.jsonBody.arguments.cookiesJson, '/tmp/cookies.json');
+      sendJson(res, 200, {
+        ok: true,
+        result: {
+          structuredContent: {
+            ok: true,
+            action: 'session_status',
+            authenticated: true,
+            selectedAdapter: 'browserBackground',
+            nextAction: { code: 'ready', message: 'Sessao do navegador pronta.' },
+          },
+          isError: false,
+        },
+      });
+      return;
+    }
+    sendJson(res, 404, { ok: false, error: `unexpected ${url.pathname}` });
+  }, async (bridgeUrl, requests) => {
+    const stdout = captureStream();
+    const run = await main(
+      [
+        'auth',
+        'status',
+        '--bridge-url',
+        bridgeUrl,
+        '--no-start-bridge',
+        '--cookies-json',
+        '/tmp/cookies.json',
+        '--plain',
+        '--result-json',
+      ],
+      { stdout },
+    );
+
+    assert.equal(run.exitCode, 0);
+    assert.match(stdout.text(), /Auth: ok via browserBackground/);
+    assert.equal(requests.some((request) => request.pathname === '/agent/mcp-tool-call'), true);
+  });
+});
+
+
 test('CLI browser status acorda Gemini quando so My Activity esta conectado', async () => {
   const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-cli-activity-only-wake-'));
   try {
