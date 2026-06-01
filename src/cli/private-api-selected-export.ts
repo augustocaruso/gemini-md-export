@@ -12,6 +12,7 @@ import {
   type GeminiWebapiPythonReadChatResult,
   runGeminiWebapiPythonListChats,
   runGeminiWebapiPythonReadChat,
+  runGeminiWebapiPythonSessionStatus,
 } from '../mcp/gemini-webapi-python-adapter.js';
 import { privateReadExportResultToCollectedPayload } from '../mcp/private-read-export-runtime.js';
 import { runPrivateApiSelectedExportViaBridge } from './private-api-bridge-export.js';
@@ -129,6 +130,11 @@ type PrivateApiSelectedExportDeps = Readonly<{
     python?: unknown;
     cookiesJson?: unknown;
   }): Promise<AnyRecord>;
+  runSessionStatus(input: {
+    timeoutMs?: unknown;
+    python?: unknown;
+    cookiesJson?: unknown;
+  }): Promise<AnyRecord>;
   now(): Date;
   sleep(ms: number): Promise<void>;
 }>;
@@ -137,6 +143,7 @@ const defaultDeps: PrivateApiSelectedExportDeps = {
   bootstrapPythonSidecar: ensureGeminiWebapiPythonBootstrap,
   runReadChat: runGeminiWebapiPythonReadChat,
   runListChats: runGeminiWebapiPythonListChats,
+  runSessionStatus: runGeminiWebapiPythonSessionStatus,
   now: () => new Date(),
   sleep: (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms)),
 };
@@ -526,6 +533,31 @@ export const runPrivateApiSelectedExport = async (
       'failed',
       null,
       'Preparacao da API privada falhou',
+      runtimeDeps.now().toISOString(),
+    );
+  }
+
+  latestJob = emit('running', null, 'Verificando sessão da API privada');
+  const sessionResult = await runtimeDeps.runSessionStatus({
+    timeoutMs: args.waitMs ?? args.privateReadWaitMs ?? args.timeoutMs,
+    python: args.python,
+    cookiesJson: args.cookiesJson,
+  });
+  if (sessionResult?.ok !== true || sessionResult.authenticated !== true) {
+    failures.push({
+      index: 0,
+      chatId: null,
+      title: null,
+      error:
+        stringOrNull(sessionResult?.message) ||
+        stringOrNull(sessionResult?.error) ||
+        'Sessao da API privada nao autenticada.',
+      code: stringOrNull(sessionResult?.code) || 'private_api_session_unavailable',
+    });
+    return emit(
+      'failed',
+      null,
+      'Sessão da API privada precisa de login',
       runtimeDeps.now().toISOString(),
     );
   }

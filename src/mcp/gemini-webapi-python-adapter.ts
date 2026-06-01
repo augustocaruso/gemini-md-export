@@ -684,6 +684,16 @@ export const parseGeminiWebapiPythonSessionStatusResponse = (
       stringOrNull(record.message) || 'O adapter Python gemini_webapi falhou.',
     );
   }
+  if (record.authenticated !== true) {
+    const accountStatus = stringOrNull(record.account_status || record.accountStatus);
+    return sessionFailure(
+      stringOrNull(record.code) || 'gemini_webapi_python_unauthenticated',
+      stringOrNull(record.message) ||
+        (accountStatus
+          ? `Sessao da API privada nao autenticada (${accountStatus}).`
+          : 'Sessao da API privada nao autenticada.'),
+    );
+  }
 
   return {
     ok: true,

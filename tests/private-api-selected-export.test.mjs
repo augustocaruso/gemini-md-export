@@ -52,6 +52,15 @@ const bootstrapOk = async () => ({
   warnings: [],
 });
 
+const sessionOk = async () => ({
+  ok: true,
+  authenticated: true,
+  adapterPlan: { selectedAdapter: 'privateApiGeminiWebapi' },
+  transport: { source: 'gemini_webapi_python' },
+  chatCount: 2,
+  warnings: [],
+});
+
 test('private API selected export writes Markdown with dates and emits progress', async () => {
   const outputDir = mkdtempSync(resolve(tmpdir(), 'gme-private-api-selected-'));
   const events = [];
@@ -69,6 +78,10 @@ test('private API selected export writes Markdown with dates and emits progress'
       bootstrapPythonSidecar: async () => {
         sequence.push('bootstrap');
         return bootstrapOk();
+      },
+      runSessionStatus: async () => {
+        sequence.push('session');
+        return sessionOk();
       },
       runReadChat: async (input) => {
         sequence.push('read');
@@ -105,7 +118,7 @@ test('private API selected export writes Markdown with dates and emits progress'
   assert.equal(job.status, 'completed');
   assert.equal(job.successCount, 1);
   assert.equal(job.failureCount, 0);
-  assert.deepEqual(sequence, ['bootstrap', 'read']);
+  assert.deepEqual(sequence, ['bootstrap', 'session', 'read']);
   assert.equal(calls[0].chatId, '88a98a108cdcfb61');
   assert.equal(calls[0].downloadAssets, true);
   assert.equal(calls[0].assetsRelDir, 'assets/88a98a108cdcfb61');
@@ -147,6 +160,7 @@ test('private API selected export records failures and continues the batch', asy
       now: () => new Date('2026-05-28T23:10:00Z'),
       sleep: async () => {},
       bootstrapPythonSidecar: bootstrapOk,
+      runSessionStatus: sessionOk,
       runReadChat: async (input) => {
         if (input.chatId === 'dbe5dd4b50b09c74') {
           return {
@@ -196,6 +210,10 @@ test('private API recent export lists inventory before selected export without b
         sequence.push('bootstrap');
         return bootstrapOk();
       },
+      runSessionStatus: async () => {
+        sequence.push('session');
+        return sessionOk();
+      },
       runListChats: async (input) => {
         sequence.push('list');
         listCalls.push(input);
@@ -229,6 +247,7 @@ test('private API recent export lists inventory before selected export without b
   assert.equal(job.successCount, 2);
   assert.deepEqual(sequence, [
     'bootstrap',
+    'session',
     'list',
     'read:88a98a108cdcfb61',
     'read:dbe5dd4b50b09c74',
@@ -277,6 +296,47 @@ test('private API selected export fails before reads when sidecar bootstrap fail
     events.map((event) => event.progressMessage),
     ['Preparando API privada', 'Preparacao da API privada falhou'],
   );
+});
+
+test('private API selected export preflights auth once before reading the batch', async () => {
+  const outputDir = mkdtempSync(resolve(tmpdir(), 'gme-private-api-selected-auth-'));
+  const sequence = [];
+  let readCalled = false;
+  const job = await runPrivateApiSelectedExport(
+    {
+      chatIds: ['88a98a108cdcfb61', 'dbe5dd4b50b09c74'],
+      outputDir,
+    },
+    {
+      now: () => new Date('2026-05-28T23:10:00Z'),
+      sleep: async () => {},
+      bootstrapPythonSidecar: async () => {
+        sequence.push('bootstrap');
+        return bootstrapOk();
+      },
+      runSessionStatus: async () => {
+        sequence.push('session');
+        return {
+          ok: false,
+          code: 'gemini_webapi_auth_failed',
+          message:
+            'Account status: UNAUTHENTICATED - Session is not authenticated or cookies have expired.',
+          adapterPlan: { selectedAdapter: 'privateApiGeminiWebapi' },
+        };
+      },
+      runReadChat: async () => {
+        readCalled = true;
+        throw new Error('read should not run without auth');
+      },
+    },
+  );
+
+  assert.equal(job.status, 'failed');
+  assert.equal(job.failureCount, 1);
+  assert.equal(job.failures[0].chatId, null);
+  assert.equal(job.failures[0].code, 'gemini_webapi_auth_failed');
+  assert.equal(readCalled, false);
+  assert.deepEqual(sequence, ['bootstrap', 'session']);
 });
 
 test('private API selected export is explicitly planned as private-first without browser wake', () => {

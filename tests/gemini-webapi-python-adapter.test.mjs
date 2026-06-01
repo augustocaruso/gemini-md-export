@@ -150,6 +150,23 @@ test('Gemini Web API Python adapter parses list and session status envelopes', (
   assert.equal(status.chatCount, 1);
 });
 
+test('Gemini Web API Python adapter rejects unauthenticated session envelopes', () => {
+  const status = parseGeminiWebapiPythonSessionStatusResponse(
+    JSON.stringify({
+      ok: true,
+      source: 'gemini_webapi_python',
+      authenticated: false,
+      chat_count: 0,
+      account_status: 'UNAUTHENTICATED',
+      message: 'Account status: UNAUTHENTICATED - Session is not authenticated.',
+    }),
+  );
+
+  assert.equal(status.ok, false);
+  assert.equal(status.code, 'gemini_webapi_python_unauthenticated');
+  assert.match(status.message, /UNAUTHENTICATED/);
+});
+
 test('Gemini Web API Python adapter prewarms before direct session status', async () => {
   const tempDir = mkdtempSync(resolve(tmpdir(), 'gme-webapi-bootstrap-runner-'));
   const runnerPath = resolve(tempDir, 'fake-runner.mjs');

@@ -1,6 +1,6 @@
 [project]
 name = "gemini-md-export-python-adapters"
-version = "0.0.0"
+version = "0.8.58"
 description = "Python sidecar adapters for gemini-md-export shell integrations."
 requires-python = ">=3.11,<3.13"
 dependencies = [

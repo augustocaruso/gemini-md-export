@@ -637,6 +637,11 @@ if (request.action === 'bootstrap') {
   process.stdout.write(JSON.stringify({ ok: true, source: 'gemini_webapi_python', warnings: [] }) + '\\n');
   process.exit(0);
 }
+if (request.action === 'session_status') {
+  appendFileSync(eventsPath, JSON.stringify({ tool: 'private-api-session' }) + '\\n');
+  process.stdout.write(JSON.stringify({ ok: true, source: 'gemini_webapi_python', authenticated: true, chat_count: 1, warnings: [] }) + '\\n');
+  process.exit(0);
+}
 const chatId = String(request.chat_id || '').replace(/^c_/, '');
 const assetsRelDir = request.assets_rel_dir || 'assets/' + chatId;
 const assetPath = resolve(request.assets_dir, 'turn-0001-asset-00.png');
@@ -728,12 +733,13 @@ process.stdout.write(JSON.stringify({
         'repair:true',
         'metadata:true',
         'private-api-bootstrap:undefined',
+        'private-api-session:undefined',
         'private-api:cccccccccccc',
         'metadata:false',
       ],
     );
-    assert.equal(events[3].assetsRelDir, 'assets/cccccccccccc');
-    assert.equal(events[4].repairDone, true);
+    assert.equal(events[4].assetsRelDir, 'assets/cccccccccccc');
+    assert.equal(events[5].repairDone, true);
     assert.match(readFileSync(chatPath, 'utf-8'), /Resposta correta reexportada pelo chatId/);
     assert.deepEqual(
       [...readFileSync(resolve(vault, 'assets/cccccccccccc/turn-0001-asset-00.png'))],

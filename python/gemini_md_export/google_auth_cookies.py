@@ -17,10 +17,12 @@ for gemini-md-export.
 from __future__ import annotations
 
 import json
+import os
 import time
 from collections.abc import Callable, Iterable, Mapping
+from contextlib import suppress
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from pydantic import BaseModel, Field
 
@@ -52,6 +54,13 @@ ROOKIEPY_COOKIE_DOMAINS = (
     "accounts.google.com",
     "gemini.google.com",
 )
+DIA_USER_DATA_ENV_VARS = (
+    "GME_DIA_USER_DATA_DIR",
+    "GEMINI_MCP_DIA_USER_DATA_DIR",
+    "DIA_USER_DATA_DIR",
+)
+DIA_OSX_KEY_SERVICE = "Dia Safe Storage"
+DIA_OSX_KEY_USER = "Dia"
 
 
 class GoogleCookie(BaseModel):
@@ -235,6 +244,164 @@ def _coerce_rookiepy_cookies(raw_cookies: Iterable[Any]) -> list[GoogleCookie]:
     return entries
 
 
+def _unique_existing_paths(paths: Iterable[Path]) -> list[Path]:
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for path in paths:
+        try:
+            resolved = path.expanduser().resolve()
+        except Exception:
+            resolved = path.expanduser()
+        key = str(resolved)
+        if key in seen or not resolved.exists():
+            continue
+        seen.add(key)
+        unique.append(resolved)
+    return unique
+
+
+def _dia_user_data_roots() -> list[Path]:
+    env_roots = [
+        Path(value)
+        for name in DIA_USER_DATA_ENV_VARS
+        if (value := str(os.environ.get(name, "")).strip())
+    ]
+    if env_roots:
+        return _unique_existing_paths(env_roots)
+    home = Path.home()
+    local_app_data = str(os.environ.get("LOCALAPPDATA", "")).strip()
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME", home / ".config"))
+    defaults = [
+        home / "Library" / "Application Support" / "Dia" / "User Data",
+        home / "Library" / "Application Support" / "Dia" / "User Data" / "User Data",
+        *([Path(local_app_data) / "Dia" / "User Data"] if local_app_data else []),
+        home / "AppData" / "Local" / "Dia" / "User Data",
+        config_home / "Dia",
+    ]
+    return _unique_existing_paths([*env_roots, *defaults])
+
+
+def _profile_sort_key(path: Path) -> tuple[int, str]:
+    name = path.name
+    if name == "Default":
+        return (0, name)
+    if name.startswith("Profile "):
+        suffix = name.removeprefix("Profile ")
+        if suffix.isdigit():
+            return (1, f"{int(suffix):04d}")
+        return (1, name)
+    return (2, name)
+
+
+def _dia_cookie_db_candidates() -> list[Path]:
+    candidates: list[Path] = []
+    for root in _dia_user_data_roots():
+        profile_dirs = [root]
+        with suppress(OSError):
+            profile_dirs.extend(
+                sorted(
+                    [child for child in root.iterdir() if child.is_dir()],
+                    key=_profile_sort_key,
+                )
+            )
+        for profile_dir in profile_dirs:
+            for cookie_path in (profile_dir / "Cookies", profile_dir / "Network" / "Cookies"):
+                if cookie_path.is_file():
+                    candidates.append(cookie_path)
+    return _unique_existing_paths(candidates)
+
+
+def _dia_cookie_profile_label(cookie_db: Path) -> str:
+    if cookie_db.parent.name == "Network":
+        return cookie_db.parent.parent.name
+    return cookie_db.parent.name
+
+
+def _dia_local_state_for_cookie_db(cookie_db: Path) -> Path:
+    if cookie_db.parent.name == "Network":
+        return cookie_db.parent.parent.parent / "Local State"
+    return cookie_db.parent.parent / "Local State"
+
+
+def _load_dia_rookiepy_cookie_entries(rookiepy: Any) -> tuple[list[GoogleCookie], list[str]]:
+    chromium_based = getattr(rookiepy, "chromium_based", None)
+    if not callable(chromium_based):
+        return [], ["rookiepy:dia: chromium_based indisponivel."]
+
+    entries: list[GoogleCookie] = []
+    diagnostics: list[str] = []
+    candidates = _dia_cookie_db_candidates()
+    if not candidates:
+        return [], ["rookiepy:dia: nenhum perfil Dia com Cookies encontrado."]
+
+    for cookie_db in candidates:
+        label = _dia_cookie_profile_label(cookie_db)
+        try:
+            raw_cookies = chromium_based(str(cookie_db), domains=list(ROOKIEPY_COOKIE_DOMAINS))
+        except Exception as exc:  # pragma: no cover - depends on host profile encryption.
+            diagnostics.append(f"rookiepy:dia:{label}: {type(exc).__name__}: {str(exc)[:160]}")
+            continue
+        browser_entries = _coerce_rookiepy_cookies(cast(Iterable[Any], raw_cookies))
+        entries.extend(browser_entries)
+        diagnostics.append(f"rookiepy:dia:{label}: {len(browser_entries)} cookie(s)")
+    return entries, diagnostics
+
+
+def _coerce_cookiejar_entries(cookiejar: Iterable[Any]) -> list[GoogleCookie]:
+    entries: list[GoogleCookie] = []
+    for cookie in cookiejar:
+        if cookie.is_expired():
+            continue
+        entries.append(
+            GoogleCookie(
+                name=str(cookie.name),
+                value=str(cookie.value),
+                domain=_normalize_domain(cookie.domain),
+                path=str(cookie.path or "/"),
+                expires=cookie.expires,
+            )
+        )
+    return entries
+
+
+def _load_dia_browser_cookie3_cookie_entries(bc3: Any) -> tuple[list[GoogleCookie], list[str]]:
+    chromium_based = getattr(bc3, "ChromiumBased", None)
+    if not callable(chromium_based):
+        return [], ["browser_cookie3:dia: ChromiumBased indisponivel."]
+
+    entries: list[GoogleCookie] = []
+    diagnostics: list[str] = []
+    candidates = _dia_cookie_db_candidates()
+    if not candidates:
+        return [], ["browser_cookie3:dia: nenhum perfil Dia com Cookies encontrado."]
+
+    for cookie_db in candidates:
+        label = _dia_cookie_profile_label(cookie_db)
+        local_state = _dia_local_state_for_cookie_db(cookie_db)
+        try:
+            browser = cast(Any, chromium_based)(
+                browser="Dia",
+                cookie_file=str(cookie_db),
+                domain_name="google.com",
+                key_file=str(local_state) if local_state.is_file() else None,
+                os_crypt_name="chromium",
+                osx_key_service=DIA_OSX_KEY_SERVICE,
+                osx_key_user=DIA_OSX_KEY_USER,
+                osx_cookies=[],
+                linux_cookies=[],
+                windows_cookies=[],
+                windows_keys=[],
+            )
+            jar = browser.load()
+        except Exception as exc:  # pragma: no cover - depends on host profile encryption.
+            diagnostics.append(f"browser_cookie3:dia:{label}: {type(exc).__name__}")
+            continue
+        browser_entries = _coerce_cookiejar_entries(jar)
+        entries.extend(browser_entries)
+        diagnostics.append(f"browser_cookie3:dia:{label}: {len(browser_entries)} cookie(s)")
+    return entries, diagnostics
+
+
 def _load_rookiepy_cookie_entries() -> tuple[list[GoogleCookie], list[str]]:
     try:
         import rookiepy
@@ -243,6 +410,9 @@ def _load_rookiepy_cookie_entries() -> tuple[list[GoogleCookie], list[str]]:
 
     entries: list[GoogleCookie] = []
     diagnostics: list[str] = []
+    dia_entries, dia_diagnostics = _load_dia_rookiepy_cookie_entries(rookiepy)
+    entries.extend(dia_entries)
+    diagnostics.extend(dia_diagnostics)
     for browser_name in ROOKIEPY_BROWSER_ALIASES:
         try:
             cookie_fn = rookiepy.load if browser_name == "auto" else getattr(rookiepy, browser_name)
@@ -474,6 +644,9 @@ def _load_browser_cookie_entries() -> tuple[list[GoogleCookie], list[str]]:
 
     entries: list[GoogleCookie] = []
     diagnostics: list[str] = [*rookie_diagnostics]
+    dia_entries, dia_diagnostics = _load_dia_browser_cookie3_cookie_entries(bc3)
+    entries.extend(dia_entries)
+    diagnostics.extend(dia_diagnostics)
     browser_fns: list[Callable[..., Any]] = [
         bc3.chrome,
         bc3.chromium,
@@ -493,21 +666,9 @@ def _load_browser_cookie_entries() -> tuple[list[GoogleCookie], list[str]]:
         except Exception as exc:  # pragma: no cover - depends on host browsers.
             diagnostics.append(f"{name}: {type(exc).__name__}")
             continue
-        count = 0
-        for cookie in jar:
-            if cookie.is_expired():
-                continue
-            count += 1
-            entries.append(
-                GoogleCookie(
-                    name=str(cookie.name),
-                    value=str(cookie.value),
-                    domain=_normalize_domain(cookie.domain),
-                    path=str(cookie.path or "/"),
-                    expires=cookie.expires,
-                )
-            )
-        diagnostics.append(f"{name}: {count} cookie(s)")
+        browser_entries = _coerce_cookiejar_entries(jar)
+        entries.extend(browser_entries)
+        diagnostics.append(f"{name}: {len(browser_entries)} cookie(s)")
     return entries, diagnostics
 
 

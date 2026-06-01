@@ -326,6 +326,23 @@ def _auth_snapshot_for_request(request: AdapterRequest) -> GoogleAuthCookieSnaps
     )
 
 
+def _account_status_failure(client: Any, chat_id: str | None) -> AdapterFailure | None:
+    status = getattr(client, "account_status", None)
+    name = str(getattr(status, "name", "") or "").strip()
+    if not name or name == "AVAILABLE":
+        return None
+    description = str(getattr(status, "description", "") or "").strip()
+    detail = f"Account status: {name}"
+    if description:
+        detail = f"{detail} - {description}"
+    return _failure(
+        "gemini_webapi_auth_failed",
+        detail,
+        chat_id,
+        warnings=[f"account_status:{name}"],
+    )
+
+
 async def _init_client(request: AdapterRequest) -> tuple[Any | None, AdapterFailure | None]:
     try:
         from gemini_webapi import GeminiClient, set_log_level
@@ -359,6 +376,11 @@ async def _init_client(request: AdapterRequest) -> tuple[Any | None, AdapterFail
             auto_close=False,
             auto_refresh=request.auto_refresh,
         )
+        account_failure = _account_status_failure(client, chat_id)
+        if account_failure is not None:
+            with suppress(Exception):
+                await client.close()
+            return None, account_failure
         return client, None
     except AuthError as exc:
         if not request.cookies_json and not auth_snapshot.ok:

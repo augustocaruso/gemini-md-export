@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import test from 'node:test';
@@ -214,6 +214,156 @@ print(json.dumps({
   assert.ok(data.diagnostics.some((line) => line === 'rookiepy:chrome: 4 cookie(s)'));
 });
 
+test('Google auth loader imports Dia Chromium profile cookies explicitly', () => {
+  const dir = mkdtempSync(resolve(tmpdir(), 'gme-dia-auth-'));
+  const diaProfile = resolve(dir, 'Default');
+  mkdirSync(diaProfile, { recursive: true });
+  writeFileSync(resolve(diaProfile, 'Cookies'), 'sqlite-placeholder', 'utf-8');
+
+  const data = runPython(`
+import json
+import os
+import sys
+import types
+from gemini_md_export import google_auth_cookies as mod
+
+calls = []
+
+def chromium_based(db_path, domains=None):
+    calls.append({"db_path": db_path, "domains": domains})
+    return [
+        {"name": "SID", "value": "sid-dia", "domain": ".google.com", "path": "/", "expires": -1},
+        {"name": "__Secure-1PSID", "value": "psid-dia", "domain": ".google.com", "path": "/", "expires": -1},
+        {"name": "__Secure-1PSIDTS", "value": "psidts-dia", "domain": ".google.com", "path": "/", "expires": -1},
+        {"name": "OSID", "value": "osid-dia", "domain": "accounts.google.com", "path": "/", "expires": -1},
+    ]
+
+fake_rookiepy = types.SimpleNamespace(
+    chromium_based=chromium_based,
+    chrome=lambda domains: [],
+    edge=lambda domains: [],
+    brave=lambda domains: [],
+    firefox=lambda domains: [],
+    load=lambda domains: [],
+)
+sys.modules["rookiepy"] = fake_rookiepy
+os.environ["GME_DIA_USER_DATA_DIR"] = ${JSON.stringify(dir)}
+entries, diagnostics = mod._load_browser_cookie_entries()
+snapshot = mod._snapshot_from_entries(entries, source="browser_import", browser_diagnostics=diagnostics)
+print(json.dumps({
+  "ok": snapshot.ok,
+  "source": snapshot.source,
+  "secure_1psid": snapshot.secure_1psid,
+  "secure_1psidts": snapshot.secure_1psidts,
+  "calls": calls,
+  "diagnostics": diagnostics,
+}))
+`);
+
+  assert.equal(data.ok, true);
+  assert.equal(data.source, 'browser_import');
+  assert.equal(data.secure_1psid, 'psid-dia');
+  assert.equal(data.secure_1psidts, 'psidts-dia');
+  assert.equal(data.calls.length, 1);
+  assert.equal(data.calls[0].db_path.endsWith('/Default/Cookies'), true);
+  assert.ok(data.diagnostics.some((line) => line === 'rookiepy:dia:Default: 4 cookie(s)'));
+});
+
+test('Google auth loader falls back to Dia Keychain service when rookiepy cannot decrypt Dia', () => {
+  const dir = mkdtempSync(resolve(tmpdir(), 'gme-dia-auth-'));
+  const diaProfile = resolve(dir, 'Default');
+  mkdirSync(diaProfile, { recursive: true });
+  writeFileSync(resolve(dir, 'Local State'), '{}', 'utf-8');
+  writeFileSync(resolve(diaProfile, 'Cookies'), 'sqlite-placeholder', 'utf-8');
+
+  const data = runPython(`
+import json
+import os
+import sys
+import types
+from gemini_md_export import google_auth_cookies as mod
+
+def fail_chromium_based(db_path, domains=None):
+    raise RuntimeError("missing osx_key_service")
+
+fake_rookiepy = types.SimpleNamespace(
+    chromium_based=fail_chromium_based,
+    chrome=lambda domains: [],
+    edge=lambda domains: [],
+    brave=lambda domains: [],
+    firefox=lambda domains: [],
+    load=lambda domains: [],
+)
+
+class FakeCookie:
+    def __init__(self, name, value, domain=".google.com", path="/", expires=-1):
+        self.name = name
+        self.value = value
+        self.domain = domain
+        self.path = path
+        self.expires = expires
+
+    def is_expired(self):
+        return False
+
+class FakeChromiumBased:
+    calls = []
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        FakeChromiumBased.calls.append(kwargs)
+
+    def load(self):
+        return [
+            FakeCookie("SID", "sid-dia"),
+            FakeCookie("__Secure-1PSID", "psid-dia"),
+            FakeCookie("__Secure-1PSIDTS", "psidts-dia"),
+            FakeCookie("OSID", "osid-dia", domain="accounts.google.com"),
+        ]
+
+def empty_browser(domain_name=None):
+    return []
+
+fake_browser_cookie3 = types.SimpleNamespace(
+    ChromiumBased=FakeChromiumBased,
+    chrome=empty_browser,
+    chromium=empty_browser,
+    opera=empty_browser,
+    opera_gx=empty_browser,
+    brave=empty_browser,
+    edge=empty_browser,
+    vivaldi=empty_browser,
+    firefox=empty_browser,
+    librewolf=empty_browser,
+    safari=empty_browser,
+)
+
+sys.modules["rookiepy"] = fake_rookiepy
+sys.modules["browser_cookie3"] = fake_browser_cookie3
+os.environ["GME_DIA_USER_DATA_DIR"] = ${JSON.stringify(dir)}
+entries, diagnostics = mod._load_browser_cookie_entries()
+snapshot = mod._snapshot_from_entries(entries, source="browser_import", browser_diagnostics=diagnostics)
+print(json.dumps({
+  "ok": snapshot.ok,
+  "secure_1psid": snapshot.secure_1psid,
+  "secure_1psidts": snapshot.secure_1psidts,
+  "calls": FakeChromiumBased.calls,
+  "diagnostics": diagnostics,
+}))
+`);
+
+  assert.equal(data.ok, true);
+  assert.equal(data.secure_1psid, 'psid-dia');
+  assert.equal(data.secure_1psidts, 'psidts-dia');
+  assert.equal(data.calls.length, 1);
+  assert.equal(data.calls[0].browser, 'Dia');
+  assert.equal(data.calls[0].osx_key_service, 'Dia Safe Storage');
+  assert.equal(data.calls[0].osx_key_user, 'Dia');
+  assert.equal(data.calls[0].cookie_file.endsWith('/Default/Cookies'), true);
+  assert.equal(data.calls[0].key_file.endsWith('/Local State'), true);
+  assert.ok(data.diagnostics.some((line) => line === 'browser_cookie3:dia:Default: 4 cookie(s)'));
+});
+
 test('Google auth loader falls back to browser-cookie3 diagnostics when rookiepy fails', () => {
   const data = runPython(`
 import json
@@ -295,4 +445,81 @@ test('gemini_webapi sidecar preflights explicit cookies before initializing netw
   assert.deepEqual(payload.warnings, []);
   assert.match(payload.message, /sessao Google incompleta/i);
   assert.doesNotMatch(payload.message, /Failed to initialize client/i);
+});
+
+test('gemini_webapi sidecar rejects initialized but unauthenticated accounts', () => {
+  const dir = mkdtempSync(resolve(tmpdir(), 'gme-auth-status-'));
+  const fakePackage = resolve(dir, 'gemini_webapi');
+  const storagePath = resolve(dir, 'storage_state.json');
+  mkdirSync(fakePackage, { recursive: true });
+  writeFileSync(
+    resolve(fakePackage, '__init__.py'),
+    `
+class _AccountStatus:
+    name = "UNAUTHENTICATED"
+    description = "Session is not authenticated or cookies have expired."
+
+class GeminiClient:
+    def __init__(self, *args, **kwargs):
+        self.cookies = {}
+        self.account_status = None
+
+    async def init(self, *args, **kwargs):
+        self.account_status = _AccountStatus()
+
+    def list_chats(self):
+        return []
+
+    async def close(self):
+        return None
+
+def set_log_level(_level):
+    return None
+`,
+    'utf-8',
+  );
+  writeFileSync(
+    resolve(fakePackage, 'exceptions.py'),
+    `
+class AuthError(Exception):
+    pass
+`,
+    'utf-8',
+  );
+  writeFileSync(
+    storagePath,
+    JSON.stringify({
+      cookies: [
+        { name: 'SID', value: 'sid', domain: '.google.com', path: '/', expires: -1 },
+        { name: '__Secure-1PSID', value: 'psid', domain: '.google.com', path: '/', expires: -1 },
+        { name: '__Secure-1PSIDTS', value: 'psidts', domain: '.google.com', path: '/', expires: -1 },
+        { name: 'OSID', value: 'osid', domain: 'accounts.google.com', path: '/', expires: -1 },
+      ],
+    }),
+    'utf-8',
+  );
+
+  const result = spawnSync(
+    'uv',
+    ['run', '--project', ROOT, 'python', '-m', 'gemini_md_export.gemini_webapi_adapter'],
+    {
+      cwd: ROOT,
+      input: JSON.stringify({
+        action: 'session_status',
+        cookies_json: storagePath,
+        timeout_ms: 5000,
+      }),
+      encoding: 'utf-8',
+      env: {
+        ...process.env,
+        PYTHONPATH: `${dir}:${resolve(ROOT, 'python')}:${process.env.PYTHONPATH || ''}`,
+      },
+    },
+  );
+
+  assert.equal(result.status, 1);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.ok, false);
+  assert.equal(payload.code, 'gemini_webapi_auth_failed');
+  assert.match(payload.message, /UNAUTHENTICATED/);
 });
