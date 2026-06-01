@@ -6,6 +6,9 @@ import { resolve } from 'node:path';
 import test from 'node:test';
 
 const ROOT = resolve(import.meta.dirname, '..');
+const HAS_UV = spawnSync('uv', ['--version'], { encoding: 'utf-8' }).status === 0;
+const pythonTest = (name, fn) =>
+  test(name, { skip: HAS_UV ? false : 'uv is required for Python sidecar tests' }, fn);
 
 const runPython = (source) => {
   const result = spawnSync('uv', ['run', '--project', ROOT, 'python', '-c', source], {
@@ -13,12 +16,14 @@ const runPython = (source) => {
     encoding: 'utf-8',
   });
   if (result.status !== 0) {
-    throw new Error(`python failed\nSTDOUT:\n${result.stdout}\nSTDERR:\n${result.stderr}`);
+    throw new Error(
+      `python failed\nSTATUS: ${result.status}\nERROR: ${result.error?.message || ''}\nSTDOUT:\n${result.stdout || ''}\nSTDERR:\n${result.stderr || ''}`,
+    );
   }
   return JSON.parse(result.stdout);
 };
 
-test('Google auth loader accepts Playwright storage_state and validates required cookies', () => {
+pythonTest('Google auth loader accepts Playwright storage_state and validates required cookies', () => {
   const dir = mkdtempSync(resolve(tmpdir(), 'gme-auth-'));
   const storagePath = resolve(dir, 'storage_state.json');
   writeFileSync(
@@ -56,7 +61,7 @@ print(json.dumps({
   assert.equal(data.message, null);
 });
 
-test('Google auth loader reports missing cookies instead of blaming stale PSIDTS', () => {
+pythonTest('Google auth loader reports missing cookies instead of blaming stale PSIDTS', () => {
   const dir = mkdtempSync(resolve(tmpdir(), 'gme-auth-'));
   const storagePath = resolve(dir, 'storage_state.json');
   writeFileSync(
@@ -88,7 +93,7 @@ print(json.dumps({
   assert.doesNotMatch(data.message, /expir/i);
 });
 
-test('Google auth loader rotates and persists PSIDTS when the cookie set is recoverable', () => {
+pythonTest('Google auth loader rotates and persists PSIDTS when the cookie set is recoverable', () => {
   const dir = mkdtempSync(resolve(tmpdir(), 'gme-auth-'));
   const storagePath = resolve(dir, 'storage_state.json');
   writeFileSync(
@@ -136,7 +141,7 @@ print(json.dumps({
   assert.deepEqual(data.stored_names, ['OSID', 'SID', '__Secure-1PSID', '__Secure-1PSIDTS']);
 });
 
-test('Google auth loader rotates browser-imported PSIDTS in memory', () => {
+pythonTest('Google auth loader rotates browser-imported PSIDTS in memory', () => {
   const data = runPython(`
 import json
 from gemini_md_export import google_auth_cookies as mod
@@ -180,7 +185,7 @@ print(json.dumps({
   assert.deepEqual(data.diagnostics, ['chrome: 3 cookie(s)']);
 });
 
-test('Google auth loader prefers rookiepy browser extraction when available', () => {
+pythonTest('Google auth loader prefers rookiepy browser extraction when available', () => {
   const data = runPython(`
 import json
 import sys
@@ -214,7 +219,7 @@ print(json.dumps({
   assert.ok(data.diagnostics.some((line) => line === 'rookiepy:chrome: 4 cookie(s)'));
 });
 
-test('Google auth loader imports Dia Chromium profile cookies explicitly', () => {
+pythonTest('Google auth loader imports Dia Chromium profile cookies explicitly', () => {
   const dir = mkdtempSync(resolve(tmpdir(), 'gme-dia-auth-'));
   const diaProfile = resolve(dir, 'Default');
   mkdirSync(diaProfile, { recursive: true });
@@ -269,7 +274,7 @@ print(json.dumps({
   assert.ok(data.diagnostics.some((line) => line === 'rookiepy:dia:Default: 4 cookie(s)'));
 });
 
-test('Google auth loader falls back to Dia Keychain service when rookiepy cannot decrypt Dia', () => {
+pythonTest('Google auth loader falls back to Dia Keychain service when rookiepy cannot decrypt Dia', () => {
   const dir = mkdtempSync(resolve(tmpdir(), 'gme-dia-auth-'));
   const diaProfile = resolve(dir, 'Default');
   mkdirSync(diaProfile, { recursive: true });
@@ -364,7 +369,7 @@ print(json.dumps({
   assert.ok(data.diagnostics.some((line) => line === 'browser_cookie3:dia:Default: 4 cookie(s)'));
 });
 
-test('Google auth loader falls back to browser-cookie3 diagnostics when rookiepy fails', () => {
+pythonTest('Google auth loader falls back to browser-cookie3 diagnostics when rookiepy fails', () => {
   const data = runPython(`
 import json
 import sys
@@ -411,7 +416,7 @@ print(json.dumps({
   assert.equal(data.has_browser_cookie3, true);
 });
 
-test('gemini_webapi sidecar preflights explicit cookies before initializing network client', () => {
+pythonTest('gemini_webapi sidecar preflights explicit cookies before initializing network client', () => {
   const dir = mkdtempSync(resolve(tmpdir(), 'gme-auth-'));
   const storagePath = resolve(dir, 'storage_state.json');
   writeFileSync(
@@ -447,7 +452,7 @@ test('gemini_webapi sidecar preflights explicit cookies before initializing netw
   assert.doesNotMatch(payload.message, /Failed to initialize client/i);
 });
 
-test('gemini_webapi sidecar rejects initialized but unauthenticated accounts', () => {
+pythonTest('gemini_webapi sidecar rejects initialized but unauthenticated accounts', () => {
   const dir = mkdtempSync(resolve(tmpdir(), 'gme-auth-status-'));
   const fakePackage = resolve(dir, 'gemini_webapi');
   const storagePath = resolve(dir, 'storage_state.json');

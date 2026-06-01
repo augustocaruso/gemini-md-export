@@ -107,7 +107,7 @@ wheels = [
 
 [[package]]
 name = "gemini-md-export-python-adapters"
-version = "0.8.58"
+version = "0.8.59"
 source = { editable = "." }
 dependencies = [
     { name = "gemini-webapi", extra = ["browser"] },
