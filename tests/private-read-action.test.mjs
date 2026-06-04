@@ -111,6 +111,36 @@ test('private_read action falls back to gemini_webapi Python when no browser tab
   ]);
 });
 
+test('private_read action can disable Python fallback for browser-background export', async () => {
+  const action = createMcpPrivateReadAction({
+    requireManagedChatClient: () => {
+      throw new Error('no connected browser client');
+    },
+    enqueueCommand: async () => {
+      throw new Error('should not enqueue browser command');
+    },
+    summarizeClient: () => null,
+    runGeminiWebapiPythonReadChat: async () => {
+      throw new Error('should not call Python when fallback is disabled');
+    },
+  });
+
+  const result = await action({
+    action: 'private_read',
+    chatId: 'dbe5dd4b50b09c74',
+    privateApiTransport: 'browser-background',
+    allowPythonFallback: false,
+    allowDomFallback: false,
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.adapterPlan.selectedAdapter, 'browserBackground');
+  assert.deepEqual(result.adapterPlan.fallbackAdapters, []);
+  assert.equal(result.adapterAttempts.length, 1);
+  assert.equal(result.adapterAttempts[0].adapter, 'browserBackground');
+  assert.match(result.message, /no connected browser client/);
+});
+
 test('private_read action prefers browser-background when a logged tab is ready', async () => {
   const calls = [];
   const action = createMcpPrivateReadAction({
@@ -128,7 +158,12 @@ test('private_read action prefers browser-background when a logged tab is ready'
     },
   });
 
-  const result = await action({ chatId: 'dbe5dd4b50b09c74', waitMs: 2000 });
+  const result = await action({
+    chatId: 'dbe5dd4b50b09c74',
+    waitMs: 2000,
+    downloadAssets: true,
+    assetsRelDir: 'assets/dbe5dd4b50b09c74',
+  });
 
   assert.equal(result.ok, true);
   assert.equal(result.via, 'browser');
@@ -138,12 +173,131 @@ test('private_read action prefers browser-background when a logged tab is ready'
   assert.deepEqual(result.fallbackWarnings, []);
   assert.deepEqual(calls[0], [
     'requireManagedChatClient',
-    { chatId: 'dbe5dd4b50b09c74', waitMs: 2000 },
+    {
+      chatId: 'dbe5dd4b50b09c74',
+      waitMs: 2000,
+      downloadAssets: true,
+      assetsRelDir: 'assets/dbe5dd4b50b09c74',
+    },
     'private-api-read-chat',
   ]);
   assert.equal(calls[1][0], 'enqueueCommand');
   assert.equal(calls[1][1], 'client-1');
   assert.equal(calls[1][2], 'private-api-read-chat');
+});
+
+test('private_read action can use native broker background without a managed tab', async () => {
+  const calls = [];
+  const action = createMcpPrivateReadAction({
+    requireManagedChatClient: () => {
+      throw new Error('should not require a managed tab');
+    },
+    enqueueCommand: async () => {
+      throw new Error('should not enqueue browser command');
+    },
+    summarizeClient: () => null,
+    nativeBrowserBroker: {
+      privateApiReadChat: async (payload, options) => {
+        calls.push({ payload, options });
+        return {
+          ok: true,
+          result: {
+            ok: true,
+            snapshot: {
+              chatId: 'dbe5dd4b50b09c74',
+              title: 'Native broker read',
+              url: 'https://gemini.google.com/app/dbe5dd4b50b09c74',
+              turns: [
+                {
+                  role: 'assistant',
+                  markdown: 'Resposta pelo background',
+                  textHash: 'hash-bg',
+                  sourceOrder: 0,
+                  attachments: [],
+                },
+              ],
+              metadata: { assistantTurnCount: 1 },
+              evidence: [],
+            },
+            transport: { source: 'browser-background-native-broker' },
+          },
+        };
+      },
+    },
+    runGeminiWebapiPythonReadChat: async () => {
+      throw new Error('should not call Python when native broker succeeds');
+    },
+  });
+
+  const result = await action({
+    chatId: 'dbe5dd4b50b09c74',
+    waitMs: 2000,
+    downloadAssets: true,
+    assetsRelDir: 'assets/dbe5dd4b50b09c74',
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.adapter, 'browserBackground');
+  assert.equal(result.client, null);
+  assert.equal(result.snapshot.chatId, 'dbe5dd4b50b09c74');
+  assert.match(result.markdown, /Resposta pelo background/);
+  assert.deepEqual(calls, [
+    {
+      payload: {
+        chatId: 'dbe5dd4b50b09c74',
+        title: undefined,
+        timeoutMs: 5000,
+        downloadAssets: true,
+        assetsRelDir: 'assets/dbe5dd4b50b09c74',
+      },
+      options: { allowFallback: true },
+    },
+  ]);
+});
+
+test('private_read strict browser-background surfaces native broker failure without requiring a tab', async () => {
+  const calls = [];
+  const action = createMcpPrivateReadAction({
+    requireManagedChatClient: () => {
+      calls.push('requireManagedChatClient');
+      throw new Error('should not require a managed tab after native broker failure');
+    },
+    enqueueCommand: async () => {
+      calls.push('enqueueCommand');
+      throw new Error('should not enqueue browser command');
+    },
+    summarizeClient: () => null,
+    nativeBrowserBroker: {
+      privateApiReadChat: async (payload, options) => {
+        calls.push({ payload, options });
+        return {
+          ok: false,
+          code: 'private_api_rpc_fetch_failed',
+          message: 'RPC privado recusou a conversa.',
+          chatId: 'dbe5dd4b50b09c74',
+        };
+      },
+    },
+    runGeminiWebapiPythonReadChat: async () => {
+      calls.push('python');
+      throw new Error('should not call Python when fallback is disabled');
+    },
+  });
+
+  const result = await action({
+    chatId: 'dbe5dd4b50b09c74',
+    privateApiTransport: 'browser-background',
+    allowPythonFallback: false,
+    allowDomFallback: false,
+    downloadAssets: true,
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'private_api_rpc_fetch_failed');
+  assert.match(result.message, /RPC privado recusou/);
+  assert.equal(calls.some((call) => call === 'requireManagedChatClient'), false);
+  assert.equal(calls.some((call) => call === 'enqueueCommand'), false);
+  assert.equal(calls.some((call) => call === 'python'), false);
 });
 
 test('private_read action falls through to sidecar when browser read exposes assets without downloads', async () => {

@@ -13,10 +13,14 @@ type NativeBrowserBrokerCommand = Extract<
   | 'tabs.release'
   | 'tabs.activate'
   | 'tabs.reload'
+  | 'extension.keepAlive'
   | 'extension.status'
   | 'extension.selfHealContentScripts'
   | 'extension.reloadManagedTabs'
   | 'extension.reloadSelf'
+  | 'privateApi.sessionStatus'
+  | 'privateApi.listChats'
+  | 'privateApi.readChat'
 >;
 
 type NativeBrowserBrokerOptions = Readonly<{
@@ -123,6 +127,8 @@ export const createNativeBrowserBrokerClient = ({
       call('tabs.activate', payload, options),
     reload: (payload: Record<string, unknown> = {}, options: NativeBrowserBrokerOptions = {}) =>
       call('tabs.reload', payload, options),
+    keepAlive: (payload: Record<string, unknown> = {}, options: NativeBrowserBrokerOptions = {}) =>
+      call('extension.keepAlive', payload, options),
     extensionStatus: (options: NativeBrowserBrokerOptions = {}) =>
       call('extension.status', {}, options),
     selfHealContentScripts: (
@@ -142,5 +148,17 @@ export const createNativeBrowserBrokerClient = ({
       payload: Record<string, unknown> = {},
       options: NativeBrowserBrokerOptions = {},
     ) => call('extension.reloadSelf', payload, options),
+    privateApiSessionStatus: (
+      payload: Record<string, unknown> = {},
+      options: NativeBrowserBrokerOptions = {},
+    ) => call('privateApi.sessionStatus', payload, options),
+    privateApiListChats: (
+      payload: Record<string, unknown> = {},
+      options: NativeBrowserBrokerOptions = {},
+    ) => call('privateApi.listChats', payload, options),
+    privateApiReadChat: (
+      payload: Record<string, unknown> = {},
+      options: NativeBrowserBrokerOptions = {},
+    ) => call('privateApi.readChat', payload, options),
   };
 };

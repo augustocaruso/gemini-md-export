@@ -138,6 +138,40 @@ test('CDP runtime session owner reutiliza o mesmo Browser WebSocket entre snapsh
   assert.equal(FakeBrowserWebSocket.instances[0].closed, true);
 });
 
+test('CDP runtime session owner usa DevToolsActivePort quando /json/version nao informa Browser WebSocket', async () => {
+  FakeBrowserWebSocket.instances = [];
+  const fetchImpl = makeFetch({
+    'GET /json/version': jsonResponse({
+      Browser: 'Chrome/148',
+    }),
+  });
+  const owner = createCdpRuntimeSessionOwner({
+    WebSocketImpl: FakeBrowserWebSocket,
+    fetchImpl,
+    timeoutMs: 1000,
+  });
+  try {
+    const snapshot = await owner.buildSnapshot({
+      endpoint: 'http://127.0.0.1:60268',
+      devToolsActivePortContents: '60268\n/devtools/browser/from-file\n',
+    });
+
+    assert.equal(snapshot.ok, true);
+    assert.equal(snapshot.targets.length, 2);
+    assert.equal(FakeBrowserWebSocket.instances.length, 1);
+    assert.equal(
+      FakeBrowserWebSocket.instances[0].url,
+      'ws://127.0.0.1:60268/devtools/browser/from-file',
+    );
+    assert.deepEqual(
+      FakeBrowserWebSocket.instances[0].sent.map((message) => message.method),
+      ['Target.getTargets'],
+    );
+  } finally {
+    owner.closeAll();
+  }
+});
+
 test('CDP runtime session owner reutiliza attach de reload da extensao entre chamadas', async () => {
   FakeBrowserWebSocket.instances = [];
   const owner = createCdpRuntimeSessionOwner({

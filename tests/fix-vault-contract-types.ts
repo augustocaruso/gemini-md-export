@@ -22,7 +22,7 @@ const orderedSteps = [
     reportPath: '/tmp/metadata-diagnosis.json',
   },
   {
-    name: 'web-repair',
+    name: 'private-api-repair',
     status: 'completed',
     exitCode: 0,
     targetCount: 1,
@@ -62,6 +62,12 @@ const validReport = {
       takeoutEvidence: { enabled: true },
     },
     diagnosis: null,
+    chatRepair: {
+      adapter: 'private_api',
+      targetCount: 1,
+      exitCode: 0,
+      skipped: false,
+    },
     webRepair: {
       targetCount: 1,
       exitCode: 0,
@@ -87,8 +93,8 @@ const invalidOrder = [
 void invalidOrder;
 
 const invalidStatus = {
-  name: 'web-repair',
-  // @ts-expect-error web-repair has explicit terminal states, never generic pending.
+  name: 'private-api-repair',
+  // @ts-expect-error private-api-repair has explicit terminal states, never generic pending.
   status: 'pending',
   exitCode: 0,
   targetCount: 0,

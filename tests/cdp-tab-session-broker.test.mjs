@@ -30,6 +30,18 @@ test('opcoes runtime de CDP ficam em modulo TypeScript compartilhado', () => {
     }),
     'http://127.0.0.1:9222',
   );
+  assert.equal(
+    cdpRuntimeInputForArgs(
+      {},
+      {
+        env: {
+          GEMINI_MCP_CDP_DEVTOOLS_ACTIVE_PORT_FILE:
+            ' C:\\Users\\leo\\AppData\\Local\\Google\\Chrome\\User Data\\DevToolsActivePort ',
+        },
+      },
+    ).devToolsActivePortFile,
+    'C:\\Users\\leo\\AppData\\Local\\Google\\Chrome\\User Data\\DevToolsActivePort',
+  );
   assert.deepEqual(browserControlParamsFromFlags({}), {
     activateTab: false,
     focusWindow: false,

@@ -10,6 +10,9 @@ type PrivateReadArgs = Readonly<{
   url?: unknown;
   title?: unknown;
   waitMs?: unknown;
+  downloadAssets?: unknown;
+  assetsRelDir?: unknown;
+  assetsDir?: unknown;
 }>;
 
 type PrivateReadClient = Readonly<{
@@ -56,6 +59,9 @@ export const buildPrivateApiReadChatCommand = (
         stringOrNull(args.chatId) || stringOrNull(args.url) || stringOrNull(client?.page?.chatId),
       title: stringOrNull(args.title) || stringOrNull(client?.page?.title),
       timeoutMs,
+      downloadAssets: args.downloadAssets === true,
+      assetsRelDir: stringOrNull(args.assetsRelDir),
+      assetsDir: stringOrNull(args.assetsDir),
       adapterPlan,
     },
     timeoutMs,

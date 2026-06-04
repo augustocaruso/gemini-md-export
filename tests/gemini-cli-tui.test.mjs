@@ -750,10 +750,171 @@ process.stdout.write(JSON.stringify({
     assert.equal(report.ok, true);
     assert.deepEqual(
       report.steps.map((step) => step.name),
-      ['repair-audit', 'metadata-diagnosis', 'web-repair', 'metadata-backfill', 'vault-validation'],
+      [
+        'repair-audit',
+        'metadata-diagnosis',
+        'private-api-repair',
+        'metadata-backfill',
+        'vault-validation',
+      ],
     );
     assert.equal(report.summary.metadata.matched, 1);
     assert.equal(report.summary.diagnosis.exportErrors, 1);
+  } finally {
+    rmSync(vault, { recursive: true, force: true });
+  }
+});
+
+test('CLI fix-vault valida sessão browser privada antes do lote de reparo', async () => {
+  const vault = mkdtempSync(resolve(tmpdir(), 'gme-cli-fix-vault-private-preflight-'));
+  const reportPath = resolve(vault, 'fix-report.json');
+  const takeoutPath = resolve(vault, 'Minhaatividade.html');
+  const repairScript = resolve(vault, 'fake-repair.mjs');
+  const metadataScript = resolve(vault, 'fake-metadata.mjs');
+  const metadataRan = resolve(vault, 'metadata-ran');
+  const chatPath = resolve(vault, 'bbbbbbbbbbbb.md');
+  writeFileSync(
+    chatPath,
+    [
+      '---',
+      'chat_id: bbbbbbbbbbbb',
+      'url: https://gemini.google.com/app/bbbbbbbbbbbb',
+      'tags: [gemini-export]',
+      '---',
+      '',
+      '## 🧑 Usuário',
+      '',
+      'pergunta',
+      '',
+      '---',
+      '',
+      '## 🤖 Gemini',
+      '',
+      'resposta raw suspeita ![imagem faltando](assets/bbbbbbbbbbbb/missing.png)',
+      '',
+    ].join('\n'),
+    'utf-8',
+  );
+  writeFileSync(takeoutPath, '<html><body>Gemini Apps</body></html>', 'utf-8');
+  writeExecutableScript(
+    repairScript,
+    `
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+const args = process.argv.slice(2);
+const reportDir = args[args.indexOf('--report-dir') + 1];
+mkdirSync(reportDir, { recursive: true });
+const preliminaryReportPath = resolve(reportDir, 'preliminary.json');
+writeFileSync(preliminaryReportPath, JSON.stringify({ verificationQueueSize: 1, wikiReviewQueueSize: 0 }));
+process.stdout.write(JSON.stringify({ ok: true, dryRun: args.includes('--dry-run'), preliminaryReportPath }) + '\\n');
+`,
+  );
+  writeExecutableScript(
+    metadataScript,
+    `
+import { writeFileSync } from 'node:fs';
+const args = process.argv.slice(2);
+const reportPath = args[args.indexOf('--report') + 1];
+if (args.includes('--diagnose-only')) {
+  writeFileSync(reportPath, JSON.stringify({
+    summary: { totalChats: 1, filesRewritten: 0, datesMatched: 0, exportErrors: 1, sourceGaps: 0, complete: false },
+    rawExportDiagnostics: { enabled: true, diagnosed: 1, byCode: { missing_local_asset: 1 } },
+    items: [{
+      chatId: 'bbbbbbbbbbbb',
+      file: 'bbbbbbbbbbbb.md',
+      status: 'export_error',
+      diagnostic: { status: 'raw_export_suspected', repair: { action: 'reexport_chat' } }
+    }]
+  }));
+  process.exit(2);
+}
+writeFileSync(${JSON.stringify(metadataRan)}, 'ran');
+process.exit(0);
+`,
+  );
+
+  try {
+    await withServer((req, res, url, requestRecord) => {
+      if (url.pathname === '/healthz') {
+        sendJson(res, 200, { ok: true, bridgeRole: 'primary' });
+        return;
+      }
+      if (url.pathname === '/agent/ready') {
+        sendJson(res, 200, {
+          ok: true,
+          ready: true,
+          connectedClients: [{ clientId: 'client-ready-1' }],
+        });
+        return;
+      }
+      if (url.pathname === '/agent/mcp-tool-call') {
+        const action = requestRecord.jsonBody?.arguments?.action;
+        if (action === 'session_status') {
+          sendJson(res, 200, {
+            ok: true,
+            result: {
+              structuredContent: {
+                ok: false,
+                action: 'session_status',
+                authenticated: false,
+                selectedAdapter: null,
+                nextAction: {
+                  code: 'browser_session_not_connected',
+                  message: 'Abra o Gemini no navegador logado e aguarde a extensao conectar.',
+                },
+              },
+              isError: false,
+            },
+          });
+          return;
+        }
+        sendJson(res, 500, {
+          ok: false,
+          code: 'unexpected_private_read',
+          message: `unexpected action ${action}`,
+        });
+        return;
+      }
+      sendJson(res, 404, { ok: false, error: `unexpected ${url.pathname}` });
+    }, async (bridgeUrl, requests) => {
+      await withEnv(
+        {
+          GEMINI_MD_EXPORT_REPAIR_SCRIPT: repairScript,
+          GEMINI_MD_EXPORT_METADATA_SCRIPT: metadataScript,
+          GEMINI_MD_EXPORT_PROGRESS_TICK_MS: '10',
+        },
+        async () => {
+          const stdout = captureStream();
+          const run = await main(
+            [
+              'fix-vault',
+              vault,
+              '--takeout',
+              takeoutPath,
+              '--report',
+              reportPath,
+              '--bridge-url',
+              bridgeUrl,
+              '--private-api',
+              '--no-open-if-missing',
+              '--no-wake',
+              '--plain',
+            ],
+            { stdout, stderr: captureStream() },
+          );
+
+          const toolActions = requests
+            .filter((request) => request.pathname === '/agent/mcp-tool-call')
+            .map((request) => request.jsonBody?.arguments?.action);
+          assert.deepEqual(toolActions, ['session_status']);
+          assert.equal(run.exitCode, 1);
+          assert.equal(existsSync(metadataRan), false);
+          const report = JSON.parse(readFileSync(reportPath, 'utf-8'));
+          assert.equal(report.summary.webRepair.unavailable?.code, 'browser_session_not_connected');
+          assert.equal(report.steps[3].status, 'blocked');
+        },
+      );
+    });
   } finally {
     rmSync(vault, { recursive: true, force: true });
   }
@@ -2047,7 +2208,7 @@ test('CLI sync --plain emite progresso estavel e RESULT_JSON final', async () =>
     const stdout = captureStream();
     const stderr = captureStream();
     const run = await main(
-      ['sync', '/vault/Gemini', '--bridge-url', bridgeUrl, '--plain', '--poll-ms', '10'],
+      ['sync', '/vault/Gemini', '--bridge-url', bridgeUrl, '--plain', '--poll-ms', '10', '--no-private-api'],
       { stdout, stderr },
     );
 
@@ -2072,6 +2233,20 @@ test('CLI sync --plain emite progresso estavel e RESULT_JSON final', async () =>
   });
 });
 
+test('CLI sync usa rota privada antes da readiness DOM legada', () => {
+  const source = readFileSync(resolve(ROOT, 'bin', 'gemini-md-export.mjs'), 'utf-8');
+  const runSyncBlock =
+    source.match(/const runSync = async \(parsed, streams = \{\}\) => \{[\s\S]*?\n\};\n\nconst runDoctor/)?.[0] ||
+    '';
+
+  assert.match(runSyncBlock, /parsed\.flags\.privateApi !== false/);
+  assert.match(runSyncBlock, /runPrivateApiSyncCommand/);
+  assert.ok(
+    runSyncBlock.indexOf('runPrivateApiSyncCommand') <
+      runSyncBlock.indexOf('ensureReadyForExport'),
+  );
+});
+
 test('CLI sync --plain destaca historico incompleto e falhas no RESULT_JSON', async () => {
   await withServer((req, res, url) => {
     if (url.pathname === '/agent/ready') {
@@ -2093,7 +2268,7 @@ test('CLI sync --plain destaca historico incompleto e falhas no RESULT_JSON', as
     const stdout = captureStream();
     const stderr = captureStream();
     const run = await main(
-      ['sync', '/vault/Gemini', '--bridge-url', bridgeUrl, '--plain', '--poll-ms', '10'],
+      ['sync', '/vault/Gemini', '--bridge-url', bridgeUrl, '--plain', '--poll-ms', '10', '--no-private-api'],
       { stdout, stderr },
     );
     assert.equal(run.exitCode, 1);
@@ -2267,6 +2442,7 @@ test('CLI sync cancela job em timeout e libera claim visual da aba', async () =>
               '20',
               '--poll-ms',
               '10',
+              '--no-private-api',
             ],
             { stdout, stderr },
           ),
@@ -2438,6 +2614,7 @@ test('CLI sync acorda Gemini Web pela propria CLI antes de exportar quando --wak
               '300',
               '--poll-ms',
               '10',
+              '--no-private-api',
             ],
             { stdout, stderr },
           );
@@ -2562,6 +2739,10 @@ test('CLI auth status chama o session_status unificado da bridge', async () => {
   await withServer((req, res, url, requestRecord) => {
     if (url.pathname === '/healthz') {
       sendJson(res, 200, { ok: true, bridgeRole: 'primary' });
+      return;
+    }
+    if (url.pathname === '/agent/ready') {
+      sendJson(res, 200, { ok: true, ready: true });
       return;
     }
     if (url.pathname === '/agent/mcp-tool-call') {
@@ -3932,6 +4113,7 @@ test('CLI espera aba Gemini existente reconectar antes de abrir nova aba', async
               '300',
               '--poll-ms',
               '10',
+              '--no-private-api',
             ],
             { stdout, stderr },
           );
@@ -4009,6 +4191,7 @@ test('CLI sync reaproveita estado legado de launch em andamento para evitar aba 
             '300',
             '--poll-ms',
             '10',
+            '--no-private-api',
           ],
           { stdout, stderr },
         );
@@ -4032,7 +4215,7 @@ test('CLI sync --tui renderiza painel ANSI quando usado com TTY', async () => {
     const stdout = captureStream({ isTTY: true, columns: 100 });
     const stderr = captureStream();
     const run = await main(
-      ['sync', '/vault/Gemini', '--bridge-url', bridgeUrl, '--tui', '--poll-ms', '10'],
+      ['sync', '/vault/Gemini', '--bridge-url', bridgeUrl, '--tui', '--poll-ms', '10', '--no-private-api'],
       { stdout, stderr },
     );
 
@@ -4055,7 +4238,7 @@ test('CLI sync --tui reinicia frame apos readiness e conta quebras de linha', as
       const stdout = captureStream({ isTTY: true, columns: 36 });
       const stderr = captureStream();
       const run = await main(
-        ['sync', '/vault/Gemini', '--bridge-url', bridgeUrl, '--tui', '--poll-ms', '10'],
+        ['sync', '/vault/Gemini', '--bridge-url', bridgeUrl, '--tui', '--poll-ms', '10', '--no-private-api'],
         { stdout, stderr },
       );
 
@@ -4204,7 +4387,7 @@ test('CLI sync --tui usa stream compacto quando pedido por env', async () => {
       const stdout = captureStream({ isTTY: true, columns: 100 });
       const stderr = captureStream();
       const run = await main(
-        ['sync', '/vault/Gemini', '--bridge-url', bridgeUrl, '--tui', '--poll-ms', '10'],
+        ['sync', '/vault/Gemini', '--bridge-url', bridgeUrl, '--tui', '--poll-ms', '10', '--no-private-api'],
         { stdout, stderr },
       );
 
@@ -4227,7 +4410,7 @@ test('CLI sync --tui avisa e cai para plain sem TTY', async () => {
     const stdout = captureStream();
     const stderr = captureStream();
     const run = await main(
-      ['sync', '/vault/Gemini', '--bridge-url', bridgeUrl, '--tui', '--poll-ms', '10'],
+      ['sync', '/vault/Gemini', '--bridge-url', bridgeUrl, '--tui', '--poll-ms', '10', '--no-private-api'],
       { stdout, stderr },
     );
 
@@ -4243,7 +4426,7 @@ test('CLI sync --json preserva stdout como JSON puro', async () => {
     const stdout = captureStream();
     const stderr = captureStream();
     const run = await main(
-      ['sync', '/vault/Gemini', '--bridge-url', bridgeUrl, '--json', '--poll-ms', '10'],
+      ['sync', '/vault/Gemini', '--bridge-url', bridgeUrl, '--json', '--poll-ms', '10', '--no-private-api'],
       { stdout, stderr },
     );
 
@@ -4549,9 +4732,18 @@ test('CLI export selected usa API privada por padrão e exige opt-out para bridg
     /\(isSelectedExport \|\| subcommand === 'recent'\) && flags\.privateApi !== false/,
   );
   assert.ok(
-    runExportBlock.indexOf('runPrivateApiSelectedExportCommand') <
-      runExportBlock.indexOf('ensureBridgeAvailable'),
-    'export selected/recent precisa tentar API privada antes de bridge/aba',
+    runExportBlock.indexOf('ensureBridgeAvailable(flags, makeUi(flags, streams))') <
+      runExportBlock.indexOf('runPrivateApiSelectedExportCommand'),
+    'export selected/recent privado precisa preparar a bridge antes do runner',
+  );
+  const privateExportBlock =
+    runExportBlock.match(
+      /if \(\(isSelectedExport \|\| subcommand === 'recent'\) && flags\.privateApi !== false\) \{[\s\S]*?return runPrivateApiSelectedExportCommand\(\{ flags, streams \}\);[\s\S]*?\n  \}/,
+    )?.[0] || '';
+  assert.doesNotMatch(
+    privateExportBlock,
+    /ensureReadyForExport/,
+    'export privado deve permitir native broker/service worker mesmo sem content client pronto',
   );
 });
 

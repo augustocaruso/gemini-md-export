@@ -50,6 +50,7 @@ import {
   summarizeTabSession,
 } from './tab-session.mjs';
 import { decorateErrorWithTimeoutContext } from './timeout-diagnostics.mjs';
+import { diagnoseNativeHost } from './browser-diagnostics.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
@@ -199,6 +200,10 @@ const {
   shouldUseNativeBrowserBroker,
 } = await import(compiledTsModuleUrl('mcp', 'native-browser-broker.js'));
 const {
+  browserReadyNextAction,
+  enrichNativeBrokerStatusWithInstallDiagnostic,
+} = await import(compiledTsModuleUrl('mcp', 'browser-ready-diagnostics.js'));
+const {
   attachContentScriptSelfHealToNativeReload,
   attachNativeLeaseVisualToClaim,
   assignExportDateImportVisualGroupTabId,
@@ -209,6 +214,7 @@ const {
   createNativeExportLeaseTools,
   createTabClaimRelease,
   createTargetTabClientMissingAfterActivationError,
+  decideNativeBrokerReadyWake,
   isNativeExportLeaseStrict,
   nativeBrokerAvailabilityFromStatus,
   nativeBrokerBlockingIssueForReady,
@@ -659,6 +665,12 @@ const browserSideEffectsStatus = () => ({
   bridgeHttpEnabled: BRIDGE_HTTP_ENABLED,
 });
 
+const configuredBrowserKey = () =>
+  process.env.GEMINI_MCP_BROWSER ||
+  process.env.GME_BROWSER ||
+  resolveGeminiBrowserLaunchPlan().browserKey ||
+  'chrome';
+
 const probeNativeBrowserBrokerStatusOnce = async () => {
   if (!shouldUseNativeBrowserBroker()) return nativeBrokerStatusFromProbe({ enabled: false });
   const response = await withNativeBrokerSoftTimeout(
@@ -666,7 +678,14 @@ const probeNativeBrowserBrokerStatusOnce = async () => {
     750,
     { ok: false, code: 'native_broker_probe_timeout' },
   );
-  return nativeBrokerStatusFromProbe({ enabled: true, response });
+  return enrichNativeBrokerStatusWithInstallDiagnostic(nativeBrokerStatusFromProbe({ enabled: true, response }), {
+    diagnoseNativeHost,
+    browser: configuredBrowserKey(),
+    packageRoot: ROOT,
+    platform: process.platform,
+    home: homedir(),
+    env: process.env,
+  });
 };
 
 const browserTransportStatus = async () =>
@@ -4453,7 +4472,6 @@ const buildLightweightBrowserReady = async (args = {}) => {
   let launchResult = null;
   let waitedMs = 0;
   const cdp = await cdpRuntime.buildSnapshot(args);
-  const nativeBrokerStatus = await probeNativeBrowserBrokerStatus({ allowWake: true });
 
   if (args.selfHeal === true) {
     const activeReloadBlockedByJobs =
@@ -4548,6 +4566,14 @@ const buildLightweightBrowserReady = async (args = {}) => {
 
   const matchingClients = allLiveClients.filter(clientMatchesExpectedBrowserExtension);
   const commandReadyClients = matchingClients.filter(commandChannelReadyForClient);
+  const nativeBrokerReadyWakeDecision = decideNativeBrokerReadyWake({
+    explicit: args.wakeNativeBroker === true || args.allowNativeBrokerWake === true,
+    matchingClientCount: matchingClients.length,
+    commandReadyClientCount: commandReadyClients.length,
+  });
+  const nativeBrokerStatus = await probeNativeBrowserBrokerStatus({
+    allowWake: nativeBrokerReadyWakeDecision.allowWake,
+  });
   const mode =
     (selfHeal.reloadAttempts || 0) > 0
       ? 'post-update'
@@ -4585,10 +4611,19 @@ const buildLightweightBrowserReady = async (args = {}) => {
   const effectiveReady = ready && !tabOrchestratorBlockingIssue;
   const summarizedClients = selectableClients.map(summarizeClient);
   const summarizedMatchingClients = matchingClients.map(summarizeClient);
+  const effectiveBlockingIssue = tabOrchestratorBlockingIssue || blockingIssue;
+  const nextAction = browserReadyNextAction({
+    ready: effectiveReady,
+    blockingIssue: effectiveBlockingIssue,
+    connectedClientCount: readiness.connectedClientCount,
+    nativeBrokerStatus,
+    cdp,
+  });
   return {
     ok: effectiveReady,
     ready: effectiveReady,
-    blockingIssue: tabOrchestratorBlockingIssue || blockingIssue,
+    blockingIssue: effectiveBlockingIssue,
+    nextAction,
     mode,
     generatedAt: new Date().toISOString(),
     expectedChromeExtension: EXPECTED_CHROME_EXTENSION_INFO,
@@ -4621,6 +4656,7 @@ const buildLightweightBrowserReady = async (args = {}) => {
         }
       : null,
     nativeBroker: nativeBrokerStatus,
+    nativeBrokerReadyWake: nativeBrokerReadyWakeDecision,
     tabOrchestrator: summarizeTabOrchestratorPlan(tabOrchestratorPlan),
     extensionReadiness: buildExtensionReadiness({
       connectedClients: allLiveClients.map(summarizeClient),
@@ -4775,6 +4811,7 @@ const privateRead = createMcpPrivateReadRuntimes({
   requireManagedChatClient,
   enqueueCommand,
   summarizeClient,
+  nativeBrowserBroker,
   validateMcpExportPayload,
   assertNotAborted: assertConversationOperationNotAborted,
   env: process.env,
@@ -4843,6 +4880,9 @@ const getSelectableGeminiClients = () => {
   const liveClients = getLiveClients().map(hydrateClientLifecycleFields);
   return dedupeSelectableClientsByTabId(liveClients.filter(clientIsSelectableGeminiTab));
 };
+
+const getCommandReadyGeminiClients = () =>
+  getSelectableGeminiClients().filter(commandChannelReadyForClient);
 
 const getActivityClients = () =>
   getLiveClients()
@@ -7870,9 +7910,11 @@ const privateInventoryDeps = {
   normalizeConversationChatId,
   summarizeClient,
   getSelectableGeminiClients,
+  getCommandReadyGeminiClients,
   normalizeClientSelector,
   requireClient,
   claimForSession,
+  nativeBrowserBroker,
 };
 
 const listRecentChatsForClient = async (client, args = {}) => {
@@ -13184,6 +13226,7 @@ const bridgeServer = createServer(async (req, res) => {
       await buildLightweightBrowserReady({
         clientId: url.searchParams.get('clientId') || undefined,
         cdpUrl: url.searchParams.get('cdpUrl') || undefined,
+        devToolsActivePortFile: url.searchParams.get('devToolsActivePortFile') || undefined,
         controlPlane: url.searchParams.get('controlPlane') || undefined,
         wakeBrowser: parseOptionalBoolean(url.searchParams.get('wakeBrowser')),
         waitMs: url.searchParams.get('waitMs') || undefined,

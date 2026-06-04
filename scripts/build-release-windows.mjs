@@ -12,7 +12,7 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, resolve, sep } from 'node:path';
+import { basename, dirname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -32,7 +32,7 @@ const releaseName = `gemini-md-export-windows-v${version}-${stamp}`;
 const stageDir = resolve(RELEASE_ROOT, `${releaseName}.bundle`);
 const exePath = resolve(RELEASE_ROOT, `${releaseName}.exe`);
 
-const log = (line = '') => process.stdout.write(`${line}\n`);
+const log = console.log;
 
 const run = (command, args, label, cwd = ROOT) => {
   log(`\n>> ${label}`);
@@ -82,7 +82,7 @@ const copyPath = (relativePath) => {
   if (lstatSync(source).isDirectory()) {
     cpSync(source, target, {
       recursive: true,
-      filter: (src) => !src.endsWith('.DS_Store'),
+      filter: (src) => !/(?:^|[\\/])\._|\.DS_Store$/.test(src),
     });
   } else {
     copyFileSync(source, target);

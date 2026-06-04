@@ -1,3 +1,4 @@
+import { assetRefsFromChatSnapshot, buildAssetFetchPlan } from '../../core/assets.js';
 import { canonicalGeminiChatUrl, parseChatId } from '../../core/chat-id.js';
 import {
   browserBackgroundChatReadCapability,
@@ -17,9 +18,13 @@ import {
   normalizeGeminiPrivateReadChatSnapshot,
 } from '../../core/gemini-private-protocol.js';
 import {
-  createTurndownMarkdownRenderer,
+  extractGeminiPrivateSessionFields,
+  looksLikeGoogleVerificationHtml,
+} from '../../core/gemini-private-session.js';
+import {
+  createBrowserSafeMarkdownRenderer,
   type MarkdownRenderer,
-} from '../../core/markdown-renderer/turndown-renderer.js';
+} from '../../core/markdown-renderer/browser-safe-renderer.js';
 import type { ChatId, ChatSnapshot } from '../../core/types.js';
 
 type GeminiPrivateApiReadDiagnostics = Omit<GeminiBatchDecodeDiagnostics, 'frames'>;
@@ -31,11 +36,31 @@ type FetchLike = (
     headers?: Record<string, string>;
     body?: string;
     credentials?: 'include';
+    signal?: AbortSignal;
   },
 ) => Promise<{
   ok: boolean;
   status: number;
+  headers?: { get(name: string): string | null };
   text(): Promise<string>;
+  arrayBuffer?(): Promise<ArrayBuffer>;
+}>;
+
+type GeminiPrivateApiMediaFile = Readonly<{
+  filename: string;
+  contentBase64: string;
+  contentType: string | null;
+  bytes: number;
+  sourceUrl: string;
+  refId: string;
+}>;
+
+type GeminiPrivateApiMediaFailure = Readonly<{
+  refId: string;
+  url: string;
+  label: string;
+  error: string;
+  status?: number | null;
 }>;
 
 export type GeminiPrivateApiReadChatResult =
@@ -48,6 +73,8 @@ export type GeminiPrivateApiReadChatResult =
         appStatus: number;
         rpcStatus: number | null;
       };
+      mediaFiles: readonly GeminiPrivateApiMediaFile[];
+      mediaFailures: readonly GeminiPrivateApiMediaFailure[];
       adapterPlan: ReturnType<typeof privateApiAdapterPlan>;
     }
   | {
@@ -133,37 +160,24 @@ export type ReadGeminiPrivateChatInput = Readonly<{
   fetchImpl?: FetchLike;
   requestId?: number;
   markdownRenderer?: MarkdownRenderer;
+  timeoutMs?: number;
+  downloadAssets?: boolean;
+  assetsRelDir?: string | null;
 }>;
 
 export type ListGeminiPrivateChatsInput = Readonly<{
   fetchImpl?: FetchLike;
   requestId?: number;
   limit?: number;
+  timeoutMs?: number;
 }>;
 
 export type CheckGeminiPrivateSessionInput = Readonly<{
   fetchImpl?: FetchLike;
+  timeoutMs?: number;
 }>;
 
-const unescapeJsonString = (value: string): string => {
-  try {
-    return JSON.parse(`"${value.replace(/"/g, '\\"')}"`) as string;
-  } catch {
-    return value;
-  }
-};
-
-const extractField = (html: string, key: string): string | null => {
-  const match = html.match(new RegExp(`"${key}"\\s*:\\s*"(.*?)"`));
-  return match?.[1] ? unescapeJsonString(match[1]) : null;
-};
-
-export const extractGeminiPrivateSessionFields = (html: string) => ({
-  at: extractField(html, 'SNlM0e') || '',
-  bl: extractField(html, 'cfb2h'),
-  fSid: extractField(html, 'FdrFJe'),
-  hl: extractField(html, 'TuX5cc'),
-});
+export { extractGeminiPrivateSessionFields } from '../../core/gemini-private-session.js';
 
 const failure = (
   code: GeminiPrivateApiReadChatResult extends infer Result
@@ -232,14 +246,81 @@ const privateApiAdapterPlan = () =>
     ],
   });
 
-const looksLikeGoogleVerificationHtml = (value: string): boolean =>
-  /<html[\s>]/i.test(value) &&
-  (/\/sorry\//i.test(value) ||
-    /CaptchaRedirect/i.test(value) ||
-    /unusual traffic/i.test(value) ||
-    /detected unusual traffic/i.test(value) ||
-    /Our systems have detected/i.test(value) ||
-    /<title>\s*Sorry/i.test(value));
+const normalizeTimeoutMs = (value: unknown, fallbackMs: number): number => {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return fallbackMs;
+  return Math.max(1, Math.min(120_000, numeric));
+};
+
+const requestFailureMessage = (err: unknown): string => {
+  if (err instanceof Error && err.name === 'AbortError') {
+    return 'Tempo esgotado ao consultar a API privada do Gemini.';
+  }
+  return err instanceof Error ? err.message : String(err);
+};
+
+const privateApiTimeoutError = (): Error =>
+  Object.assign(new Error('Tempo esgotado ao consultar a API privada do Gemini.'), {
+    name: 'AbortError',
+  });
+
+const withPrivateApiTimeout = async <T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  onTimeout?: () => void,
+): Promise<T> =>
+  new Promise((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      try {
+        onTimeout?.();
+      } catch {
+        // Ignore abort races.
+      }
+      reject(privateApiTimeoutError());
+    }, timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timeoutId);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timeoutId);
+        reject(err);
+      },
+    );
+  });
+
+const fetchWithTimeout = async (
+  fetchImpl: FetchLike,
+  url: string,
+  init: Parameters<FetchLike>[1],
+  timeoutMs: number,
+) => {
+  const controller = typeof AbortController === 'undefined' ? null : new AbortController();
+  return withPrivateApiTimeout(
+    fetchImpl(url, {
+      ...(init || {}),
+      ...(controller ? { signal: controller.signal } : {}),
+    }),
+    timeoutMs,
+    () => controller?.abort(),
+  );
+};
+
+const readResponseTextWithTimeout = async (
+  response: Awaited<ReturnType<FetchLike>>,
+  timeoutMs: number,
+): Promise<string> => withPrivateApiTimeout(response.text(), timeoutMs);
+
+const readResponseArrayBufferWithTimeout = async (
+  response: Awaited<ReturnType<FetchLike>>,
+  timeoutMs: number,
+): Promise<ArrayBuffer> => {
+  if (typeof response.arrayBuffer !== 'function') {
+    throw new Error('A resposta do asset nao oferece arrayBuffer().');
+  }
+  return withPrivateApiTimeout(response.arrayBuffer(), timeoutMs);
+};
 
 const summarizeDecodeDiagnostics = ({
   parseableFrameCount,
@@ -251,10 +332,15 @@ const summarizeDecodeDiagnostics = ({
   warnings,
 });
 
-const fetchGeminiAppSession = async (fetchImpl: FetchLike) => {
-  const appResponse = await fetchImpl('https://gemini.google.com/app', {
-    credentials: 'include',
-  });
+const fetchGeminiAppSession = async (fetchImpl: FetchLike, timeoutMs: number) => {
+  const appResponse = await fetchWithTimeout(
+    fetchImpl,
+    'https://gemini.google.com/app',
+    {
+      credentials: 'include',
+    },
+    timeoutMs,
+  );
   if (!appResponse.ok) {
     return {
       ok: false as const,
@@ -263,7 +349,7 @@ const fetchGeminiAppSession = async (fetchImpl: FetchLike) => {
       html: '',
     };
   }
-  const html = await appResponse.text();
+  const html = await readResponseTextWithTimeout(appResponse, timeoutMs);
   return {
     ok: true as const,
     response: appResponse,
@@ -319,12 +405,163 @@ const mergeListChats = (
   return chats;
 };
 
+const safeAssetPathPart = (value: unknown, fallback: string): string => {
+  const text = String(value || '')
+    .replace(/[\\/]+/g, '/')
+    .split('/')
+    .pop()
+    ?.replace(/[^\w .@()+,-]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return text || fallback;
+};
+
+const extensionForContentType = (contentType: string | null): string => {
+  const normalized = String(contentType || '')
+    .split(';')[0]
+    .trim()
+    .toLowerCase();
+  if (normalized === 'image/jpeg') return '.jpg';
+  if (normalized === 'image/png') return '.png';
+  if (normalized === 'image/webp') return '.webp';
+  if (normalized === 'image/gif') return '.gif';
+  if (normalized === 'application/pdf') return '.pdf';
+  if (normalized === 'video/mp4') return '.mp4';
+  if (normalized === 'audio/mpeg') return '.mp3';
+  return '';
+};
+
+const assetOutputFilename = ({
+  assetsRelDir,
+  label,
+  contentType,
+  index,
+}: {
+  assetsRelDir: string;
+  label: string;
+  contentType: string | null;
+  index: number;
+}): string => {
+  const safeDir = String(assetsRelDir || 'assets')
+    .replace(/\\/g, '/')
+    .split('/')
+    .map((part) => safeAssetPathPart(part, 'assets'))
+    .join('/');
+  let basename = safeAssetPathPart(label, `asset-${String(index + 1).padStart(2, '0')}`);
+  if (!/\.[a-z0-9]{2,8}$/i.test(basename)) basename += extensionForContentType(contentType);
+  return `${safeDir}/${basename}`;
+};
+
+const uniqueAssetOutputFilename = (filename: string, usedFilenames: Set<string>): string => {
+  const normalized = filename.replace(/\\/g, '/');
+  const normalizedKey = normalized.toLowerCase();
+  if (!usedFilenames.has(normalizedKey)) {
+    usedFilenames.add(normalizedKey);
+    return normalized;
+  }
+
+  const slashIndex = normalized.lastIndexOf('/');
+  const dir = slashIndex >= 0 ? `${normalized.slice(0, slashIndex + 1)}` : '';
+  const basename = slashIndex >= 0 ? normalized.slice(slashIndex + 1) : normalized;
+  const extensionMatch = basename.match(/(\.[a-z0-9]{2,8})$/i);
+  const extension = extensionMatch?.[1] || '';
+  const stem = extension ? basename.slice(0, -extension.length) : basename;
+  for (let suffix = 2; suffix < 10_000; suffix += 1) {
+    const candidate = `${dir}${stem}-${String(suffix).padStart(2, '0')}${extension}`;
+    const candidateKey = candidate.toLowerCase();
+    if (usedFilenames.has(candidateKey)) continue;
+    usedFilenames.add(candidateKey);
+    return candidate;
+  }
+  throw new Error('Nao consegui gerar nome unico para asset da API privada.');
+};
+
+const base64FromArrayBuffer = (buffer: ArrayBuffer): string => {
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let index = 0; index < bytes.length; index += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
+  }
+  return btoa(binary);
+};
+
+const fetchSnapshotAssets = async ({
+  snapshot,
+  fetchImpl,
+  timeoutMs,
+  assetsRelDir,
+}: {
+  snapshot: ChatSnapshot;
+  fetchImpl: FetchLike;
+  timeoutMs: number;
+  assetsRelDir: string;
+}): Promise<{
+  mediaFiles: GeminiPrivateApiMediaFile[];
+  mediaFailures: GeminiPrivateApiMediaFailure[];
+}> => {
+  const plan = buildAssetFetchPlan(assetRefsFromChatSnapshot(snapshot));
+  const mediaFiles: GeminiPrivateApiMediaFile[] = [];
+  const mediaFailures: GeminiPrivateApiMediaFailure[] = [];
+  const usedFilenames = new Set<string>();
+  for (const [index, request] of plan.requests.entries()) {
+    try {
+      const response = await fetchWithTimeout(
+        fetchImpl,
+        request.url,
+        { credentials: 'include' },
+        timeoutMs,
+      );
+      if (!response.ok) {
+        mediaFailures.push({
+          refId: request.refId,
+          url: request.url,
+          label: request.label,
+          error: 'asset_fetch_http_error',
+          status: response.status,
+        });
+        continue;
+      }
+      const contentType = response.headers?.get('content-type') || null;
+      const buffer = await readResponseArrayBufferWithTimeout(response, timeoutMs);
+      const filename = uniqueAssetOutputFilename(
+        assetOutputFilename({
+          assetsRelDir,
+          label: request.label,
+          contentType,
+          index,
+        }),
+        usedFilenames,
+      );
+      mediaFiles.push({
+        filename,
+        contentBase64: base64FromArrayBuffer(buffer),
+        contentType,
+        bytes: buffer.byteLength,
+        sourceUrl: request.url,
+        refId: request.refId,
+      });
+    } catch (err) {
+      mediaFailures.push({
+        refId: request.refId,
+        url: request.url,
+        label: request.label,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return { mediaFiles, mediaFailures };
+};
+
 export const readGeminiPrivateChat = async ({
   chatId: rawChatId,
   title,
   fetchImpl = fetch as FetchLike,
   requestId = Date.now() % 100000,
-  markdownRenderer = createTurndownMarkdownRenderer(),
+  markdownRenderer = createBrowserSafeMarkdownRenderer(),
+  timeoutMs: rawTimeoutMs,
+  downloadAssets = false,
+  assetsRelDir,
 }: ReadGeminiPrivateChatInput): Promise<GeminiPrivateApiReadChatResult> => {
   const chatId = parseChatId(rawChatId);
   if (!chatId) {
@@ -336,7 +573,8 @@ export const readGeminiPrivateChat = async ({
   }
 
   try {
-    const app = await fetchGeminiAppSession(fetchImpl);
+    const timeoutMs = normalizeTimeoutMs(rawTimeoutMs, 30_000);
+    const app = await fetchGeminiAppSession(fetchImpl, timeoutMs);
     if (!app.ok) {
       return failure(
         'private_api_app_fetch_failed',
@@ -371,12 +609,17 @@ export const readGeminiPrivateChat = async ({
       requestId,
       sourcePath: '/app',
     });
-    const rpcResponse = await fetchImpl(request.url, {
-      method: request.method,
-      headers: request.headers,
-      body: request.body,
-      credentials: 'include',
-    });
+    const rpcResponse = await fetchWithTimeout(
+      fetchImpl,
+      request.url,
+      {
+        method: request.method,
+        headers: request.headers,
+        body: request.body,
+        credentials: 'include',
+      },
+      timeoutMs,
+    );
     if (!rpcResponse.ok) {
       return failure(
         'private_api_rpc_fetch_failed',
@@ -386,7 +629,7 @@ export const readGeminiPrivateChat = async ({
       );
     }
 
-    const rpcText = await rpcResponse.text();
+    const rpcText = await readResponseTextWithTimeout(rpcResponse, timeoutMs);
     if (looksLikeGoogleVerificationHtml(rpcText)) {
       return failure(
         'google_verification_required',
@@ -424,6 +667,14 @@ export const readGeminiPrivateChat = async ({
       title: title || undefined,
       markdownRenderer,
     });
+    const media = downloadAssets
+      ? await fetchSnapshotAssets({
+          snapshot,
+          fetchImpl,
+          timeoutMs,
+          assetsRelDir: assetsRelDir || `assets/${chatId}`,
+        })
+      : { mediaFiles: [], mediaFailures: [] };
 
     return {
       ok: true,
@@ -434,14 +685,12 @@ export const readGeminiPrivateChat = async ({
         appStatus: app.response.status,
         rpcStatus: payload.status,
       },
+      mediaFiles: media.mediaFiles,
+      mediaFailures: media.mediaFailures,
       adapterPlan: privateApiAdapterPlan(),
     };
   } catch (err) {
-    return failure(
-      'private_api_request_failed',
-      err instanceof Error ? err.message : String(err),
-      chatId as ChatId,
-    );
+    return failure('private_api_request_failed', requestFailureMessage(err), chatId as ChatId);
   }
 };
 
@@ -449,9 +698,11 @@ export const listGeminiPrivateChats = async ({
   fetchImpl = fetch as FetchLike,
   requestId = Date.now() % 100000,
   limit = 200,
+  timeoutMs: rawTimeoutMs,
 }: ListGeminiPrivateChatsInput = {}): Promise<GeminiPrivateApiListChatsResult> => {
   try {
-    const app = await fetchGeminiAppSession(fetchImpl);
+    const timeoutMs = normalizeTimeoutMs(rawTimeoutMs, 30_000);
+    const app = await fetchGeminiAppSession(fetchImpl, timeoutMs);
     if (!app.ok) {
       return listFailure(
         'private_api_app_fetch_failed',
@@ -484,12 +735,17 @@ export const listGeminiPrivateChats = async ({
         requestId: requestId + source,
         sourcePath: '/app',
       });
-      const rpcResponse = await fetchImpl(request.url, {
-        method: request.method,
-        headers: request.headers,
-        body: request.body,
-        credentials: 'include',
-      });
+      const rpcResponse = await fetchWithTimeout(
+        fetchImpl,
+        request.url,
+        {
+          method: request.method,
+          headers: request.headers,
+          body: request.body,
+          credentials: 'include',
+        },
+        timeoutMs,
+      );
       statuses.push(rpcResponse.status);
       if (!rpcResponse.ok) {
         return listFailure(
@@ -499,7 +755,7 @@ export const listGeminiPrivateChats = async ({
         );
       }
 
-      const rpcText = await rpcResponse.text();
+      const rpcText = await readResponseTextWithTimeout(rpcResponse, timeoutMs);
       if (looksLikeGoogleVerificationHtml(rpcText)) {
         return listFailure(
           'google_verification_required',
@@ -533,18 +789,17 @@ export const listGeminiPrivateChats = async ({
       adapterPlan: privateApiAdapterPlan(),
     };
   } catch (err) {
-    return listFailure(
-      'private_api_request_failed',
-      err instanceof Error ? err.message : String(err),
-    );
+    return listFailure('private_api_request_failed', requestFailureMessage(err));
   }
 };
 
 export const checkGeminiPrivateSession = async ({
   fetchImpl = fetch as FetchLike,
+  timeoutMs: rawTimeoutMs,
 }: CheckGeminiPrivateSessionInput = {}): Promise<GeminiPrivateApiSessionStatusResult> => {
   try {
-    const app = await fetchGeminiAppSession(fetchImpl);
+    const timeoutMs = normalizeTimeoutMs(rawTimeoutMs, 20_000);
+    const app = await fetchGeminiAppSession(fetchImpl, timeoutMs);
     if (!app.ok) {
       return sessionFailure(
         'private_api_app_fetch_failed',
@@ -575,9 +830,6 @@ export const checkGeminiPrivateSession = async ({
       adapterPlan: privateApiAdapterPlan(),
     };
   } catch (err) {
-    return sessionFailure(
-      'private_api_request_failed',
-      err instanceof Error ? err.message : String(err),
-    );
+    return sessionFailure('private_api_request_failed', requestFailureMessage(err));
   }
 };

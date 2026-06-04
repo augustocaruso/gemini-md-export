@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
+import { canonicalGeminiChatUrl, parseChatId } from './chat-id.js';
 import { type ExportAdapterPlan, planExportAdapters } from './export-adapter-policy.js';
 import type { FixVaultReport } from './fix-vault-contract.js';
 import { buildFixVaultProgressViewModel } from './progress-view-model.js';
@@ -16,12 +17,17 @@ export type FixVaultFlowFlags = {
   tabId?: number | string | null;
   session?: string | null;
   activateTab?: boolean | null;
+  allowReload?: boolean | null;
   waitMs?: number | null;
   timeoutMs?: number | null;
   privateReadWaitMs?: number | null;
+  pollMs?: number | null;
+  bootstrapTimeoutMs?: number | null;
+  bridgeKeepAliveMs?: number | null;
   python?: string | null;
   cookiesJson?: string | null;
   delayMs?: number | null;
+  sessionId?: string | null;
 };
 
 export type FixVaultPrivateRepairTarget = {
@@ -112,9 +118,25 @@ export const buildWebRepairArgs = ({
 };
 
 export const metadataExportErrorItems = (
-  diagnosisReport: { items?: Array<{ status?: string; file?: string | null }> } | null | undefined,
-): Array<{ status?: string; file?: string | null }> =>
-  (diagnosisReport?.items || []).filter((item) => item.status === 'export_error');
+  diagnosisReport:
+    | {
+        items?: Array<{
+          status?: string;
+          file?: string | null;
+          chatId?: string | null;
+          title?: string | null;
+          url?: string | null;
+        }>;
+      }
+    | null
+    | undefined,
+): Array<{
+  status?: string;
+  file?: string | null;
+  chatId?: string | null;
+  title?: string | null;
+  url?: string | null;
+}> => (diagnosisReport?.items || []).filter((item) => item.status === 'export_error');
 
 export const repairTargetPathsFromDiagnosis = ({
   vaultDir,
@@ -133,7 +155,18 @@ export const buildFixVaultPrivateRepairTargets = ({
   vaultRecords = [],
 }: {
   vaultDir: string;
-  diagnosisReport: { items?: Array<{ status?: string; file?: string | null }> } | null | undefined;
+  diagnosisReport:
+    | {
+        items?: Array<{
+          status?: string;
+          file?: string | null;
+          chatId?: string | null;
+          title?: string | null;
+          url?: string | null;
+        }>;
+      }
+    | null
+    | undefined;
   vaultRecords?: readonly FixVaultPrivateRepairRecord[];
 }): FixVaultPrivateRepairTarget[] => {
   const resolvedVaultDir = resolve(vaultDir);
@@ -164,12 +197,27 @@ export const buildFixVaultPrivateRepairTargets = ({
     });
   };
 
-  for (const targetPath of repairTargetPathsFromDiagnosis({
-    vaultDir: resolvedVaultDir,
-    diagnosisReport,
-  })) {
+  for (const item of metadataExportErrorItems(diagnosisReport)) {
+    const targetPath = item.file ? resolve(resolvedVaultDir, item.file) : null;
+    if (!targetPath || !existsSync(targetPath)) continue;
     const record = recordsByPath.get(resolve(targetPath));
-    if (record) addTarget(record, 'metadata_export_error');
+    if (record) {
+      addTarget(record, 'metadata_export_error');
+      continue;
+    }
+    const chatId = parseChatId(item.chatId) || parseChatId(item.url) || parseChatId(targetPath);
+    if (!chatId) continue;
+    addTarget(
+      {
+        chatId,
+        title: item.title || basename(targetPath, '.md'),
+        url: item.url || canonicalGeminiChatUrl(chatId),
+        sourcePath: targetPath,
+        relativePath: item.file || basename(targetPath),
+        missingAssets: [],
+      },
+      'metadata_export_error',
+    );
   }
 
   for (const record of vaultRecords) {
@@ -197,6 +245,28 @@ export const buildFixVaultRepairAdapterPlan = ({
     browserFallbackAllowed: flags.privateApi === false || flags.openIfMissing === true,
   });
 
+export const buildFixVaultPrivateRepairExportOptions = (flags: FixVaultFlowFlags) => ({
+  bridgeUrl: flags.bridgeUrl,
+  limit: flags.limit,
+  waitMs: flags.waitMs,
+  privateReadWaitMs: flags.privateReadWaitMs,
+  timeoutMs: flags.timeoutMs,
+  pollMs: flags.pollMs,
+  clientId: flags.clientId,
+  tabId: flags.tabId,
+  claimId: flags.claimId,
+  sessionId: flags.sessionId || flags.session,
+  openIfMissing: false,
+  wakeBrowser: false,
+  activateTab: false,
+  allowReload: false,
+  bootstrapTimeoutMs: flags.bootstrapTimeoutMs,
+  browserKeepAliveMs: flags.bridgeKeepAliveMs,
+  python: flags.python,
+  cookiesJson: flags.cookiesJson,
+  delayMs: flags.delayMs,
+});
+
 export const formatFixVaultProgressLine = ({
   format,
   current,
@@ -221,6 +291,7 @@ export const buildFixVaultCombinedReport = ({
   takeout,
   repairExitCode,
   diagnosisExitCode,
+  repairAdapter = 'private_api',
   webRepairExitCode,
   webRepairSkipped,
   webRepairTargetCount,
@@ -240,6 +311,7 @@ export const buildFixVaultCombinedReport = ({
   takeout: string | null;
   repairExitCode: number;
   diagnosisExitCode: number;
+  repairAdapter?: 'private_api' | 'web';
   webRepairExitCode: number;
   webRepairSkipped: boolean;
   webRepairTargetCount: number;
@@ -286,7 +358,7 @@ export const buildFixVaultCombinedReport = ({
         reportPath: metadataDiagnosisReportPath,
       },
       {
-        name: 'web-repair',
+        name: repairAdapter === 'web' ? 'web-repair' : 'private-api-repair',
         status: webRepairSkipped
           ? 'skipped'
           : webRepairExitCode === FIX_VAULT_MANUAL_ACTION_EXIT_CODE
@@ -331,6 +403,13 @@ export const buildFixVaultCombinedReport = ({
         takeoutEvidence: repairSummary?.takeoutEvidence?.summary || { enabled: false },
       },
       diagnosis: diagnosisSummary || null,
+      chatRepair: {
+        adapter: repairAdapter,
+        targetCount: webRepairTargetCount,
+        exitCode: webRepairExitCode,
+        skipped: webRepairSkipped,
+        unavailable: webRepairUnavailable,
+      },
       webRepair: {
         targetCount: webRepairTargetCount,
         exitCode: webRepairExitCode,

@@ -99,6 +99,40 @@ export const shouldAttemptNativeBrokerWake = ({
   liveClientCount > 0 &&
   NATIVE_BROKER_WAKEABLE_CODES.has(String(nativeBrokerStatus.code || ''));
 
+export type NativeBrokerReadyWakeDecision = Readonly<{
+  allowWake: boolean;
+  reason: 'explicit' | 'command_channel_ready' | 'command_channel_not_ready' | 'no_matching_client';
+}>;
+
+const positiveCount = (value: unknown): number => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+};
+
+export const decideNativeBrokerReadyWake = ({
+  explicit = false,
+  matchingClientCount = 0,
+  commandReadyClientCount = 0,
+}: Readonly<{
+  explicit?: boolean;
+  matchingClientCount?: number;
+  commandReadyClientCount?: number;
+}>): NativeBrokerReadyWakeDecision => {
+  if (explicit === true) {
+    return { allowWake: true, reason: 'explicit' };
+  }
+
+  if (positiveCount(matchingClientCount) === 0) {
+    return { allowWake: false, reason: 'no_matching_client' };
+  }
+
+  if (positiveCount(commandReadyClientCount) > 0) {
+    return { allowWake: true, reason: 'command_channel_ready' };
+  }
+
+  return { allowWake: false, reason: 'command_channel_not_ready' };
+};
+
 export const NATIVE_BROKER_WAKE_CAPABILITY = 'native-broker-wake-v1';
 
 type NativeBrokerWakeClient = Readonly<{

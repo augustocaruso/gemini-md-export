@@ -36,6 +36,11 @@ import {
   staleBridgeMessage,
 } from '../build/ts/cli/bridge-runtime-freshness.js';
 import { runFixVaultCommand } from '../build/ts/cli/fix-vault-runner.js';
+import { runConfigCommand } from '../build/ts/cli/config-command.js';
+import {
+  buildFixVaultCliHelp,
+  runFixVaultCliCommand,
+} from '../build/ts/cli/fix-vault-cli-command.js';
 import { summarizeJobTotals as jobTotals } from '../build/ts/cli/job-result-summary.js';
 import {
   buildExportJobProgressViewModel,
@@ -79,7 +84,10 @@ import {
   buildAuthHelp,
   runAuthStatusCommand,
 } from '../build/ts/cli/auth-status-command.js';
+import { runPrivateApiSyncCommand } from '../build/ts/cli/private-api-sync-command.js';
 import { buildBridgeOnlyChildEnv } from '../build/ts/mcp/browser-runtime-env.js';
+import { createFixVaultBrowserPrivateSessionPreflight } from '../build/ts/cli/fix-vault-private-preflight.js';
+import { runFixVaultDoctorCommand } from '../build/ts/cli/fix-vault-doctor-command.js';
 
 const DEFAULT_BRIDGE_URL = 'http://127.0.0.1:47283';
 const DEFAULT_POLL_MS = 1200;
@@ -88,9 +96,9 @@ const DEFAULT_EXPORT_READY_WAIT_MS = 75_000;
 const DEFAULT_READY_REQUEST_TIMEOUT_MS = 60_000;
 const DEFAULT_EXISTING_TAB_RECONNECT_GRACE_MS = 8_000;
 const DEFAULT_FAST_BROWSER_DIAGNOSTIC_MS = 2_000;
-const DEFAULT_GEMINI_EXTENSION_CONNECT_GRACE_MS = 5_000;
-const DEFAULT_TIMEOUT_MS = 6 * 60 * 60 * 1000;
-const DEFAULT_COUNT_LOAD_MORE_TIMEOUT_MS = 15 * 60 * 1000;
+const DEFAULT_GEMINI_EXTENSION_CONNECT_GRACE_MS = 30_000;
+const DEFAULT_TIMEOUT_MS = 21_600_000;
+const DEFAULT_COUNT_LOAD_MORE_TIMEOUT_MS = 900_000;
 const DEFAULT_JOB_TIMEOUT_CLEANUP_MS = 45_000;
 const DEFAULT_COUNT_STATUS_INTERVAL_MS = 15_000;
 const DEFAULT_READY_STATUS_INTERVAL_MS = 15_000;
@@ -101,7 +109,7 @@ const DEFAULT_COUNT_MAX_NO_GROWTH_ROUNDS = 8;
 const DEFAULT_BROWSER_LAUNCH_LOCK_GRACE_MS = 2_000;
 const EXPORT_JOB_START_TIMEOUT_MS = 120_000;
 const TAB_CLAIM_COUNT_LABEL = '🔎 Conferindo';
-const TERMINAL_STATUSES = new Set(['completed', 'completed_with_errors', 'failed', 'cancelled']);
+const TERMINAL_STATUSES = { completed: 1, completed_with_errors: 1, failed: 1, cancelled: 1 };
 
 const EXIT = {
   OK: 0,
@@ -112,6 +120,8 @@ const EXIT = {
   JOB_FAILED: 5,
   USAGE: 64,
 };
+const { OK, WARNINGS, MANUAL_ACTION, BRIDGE_UNAVAILABLE, EXTENSION_UNREADY, JOB_FAILED, USAGE } =
+  EXIT;
 
 const BIN_DIR = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = resolve(BIN_DIR, '..');
@@ -625,45 +635,6 @@ const cleanupHelp = () =>
     ...commonOptionHelp(),
   ].join('\n');
 
-const repairVaultHelp = () =>
-  [
-    'gemini-md-export repair-vault',
-    '',
-    'Uso:',
-    '  gemini-md-export repair-vault <vault-or-folder> [opcoes]',
-    '',
-    'Executa o script local scripts/vault-repair.mjs empacotado na extensao.',
-    '',
-    'Opcoes:',
-    '  --audit-only             Somente auditoria, quando suportado pelo script.',
-    '  --include-notes          Inclui notas wiki na auditoria, quando suportado.',
-    '  --report <file.json>     Caminho de relatorio, quando suportado.',
-    '',
-    ...commonOptionHelp(),
-  ].join('\n');
-
-const fixVaultHelp = () =>
-  [
-    'gemini-md-export fix-vault',
-    '',
-    'Uso:',
-    '  gemini-md-export fix-vault <vaultDir> [--takeout <takeout.zip|Minhaatividade.html|MyActivity.json>] [--report <report.json>]',
-    '',
-    'Corrige o back catalog em um unico fluxo: audita integridade, normaliza o',
-    'YAML canonico dos chats, reexporta chats/assets suspeitos pela API privada',
-    'e preenche datas com Takeout primeiro e My Activity para o que sobrar.',
-    '',
-    'Opcoes:',
-    '  --takeout <file>       Usa arquivo offline do Google Takeout/My Activity (.zip, .html ou .json).',
-    '  --use-my-activity      Usa My Activity pela extensao para datas remanescentes. Default.',
-    '  --no-my-activity       Nao tenta My Activity; usa apenas Takeout e normalizacao local.',
-    '  --report <file.json>   Grava relatorio combinado do fix-vault.',
-    '  --limit <n>            Limita quantidade de chats no backfill de metadados.',
-    '  --no-open-if-missing   Nao abre/recarrega My Activity automaticamente.',
-    '',
-    ...commonOptionHelp(),
-  ].join('\n');
-
 const metadataHelp = () =>
   [
     'gemini-md-export metadata',
@@ -729,7 +700,7 @@ const helpForParsed = (parsed) => {
   if (command === 'job') return jobHelp();
   if (command === 'export-dir') return exportDirHelp();
   if (command === 'cleanup') return cleanupHelp();
-  if (command === 'fix-vault') return fixVaultHelp();
+  if (command === 'fix-vault') return buildFixVaultCliHelp({ commonOptions: commonOptionHelp() });
   if (command === 'telemetry') return telemetryHelp();
   return usage();
 };
@@ -922,8 +893,13 @@ const parseArgs = (argv) => {
     else if (arg === '--no-start-bridge') out.flags.startBridge = false;
     else if (arg === '--exit-when-idle') out.flags.bridgeExitWhenIdle = true;
     else if (arg === '--no-exit-when-idle') out.flags.bridgeExitWhenIdle = false;
-    else if (arg === '--wake' || arg === '--wake-browser') out.flags.wakeBrowser = true;
-    else if (arg === '--no-wake') out.flags.wakeBrowser = false;
+    else if (arg === '--wake' || arg === '--wake-browser') {
+      out.flags.wakeBrowser = true;
+    }
+    else if (arg === '--no-wake') {
+      out.flags.wakeBrowser = false;
+      out.flags.wakeBrowserExplicit = true;
+    }
     else if (arg === '--activate-tab') {
       out.flags.activateTab = true;
       out.flags.activateTabExplicit = true;
@@ -2139,7 +2115,7 @@ const renderLinesForJobList = (result = {}) => {
   for (const job of jobs) {
     lines.push(`- ${job.jobId || '-'} ${job.status || '-'}${job.phase ? `/${job.phase}` : ''} ${job.type || ''}`.trim());
     lines.push(`  status: gemini-md-export job status ${job.jobId} --tui --result-json`);
-    if (!TERMINAL_STATUSES.has(job.status)) {
+    if (!(job.status in TERMINAL_STATUSES)) {
       lines.push(`  cancelar: gemini-md-export job cancel ${job.jobId} --tui --result-json`);
     }
     if (job.reportFile) lines.push(`  reportFile: ${job.reportFile}`);
@@ -2359,18 +2335,18 @@ const emitResult = (ui, job) => {
 };
 
 const exitCodeForJob = (job = {}) => {
-  if (job.status === 'completed') return EXIT.OK;
-  if (job.status === 'completed_with_errors') return EXIT.WARNINGS;
-  if (job.status === 'cancelled') return EXIT.MANUAL_ACTION;
-  return EXIT.JOB_FAILED;
+  if (job.status === 'completed') return OK;
+  if (job.status === 'completed_with_errors') return WARNINGS;
+  if (job.status === 'cancelled') return MANUAL_ACTION;
+  return JOB_FAILED;
 };
 
 const exitCodeForJobCommand = (subcommand, job = {}) => {
   if (subcommand === 'cancel') {
-    if (job.status === 'cancel_requested') return EXIT.MANUAL_ACTION;
-    return job.status === 'failed' ? EXIT.JOB_FAILED : EXIT.OK;
+    if (job.status === 'cancel_requested') return MANUAL_ACTION;
+    return job.status === 'failed' ? JOB_FAILED : OK;
   }
-  if (!TERMINAL_STATUSES.has(job.status)) return EXIT.OK;
+  if (!(job.status in TERMINAL_STATUSES)) return OK;
   return exitCodeForJob(job);
 };
 
@@ -3077,7 +3053,7 @@ const sameResolvedPath = (left, right) => {
 };
 
 const activeJobMatchesExportStart = (job = {}, kind, flags = {}) => {
-  if (!job.jobId || TERMINAL_STATUSES.has(job.status)) return false;
+  if (!job.jobId || (job.status in TERMINAL_STATUSES)) return false;
   if (job.type && job.type !== exportJobTypeForKind(kind)) return false;
   if (!sameResolvedPath(job.outputDir, flags.outputDir || flags.vaultDir)) return false;
   if (flags.maxChats !== undefined && job.maxChats !== undefined) {
@@ -3132,7 +3108,7 @@ const waitForJobTerminalQuietly = async (bridgeUrl, jobId, flags = {}) => {
   while (Date.now() - startedAt <= timeoutMs) {
     try {
       lastJob = await fetchJobStatus(bridgeUrl, jobId);
-      if (TERMINAL_STATUSES.has(lastJob.status)) return lastJob;
+      if ((lastJob.status in TERMINAL_STATUSES)) return lastJob;
     } catch (err) {
       return {
         ...(lastJob || { jobId }),
@@ -3149,7 +3125,7 @@ const waitForJobTerminalQuietly = async (bridgeUrl, jobId, flags = {}) => {
 };
 
 const cancelJobForTimeoutQuietly = async (flags, job, ui = null) => {
-  if (!job?.jobId || TERMINAL_STATUSES.has(job.status)) return job;
+  if (!job?.jobId || (job.status in TERMINAL_STATUSES)) return job;
   if (ui?.format && ui.format !== 'json' && ui.format !== 'jsonl') {
     ui.stdout.write('Timeout do job; cancelando no navegador e liberando a aba antes de sair.\n');
   }
@@ -3176,7 +3152,7 @@ const cancelJobForTimeoutQuietly = async (flags, job, ui = null) => {
 };
 
 const cancelJobForSignalQuietly = async (flags, job, ui, signal) => {
-  if (!job?.jobId || TERMINAL_STATUSES.has(job.status)) return job;
+  if (!job?.jobId || (job.status in TERMINAL_STATUSES)) return job;
   if (ui?.format && ui.format !== 'json' && ui.format !== 'jsonl') {
     ui.stdout.write(`Interrupcao recebida (${signal}); cancelando job ${job.jobId} e liberando a aba.\n`);
     if (job.reportFile) ui.stdout.write(`reportFile: ${job.reportFile}\n`);
@@ -3225,7 +3201,7 @@ const installJobSignalCleanup = ({ flags, ui, getJob, reason }) => {
       if (ui?.format === 'json' || ui?.format === 'jsonl') ui.stderr.write(`${err.message}\n`);
       else ui?.stdout?.write(`Falha no cleanup da interrupcao: ${err.message}\n`);
     } finally {
-      process.exit(EXIT.MANUAL_ACTION);
+      process.exit(MANUAL_ACTION);
     }
   };
   for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
@@ -3321,12 +3297,11 @@ const writeStructuredResult = (ui, result, { label = null, includeResultJson = t
 };
 
 const runAuth = async (parsed, streams = {}) => {
-  const flags = parsed.flags;
-  const ui = makeUi(flags, streams);
+  const ui = makeUi(parsed.flags, streams);
   warnTuiFallback(ui);
   return runAuthStatusCommand({
     subcommand: parsed.positionals[0] || 'status',
-    flags,
+    flags: parsed.flags,
     ui,
     dependencies: {
       ensureBridgeAvailable,
@@ -3335,8 +3310,8 @@ const runAuth = async (parsed, streams = {}) => {
       writeStructuredResult,
     },
     exitCodes: {
-      ok: EXIT.OK,
-      manualAction: EXIT.MANUAL_ACTION,
+      ok: OK,
+      manualAction: MANUAL_ACTION,
     },
   });
 };
@@ -3375,7 +3350,7 @@ const followJob = async (bridgeUrl, initialJob, flags, ui) => {
       ui.stdout.write(`${JSON.stringify({ type: 'job_status', job: summarizeForResultJson(job), raw: job })}\n`);
     }
 
-    if (TERMINAL_STATUSES.has(job.status)) return job;
+    if ((job.status in TERMINAL_STATUSES)) return job;
     if (Date.now() - startedAt > flags.timeoutMs) {
       const err = createLayeredTimeoutError({
         code: 'job_timeout',
@@ -3416,6 +3391,9 @@ const attachJobContextToErrorMessage = (err, job = {}) => {
 };
 
 const runSync = async (parsed, streams = {}) => {
+  if (parsed.flags.privateApi !== false) {
+    return runPrivateApiSyncCommand(parsed, streams, ensureBridgeAvailable);
+  }
   const flags = { ...parsed.flags };
   if (flags.allowReloadExplicit !== true) flags.allowReload = true;
   if (flags.activateTabExplicit !== true) flags.activateTab = true;
@@ -3564,12 +3542,12 @@ const runDoctor = async (parsed, streams = {}) => {
     if (parsed.flags.resultJson === true) ui.stdout.write(`RESULT_JSON ${JSON.stringify(result)}\n`);
   }
   const exitCode = result.ok
-    ? EXIT.OK
+    ? OK
     : !result.bridge.ok
-      ? EXIT.BRIDGE_UNAVAILABLE
+      ? BRIDGE_UNAVAILABLE
       : result.ready && result.warnings.length > 0
-        ? EXIT.WARNINGS
-        : EXIT.EXTENSION_UNREADY;
+        ? WARNINGS
+        : EXTENSION_UNREADY;
   return { exitCode, result };
 };
 
@@ -3610,7 +3588,7 @@ const runBrowser = async (parsed, streams = {}) => {
             ? 'Controle do navegador reativado.'
             : `Controle do navegador: ${state}.`,
     });
-    return { exitCode: result.ok ? EXIT.OK : EXIT.MANUAL_ACTION, result };
+    return { exitCode: result.ok ? OK : MANUAL_ACTION, result };
   }
 
   const ready = await readyWithCliWake(flags.bridgeUrl, flags, ui);
@@ -3646,7 +3624,7 @@ const runBrowser = async (parsed, streams = {}) => {
   writeStructuredResult(ui, result, {
     label: `${result.ok ? 'OK' : 'NAO PRONTO'}: ${result.nextAction}`,
   });
-  return { exitCode: result.ok ? EXIT.OK : EXIT.EXTENSION_UNREADY, result };
+  return { exitCode: result.ok ? OK : EXTENSION_UNREADY, result };
 };
 
 const artifactStatusText = (item = {}) => {
@@ -3785,7 +3763,7 @@ const runDiagnose = async (parsed, streams = {}) => {
       label: diagnosePlainLabel(result),
       includeResultJson: parsed.flags.resultJson === true,
     });
-    return { exitCode: result.ok ? EXIT.OK : EXIT.EXTENSION_UNREADY, result };
+    return { exitCode: result.ok ? OK : EXTENSION_UNREADY, result };
   } finally {
     if (!result?.tabClaimRelease && parsed.flags.claimId && parsed.flags.autoReleaseClaim !== false) {
       await releaseCliClaimQuietly(parsed.flags, 'cli-diagnose-finished', result);
@@ -3907,7 +3885,7 @@ const runTabs = async (parsed, streams = {}) => {
     label,
     includeResultJson: parsed.flags.resultJson === true,
   });
-  return { exitCode: summary.ok ? EXIT.OK : EXIT.EXTENSION_UNREADY, result: summary };
+  return { exitCode: summary.ok ? OK : EXTENSION_UNREADY, result: summary };
 };
 
 const summarizeChatsCountResult = (result = {}) => ({
@@ -4100,7 +4078,7 @@ const runChats = async (parsed, streams = {}) => {
       label: chatsListPlainLabel(result),
       includeResultJson: parsed.flags.resultJson === true,
     });
-    return { exitCode: result.ok ? EXIT.OK : EXIT.WARNINGS, result };
+    return { exitCode: result.ok ? OK : WARNINGS, result };
   }
   const countTimeoutMs = Math.max(
     1000,
@@ -4217,7 +4195,7 @@ const runChats = async (parsed, streams = {}) => {
       label,
       includeResultJson: parsed.flags.resultJson === true,
     });
-    return { exitCode: result.totalKnown ? EXIT.OK : EXIT.WARNINGS, result };
+    return { exitCode: result.totalKnown ? OK : WARNINGS, result };
   } finally {
     await releaseCliClaimQuietly(releaseFlags, 'cli-chats-count-finished', countClaimResult);
   }
@@ -4272,6 +4250,7 @@ const runExport = async (parsed, streams = {}) => {
 
   if ((isSelectedExport || subcommand === 'recent') && flags.privateApi !== false) {
     flags.privateApiRecent = subcommand === 'recent';
+    await ensureBridgeAvailable(flags, makeUi(flags, streams));
     const { runPrivateApiSelectedExportCommand } = await import(
       '../build/ts/cli/private-api-selected-export-command.js'
     );
@@ -4356,7 +4335,7 @@ const runJob = async (parsed, streams = {}) => {
       for (const line of renderLinesForJobList(result)) ui.stdout.write(`${stripAnsi(line)}\n`);
       ui.stdout.write(`RESULT_JSON ${JSON.stringify(result)}\n`);
     }
-    return { exitCode: EXIT.OK, result };
+    return { exitCode: OK, result };
   }
   if (subcommand === 'trace') {
     const trace = await fetchJobTrace(parsed.flags.bridgeUrl, jobId);
@@ -4368,15 +4347,15 @@ const runJob = async (parsed, streams = {}) => {
       for (const line of renderLinesForJobTrace(trace)) ui.stdout.write(`${stripAnsi(line)}\n`);
       ui.stdout.write(`RESULT_JSON ${JSON.stringify(trace)}\n`);
     }
-    return { exitCode: trace.ok === false ? EXIT.JOB_FAILED : EXIT.OK, result: trace };
+    return { exitCode: trace.ok === false ? JOB_FAILED : OK, result: trace };
   }
   let job = subcommand === 'cancel' ? await cancelJob(parsed.flags.bridgeUrl, jobId) : await fetchJobStatus(parsed.flags.bridgeUrl, jobId);
-  if (subcommand === 'cancel' && parsed.flags.wait === true && !TERMINAL_STATUSES.has(job.status)) {
+  if (subcommand === 'cancel' && parsed.flags.wait === true && !(job.status in TERMINAL_STATUSES)) {
     if (ui.format !== 'json' && ui.format !== 'jsonl') {
       ui.stdout.write(`Cancelamento solicitado; aguardando o job ${jobId} parar com seguranca...\n`);
     }
     job = await waitForJobTerminalQuietly(parsed.flags.bridgeUrl, jobId, parsed.flags);
-    if (!TERMINAL_STATUSES.has(job.status) && ui.format !== 'json' && ui.format !== 'jsonl') {
+    if (!(job.status in TERMINAL_STATUSES) && ui.format !== 'json' && ui.format !== 'jsonl') {
       ui.stdout.write(
         `O job ainda nao chegou ao estado terminal; provavelmente a aba ainda esta dentro da conversa atual.\n`,
       );
@@ -4416,7 +4395,7 @@ const runExportDir = async (parsed, streams = {}) => {
         ? `Diretorio de export: ${result.outputDir}`
         : `Diretorio de export atualizado: ${result.outputDir}`,
   });
-  return { exitCode: EXIT.OK, result };
+  return { exitCode: OK, result };
 };
 
 const runCleanup = async (parsed, streams = {}) => {
@@ -4440,7 +4419,7 @@ const runCleanup = async (parsed, streams = {}) => {
   writeStructuredResult(ui, result, {
     label: result.message || (result.ok ? 'Cleanup concluido.' : 'Cleanup nao executado.'),
   });
-  return { exitCode: result.ok || result.dryRun ? EXIT.OK : EXIT.MANUAL_ACTION, result };
+  return { exitCode: result.ok || result.dryRun ? OK : MANUAL_ACTION, result };
 };
 
 const runRepairVault = async (parsed, streams = {}) => {
@@ -4460,29 +4439,47 @@ const runRepairVault = async (parsed, streams = {}) => {
   child.stdout.on('data', (chunk) => stdout.write(chunk));
   child.stderr.on('data', (chunk) => stderr.write(chunk));
   const exitCode = await new Promise((resolveExit) => {
-    child.on('exit', (code) => resolveExit(code ?? EXIT.JOB_FAILED));
+    child.on('exit', (code) => resolveExit(code ?? JOB_FAILED));
   });
   return { exitCode, result: { ok: exitCode === 0, scriptPath, vaultDir } };
 };
 
-const reportTimestamp = () =>
-  new Date()
-    .toISOString()
-    .replace(/[-:]/g, '')
-    .replace(/\..+$/, '')
-    .replace('T', '-');
-
 const runFixVault = async (parsed, streams = {}) => {
-  const repairPath = repairScriptPath();
-  const metadataPath = metadataScriptPath();
-  if (!repairPath) throw new Error('scripts/vault-repair.mjs nao encontrado no pacote.');
-  if (!metadataPath) throw new Error('scripts/chat-metadata-backfill.mjs nao encontrado no pacote.');
-  return runFixVaultCommand({
+  return runFixVaultCliCommand({
     parsed,
     streams,
-    packageRoot: packageRoot(),
-    repairPath,
-    metadataPath,
+    runDoctor: async (nextParsed, nextStreams) => {
+      const ui = makeUi(nextParsed.flags, nextStreams);
+      warnTuiFallback(ui);
+      await ensureBridgeAvailable(nextParsed.flags, ui);
+      return runFixVaultDoctorCommand({
+        parsed: nextParsed,
+        streams: nextStreams,
+        dependencies: { requestJson },
+      });
+    },
+    runDefault: (nextParsed, nextStreams) => {
+      const repairPath = repairScriptPath();
+      const metadataPath = metadataScriptPath();
+      if (!repairPath) throw new Error('scripts/vault-repair.mjs nao encontrado no pacote.');
+      if (!metadataPath) throw new Error('scripts/chat-metadata-backfill.mjs nao encontrado no pacote.');
+      return runFixVaultCommand({
+        parsed: nextParsed,
+        streams: nextStreams,
+        packageRoot: packageRoot(),
+        repairPath,
+        metadataPath,
+        preparePrivateApiRepair: createFixVaultBrowserPrivateSessionPreflight(
+          nextParsed.flags,
+          nextStreams,
+          makeUi,
+          warnTuiFallback,
+          ensureBridgeAvailable,
+          readyWithCliWake,
+          requestJson,
+        ),
+      });
+    },
   });
 };
 
@@ -4514,7 +4511,7 @@ const runMetadata = async (parsed, streams = {}) => {
   child.stdout.on('data', (chunk) => stdout.write(chunk));
   child.stderr.on('data', (chunk) => stderr.write(chunk));
   const exitCode = await new Promise((resolveExit) => {
-    child.on('exit', (code) => resolveExit(code ?? EXIT.JOB_FAILED));
+    child.on('exit', (code) => resolveExit(code ?? JOB_FAILED));
   });
   return { exitCode, result: { ok: exitCode === 0, scriptPath, vaultDir } };
 };
@@ -4564,7 +4561,7 @@ const runTelemetry = async (parsed, streams = {}) => {
     includeResultJson: parsed.flags.resultJson === true || ui.format === 'plain',
   });
   return {
-    exitCode: subcommand === 'send' && result.ok === false ? EXIT.BRIDGE_UNAVAILABLE : EXIT.OK,
+    exitCode: subcommand === 'send' && result.ok === false ? BRIDGE_UNAVAILABLE : OK,
     result,
   };
 };
@@ -4579,18 +4576,18 @@ export const main = async (argv = process.argv.slice(2), streams = {}) => {
   const parsed = parseArgs(argv);
   if (parsed.flags.version || parsed.command === 'version') {
     (streams.stdout || process.stdout).write(`gemini-md-export ${VERSION}\n`);
-    return { exitCode: EXIT.OK };
+    return { exitCode: OK };
   }
   if (parsed.flags.help || parsed.command === 'help') {
     (streams.stdout || process.stdout).write(`${helpForParsed(parsed)}\n`);
-    return { exitCode: EXIT.OK };
+    return { exitCode: OK };
   }
 
   const startedAt = Date.now();
   try {
     const outcome = await runParsedCommand(parsed, streams);
     await recordCliTelemetry(parsed, {
-      exitCode: outcome.exitCode ?? EXIT.OK,
+      exitCode: outcome.exitCode ?? OK,
       result: outcome.result || null,
       durationMs: Date.now() - startedAt,
       version: VERSION,
@@ -4617,6 +4614,7 @@ const runParsedCommand = (parsed, streams = {}) => {
   if (parsed.command === 'chats') return runChats(parsed, streams);
   if (parsed.command === 'export') return runExport(parsed, streams);
   if (parsed.command === 'job') return runJob(parsed, streams);
+  if (parsed.command === 'config') return runConfigCommand({ parsed, streams });
   if (parsed.command === 'export-dir') return runExportDir(parsed, streams);
   if (parsed.command === 'cleanup') return runCleanup(parsed, streams);
   if (parsed.command === 'fix-vault') return runFixVault(parsed, streams);
@@ -4628,16 +4626,16 @@ const runParsedCommand = (parsed, streams = {}) => {
 
 const exitCodeForError = (err) =>
   err.code === 'usage'
-    ? EXIT.USAGE
+    ? USAGE
     : err.code === 'export_job_in_progress' || err.code === 'stale_bridge_active_export_job'
-      ? EXIT.MANUAL_ACTION
+      ? MANUAL_ACTION
     : err.code === 'extension_unready'
-      ? EXIT.EXTENSION_UNREADY
+      ? EXTENSION_UNREADY
       : err.code === 'bridge_timeout' ||
           err.code === 'bridge_connection_lost' ||
           /fetch failed|ECONNREFUSED|Bridge/i.test(err.message)
-        ? EXIT.BRIDGE_UNAVAILABLE
-        : EXIT.JOB_FAILED;
+        ? BRIDGE_UNAVAILABLE
+        : JOB_FAILED;
 
 const cliEntrypoint = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 
@@ -4648,7 +4646,7 @@ if (cliEntrypoint) {
     })
     .catch((err) => {
       const code = exitCodeForError(err);
-      if (code === EXIT.USAGE) {
+      if (code === USAGE) {
         process.stderr.write(`${err.message}\n\n${usage()}\n`);
       } else if (err.reported) {
         // A camada de comando ja imprimiu uma mensagem humana completa.

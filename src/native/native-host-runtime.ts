@@ -217,7 +217,9 @@ const brokerRequestTimeoutMs = (
 
 const isExtensionBrokerCommand = (command: unknown) => {
   const value = String(command || '');
-  return value.startsWith('tabs.') || value.startsWith('extension.');
+  return (
+    value.startsWith('tabs.') || value.startsWith('extension.') || value.startsWith('privateApi.')
+  );
 };
 
 const handleCommand = async (

@@ -69,8 +69,11 @@ export type CdpWebSocketConstructor = new (url: string) => CdpWebSocketLike;
 
 export type CdpRequestOptions = Readonly<{
   endpoint: string;
+  allowHttpBrowserFallback?: boolean;
   browserWebSocketUrl?: string | null;
   browserWebSocketSession?: BrowserWebSocketSession | null;
+  devToolsActivePortContents?: string | null;
+  devToolsActivePortFile?: string | null;
   fetchImpl?: CdpFetch;
   timeoutMs?: number;
   WebSocketImpl?: CdpWebSocketConstructor;
@@ -111,6 +114,33 @@ const fetchJson = async <T>(
     throw error;
   }
   return (await response.json()) as T;
+};
+
+const cdpError = (message: string, code: string): Error =>
+  Object.assign(new Error(message), { code });
+
+const browserVersionString = (version: Record<string, unknown> | null, key: string): string =>
+  typeof version?.[key] === 'string' ? String(version[key]).trim() : '';
+
+const assertUserBrowserCdpEndpoint = (version: Record<string, unknown> | null): void => {
+  if (!version) return;
+  const browser = browserVersionString(version, 'Browser');
+  const userAgent = browserVersionString(version, 'User-Agent');
+  if (/LenovoVantage/i.test(userAgent)) {
+    throw cdpError(
+      'A porta CDP pertence a um WebView de aplicativo, nao ao navegador do usuario.',
+      'cdp_unrelated_endpoint',
+    );
+  }
+  if (
+    browser &&
+    !/^(Chrome|Chromium|HeadlessChrome|Edg|Microsoft Edge|Brave|Dia)\//i.test(browser)
+  ) {
+    throw cdpError(
+      `A porta CDP anunciou um navegador inesperado: ${browser}.`,
+      'cdp_unrelated_endpoint',
+    );
+  }
 };
 
 const chatIdFromGeminiUrl = (url: string): string | null => {
@@ -308,6 +338,7 @@ const blockerFromTarget = (target: CdpTarget): CdpBlocker | null => {
 
 export const buildCdpBrowserSnapshot = async ({
   endpoint,
+  allowHttpBrowserFallback = false,
   browserWebSocketUrl: explicitBrowserWebSocketUrl,
   browserWebSocketSession,
   fetchImpl,
@@ -317,6 +348,7 @@ export const buildCdpBrowserSnapshot = async ({
   const version = await fetchJson<Record<string, unknown>>(endpoint, '/json/version', {
     fetchImpl,
   }).catch(() => null);
+  assertUserBrowserCdpEndpoint(version);
   const browserWebSocketUrl =
     String(explicitBrowserWebSocketUrl || '').trim() ||
     (typeof version?.webSocketDebuggerUrl === 'string' ? String(version.webSocketDebuggerUrl) : '');
@@ -329,9 +361,15 @@ export const buildCdpBrowserSnapshot = async ({
         WebSocketImpl,
         timeoutMs,
       });
-    } catch {
+    } catch (err) {
+      if (!allowHttpBrowserFallback) throw err;
       targets = await listCdpTargets({ endpoint, fetchImpl });
     }
+  } else if (!allowHttpBrowserFallback) {
+    throw cdpError(
+      'CDP sem Browser WebSocket nao e aceito para controle de abas.',
+      'cdp_browser_websocket_required',
+    );
   } else {
     targets = await listCdpTargets({ endpoint, fetchImpl });
   }

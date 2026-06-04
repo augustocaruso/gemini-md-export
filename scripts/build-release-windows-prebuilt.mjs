@@ -77,7 +77,7 @@ const copyPath = (relativePath) => {
   if (lstatSync(source).isDirectory()) {
     cpSync(source, target, {
       recursive: true,
-      filter: (src) => !src.endsWith('.DS_Store'),
+      filter: (src) => !/(?:^|[\\/])\._|\.DS_Store$/.test(src),
     });
   } else {
     copyFileSync(source, target);

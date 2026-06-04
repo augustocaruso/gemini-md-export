@@ -1,3 +1,5 @@
+import { applyPrivateApiSessionDefaults } from './private-api-session-store.js';
+
 type JsonRecord = Record<string, unknown>;
 
 type ToolContentItem = Readonly<{
@@ -8,6 +10,7 @@ type ToolContentItem = Readonly<{
 export type AuthStatusFlags = Readonly<{
   bridgeUrl?: unknown;
   wakeBrowser?: unknown;
+  wakeBrowserExplicit?: unknown;
   waitMs?: unknown;
   cookiesJson?: unknown;
   python?: unknown;
@@ -87,6 +90,7 @@ export const buildAuthStatusToolCall = (flags: AuthStatusFlags = {}) => ({
     action: 'session_status' as const,
     waitMs: flags.waitMs,
     cookiesJson: flags.cookiesJson,
+    pythonFallback: Boolean(flags.cookiesJson || flags.python),
     python: flags.python,
     clientId: flags.clientId,
     tabId: flags.tabId,
@@ -114,7 +118,8 @@ export const buildAuthHelp = ({
     'Opcoes:',
     '  --cookies-json <path>   storage_state.json/JSON de cookies para o fallback Python.',
     '  --python <path>         Python explicito para o sidecar.',
-    '  --wake                  Pode acordar Gemini antes de verificar a sessao.',
+    '  --wake                  Acorda/abre Gemini antes de verificar a sessao. Default do auth.',
+    '  --no-wake               Nao abre navegador; usa apenas aba/extensao ja conectada.',
     '  --allow-reload          Pode recarregar extensao/abas existentes antes da verificacao.',
     '  --wait-ms <ms>          Timeout da verificacao.',
     '',
@@ -163,6 +168,12 @@ const usageError = (message: string): UsageError => {
   return error;
 };
 
+const bridgePostTimeoutMs = (waitMs: unknown): number =>
+  Math.max(5000, Number(waitMs || 45_000)) + 15_000;
+
+const shouldWakeBrowserForAuthStatus = (flags: AuthStatusFlags): boolean =>
+  flags.wakeBrowser === true || flags.wakeBrowserExplicit !== true;
+
 export const runAuthStatusCommand = async ({
   subcommand = 'status',
   flags = {},
@@ -174,16 +185,22 @@ export const runAuthStatusCommand = async ({
     throw usageError('Uso: gemini-md-export auth status.');
   }
 
-  const bridgeUrl = stringValue(flags.bridgeUrl) || '';
-  await dependencies.ensureBridgeAvailable(flags, ui);
-  if (flags.wakeBrowser === true) {
-    await dependencies.readyWithCliWake(bridgeUrl, flags, ui);
-  }
+  const effectiveFlags = applyPrivateApiSessionDefaults(flags);
+  const bridgeUrl = stringValue(effectiveFlags.bridgeUrl) || '';
+  await dependencies.ensureBridgeAvailable(effectiveFlags, ui);
+  await dependencies.readyWithCliWake(
+    bridgeUrl,
+    {
+      ...effectiveFlags,
+      wakeBrowser: shouldWakeBrowserForAuthStatus(effectiveFlags),
+    },
+    ui,
+  );
 
   const response = await dependencies.requestJson(bridgeUrl, '/agent/mcp-tool-call', {
     method: 'POST',
-    timeoutMs: Math.max(5000, Number(flags.waitMs || 45_000)),
-    body: buildAuthStatusToolCall(flags),
+    timeoutMs: bridgePostTimeoutMs(effectiveFlags.waitMs),
+    body: buildAuthStatusToolCall(effectiveFlags),
   });
   const result = extractAuthStatusResult(response);
   dependencies.writeStructuredResult(ui, result, { label: formatAuthStatusLabel(result) });

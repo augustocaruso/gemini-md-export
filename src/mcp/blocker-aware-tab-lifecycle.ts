@@ -127,6 +127,8 @@ const DEFAULT_STATE = (nowMs: number): BrowserTabLifecycleState => ({
   launchAttemptCount: 0,
   updatedAtMs: nowMs,
 });
+const MANAGED_TAB_WITHOUT_ID_TTL_MS = 120_000;
+const MANAGED_TAB_MAX_RECORDS = 12;
 
 const recordOrNull = (value: unknown): Record<string, unknown> | null =>
   value !== null && typeof value === 'object' ? (value as Record<string, unknown>) : null;
@@ -184,6 +186,21 @@ const normalizeManagedTab = (value: unknown, nowMs: number): ManagedBrowserTab |
   };
 };
 
+const pruneManagedTabs = (
+  managedTabs: readonly ManagedBrowserTab[],
+  nowMs: number,
+): readonly ManagedBrowserTab[] => {
+  const freshTabs = managedTabs.filter((tab) => {
+    if (tab.tabId !== null && tab.tabId !== undefined) return true;
+    const ageMs = nowMs - tab.updatedAtMs;
+    if (!Number.isFinite(ageMs) || ageMs < 0) return true;
+    return ageMs < MANAGED_TAB_WITHOUT_ID_TTL_MS;
+  });
+  return freshTabs.length > MANAGED_TAB_MAX_RECORDS
+    ? freshTabs.slice(freshTabs.length - MANAGED_TAB_MAX_RECORDS)
+    : freshTabs;
+};
+
 const normalizeBlocker = (value: unknown, nowMs: number): BrowserTabLifecycleBlocker | null => {
   const record = recordOrNull(value);
   if (!record) return null;
@@ -231,7 +248,7 @@ export const browserTabLifecycleStateFromLaunchState = (
           : 'idle',
     activeLaunchId: stringOrNull(source.activeLaunchId),
     blocker: normalizeBlocker(source.blocker, nowMs),
-    managedTabs,
+    managedTabs: pruneManagedTabs(managedTabs, nowMs),
     launchAttemptCount: Math.max(0, Math.floor(Number(source.launchAttemptCount || 0) || 0)),
     updatedAtMs: Number(source.updatedAtMs || nowMs) || nowMs,
   };

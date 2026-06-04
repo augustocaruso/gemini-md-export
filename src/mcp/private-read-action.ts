@@ -36,6 +36,7 @@ type PrivateReadArgs = Readonly<{
   assetsDir?: unknown;
   assetsRelDir?: unknown;
   allowDomFallback?: unknown;
+  allowPythonFallback?: unknown;
 }>;
 
 type GeminiWebapiPythonRunner = typeof runGeminiWebapiPythonReadChat;
@@ -50,6 +51,12 @@ type PrivateReadDeps = Readonly<{
   ) => Promise<unknown>;
   summarizeClient: (client: unknown) => unknown;
   runGeminiWebapiPythonReadChat?: GeminiWebapiPythonRunner;
+  nativeBrowserBroker?: {
+    privateApiReadChat?(
+      payload?: Record<string, unknown>,
+      options?: Record<string, unknown>,
+    ): Promise<unknown>;
+  };
 }>;
 
 type PrivateReadRuntimeDeps = PrivateReadDeps &
@@ -73,6 +80,9 @@ const clientIdOf = (client: unknown): string => {
 const usesGeminiWebapiPython = (args: PrivateReadArgs): boolean =>
   args.privateApiTransport === 'gemini-webapi-python';
 
+const allowsPythonFallback = (args: PrivateReadArgs): boolean =>
+  usesGeminiWebapiPython(args) || args.allowPythonFallback !== false;
+
 const stringOrNull = (value: unknown): string | null => {
   const text = String(value ?? '').trim();
   return text || null;
@@ -92,16 +102,23 @@ const preferredAdapterForArgs = (args: PrivateReadArgs): ChatReadAdapterKind => 
   return 'browserBackground';
 };
 
+const strictBrowserBackgroundOnly = (args: PrivateReadArgs): boolean =>
+  args.privateApiTransport === 'browser-background' &&
+  args.allowPythonFallback === false &&
+  args.allowDomFallback !== true;
+
 const buildPrivateReadAdapterPlan = (args: PrivateReadArgs): ChatReadAdapterPlan =>
   buildChatReadAdapterPlan({
     allowExperimental: true,
     preferredAdapter: preferredAdapterForArgs(args),
     capabilities: [
       privateApiGeminiWebapiChatReadCapability({
-        available: !!(parseChatId(args.chatId) || parseChatId(args.url)),
+        available:
+          allowsPythonFallback(args) && !!(parseChatId(args.chatId) || parseChatId(args.url)),
         canReadAssets: true,
-        reason:
-          parseChatId(args.chatId) || parseChatId(args.url)
+        reason: !allowsPythonFallback(args)
+          ? 'gemini_webapi_python_fallback_disabled'
+          : parseChatId(args.chatId) || parseChatId(args.url)
             ? 'gemini_webapi_python_sidecar'
             : 'gemini_webapi_python_requires_explicit_chat_id',
       }),
@@ -205,6 +222,49 @@ export const createMcpPrivateReadAction =
       }
 
       if (adapter === 'browserBackground') {
+        if (deps.nativeBrowserBroker?.privateApiReadChat) {
+          const nativeResponse = await deps.nativeBrowserBroker.privateApiReadChat(
+            {
+              chatId: args.chatId || args.url,
+              title: args.title,
+              timeoutMs: timeoutMsOf(args.waitMs),
+              downloadAssets: args.downloadAssets,
+              assetsRelDir: args.assetsRelDir,
+              ...(args.assetsDir ? { assetsDir: args.assetsDir } : {}),
+            },
+            { allowFallback: true },
+          );
+          const nativeResult =
+            objectOrNull(nativeResponse)?.ok === true
+              ? objectOrNull(nativeResponse)?.result
+              : nativeResponse;
+          if (isOkResult(nativeResult)) {
+            const enriched = enrichSnapshotResult({
+              client: null,
+              ...(objectOrNull(nativeResult) || { result: nativeResult }),
+            });
+            const assetPlan = objectOrNull(enriched.assetPlan);
+            const assetRequestCount = Array.isArray(assetPlan?.requests)
+              ? assetPlan.requests.length
+              : 0;
+            if (
+              args.downloadAssets === true &&
+              assetRequestCount > 0 &&
+              mediaFilesOfResult(enriched).length === 0
+            ) {
+              return {
+                ok: false,
+                code: 'browser_background_assets_unavailable',
+                message:
+                  'A leitura pelo navegador encontrou assets, mas ainda nao consegue baixa-los; tentando sidecar Python.',
+                chatId: expectedChatIdOf(args),
+              };
+            }
+            return enriched;
+          }
+          if (strictBrowserBackgroundOnly(args)) return nativeResult;
+        }
+
         const client = getManagedClient('private-api-read-chat');
         const command = buildPrivateApiReadChatCommand(
           args,

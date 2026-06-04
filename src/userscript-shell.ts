@@ -33,6 +33,8 @@
   /* __INLINE_BRIDGE_CLIENT__ */
   /* __INLINE_PAGE_BLOCKER__ */
   /* __INLINE_BROWSER_NAVIGATION_STACK__ */
+  /* __INLINE_PRIVATE_API_CONTENT_FETCH__ */
+  /* __INLINE_CONTENT_RUNTIME_GUARD__ */
 
   // --- config -----------------------------------------------------------
 
@@ -448,12 +450,6 @@
   const TAB_IGNORE_SESSION_STORAGE_KEY_BOOTSTRAP = 'gemini-md-export.ignoreThisTab.v1';
   const TAB_IGNORE_CHANGED_EVENT_BOOTSTRAP = 'gm-md-export:tab-ignored-changed';
   const existingRuntime = pageWindow[RUNTIME_GUARD_KEY];
-  if (
-    existingRuntime?.buildStamp === BUILD_STAMP &&
-    Number(existingRuntime?.protocolVersion) === Number(EXTENSION_PROTOCOL_VERSION)
-  ) {
-    return;
-  }
   const quiesceExistingRuntime = (runtime) => {
     if (!runtime) return;
     try {
@@ -478,18 +474,74 @@
       // Fallback melhor-esforço para builds antigas que só escutam o toggle.
     }
   };
+  const readExistingRuntimeStatus = (runtime) => {
+    if (!runtime) return null;
+    try {
+      if (typeof runtime.status === 'function') return runtime.status();
+    } catch (err) {
+      return {
+        ok: false,
+        installedAt: Number(runtime.installedAt) || null,
+        bridge: null,
+        error: err?.message || String(err),
+      };
+    }
+    return {
+      ok: null,
+      installedAt: Number(runtime.installedAt) || null,
+      bridge: null,
+    };
+  };
+  const runtimeGuardDecision = transitionContentRuntimeGuard(
+    { tag: 'checking' },
+    {
+      type: 'evaluate-runtime',
+      hasRuntime: !!existingRuntime,
+      sameBuild: existingRuntime?.buildStamp === BUILD_STAMP,
+      sameProtocol: Number(existingRuntime?.protocolVersion) === Number(EXTENSION_PROTOCOL_VERSION),
+      status: readExistingRuntimeStatus(existingRuntime),
+      installedAt: Number(existingRuntime?.installedAt) || null,
+    },
+  );
+  if (runtimeGuardDecision.effects.includes('return-existing')) {
+    return;
+  }
   try {
-    if (existingRuntime && existingRuntime.buildStamp !== BUILD_STAMP) {
+    if (runtimeGuardDecision.effects.includes('quiesce-existing')) {
       quiesceExistingRuntime(existingRuntime);
       existingRuntime.supersededAt = Date.now();
       existingRuntime.supersededBy = BUILD_STAMP;
     }
+    const runtimeInstalledAt = Date.now();
     pageWindow[RUNTIME_GUARD_KEY] = {
       version: SCRIPT_VERSION,
       extensionVersion: SCRIPT_VERSION,
       protocolVersion: EXTENSION_PROTOCOL_VERSION,
       buildStamp: BUILD_STAMP,
-      installedAt: Date.now(),
+      installedAt: runtimeInstalledAt,
+      status: () => {
+        try {
+          return contentScriptRuntimeStatus();
+        } catch (err) {
+          return {
+            ok: false,
+            contentScript: true,
+            version: SCRIPT_VERSION,
+            extensionVersion: SCRIPT_VERSION,
+            protocolVersion: EXTENSION_PROTOCOL_VERSION,
+            buildStamp: BUILD_STAMP,
+            installedAt: runtimeInstalledAt,
+            error: err?.message || String(err),
+            bridge: {
+              started: false,
+              heartbeatTimerActive: false,
+              heartbeatInFlight: false,
+              lastHeartbeatAt: null,
+              lastHeartbeatStartedAt: null,
+            },
+          };
+        }
+      },
     };
   } catch {
     // Se a página bloquear escrita no window, seguimos sem o guard.
@@ -499,6 +551,8 @@
   const BRIDGE_POLL_ERROR_BACKOFF_MS = 250;
   const BRIDGE_EVENTS_BASE_BACKOFF_MS = 500;
   const BRIDGE_EVENTS_MAX_BACKOFF_MS = 15000;
+  const BRIDGE_INSTALL_RETRY_INITIAL_MS = 1500;
+  const BRIDGE_INSTALL_RETRY_MAX_MS = 15000;
   const BRIDGE_HEARTBEAT_PING_MS = 30000;
   const TAB_BROKER_REPORT_MIN_MS = 3000;
   const NATIVE_BRIDGE_TRANSPORT_COOLDOWN_MS = 60_000;
@@ -2494,7 +2548,11 @@
       lastHeartbeatAt: bridgeState.lastHeartbeatAt || null,
       eventsConnected: bridgeState.eventsConnected,
       polling: bridgeState.polling,
+      heartbeatTimerActive: !!bridgeState.heartbeatTimer,
+      heartbeatInFlight: bridgeState.heartbeatInFlight,
       lastError: bridgeState.lastError || null,
+      lastHeartbeatStartedAt: bridgeState.lastHeartbeatStartedAt || null,
+      lastExtensionPingOkAt: bridgeState.lastExtensionPingOkAt || null,
     },
     tabIgnored: isTabIgnored(),
     tabClaim: tabClaimSummary(),
@@ -3281,6 +3339,43 @@
     error.cause = lastError;
     error.attempts = totalAttempts;
     throw error;
+  };
+
+  const shouldUseContentPrivateApiFallback = (response, err = null) => {
+    const code = response?.code || response?.reason || response?.errorCode || err?.code || '';
+    const message = String(response?.message || response?.error || err?.message || '');
+    return (
+      !response ||
+      code === 'private_api_request_failed' ||
+      code === 'private_api_empty_extension_response' ||
+      /Tempo esgotado ao falar com a extensão|message channel closed|Extension context invalidated/i.test(
+        message,
+      )
+    );
+  };
+
+  const splitPrivateApiTimeouts = (timeoutMs) => {
+    const totalMs = Math.max(5000, Number(timeoutMs || 30_000));
+    const backgroundMs = Math.max(2500, Math.min(6000, totalMs - 2500));
+    const fallbackMs = Math.max(1000, totalMs - backgroundMs - 500);
+    return { totalMs, backgroundMs, fallbackMs };
+  };
+
+  const runContentPrivateApiFallback = async (type, args = {}) => {
+    if (type === 'read-chat' && typeof readGeminiPrivateChatFromContent === 'function') {
+      return readGeminiPrivateChatFromContent(args);
+    }
+    if (type === 'list-chats' && typeof listGeminiPrivateChatsFromContent === 'function') {
+      return listGeminiPrivateChatsFromContent(args);
+    }
+    if (type === 'session-status' && typeof checkGeminiPrivateSessionFromContent === 'function') {
+      return checkGeminiPrivateSessionFromContent(args);
+    }
+    return {
+      ok: false,
+      code: 'content_private_api_fallback_unavailable',
+      message: 'Fallback privado direto do content script indisponivel neste build.',
+    };
   };
 
   const tabClaimSummary = () => {
@@ -5450,14 +5545,41 @@
     if (command.type === 'private-api-read-chat') {
       const requestedChatId =
         normalizeExpectedChatId(command.args || {}) || extractChatId(location.pathname);
-      const response = await extensionSendMessage(
-        {
-          type: 'gemini-md-export/private-api-read-chat',
-          chatId: command.args?.chatId || requestedChatId,
-          title: command.args?.title || scrapeTitleFromDocument(document),
-        },
-        { timeoutMs: Math.max(5000, Number(command.args?.timeoutMs || 30_000)) },
-      );
+      const timeoutMs = Math.max(5000, Number(command.args?.timeoutMs || 30_000));
+      const privateTimeouts = splitPrivateApiTimeouts(timeoutMs);
+      const fallbackArgs = {
+        chatId: command.args?.chatId || requestedChatId,
+        title: command.args?.title || scrapeTitleFromDocument(document),
+        timeoutMs: privateTimeouts.fallbackMs,
+        downloadAssets: command.args?.downloadAssets === true,
+        assetsRelDir: command.args?.assetsRelDir || null,
+      };
+      let response = null;
+      let backgroundError = null;
+      try {
+        response = await extensionSendMessage(
+          {
+            type: 'gemini-md-export/private-api-read-chat',
+            ...fallbackArgs,
+            timeoutMs: Math.max(1000, privateTimeouts.backgroundMs - 500),
+          },
+          { timeoutMs: privateTimeouts.backgroundMs },
+        );
+      } catch (err) {
+        backgroundError = err;
+      }
+      if (shouldUseContentPrivateApiFallback(response, backgroundError)) {
+        const fallback = await runContentPrivateApiFallback('read-chat', fallbackArgs);
+        return {
+          ...(fallback || {}),
+          transport: {
+            ...(fallback?.transport || {}),
+            backgroundAttempt: backgroundError
+              ? { ok: false, message: backgroundError.message || String(backgroundError) }
+              : response || null,
+          },
+        };
+      }
       return response || {
         ok: false,
         code: 'private_api_empty_extension_response',
@@ -5466,13 +5588,38 @@
     }
 
     if (command.type === 'private-api-list-chats') {
-      const response = await extensionSendMessage(
-        {
-          type: 'gemini-md-export/private-api-list-chats',
-          limit: command.args?.limit || 200,
-        },
-        { timeoutMs: Math.max(5000, Number(command.args?.timeoutMs || 30_000)) },
-      );
+      const timeoutMs = Math.max(5000, Number(command.args?.timeoutMs || 30_000));
+      const privateTimeouts = splitPrivateApiTimeouts(timeoutMs);
+      const fallbackArgs = {
+        limit: command.args?.limit || 200,
+        timeoutMs: privateTimeouts.fallbackMs,
+      };
+      let response = null;
+      let backgroundError = null;
+      try {
+        response = await extensionSendMessage(
+          {
+            type: 'gemini-md-export/private-api-list-chats',
+            ...fallbackArgs,
+            timeoutMs: Math.max(1000, privateTimeouts.backgroundMs - 500),
+          },
+          { timeoutMs: privateTimeouts.backgroundMs },
+        );
+      } catch (err) {
+        backgroundError = err;
+      }
+      if (shouldUseContentPrivateApiFallback(response, backgroundError)) {
+        const fallback = await runContentPrivateApiFallback('list-chats', fallbackArgs);
+        return {
+          ...(fallback || {}),
+          transport: {
+            ...(fallback?.transport || {}),
+            backgroundAttempt: backgroundError
+              ? { ok: false, message: backgroundError.message || String(backgroundError) }
+              : response || null,
+          },
+        };
+      }
       return response || {
         ok: false,
         code: 'private_api_empty_extension_response',
@@ -5481,12 +5628,37 @@
     }
 
     if (command.type === 'private-api-session-status') {
-      const response = await extensionSendMessage(
-        {
-          type: 'gemini-md-export/private-api-session-status',
-        },
-        { timeoutMs: Math.max(5000, Number(command.args?.timeoutMs || 20_000)) },
-      );
+      const timeoutMs = Math.max(5000, Number(command.args?.timeoutMs || 20_000));
+      const privateTimeouts = splitPrivateApiTimeouts(timeoutMs);
+      const fallbackArgs = {
+        timeoutMs: privateTimeouts.fallbackMs,
+      };
+      let response = null;
+      let backgroundError = null;
+      try {
+        response = await extensionSendMessage(
+          {
+            type: 'gemini-md-export/private-api-session-status',
+            ...fallbackArgs,
+            timeoutMs: Math.max(1000, privateTimeouts.backgroundMs - 500),
+          },
+          { timeoutMs: privateTimeouts.backgroundMs },
+        );
+      } catch (err) {
+        backgroundError = err;
+      }
+      if (shouldUseContentPrivateApiFallback(response, backgroundError)) {
+        const fallback = await runContentPrivateApiFallback('session-status', fallbackArgs);
+        return {
+          ...(fallback || {}),
+          transport: {
+            ...(fallback?.transport || {}),
+            backgroundAttempt: backgroundError
+              ? { ok: false, message: backgroundError.message || String(backgroundError) }
+              : response || null,
+          },
+        };
+      }
       return response || {
         ok: false,
         authenticated: false,
@@ -9394,6 +9566,38 @@
     bridgeState.polling = false;
   };
 
+  let bridgeInstallRetryTimer = 0;
+  let bridgeInstallRetryDelayMs = BRIDGE_INSTALL_RETRY_INITIAL_MS;
+
+  const clearBridgeInstallRetry = () => {
+    if (bridgeInstallRetryTimer) {
+      clearTimeout(bridgeInstallRetryTimer);
+      bridgeInstallRetryTimer = 0;
+    }
+  };
+
+  const scheduleExtensionBridgeInstallRetry = (reason = 'bridge-start-retry') => {
+    if (bridgeInstallRetryTimer || bridgeState.started || isTabIgnored()) return;
+    const delayMs = bridgeInstallRetryDelayMs;
+    bridgeInstallRetryDelayMs = Math.min(
+      BRIDGE_INSTALL_RETRY_MAX_MS,
+      Math.round(bridgeInstallRetryDelayMs * 1.7),
+    );
+    bridgeInstallRetryTimer = setTimeout(() => {
+      bridgeInstallRetryTimer = 0;
+      if (bridgeState.started || isTabIgnored()) return;
+      installExtensionBridge()
+        .catch((err) => {
+          bridgeState.lastError = err?.message || String(err);
+        })
+        .finally(() => {
+          if (!bridgeState.started) scheduleExtensionBridgeInstallRetry('bridge-start-retry');
+        });
+    }, delayMs);
+    bridgeInstallRetryTimer?.unref?.();
+    bridgeState.lastError ||= `bridge start retry scheduled: ${reason}`;
+  };
+
   const installExtensionBridge = async () => {
     if (!isExtensionContext || bridgeState.started) return;
     if (isTabIgnored()) {
@@ -9401,37 +9605,46 @@
       return;
     }
 
+    clearBridgeInstallRetry();
     bridgeState.clientId = getOrCreateChatClientId();
     refreshExtensionContextSoon({ force: true, reason: 'install' });
 
-    const client = getChatBridgeClient();
-    await client.start({ connectEvents: false, startHeartbeatTimer: false });
-    bridgeState.started = client.state.started;
-    connectBridgeEvents();
+    try {
+      const client = getChatBridgeClient();
+      await client.start({ connectEvents: false, startHeartbeatTimer: false });
+      bridgeState.started = client.state.started;
+      connectBridgeEvents();
 
-    const heartbeatTick = async () => {
-      try {
-        await sendBridgeHeartbeat();
-      } catch {
-        // bridge offline; retry silently
-      }
-    };
+      const heartbeatTick = async () => {
+        try {
+          await sendBridgeHeartbeat();
+        } catch {
+          // bridge offline; retry silently
+        }
+      };
 
-    await heartbeatTick();
-    bridgeState.heartbeatTimer = setInterval(heartbeatTick, BRIDGE_HEARTBEAT_MS);
-    pollBridgeCommands(!bridgeState.eventsConnected);
-    resumePendingBridgeCommandSoon();
-    log('bridge da extensão iniciado', {
-      bridgeBaseUrl: BRIDGE_BASE_URL,
-      clientId: bridgeState.clientId,
-      tabId: bridgeState.tabId,
-    });
+      await heartbeatTick();
+      bridgeState.heartbeatTimer = setInterval(heartbeatTick, BRIDGE_HEARTBEAT_MS);
+      bridgeInstallRetryDelayMs = BRIDGE_INSTALL_RETRY_INITIAL_MS;
+      pollBridgeCommands(!bridgeState.eventsConnected);
+      resumePendingBridgeCommandSoon();
+      log('bridge da extensão iniciado', {
+        bridgeBaseUrl: BRIDGE_BASE_URL,
+        clientId: bridgeState.clientId,
+        tabId: bridgeState.tabId,
+      });
+    } catch (err) {
+      bridgeState.lastError = err?.message || String(err);
+      scheduleExtensionBridgeInstallRetry('install-failed');
+      throw err;
+    }
   };
 
   // Para a bridge nesta aba sem mexer no MCP nem na extensão. O long-poll
   // sai sozinho na próxima iteração do `while (bridgeState.started)`; o MCP
   // limpa o cliente sozinho via timeout de stale.
   const stopExtensionBridge = () => {
+    clearBridgeInstallRetry();
     if (chatBridgeClient) {
       chatBridgeClient.stop();
     }
@@ -9454,6 +9667,7 @@
       runtime.stop = () => {
         stopExtensionBridge();
       };
+      runtime.status = () => contentScriptRuntimeStatus();
     }
   } catch {
     // Guard de runtime é diagnóstico; não deve bloquear a extensão.
@@ -10711,6 +10925,7 @@
     installExtensionBridge().catch((err) => {
       warn('Falha ao iniciar bridge da extensão.', err);
     });
+    scheduleExtensionBridgeInstallRetry('bootstrap-watchdog');
 
     // O Gemini é uma SPA que re-renderiza o body; precisamos re-injetar o
     // botão quando isso acontece.

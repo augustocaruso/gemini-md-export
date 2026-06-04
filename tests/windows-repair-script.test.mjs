@@ -35,3 +35,12 @@ test('Windows diagnostics prefer consolidated environment report before reinstal
   assert.match(installer, /\/agent\/diagnostics/);
   assert.match(installer, /gemini_support \{ action: "diagnose" \}/);
 });
+
+test('Windows release builders do not package macOS AppleDouble files', () => {
+  const prebuilt = readFileSync(resolve(ROOT, 'scripts', 'build-release-windows-prebuilt.mjs'), 'utf-8');
+  const standalone = readFileSync(resolve(ROOT, 'scripts', 'build-release-windows.mjs'), 'utf-8');
+
+  for (const source of [prebuilt, standalone]) {
+    assert.match(source, /\\\._\|\\\.DS_Store\$/);
+  }
+});

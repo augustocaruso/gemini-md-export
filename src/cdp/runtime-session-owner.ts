@@ -83,7 +83,13 @@ export const createCdpRuntimeSessionOwner = ({
     const cached = endpointBrowserUrls.get(endpoint);
     if (cached) return cached;
     const version = await fetchVersion(endpoint, options.fetchImpl || fetchImpl).catch(() => null);
-    const browserWebSocketUrl = browserWebSocketUrlFromVersion(version);
+    const browserWebSocketUrl =
+      browserWebSocketUrlFromVersion(version) ||
+      (typeof options.devToolsActivePortContents === 'string'
+        ? parseDevToolsActivePort(options.devToolsActivePortContents).webSocketDebuggerUrl
+        : options.devToolsActivePortFile
+          ? readDevToolsActivePort(String(options.devToolsActivePortFile)).webSocketDebuggerUrl
+          : '');
     if (browserWebSocketUrl) endpointBrowserUrls.set(endpoint, browserWebSocketUrl);
     return browserWebSocketUrl;
   };

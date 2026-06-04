@@ -1,23 +1,15 @@
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
 
 import {
   importRuntimeNodeDependency,
   loadMarkdownDbFixVaultRecords,
-  runtimeDependencyInstallCommand,
 } from '../build/ts/mcp/markdown-db-vault-adapter.js';
 
-test('MarkdownDB runtime installer routes npm through cmd.exe on Windows', () => {
-  assert.deepEqual(runtimeDependencyInstallCommand('win32', { ComSpec: 'C:\\Windows\\System32\\cmd.exe' }), {
-    file: 'C:\\Windows\\System32\\cmd.exe',
-    args: ['/d', '/s', '/c', 'npm', 'install', '--omit=dev'],
-  });
-});
-
-test('MarkdownDB adapter bootstraps runtime npm dependencies when mddb is not installed', async () => {
+test('MarkdownDB adapter refuses missing runtime dependencies instead of running npm install', async () => {
   const calls = [];
   const root = resolve(tmpdir(), `gme-markdown-db-runtime-${process.pid}-${Date.now()}`);
   mkdirSync(root, { recursive: true });
@@ -30,24 +22,23 @@ test('MarkdownDB adapter bootstraps runtime npm dependencies when mddb is not in
   const moduleDir = join(root, 'build', 'ts', 'mcp');
   mkdirSync(moduleDir, { recursive: true });
   try {
-    const result = await importRuntimeNodeDependency('mddb', {
-      moduleDir,
-      importModule: async (name) => {
-        calls.push(`import:${name}`);
-        if (calls.length === 1) {
+    await assert.rejects(
+      importRuntimeNodeDependency('mddb', {
+        moduleDir,
+        importModule: async (name) => {
+          calls.push(`import:${name}`);
           throw Object.assign(new Error("Cannot find package 'mddb'"), {
             code: 'ERR_MODULE_NOT_FOUND',
           });
-        }
-        return { MarkdownDB: class FixtureMarkdownDb {} };
-      },
-      installRuntimeDependencies: async (packageRoot) => {
-        calls.push(`install:${packageRoot}`);
-      },
-    });
+        },
+        installRuntimeDependencies: async (packageRoot) => {
+          calls.push(`install:${packageRoot}`);
+        },
+      }),
+      /Cannot find package 'mddb'/,
+    );
 
-    assert.equal(typeof result.MarkdownDB, 'function');
-    assert.deepEqual(calls, ['import:mddb', `install:${root}`, 'import:mddb']);
+    assert.deepEqual(calls, ['import:mddb']);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -59,7 +50,16 @@ test('MarkdownDB adapter indexes Gemini exports and reports missing local assets
   const nested = join(vault, 'Gemini');
   const chatId = 'abc123abc123';
   const chatPath = join(nested, `${chatId}.md`);
+  const internalPath = join(
+    vault,
+    '.gemini-md-export-fix',
+    'repair',
+    'private-api-backups',
+    '20260603-000000',
+    `${chatId}.md`,
+  );
   mkdirSync(nested, { recursive: true });
+  mkdirSync(dirname(internalPath), { recursive: true });
   writeFileSync(
     chatPath,
     [
@@ -83,12 +83,33 @@ test('MarkdownDB adapter indexes Gemini exports and reports missing local assets
     ].join('\n'),
     'utf-8',
   );
+  writeFileSync(
+    internalPath,
+    [
+      '---',
+      'chat_id: abc123abc123',
+      'title: "Backup interno nao deve entrar no vault"',
+      'url: https://gemini.google.com/app/abc123abc123',
+      'tags: [gemini-export]',
+      '---',
+      '',
+      '![Backup asset](assets/abc123abc123/internal-missing.png)',
+      '',
+    ].join('\n'),
+    'utf-8',
+  );
 
   try {
     const result = await loadMarkdownDbFixVaultRecords({ vaultDir: vault });
+    assert.equal(
+      existsSync(join(vault, '.gemini-md-export', 'markdown-db')),
+      false,
+      'cache padrao nao deve ser criado dentro do vault sincronizado do usuario',
+    );
     assert.equal(result.summary.totalMarkdownFiles, 1);
     assert.equal(result.summary.recordsWithMissingAssets, 1);
-    assert.equal(existsSync(join(vault, '.gemini-md-export', 'markdown-db', 'markdown-db.sqlite')), true);
+    assert.equal(existsSync(join(result.summary.cacheDir, 'markdown-db.sqlite')), true);
+    assert.equal(result.summary.cacheDir.startsWith(vault), false);
     assert.equal(result.records.length, 1);
     assert.equal(result.records[0].chatId, chatId);
     assert.equal(result.records[0].title, 'Chat com imagem');

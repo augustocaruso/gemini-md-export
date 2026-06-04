@@ -6,21 +6,45 @@ import test from 'node:test';
 
 import {
   buildFixVaultCombinedReport,
+  buildFixVaultPrivateRepairExportOptions,
   buildFixVaultPrivateRepairTargets,
   buildFixVaultRepairAdapterPlan,
   buildWebRepairArgs,
 } from '../build/ts/core/fix-vault-flow.js';
-import { runFixVaultCommand } from '../build/ts/cli/fix-vault-runner.js';
+import {
+  privateRepairUnavailableForJob,
+  runFixVaultCommand,
+} from '../build/ts/cli/fix-vault-runner.js';
+
+const minimalReportArgs = (overrides = {}) => ({
+  generatedAt: '2026-05-21T00:00:00Z',
+  vaultDir: '/tmp/vault',
+  takeout: 'Minhaatividade.html',
+  repairExitCode: 0,
+  diagnosisExitCode: 2,
+  webRepairExitCode: 0,
+  webRepairSkipped: false,
+  webRepairTargetCount: 1,
+  metadataExitCode: 0,
+  repairReportDir: '/tmp/repair',
+  repairPreliminaryReportPath: '/tmp/repair/preliminary.json',
+  metadataDiagnosisReportPath: '/tmp/metadata-diagnosis.json',
+  metadataReportPath: '/tmp/metadata-backfill.json',
+  repairSummary: {
+    verificationQueueSize: 1,
+    wikiReviewQueueSize: 0,
+    takeoutEvidence: { summary: { enabled: true } },
+  },
+  diagnosisSummary: null,
+  metadataSummary: null,
+  warnings: [],
+  ...overrides,
+});
 
 test('fix-vault marca reparo web como bloqueado quando chats nao abrem nesta conta', () => {
-  const report = buildFixVaultCombinedReport({
-    generatedAt: '2026-05-21T00:00:00Z',
-    vaultDir: '/tmp/vault',
-    takeout: 'Minhaatividade.html',
-    repairExitCode: 0,
-    diagnosisExitCode: 2,
+  const report = buildFixVaultCombinedReport(minimalReportArgs({
+    repairAdapter: 'web',
     webRepairExitCode: 2,
-    webRepairSkipped: false,
     webRepairTargetCount: 59,
     webRepairUnavailable: {
       code: 'gemini_web_chats_unavailable',
@@ -29,24 +53,30 @@ test('fix-vault marca reparo web como bloqueado quando chats nao abrem nesta con
       failedChatIds: ['aaaaaaaaaaaa', 'bbbbbbbbbbbb', 'cccccccccccc'],
     },
     metadataExitCode: 1,
-    repairReportDir: '/tmp/repair',
-    repairPreliminaryReportPath: '/tmp/repair/preliminary.json',
-    metadataDiagnosisReportPath: '/tmp/metadata-diagnosis.json',
-    metadataReportPath: '/tmp/metadata-backfill.json',
-    repairSummary: {
-      verificationQueueSize: 59,
-      wikiReviewQueueSize: 0,
-      takeoutEvidence: { summary: { enabled: true } },
-    },
-    diagnosisSummary: null,
-    metadataSummary: null,
-    warnings: [],
-  });
+    repairSummary: { verificationQueueSize: 59, wikiReviewQueueSize: 0, takeoutEvidence: { summary: { enabled: true } } },
+  }));
 
   assert.equal(report.ok, false);
   assert.equal(report.steps[2].name, 'web-repair');
   assert.equal(report.steps[2].status, 'blocked');
   assert.equal(report.summary.webRepair.unavailable?.code, 'gemini_web_chats_unavailable');
+});
+
+test('fix-vault nomeia o step de reparo privado como private-api-repair', () => {
+  const report = buildFixVaultCombinedReport(minimalReportArgs({ repairAdapter: 'private_api' }));
+
+  assert.equal(report.steps[2].name, 'private-api-repair');
+  assert.equal(report.steps[2].status, 'completed');
+  assert.equal(report.summary.chatRepair.targetCount, 1);
+  assert.equal(report.summary.chatRepair.adapter, 'private_api');
+  assert.equal(report.summary.webRepair.targetCount, 1);
+});
+
+test('fix-vault preserva web-repair quando o fallback legado e usado', () => {
+  const report = buildFixVaultCombinedReport(minimalReportArgs({ repairAdapter: 'web' }));
+
+  assert.equal(report.steps[2].name, 'web-repair');
+  assert.equal(report.steps[2].status, 'completed');
 });
 
 test('fix-vault repassa claim explicita para o reparo web sem escolher outra aba', () => {
@@ -112,6 +142,41 @@ test('fix-vault monta fila da API privada a partir dos registros do indice Markd
   }
 });
 
+test('fix-vault monta alvo privado a partir da diagnosis quando MarkdownDB nao traz record', () => {
+  const root = resolve(tmpdir(), `gme-fix-vault-diagnosis-target-${process.pid}-${Date.now()}`);
+  const vault = join(root, 'vault');
+  const chatPath = join(vault, '003ef13f36239f09.md');
+  mkdirSync(vault, { recursive: true });
+  writeFileSync(chatPath, '# raw export suspeito\n', 'utf-8');
+
+  try {
+    const targets = buildFixVaultPrivateRepairTargets({
+      vaultDir: vault,
+      diagnosisReport: {
+        items: [
+          {
+            chatId: '003ef13f36239f09',
+            file: '003ef13f36239f09.md',
+            status: 'export_error',
+            title: 'Raw suspeito',
+          },
+        ],
+      },
+      vaultRecords: [],
+    });
+
+    assert.equal(targets.length, 1);
+    assert.equal(targets[0].chatId, '003ef13f36239f09');
+    assert.equal(targets[0].sourcePath, chatPath);
+    assert.equal(targets[0].outputDir, vault);
+    assert.equal(targets[0].filename, '003ef13f36239f09.md');
+    assert.equal(targets[0].url, 'https://gemini.google.com/app/003ef13f36239f09');
+    assert.deepEqual(targets[0].reasons, ['metadata_export_error']);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('fix-vault private repair progress surfaces unified export and Python fallback distinctly', () => {
   const source = readFileSync(
     resolve(import.meta.dirname, '..', 'src', 'cli', 'fix-vault-runner.ts'),
@@ -123,6 +188,76 @@ test('fix-vault private repair progress surfaces unified export and Python fallb
   assert.match(source, /Reparando exports\/assets pela API privada/);
 });
 
+test('fix-vault private repair reuses validated private session without browser lifecycle effects', () => {
+  const options = buildFixVaultPrivateRepairExportOptions({
+    bridgeUrl: 'http://127.0.0.1:47283',
+    wakeBrowser: true,
+    allowReload: true,
+    openIfMissing: true,
+    activateTab: true,
+    clientId: 'client-1',
+    claimId: 'claim-1',
+    tabId: 42,
+    session: 'session-1',
+    waitMs: 90000,
+    privateReadWaitMs: 45000,
+    bridgeKeepAliveMs: 900000,
+  });
+
+  assert.equal(options.bridgeUrl, 'http://127.0.0.1:47283');
+  assert.equal(options.clientId, 'client-1');
+  assert.equal(options.claimId, 'claim-1');
+  assert.equal(options.tabId, 42);
+  assert.equal(options.sessionId, 'session-1');
+  assert.equal(options.waitMs, 90000);
+  assert.equal(options.privateReadWaitMs, 45000);
+  assert.equal(options.browserKeepAliveMs, 900000);
+  assert.equal(options.wakeBrowser, false);
+  assert.equal(options.allowReload, false);
+  assert.equal(options.openIfMissing, false);
+  assert.equal(options.activateTab, false);
+});
+
+test('fix-vault private repair report keeps failure code counts and samples', () => {
+  const unavailable = privateRepairUnavailableForJob({
+    failureCount: 3,
+    savedFiles: [],
+    failures: [
+      {
+        index: 1,
+        chatId: 'aaaaaaaaaaaa',
+        title: 'A',
+        code: 'bridge_private_read_failed',
+        error: 'falha A',
+      },
+      {
+        index: 2,
+        chatId: 'bbbbbbbbbbbb',
+        title: 'B',
+        code: 'bridge_private_read_failed',
+        error: 'falha B',
+      },
+      {
+        index: 3,
+        chatId: 'cccccccccccc',
+        title: 'C',
+        code: 'gemini_private_protocol_failed',
+        error: 'falha C',
+      },
+    ],
+  });
+
+  assert.equal(unavailable?.code, 'gemini_private_api_repair_failed');
+  assert.deepEqual(unavailable?.failureCodeCounts, {
+    bridge_private_read_failed: 2,
+    gemini_private_protocol_failed: 1,
+  });
+  assert.deepEqual(
+    unavailable?.failureSamples?.map((failure) => failure.chatId),
+    ['aaaaaaaaaaaa', 'bbbbbbbbbbbb', 'cccccccccccc'],
+  );
+});
+
 test('fix-vault private repair delegates to the unified private export workflow', () => {
   const fixVaultSource = readFileSync(
     resolve(import.meta.dirname, '..', 'src', 'cli', 'fix-vault-runner.ts'),
@@ -132,16 +267,52 @@ test('fix-vault private repair delegates to the unified private export workflow'
     resolve(import.meta.dirname, '..', 'src', 'cli', 'private-api-selected-export.ts'),
     'utf-8',
   );
-  const bridgeCall = exportSource.indexOf('return await runPrivateApiSelectedExportViaBridge');
+  const bridgeMode = exportSource.indexOf('const useBridgePrivateRead = shouldAttemptBridgePrivateExport');
+  const browserBackgroundCall = exportSource.indexOf('runtimeDeps.runBrowserBackgroundReadChat({');
+  const pythonReadCall = exportSource.indexOf('runtimeDeps.runReadChat({');
+  const pythonBootstrapGate = exportSource.indexOf('if (!useBridgePrivateRead)');
   const pythonCall = exportSource.indexOf('const bootstrapResult = await runtimeDeps.bootstrapPythonSidecar');
+  const privateRepairSource = fixVaultSource.slice(
+    fixVaultSource.indexOf('const runPrivateApiRepair'),
+    fixVaultSource.indexOf('export const runFixVaultCommand'),
+  );
 
-  assert.match(fixVaultSource, /runPrivateApiSelectedExport\(\{/);
-  assert.match(fixVaultSource, /bridgeUrl: parsed\.flags\.bridgeUrl/);
-  assert.ok(bridgeCall > 0, 'export privado deve tentar a bridge/extensao');
-  assert.ok(pythonCall > 0, 'export privado ainda deve manter fallback Python interno');
+  assert.match(fixVaultSource, /runPrivateApiSelectedExport\(\s*\{/);
+  assert.match(fixVaultSource, /buildFixVaultPrivateRepairExportOptions\(parsed\.flags\)/);
+  assert.match(privateRepairSource, /recoverBrowserBackgroundSession/);
+  assert.doesNotMatch(privateRepairSource, /wakeBrowser: parsed\.flags\.wakeBrowser/);
+  assert.doesNotMatch(privateRepairSource, /allowReload: parsed\.flags\.allowReload/);
+  assert.doesNotMatch(privateRepairSource, /openIfMissing: parsed\.flags\.openIfMissing/);
+  assert.doesNotMatch(privateRepairSource, /activateTab: parsed\.flags\.activateTab/);
+  const preparePrivateRepair = fixVaultSource.indexOf('await preparePrivateApiRepair?.()');
+  const unifiedPrivateExport = fixVaultSource.indexOf('runPrivateApiSelectedExport(');
+  assert.ok(preparePrivateRepair > 0, 'fix-vault deve chamar o preflight do reparo privado');
   assert.ok(
-    bridgeCall < pythonCall,
-    'export privado deve tentar browser/background via bridge antes do sidecar Python',
+    preparePrivateRepair < unifiedPrivateExport,
+    'fix-vault precisa preparar a bridge antes do reparo privado unificado',
+  );
+  const cliSource = readFileSync(resolve(import.meta.dirname, '..', 'bin', 'gemini-md-export.mjs'), 'utf-8');
+  const privatePreflightSource = readFileSync(
+    resolve(import.meta.dirname, '..', 'src', 'cli', 'fix-vault-private-preflight.ts'),
+    'utf-8',
+  );
+  const fixVaultBlock =
+    cliSource.match(/const runFixVault = async \(parsed, streams = \{\}\) => \{[\s\S]*?\n\};\n\nconst runMetadata/)?.[0] ||
+    '';
+  assert.match(fixVaultBlock, /createFixVaultBrowserPrivateSessionPreflight/);
+  assert.match(privatePreflightSource, /ensureBridgeAvailable\(flags, ui\)/);
+  assert.doesNotMatch(
+    fixVaultBlock,
+    /ensureReadyForExport/,
+    'fix-vault private repair deve permitir native broker\/service worker sem content client pronto',
+  );
+  assert.ok(bridgeMode > 0, 'export privado deve decidir modo bridge/background');
+  assert.ok(browserBackgroundCall > 0, 'export privado deve ler pelo browser/background');
+  assert.ok(pythonCall > 0, 'export privado ainda deve manter fallback Python interno');
+  assert.ok(pythonBootstrapGate > 0, 'bootstrap Python deve ser pulado no modo bridge');
+  assert.ok(
+    browserBackgroundCall < pythonReadCall,
+    'export privado deve tentar browser/background antes do read Python',
   );
 });
 
@@ -253,4 +424,126 @@ process.exit(0);
   assert.match(stdoutText, /Datas bloqueadas ate o reparo terminar/);
   assert.doesNotMatch(stdoutText, /Atualizando datas do vault/);
   assert.match(stderrText, /web repair failed/);
+});
+
+test('fix-vault transforma falha de preflight privado em relatório acionável', async () => {
+  const root = resolve(tmpdir(), `gme-fix-vault-private-preflight-${process.pid}-${Date.now()}`);
+  const vault = join(root, 'vault');
+  const report = join(root, 'fix-vault-report.json');
+  const metadataRan = join(root, 'metadata-ran');
+  const repairScript = join(root, 'repair.mjs');
+  const metadataScript = join(root, 'metadata.mjs');
+  mkdirSync(vault, { recursive: true });
+  const chatPath = join(vault, 'aaaaaaaaaaaa.md');
+  writeFileSync(
+    chatPath,
+    [
+      '---',
+      'chat_id: aaaaaaaaaaaa',
+      'title: "Chat com asset faltando"',
+      'url: https://gemini.google.com/app/aaaaaaaaaaaa',
+      'tags: [gemini-export]',
+      '---',
+      '',
+      '## 🧑 Usuário',
+      '',
+      'pergunta',
+      '',
+      '---',
+      '',
+      '## 🤖 Gemini',
+      '',
+      'resposta ![asset faltando](assets/aaaaaaaaaaaa/missing.png)',
+      '',
+    ].join('\n'),
+    'utf-8',
+  );
+  writeFileSync(
+    repairScript,
+    `
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+const args = process.argv.slice(2);
+const reportDir = args[args.indexOf('--report-dir') + 1];
+mkdirSync(reportDir, { recursive: true });
+const preliminaryReportPath = join(reportDir, 'preliminary.json');
+writeFileSync(preliminaryReportPath, JSON.stringify({ verificationQueueSize: 1, wikiReviewQueueSize: 0 }));
+console.log(JSON.stringify({ preliminaryReportPath }));
+`,
+    'utf-8',
+  );
+  writeFileSync(
+    metadataScript,
+    `
+import { writeFileSync } from 'node:fs';
+const args = process.argv.slice(2);
+const report = args[args.indexOf('--report') + 1];
+if (args.includes('--diagnose-only')) {
+  writeFileSync(report, JSON.stringify({
+    summary: { totalChats: 1, filesRewritten: 0, datesMatched: 0, exportErrors: 1, sourceGaps: 0, complete: false },
+    rawExportDiagnostics: { enabled: true, diagnosed: 1, byCode: { missing_local_asset: 1 } },
+    items: [{
+      chatId: 'aaaaaaaaaaaa',
+      file: 'aaaaaaaaaaaa.md',
+      status: 'export_error',
+      diagnostic: { status: 'raw_export_suspected', repair: { action: 'reexport_chat' } }
+    }]
+  }));
+  process.exit(2);
+}
+writeFileSync(${JSON.stringify(metadataRan)}, 'ran');
+process.exit(0);
+`,
+    'utf-8',
+  );
+
+  try {
+    let stdoutText = '';
+    const result = await runFixVaultCommand({
+      parsed: {
+        flags: {
+          bridgeUrl: 'http://127.0.0.1:47283',
+          privateApi: true,
+          report,
+          takeout: join(root, 'Minhaatividade.html'),
+          format: 'plain',
+        },
+        positionals: [vault],
+      },
+      streams: {
+        stdout: {
+          write: (chunk) => {
+            stdoutText += String(chunk);
+            return true;
+          },
+        },
+        stderr: { write: () => true },
+      },
+      packageRoot: root,
+      repairPath: repairScript,
+      metadataPath: metadataScript,
+      preparePrivateApiRepair: async () => {
+        const err = new Error('Abra o Gemini no navegador logado e aguarde a extensao conectar.');
+        err.code = 'browser_session_not_connected';
+        err.nextAction = 'Recarregue uma aba Gemini logada e rode fix-vault novamente.';
+        throw err;
+      },
+    });
+
+    const combined = JSON.parse(readFileSync(report, 'utf-8'));
+    assert.equal(result.exitCode, 1);
+    assert.equal(combined.steps[2].status, 'failed');
+    assert.equal(combined.summary.webRepair.unavailable?.code, 'browser_session_not_connected');
+    assert.match(
+      combined.summary.webRepair.unavailable?.message || '',
+      /Abra o Gemini no navegador logado/,
+    );
+    assert.match(stdoutText, /Indexando vault com MarkdownDB/);
+    assert.equal(combined.steps[3].status, 'blocked');
+    assert.equal(existsSync(metadataRan), false);
+    assert.match(stdoutText, /Datas bloqueadas ate o reparo terminar/);
+    assert.doesNotMatch(stdoutText, /Atualizando datas do vault/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

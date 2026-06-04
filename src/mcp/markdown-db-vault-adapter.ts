@@ -1,7 +1,7 @@
-import { execFile } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
-import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
+import { existsSync, mkdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { canonicalGeminiChatUrl, parseChatId } from '../core/chat-id.js';
 import type { FixVaultPrivateRepairRecord } from '../core/fix-vault-flow.js';
 
@@ -33,15 +33,8 @@ type MarkdownDbModule = {
 };
 
 type RuntimeNodeDependencyImportDeps = {
-  moduleDir?: string;
   importModule?: (packageName: string) => Promise<unknown>;
-  installRuntimeDependencies?: (packageRoot: string) => Promise<void>;
 };
-
-type RuntimeDependencyInstallCommand = Readonly<{
-  file: string;
-  args: readonly string[];
-}>;
 
 type MarkdownAstNode = {
   type?: unknown;
@@ -58,70 +51,11 @@ export type MarkdownDbVaultLoadResult = Readonly<{
   }>;
 }>;
 
-const MARKDOWN_DB_CACHE_DIR = '.gemini-md-export/markdown-db';
-
-const moduleDir = dirname(fileURLToPath(import.meta.url));
-
-const readPackageName = (filePath: string): string | null => {
-  try {
-    const parsed = JSON.parse(readFileSync(filePath, 'utf-8')) as { name?: unknown };
-    return stringOrNull(parsed.name);
-  } catch {
-    return null;
-  }
-};
-
-const packageRootFromModuleDir = (startDir: string): string | null => {
-  let current = resolve(startDir);
-  for (let depth = 0; depth < 8; depth += 1) {
-    const packagePath = resolve(current, 'package.json');
-    if (existsSync(packagePath) && readPackageName(packagePath) === 'gemini-md-export') {
-      return current;
-    }
-    const parent = dirname(current);
-    if (parent === current) break;
-    current = parent;
-  }
-  return null;
-};
-
 const isMissingNodePackageError = (err: unknown, packageName: string): boolean => {
   const record = err && typeof err === 'object' ? (err as UnknownRecord) : {};
   if (record.code !== 'ERR_MODULE_NOT_FOUND') return false;
   return String((record as { message?: unknown }).message || '').includes(packageName);
 };
-
-export const runtimeDependencyInstallCommand = (
-  platform: NodeJS.Platform = process.platform,
-  env: Readonly<Record<string, string | undefined>> = process.env,
-): RuntimeDependencyInstallCommand => {
-  if (platform === 'win32') {
-    return {
-      file: env.ComSpec || env.COMSPEC || 'cmd.exe',
-      args: ['/d', '/s', '/c', 'npm', 'install', '--omit=dev'],
-    };
-  }
-  return { file: 'npm', args: ['install', '--omit=dev'] };
-};
-
-const installRuntimeDependencies = (packageRoot: string): Promise<void> =>
-  new Promise((resolveInstall, rejectInstall) => {
-    const command = runtimeDependencyInstallCommand();
-    const child = execFile(
-      command.file,
-      [...command.args],
-      {
-        cwd: packageRoot,
-        timeout: 180_000,
-        windowsHide: true,
-      },
-      (err) => {
-        if (err) rejectInstall(err);
-        else resolveInstall();
-      },
-    );
-    child.stdin?.end();
-  });
 
 export const importRuntimeNodeDependency = async (
   packageName: string,
@@ -132,11 +66,7 @@ export const importRuntimeNodeDependency = async (
     return (await importModule(packageName)) as UnknownRecord;
   } catch (err) {
     if (!isMissingNodePackageError(err, packageName)) throw err;
-    const packageRoot = packageRootFromModuleDir(deps.moduleDir || moduleDir);
-    if (!packageRoot) throw err;
-    const installer = deps.installRuntimeDependencies || installRuntimeDependencies;
-    await installer(packageRoot);
-    return (await importModule(packageName)) as UnknownRecord;
+    throw err;
   }
 };
 
@@ -217,6 +147,24 @@ const defaultIgnorePatterns = (vaultDir: string): RegExp[] =>
       new RegExp(`${vaultDir.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}.*[\\\\/]${dirName}[\\\\/]`),
   );
 
+const isInternalVaultRelativePath = (relativePath: string): boolean => {
+  const normalized = relativePath.replace(/\\/g, '/');
+  return (
+    normalized.startsWith('.git/') ||
+    normalized.startsWith('.obsidian/') ||
+    normalized.startsWith('.trash/') ||
+    normalized.startsWith('.gemini-md-export/') ||
+    normalized.startsWith('.gemini-md-export-fix/') ||
+    normalized.startsWith('.gemini-md-export-repair/') ||
+    normalized.startsWith('node_modules/')
+  );
+};
+
+export const defaultMarkdownDbCacheDir = (vaultDir: string): string => {
+  const hash = createHash('sha256').update(resolve(vaultDir)).digest('hex').slice(0, 16);
+  return resolve(tmpdir(), 'gemini-md-export', 'markdown-db', hash);
+};
+
 const metadataOf = (file: MarkdownDbFile): UnknownRecord => {
   const metadata = file.metadata;
   return metadata && typeof metadata === 'object' ? metadata : {};
@@ -234,6 +182,7 @@ const recordFromFile = ({
   const resolvedPath = resolve(sourcePath);
   const relativePath = relative(vaultDir, resolvedPath);
   if (!relativePath || relativePath.startsWith('..') || isAbsolute(relativePath)) return null;
+  if (isInternalVaultRelativePath(relativePath)) return null;
   const metadata = metadataOf(file);
   const chatId =
     parseChatId(metadata.chat_id) || parseChatId(metadata.url) || parseChatId(basename(sourcePath));
@@ -256,13 +205,13 @@ const recordFromFile = ({
 
 export const loadMarkdownDbFixVaultRecords = async ({
   vaultDir,
-  cacheDir = resolve(vaultDir, MARKDOWN_DB_CACHE_DIR),
+  cacheDir,
 }: Readonly<{
   vaultDir: string;
   cacheDir?: string;
 }>): Promise<MarkdownDbVaultLoadResult> => {
   const resolvedVaultDir = resolve(vaultDir);
-  const resolvedCacheDir = resolve(cacheDir);
+  const resolvedCacheDir = resolve(cacheDir || defaultMarkdownDbCacheDir(resolvedVaultDir));
   mkdirSync(resolvedCacheDir, { recursive: true });
   rmSync(resolve(resolvedCacheDir, 'markdown-db.sqlite'), { force: true });
   rmSync(resolve(resolvedCacheDir, '.markdowndb'), { recursive: true, force: true });
@@ -286,14 +235,25 @@ export const loadMarkdownDbFixVaultRecords = async ({
       },
     });
     const files = await db.getFiles({ extensions: ['md'] });
-    const records = files
+    const userFiles = files.filter((file) => {
+      const sourcePath = stringOrNull(file.file_path);
+      if (!sourcePath) return false;
+      const relativePath = relative(resolvedVaultDir, resolve(sourcePath));
+      return Boolean(
+        relativePath &&
+          !relativePath.startsWith('..') &&
+          !isAbsolute(relativePath) &&
+          !isInternalVaultRelativePath(relativePath),
+      );
+    });
+    const records = userFiles
       .map((file) => recordFromFile({ file, vaultDir: resolvedVaultDir }))
       .filter((record): record is FixVaultPrivateRepairRecord => record !== null)
       .sort((a, b) => a.relativePath.localeCompare(b.relativePath));
     return {
       records,
       summary: {
-        totalMarkdownFiles: files.length,
+        totalMarkdownFiles: userFiles.length,
         recordsWithMissingAssets: records.filter(
           (record) => (record.missingAssets || []).length > 0,
         ).length,

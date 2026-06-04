@@ -18,6 +18,12 @@ export const CDP_ENV_KEYS = Object.freeze([
   'GME_CDP_URL',
 ]);
 
+export const CDP_DEVTOOLS_ACTIVE_PORT_FILE_ENV_KEYS = Object.freeze([
+  'GEMINI_MD_EXPORT_CDP_DEVTOOLS_ACTIVE_PORT_FILE',
+  'GEMINI_MCP_CDP_DEVTOOLS_ACTIVE_PORT_FILE',
+  'GME_CDP_DEVTOOLS_ACTIVE_PORT_FILE',
+]);
+
 export type CdpRuntimeArgs = CdpRuntimeInput & Readonly<Record<string, unknown>>;
 
 export type CdpRuntimeOptions = Readonly<{
@@ -43,19 +49,35 @@ export const defaultCdpUrlFromEnv = (
   return '';
 };
 
+export const defaultDevToolsActivePortFileFromEnv = (
+  env: Record<string, string | undefined> = process.env,
+): string => {
+  for (const key of CDP_DEVTOOLS_ACTIVE_PORT_FILE_ENV_KEYS) {
+    const value = String(env[key] || '').trim();
+    if (value) return value;
+  }
+  return '';
+};
+
 export const cdpRuntimeInputForArgs = (
   args: CdpRuntimeArgs = {},
   options: CdpRuntimeOptions = {},
 ): CdpRuntimeInput => {
   const defaultCdpUrl =
     options.defaultCdpUrl !== undefined ? options.defaultCdpUrl : defaultCdpUrlFromEnv(options.env);
+  const defaultDevToolsActivePortFile = defaultDevToolsActivePortFileFromEnv(options.env);
   const input = {
     ...args,
     defaultCdpUrl,
+    ...(defaultDevToolsActivePortFile ? { defaultDevToolsActivePortFile } : {}),
   };
+  const devToolsActivePortFile = String(
+    input.devToolsActivePortFile || input.defaultDevToolsActivePortFile || '',
+  ).trim();
   return {
     ...input,
     cdpUrl: cdpUrlForRuntimeInput(input),
+    ...(devToolsActivePortFile ? { devToolsActivePortFile } : {}),
   };
 };
 

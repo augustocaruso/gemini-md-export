@@ -1,6 +1,14 @@
 import { canonicalGeminiChatUrl, parseChatId } from './chat-id.js';
+import { portableIsoSeconds } from './date.js';
 import { hashText } from './text-hash.js';
-import type { ChatAttachment, ChatId, ChatSnapshot, ChatTurn, SanitizedEvidence } from './types.js';
+import type {
+  ChatAttachment,
+  ChatId,
+  ChatSnapshot,
+  ChatTurn,
+  IsoDateTime,
+  SanitizedEvidence,
+} from './types.js';
 
 export const GEMINI_PRIVATE_BATCH_ENDPOINT =
   'https://gemini.google.com/_/BardChatUi/data/batchexecute';
@@ -263,10 +271,106 @@ const textAt = (
   renderer?: NormalizeGeminiPrivateReadChatSnapshotInput['markdownRenderer'],
 ): string => collectTextLeaves(value, [], renderer).join('\n\n');
 
+const PRIVATE_ASSET_URL_RE = /^https:\/\/[^\s]+googleusercontent\.com\/\S+$/i;
+const PRIVATE_ASSET_FILENAME_RE =
+  /^[^\s\\/][\s\S]*\.(?:png|jpe?g|gif|webp|heic|heif|bmp|svg|pdf|mp4|mov|webm|mp3|wav|m4a|aac|txt|csv|json|docx?|xlsx?|pptx?)$/i;
+const PRIVATE_ASSET_MIME_RE = /^[a-z]+\/[-+.\w]+$/i;
+
+type MarkdownWithAttachments = Readonly<{
+  markdown: string;
+  attachments: ChatAttachment[];
+}>;
+
+const isPrivateAssetUrl = (value: unknown): value is string =>
+  typeof value === 'string' && PRIVATE_ASSET_URL_RE.test(value.trim());
+
+const isPrivateAssetFilename = (value: unknown): value is string =>
+  typeof value === 'string' && PRIVATE_ASSET_FILENAME_RE.test(value.trim());
+
+const isPrivateAssetMime = (value: unknown): value is string =>
+  typeof value === 'string' && PRIVATE_ASSET_MIME_RE.test(value.trim());
+
+const attachmentKindFromMimeOrFilename = (
+  mime: string | null,
+  filename: string,
+): ChatAttachment['kind'] => {
+  const normalizedMime = String(mime || '').toLowerCase();
+  if (normalizedMime.startsWith('image/')) return 'image';
+  if (normalizedMime.startsWith('video/')) return 'video';
+  if (normalizedMime.startsWith('audio/')) return 'audio';
+  if (normalizedMime) return 'document';
+  if (/\.(?:png|jpe?g|gif|webp|heic|heif|bmp|svg)$/i.test(filename)) return 'image';
+  if (/\.(?:mp4|mov|webm)$/i.test(filename)) return 'video';
+  if (/\.(?:mp3|wav|m4a|aac)$/i.test(filename)) return 'audio';
+  return 'document';
+};
+
+const extractPrivateAssetTextBlocks = (markdown: string): MarkdownWithAttachments => {
+  const parts = markdown
+    .split(/\n{2,}/)
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  if (parts.length === 0) return { markdown: '', attachments: [] };
+
+  const cleanParts: string[] = [];
+  const attachments: ChatAttachment[] = [];
+  const seen = new Set<string>();
+  let index = 0;
+  while (index < parts.length) {
+    const filename = parts[index];
+    const url = parts[index + 1];
+    if (isPrivateAssetFilename(filename) && isPrivateAssetUrl(url)) {
+      let nextIndex = index + 2;
+      if (String(parts[nextIndex] || '').startsWith('$')) nextIndex += 1;
+      const mime = isPrivateAssetMime(parts[nextIndex]) ? parts[nextIndex] : null;
+      if (mime) nextIndex += 1;
+      const dedupeKey = `${filename}\n${url}`;
+      if (!seen.has(dedupeKey)) {
+        seen.add(dedupeKey);
+        attachments.push({
+          kind: attachmentKindFromMimeOrFilename(mime, filename),
+          label: filename,
+          url,
+        });
+      }
+      index = nextIndex;
+      continue;
+    }
+    cleanParts.push(parts[index]);
+    index += 1;
+  }
+
+  return {
+    markdown: cleanParts.join('\n\n'),
+    attachments,
+  };
+};
+
 const candidateText = (
   candidate: unknown,
   renderer?: NormalizeGeminiPrivateReadChatSnapshotInput['markdownRenderer'],
-): string => (Array.isArray(candidate) ? textAt(candidate[1], renderer) : '');
+): string => {
+  if (!Array.isArray(candidate)) return '';
+  return textAt(candidate[1], renderer) || textAt(candidate[22], renderer);
+};
+
+const candidateListFromTurn = (turn: unknown[]): unknown[] => {
+  const candidateContainer = Array.isArray(turn[3]) ? turn[3][0] : null;
+  if (!Array.isArray(candidateContainer)) return [];
+  return Array.isArray(candidateContainer[0]) ? candidateContainer : [candidateContainer];
+};
+
+const primaryAssistantCandidate = (
+  turn: unknown[],
+  renderer?: NormalizeGeminiPrivateReadChatSnapshotInput['markdownRenderer'],
+): unknown | null => {
+  const candidates = candidateListFromTurn(turn);
+  return (
+    candidates.find((candidate) => candidateText(candidate, renderer).trim()) ||
+    candidates.find((candidate) => artifactAttachments(candidate).length > 0) ||
+    null
+  );
+};
 
 const artifactAttachments = (candidate: unknown): ChatAttachment[] => {
   if (!Array.isArray(candidate) || candidate[12] === null || candidate[12] === undefined) {
@@ -281,22 +385,64 @@ const artifactAttachments = (candidate: unknown): ChatAttachment[] => {
   ];
 };
 
+const isoFromPrivateEpoch = (value: unknown): IsoDateTime | null => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null;
+  for (const divisor of [1, 1_000, 1_000_000]) {
+    const seconds = value / divisor;
+    if (seconds >= 946_684_800 && seconds <= 4_102_444_800) {
+      return portableIsoSeconds(seconds * 1_000);
+    }
+  }
+  return null;
+};
+
+const turnCreatedAt = (turn: unknown[]): IsoDateTime | null =>
+  Array.isArray(turn[4]) ? isoFromPrivateEpoch(turn[4][0]) : null;
+
+const turnDateRange = (
+  turns: ChatTurn[],
+): { dateCreated?: IsoDateTime; dateLastMessage?: IsoDateTime } => {
+  const dates = turns
+    .map((turn) => turn.createdAt)
+    .filter((date): date is IsoDateTime => Boolean(date))
+    .sort();
+  if (dates.length === 0) return {};
+  return {
+    dateCreated: dates[0],
+    dateLastMessage: dates.at(-1),
+  };
+};
+
 const turnPairsFromBody = (
   body: unknown,
   renderer?: NormalizeGeminiPrivateReadChatSnapshotInput['markdownRenderer'],
-): Array<{ user: string; assistant: string; attachments: ChatAttachment[] }> => {
+): Array<{
+  createdAt: IsoDateTime | null;
+  user: string;
+  userAttachments: ChatAttachment[];
+  assistant: string;
+  assistantAttachments: ChatAttachment[];
+}> => {
   const turns = Array.isArray(body) && Array.isArray(body[0]) ? body[0] : [];
-  const output: Array<{ user: string; assistant: string; attachments: ChatAttachment[] }> = [];
+  const output: Array<{
+    createdAt: IsoDateTime | null;
+    user: string;
+    userAttachments: ChatAttachment[];
+    assistant: string;
+    assistantAttachments: ChatAttachment[];
+  }> = [];
   for (const turn of turns) {
     if (!Array.isArray(turn)) continue;
-    const user = textAt(turn[2], renderer);
-    const candidate = Array.isArray(turn[3]) ? turn[3][0] : null;
-    const assistant = candidateText(candidate, renderer);
-    if (!user && !assistant) continue;
+    const user = extractPrivateAssetTextBlocks(textAt(turn[2], renderer));
+    const candidate = primaryAssistantCandidate(turn, renderer);
+    const assistant = extractPrivateAssetTextBlocks(candidateText(candidate, renderer));
+    if (!user.markdown && !assistant.markdown) continue;
     output.push({
-      user,
-      assistant,
-      attachments: artifactAttachments(candidate),
+      createdAt: turnCreatedAt(turn),
+      user: user.markdown,
+      userAttachments: user.attachments,
+      assistant: assistant.markdown,
+      assistantAttachments: [...assistant.attachments, ...artifactAttachments(candidate)],
     });
   }
   return output;
@@ -329,7 +475,8 @@ export const normalizeGeminiPrivateReadChatSnapshot = ({
         markdown: pair.user,
         textHash: hashText(pair.user),
         sourceOrder: index * 2,
-        attachments: [],
+        attachments: pair.userAttachments,
+        ...(pair.createdAt ? { createdAt: pair.createdAt } : {}),
       });
     }
     if (pair.assistant) {
@@ -338,7 +485,8 @@ export const normalizeGeminiPrivateReadChatSnapshot = ({
         markdown: pair.assistant,
         textHash: hashText(pair.assistant),
         sourceOrder: index * 2 + 1,
-        attachments: pair.attachments,
+        attachments: pair.assistantAttachments,
+        ...(pair.createdAt ? { createdAt: pair.createdAt } : {}),
       });
     }
   });
@@ -355,6 +503,7 @@ export const normalizeGeminiPrivateReadChatSnapshot = ({
     turns,
     metadata: {
       assistantTurnCount: turns.filter((turn) => turn.role === 'assistant').length,
+      ...turnDateRange(turns),
     },
     evidence: [snapshotEvidence(assistantMarkdown)],
   };

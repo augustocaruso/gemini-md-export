@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import test from 'node:test';
@@ -191,6 +191,42 @@ test('launcher Windows usa PowerShell minimizado e restaura foco anterior', asyn
     assert.match(result.browserArgs.join(' '), /--new-tab/);
     assert.match(result.browserArgs.join(' '), /https:\/\/gemini\.google\.com\/app/);
     assert.match(result.browserArgs.join(' '), /--profile-directory=Profile 1/);
+    assert.equal(result.launch.ok, true);
+  } finally {
+    rmSync(tmpRoot, { recursive: true, force: true });
+  }
+});
+
+test('launcher Windows em SSH usa ShellExecute para alcançar o desktop do usuario', async () => {
+  const tmpRoot = mkdtempSync(resolve(tmpdir(), 'gme-browser-launch-test-'));
+  const calls = [];
+  try {
+    const result = await launchGeminiBrowser({
+      platform: 'win32',
+      env: {
+        GEMINI_MCP_BROWSER_LAUNCH_STATE_DIR: tmpRoot,
+        SSH_CONNECTION: '192.168.0.25 54330 192.168.0.18 22',
+      },
+      exists: (candidate) => candidate === 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+      spawnSyncFn: neverProbe,
+      spawnFn: (command, args, options) => {
+        calls.push({ command, args, options });
+        return child();
+      },
+      launchObserveMs: 0,
+    });
+
+    assert.equal(result.attempted, true);
+    assert.equal(result.browserName, 'Chrome');
+    assert.equal(result.method, 'windows-powershell-shell-execute');
+    assert.equal(calls[0].command, 'powershell.exe');
+    assert.match(calls[0].args.join(' '), /open-gemini-shell-execute\.ps1/);
+    assert.equal(result.browserCommand, 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe');
+    assert.match(result.browserArgs.join(' '), /--new-tab/);
+    assert.match(result.browserArgs.join(' '), /https:\/\/gemini\.google\.com\/app/);
+    const script = readFileSync(result.shellExecuteScriptPath, 'utf-8');
+    assert.match(script, /Shell\.Application/);
+    assert.doesNotMatch(script, /GetForegroundWindow/);
     assert.equal(result.launch.ok, true);
   } finally {
     rmSync(tmpRoot, { recursive: true, force: true });

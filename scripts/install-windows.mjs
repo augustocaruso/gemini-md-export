@@ -17,6 +17,11 @@ import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import {
+  discoverLoadedBrowserExtensionsFromProfiles,
+  planLoadedBrowserExtensionSync,
+} from '../dist/gemini-cli-extension/build/ts/cli/windows-extension-sync-plan.js';
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(__dirname, '..');
 const SERVER_NAME = 'gemini-md-export';
@@ -369,8 +374,7 @@ const resolveBrowserLaunchTarget = (browserOption) => {
 };
 
 const discoverLoadedBrowserExtensions = () => {
-  const found = [];
-  const seen = new Set();
+  const profileRecords = [];
 
   for (const { browser, root } of browserUserDataRoots()) {
     if (!existsSync(root)) continue;
@@ -391,36 +395,25 @@ const discoverLoadedBrowserExtensions = () => {
     }
 
     for (const profileDir of profileDirs) {
-      const preferencesPath = resolve(profileDir, 'Preferences');
-      const preferences = readJsonForDiscovery(preferencesPath);
-      const settings = preferences?.extensions?.settings || {};
-
-      for (const [extensionId, setting] of Object.entries(settings)) {
-        const rawPath = setting?.path || setting?.install_path;
-        if (!rawPath) continue;
-        const resolvedPath = isAbsolute(String(rawPath))
-          ? resolve(String(rawPath))
-          : resolve(profileDir, String(rawPath));
-
-        const manifestMatches = manifestLooksLikeThisExtension(setting?.manifest);
-        const pathMatches = extensionDirLooksLikeThisExtension(resolvedPath);
-        if (!manifestMatches && !pathMatches) continue;
-
-        const key = normalizeKey(resolvedPath);
-        if (seen.has(key)) continue;
-        seen.add(key);
-        found.push({
+      for (const fileName of ['Preferences', 'Secure Preferences']) {
+        const preferencesPath = resolve(profileDir, fileName);
+        const preferences = readJsonForDiscovery(preferencesPath);
+        profileRecords.push({
           browser,
           profile: dirname(preferencesPath).split(/[\\/]/).pop(),
-          extensionId,
-          extensionPath: resolvedPath,
+          fileName,
+          settings: preferences?.extensions?.settings || {},
+          profileDir,
           preferencesPath,
         });
       }
     }
   }
 
-  return found;
+  return discoverLoadedBrowserExtensionsFromProfiles(profileRecords, {
+    isExtensionDir: extensionDirLooksLikeThisExtension,
+    platform: process.platform,
+  });
 };
 
 const mcpConfigInstallDir = (config) => {
@@ -586,6 +579,10 @@ const writeFile = (filePath, content) => {
   writeFileSync(filePath, content, 'utf-8');
 };
 
+// Ignore macOS AppleDouble/resource-fork files and Finder metadata in Windows packages.
+const isInstallCopyAllowed = (filePath) =>
+  !/(?:^|[\\/])(?:\._.*|\.DS_Store)$/.test(String(filePath || ''));
+
 const copyFile = (from, to) => {
   if (options.dryRun) {
     log(`[dry-run] copiaria ${from} -> ${to}`);
@@ -602,7 +599,7 @@ const copyDir = (from, to) => {
   }
   rmSync(to, { recursive: true, force: true });
   mkdirSync(dirname(to), { recursive: true });
-  cpSync(from, to, { recursive: true });
+  cpSync(from, to, { recursive: true, filter: isInstallCopyAllowed });
 };
 
 const runGeminiCommand = (geminiCommand, commandArgs, label, { ignoreFailure = false } = {}) => {
@@ -906,7 +903,7 @@ const backupExistingInstall = () => {
   for (const item of existingItems) {
     mkdirSync(dirname(item.to), { recursive: true });
     if (lstatSync(item.from).isDirectory()) {
-      cpSync(item.from, item.to, { recursive: true });
+      cpSync(item.from, item.to, { recursive: true, filter: isInstallCopyAllowed });
     } else {
       copyFileSync(item.from, item.to);
     }
@@ -958,14 +955,28 @@ const syncLoadedBrowserExtensions = () => {
     log(`      - ${loaded.browser}/${loaded.profile}: ${loaded.extensionPath}`);
   }
 
-  for (const loaded of discoveredLoadedExtensions) {
-    const target = loaded.extensionPath;
-    const sameAsInstalled = normalizeKey(target) === normalizeKey(extensionPath);
-    const sameAsGeminiCliBrowserExtension =
-      normalizeKey(target) === normalizeKey(geminiCliBrowserExtensionPath);
-    const sameAsCurrentBuild = normalizeKey(target) === normalizeKey(sourceExtensionPath);
+  const syncPlan = planLoadedBrowserExtensionSync(discoveredLoadedExtensions, {
+    canonicalExtensionPath: geminiCliBrowserExtensionPath,
+    legacyExtensionPath: extensionPath,
+    sourceExtensionPath,
+    platform: process.platform,
+  });
 
-    if (sameAsInstalled || sameAsGeminiCliBrowserExtension || sameAsCurrentBuild) {
+  for (const loaded of syncPlan) {
+    const target = loaded.extensionPath;
+
+    if (loaded.status === 'duplicate-needs-removal') {
+      syncedLoadedExtensions.push(loaded);
+      log(
+        `    [BLOQUEIO] duplicata em ${loaded.browser}/${loaded.profile}: ${loaded.extensionId} (${loaded.extensionPath})`,
+      );
+      log(
+        `               mantenha ${loaded.duplicateOf || 'a extensao canonica'} e remova este card antigo no navegador`,
+      );
+      continue;
+    }
+
+    if (!loaded.shouldSync) {
       syncedLoadedExtensions.push({
         ...loaded,
         status: 'already-current-path',
@@ -995,11 +1006,11 @@ const syncLoadedBrowserExtensions = () => {
     try {
       if (existsSync(target)) {
         mkdirSync(dirname(backupRoot), { recursive: true });
-        cpSync(target, backupRoot, { recursive: true });
+        cpSync(target, backupRoot, { recursive: true, filter: isInstallCopyAllowed });
       }
       rmSync(target, { recursive: true, force: true });
       mkdirSync(dirname(target), { recursive: true });
-      cpSync(sourceExtensionPath, target, { recursive: true });
+      cpSync(sourceExtensionPath, target, { recursive: true, filter: isInstallCopyAllowed });
       syncedLoadedExtensions.push({
         ...loaded,
         status: 'synced',
@@ -1546,10 +1557,11 @@ if (normalizedExportDir) {
   log('    nenhuma pasta fixa -- o modal deixa voce escolher');
 }
 
-step('Instalando dependencias (npm install)');
+step('Dependencias do pacote');
 if (prebuiltPayload) {
-  log('    pulado: usando payload precompilado embutido no instalador standalone');
+  log('    prebuilt: dependencias ja embutidas no pacote; npm install pulado');
 } else {
+  log('    instalando dependencias para compilar a partir do codigo-fonte');
   run(npmCommand, ['install'], 'npm install');
 }
 

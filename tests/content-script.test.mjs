@@ -1082,6 +1082,27 @@ test('content script não bloqueia heartbeat esperando service worker', async ()
   assert.doesNotMatch(installBlock, /await\s+extensionSendMessageWithRetry/);
 });
 
+test('content script tenta religar bridge quando bootstrap fica sem cliente ativo', async () => {
+  const source = await readFile(new URL('../src/userscript-shell.ts', import.meta.url), 'utf8');
+  const bootstrapBlock = source.match(/const bootstrap = \(\) => \{[\s\S]*?\n  \};/)?.[0] || '';
+  const stopBlock = source.match(/const stopExtensionBridge = \(\) => \{[\s\S]*?\n  \};/)?.[0] || '';
+  const clearRetryBlock = source.match(
+    /const clearBridgeInstallRetry = \(\) => \{[\s\S]*?\n  \};/,
+  )?.[0] || '';
+  const retryBlock = source.match(
+    /const scheduleExtensionBridgeInstallRetry = \([^)]*\) => \{[\s\S]*?\n  \};/,
+  )?.[0] || '';
+
+  assert.match(source, /BRIDGE_INSTALL_RETRY_INITIAL_MS/);
+  assert.match(source, /BRIDGE_INSTALL_RETRY_MAX_MS/);
+  assert.match(retryBlock, /!bridgeState\.started/);
+  assert.match(retryBlock, /installExtensionBridge\(\)/);
+  assert.match(retryBlock, /scheduleExtensionBridgeInstallRetry\('bridge-start-retry'\)/);
+  assert.match(bootstrapBlock, /scheduleExtensionBridgeInstallRetry\('bootstrap-watchdog'\)/);
+  assert.match(clearRetryBlock, /clearTimeout\(bridgeInstallRetryTimer\)/);
+  assert.match(stopBlock, /clearBridgeInstallRetry\(\)/);
+});
+
 test('content script não retoma export em lote automaticamente no bootstrap', async () => {
   const source = await readFile(new URL('../src/userscript-shell.ts', import.meta.url), 'utf8');
   const bootstrapBlock = source.match(/const bootstrap = \(\) => \{[\s\S]*?\n  \};/)?.[0] || '';

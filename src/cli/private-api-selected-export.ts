@@ -14,8 +14,8 @@ import {
   runGeminiWebapiPythonReadChat,
   runGeminiWebapiPythonSessionStatus,
 } from '../mcp/gemini-webapi-python-adapter.js';
+import { createNativeBrowserBrokerClient } from '../mcp/native-browser-broker.js';
 import { privateReadExportResultToCollectedPayload } from '../mcp/private-read-export-runtime.js';
-import { runPrivateApiSelectedExportViaBridge } from './private-api-bridge-export.js';
 
 type AnyRecord = Record<string, any>;
 
@@ -113,7 +113,9 @@ export type PrivateApiSelectedExportArgs = Readonly<{
   wakeBrowser?: unknown;
   activateTab?: unknown;
   allowReload?: unknown;
+  browserKeepAliveMs?: unknown;
   maxItems?: unknown;
+  maxReadAttempts?: unknown;
   recent?: unknown;
   startIndex?: unknown;
   onProgress?: (job: PrivateApiSelectedExportJob) => void;
@@ -135,6 +137,18 @@ type PrivateApiSelectedExportDeps = Readonly<{
     python?: unknown;
     cookiesJson?: unknown;
   }): Promise<AnyRecord>;
+  ensureBrowserKeepAlive(input: { reason: string; idleCloseMs: number }): Promise<AnyRecord>;
+  recoverBrowserBackgroundSession(input: {
+    args: PrivateApiSelectedExportArgs;
+    item: PrivateApiSelectedExportItem;
+    error: { code: string | null; message: string | null };
+    timeoutMs: number;
+  }): Promise<AnyRecord>;
+  runBrowserBackgroundReadChat(input: {
+    args: PrivateApiSelectedExportArgs;
+    item: PrivateApiSelectedExportItem;
+    timeoutMs: number;
+  }): Promise<AnyRecord>;
   now(): Date;
   sleep(ms: number): Promise<void>;
 }>;
@@ -144,6 +158,69 @@ const defaultDeps: PrivateApiSelectedExportDeps = {
   runReadChat: runGeminiWebapiPythonReadChat,
   runListChats: runGeminiWebapiPythonListChats,
   runSessionStatus: runGeminiWebapiPythonSessionStatus,
+  ensureBrowserKeepAlive: async (input) =>
+    (await createNativeBrowserBrokerClient().keepAlive(input, {
+      allowFallback: true,
+    })) as AnyRecord,
+  recoverBrowserBackgroundSession: async ({ args, timeoutMs }) => {
+    const waitMs = Math.max(5000, Math.min(timeoutMs, 30_000));
+    await bridgeJsonFetch(
+      args.bridgeUrl,
+      appendParams('/agent/ready', {
+        detail: 'compact',
+        wakeBrowser: args.wakeBrowser === true,
+        allowReload: args.allowReload === true,
+        waitMs,
+      }),
+      { timeoutMs: waitMs + 5000 },
+    );
+    const response = await bridgeJsonFetch(args.bridgeUrl, '/agent/mcp-tool-call', {
+      method: 'POST',
+      timeoutMs: waitMs + 15_000,
+      body: {
+        name: 'gemini_support',
+        arguments: {
+          action: 'session_status',
+          waitMs,
+          pythonFallback: false,
+          clientId: args.clientId,
+          tabId: args.tabId,
+          claimId: args.claimId,
+          sessionId: args.sessionId,
+        },
+      },
+    });
+    return toolTextPayload(response);
+  },
+  runBrowserBackgroundReadChat: async ({ args, item, timeoutMs }) => {
+    const payload = {
+      chatId: item.chatId,
+      title: item.title || null,
+      timeoutMs,
+      downloadAssets: true,
+      assetsRelDir: `assets/${item.chatId}`,
+    };
+    try {
+      const nativeResponse = (await createNativeBrowserBrokerClient().privateApiReadChat(payload, {
+        allowFallback: true,
+      })) as AnyRecord;
+      const nativeResult =
+        nativeResponse?.ok === true
+          ? (nativeResponse.result as AnyRecord)
+          : (nativeResponse as AnyRecord);
+      if (nativeResult?.ok === true) return nativeResult;
+      throw Object.assign(
+        new Error(
+          readableText(nativeResult?.message) ||
+            readableText(nativeResult?.error) ||
+            'A leitura privada pelo native broker falhou.',
+        ),
+        { code: stringOrNull(nativeResult?.code) || 'native_broker_private_read_failed' },
+      );
+    } catch {
+      return readChatViaBridgePrivateRead({ args, item, timeoutMs });
+    }
+  },
   now: () => new Date(),
   sleep: (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms)),
 };
@@ -153,20 +230,11 @@ const shouldAttemptBridgePrivateExport = (
   items: readonly PrivateApiSelectedExportItem[],
 ): boolean => {
   if (args.preferBridge === false) return false;
+  if (stringOrNull(args.python) || stringOrNull(args.cookiesJson)) return false;
+  if (stringOrNull(process.env.GME_GEMINI_WEBAPI_RUNNER)) return false;
   if (args.recent === true) return false;
   if (items.length === 0) return false;
   return !!stringOrNull(args.bridgeUrl);
-};
-
-const bridgePrivateExportStartAllowsPythonFallback = (err: unknown): boolean => {
-  const record = err && typeof err === 'object' ? (err as AnyRecord) : {};
-  const code = stringOrNull(record.code || record.data?.code);
-  return (
-    code === 'bridge_private_export_unavailable' ||
-    code === 'no_command_client_available' ||
-    code === 'no_healthy_command_client' ||
-    code === 'ambiguous_gemini_tabs'
-  );
 };
 
 const numberInRange = (value: unknown, fallback: number, min: number, max: number): number => {
@@ -180,6 +248,25 @@ const stringOrNull = (value: unknown): string | null => {
   return text || null;
 };
 
+const readableText = (value: unknown): string | null => {
+  if (value === null || value === undefined) return null;
+  if (typeof value === 'string') return stringOrNull(value);
+  if (value instanceof Error) return stringOrNull(value.message);
+  if (typeof value !== 'object') return stringOrNull(value);
+  const record = value as AnyRecord;
+  for (const key of ['message', 'error', 'reason', 'detail', 'statusText']) {
+    const nested = readableText(record[key]);
+    if (nested) return nested;
+  }
+  const code = stringOrNull(record.code);
+  if (code) return code;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return null;
+  }
+};
+
 const expandUserPath = (value: string): string => {
   if (value === '~') return homedir();
   if (value.startsWith('~/')) return resolve(homedir(), value.slice(2));
@@ -190,6 +277,181 @@ const resolveOutputDir = (outputDir: unknown): string => {
   const raw =
     stringOrNull(outputDir) || process.env.GEMINI_MCP_EXPORT_DIR || resolve(homedir(), 'Downloads');
   return resolve(expandUserPath(raw));
+};
+
+const normalizeBridgeUrl = (value: unknown): string => {
+  const raw = stringOrNull(value);
+  if (!raw) {
+    throw Object.assign(new Error('Bridge local nao configurada para leitura privada.'), {
+      code: 'bridge_private_read_unavailable',
+    });
+  }
+  return raw.replace(/\/+$/, '');
+};
+
+const bridgeJsonFetch = async (
+  bridgeUrl: unknown,
+  path: string,
+  {
+    method = 'GET',
+    body,
+    timeoutMs = 15_000,
+  }: { method?: string; body?: unknown; timeoutMs?: number } = {},
+): Promise<AnyRecord> => {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const bodyText = body === undefined ? undefined : JSON.stringify(body);
+  try {
+    const response = await fetch(new URL(path, `${normalizeBridgeUrl(bridgeUrl)}/`), {
+      method,
+      signal: controller.signal,
+      headers: {
+        accept: 'application/json',
+        ...(bodyText ? { 'content-type': 'application/json' } : {}),
+      },
+      body: bodyText,
+    });
+    const text = await response.text();
+    const json = text ? JSON.parse(text) : {};
+    if (!response.ok) {
+      throw Object.assign(
+        new Error(
+          stringOrNull(json.message) ||
+            stringOrNull(json.error) ||
+            `Bridge retornou HTTP ${response.status}.`,
+        ),
+        {
+          code: stringOrNull(json.code) || 'bridge_private_read_unavailable',
+          data: json,
+        },
+      );
+    }
+    return json;
+  } catch (err) {
+    if (err instanceof Error && 'code' in err) throw err;
+    throw Object.assign(
+      new Error(
+        err instanceof Error
+          ? `Bridge local indisponivel para leitura privada: ${err.message}`
+          : 'Bridge local indisponivel para leitura privada.',
+      ),
+      { code: 'bridge_private_read_unavailable', cause: err },
+    );
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
+const appendParams = (path: string, params: AnyRecord): string => {
+  const url = new URL(path, 'http://127.0.0.1');
+  for (const [key, value] of Object.entries(params)) {
+    if (value === undefined || value === null || value === '') continue;
+    url.searchParams.set(key, String(value));
+  }
+  return `${url.pathname}${url.search}`;
+};
+
+const bridgePrivateReadClientId = async (
+  args: PrivateApiSelectedExportArgs,
+  timeoutMs: number,
+): Promise<string | null> => {
+  const explicit = stringOrNull(args.clientId);
+  if (explicit) return explicit;
+  const ready = await bridgeJsonFetch(
+    args.bridgeUrl,
+    appendParams('/agent/ready', {
+      wakeBrowser: false,
+      waitMs: Math.min(timeoutMs, 30_000),
+      allowReload: args.allowReload === true,
+    }),
+    { timeoutMs: Math.max(5_000, Math.min(timeoutMs + 5_000, 45_000)) },
+  );
+  const clients = Array.isArray(ready.connectedClients) ? ready.connectedClients : [];
+  return stringOrNull(
+    clients.find((client: AnyRecord) => stringOrNull(client?.clientId))?.clientId,
+  );
+};
+
+const toolTextPayload = (toolCallResponse: AnyRecord): AnyRecord => {
+  const result =
+    toolCallResponse.result && typeof toolCallResponse.result === 'object'
+      ? (toolCallResponse.result as AnyRecord)
+      : {};
+  if (result.isError === true) {
+    throw Object.assign(new Error('A tool private_read retornou erro pela bridge.'), {
+      code: 'bridge_private_read_tool_error',
+      data: result,
+    });
+  }
+  const content = Array.isArray(result.content) ? result.content : [];
+  const text = stringOrNull(content.find((item: AnyRecord) => item?.type === 'text')?.text);
+  if (text) {
+    try {
+      return JSON.parse(text) as AnyRecord;
+    } catch (err) {
+      throw Object.assign(new Error('A bridge retornou private_read em formato invalido.'), {
+        code: 'bridge_private_read_invalid_json',
+        cause: err,
+      });
+    }
+  }
+  const structured =
+    result.structuredContent && typeof result.structuredContent === 'object'
+      ? (result.structuredContent as AnyRecord)
+      : null;
+  if (structured) return structured;
+  throw Object.assign(new Error('A bridge nao retornou payload de private_read.'), {
+    code: 'bridge_private_read_empty',
+  });
+};
+
+const readChatViaBridgePrivateRead = async ({
+  args,
+  item,
+  timeoutMs,
+}: {
+  args: PrivateApiSelectedExportArgs;
+  item: PrivateApiSelectedExportItem;
+  timeoutMs: number;
+}): Promise<AnyRecord> => {
+  const clientId = await bridgePrivateReadClientId(args, timeoutMs);
+  const response = await bridgeJsonFetch(args.bridgeUrl, '/agent/mcp-tool-call', {
+    method: 'POST',
+    timeoutMs: Math.max(20_000, timeoutMs + 10_000),
+    body: {
+      name: 'gemini_chats',
+      arguments: {
+        action: 'private_read',
+        intent: 'one_off',
+        diagnostic: true,
+        detail: 'full',
+        chatId: item.chatId,
+        url: item.url || undefined,
+        title: item.title || undefined,
+        privateApiTransport: 'browser-background',
+        waitMs: timeoutMs,
+        downloadAssets: true,
+        assetsRelDir: `assets/${item.chatId}`,
+        allowPythonFallback: false,
+        allowDomFallback: false,
+        clientId: clientId || undefined,
+        tabId: args.tabId,
+        claimId: args.claimId,
+      },
+    },
+  });
+  const payload = toolTextPayload(response);
+  if (payload.ok !== true) {
+    throw Object.assign(
+      new Error(
+        readableText(payload.message) ||
+          readableText(payload.error) ||
+          'A leitura privada pela bridge falhou.',
+      ),
+      { code: stringOrNull(payload.code) || 'bridge_private_read_failed', data: payload },
+    );
+  }
+  return payload;
 };
 
 const safeFilename = (filename: unknown): string => {
@@ -268,9 +530,25 @@ const mediaFilesOf = (payload: AnyRecord): AnyRecord[] =>
 const mediaFailuresOf = (payload: AnyRecord): readonly unknown[] =>
   Array.isArray(payload.mediaFailures) ? payload.mediaFailures : [];
 
+const payloadWithLocalMediaLinks = (payload: AnyRecord, mediaFiles: readonly AnyRecord[]) => {
+  if (typeof payload.content !== 'string') return payload;
+  let content = payload.content;
+  for (const file of mediaFiles) {
+    const sourceUrl = stringOrNull(file.sourceUrl);
+    if (!sourceUrl) continue;
+    const filename = safeFilename(file.filename || 'asset.bin').replace(/\\/g, '/');
+    content = content.split(sourceUrl).join(filename);
+  }
+  return content === payload.content ? payload : { ...payload, content };
+};
+
 const writePayloadBundle = (payload: AnyRecord, outputDir: string) => {
-  const markdown = writeMarkdownPayload(payload, outputDir);
-  const mediaFiles = mediaFilesOf(payload).map((file) =>
+  const mediaPayloads = mediaFilesOf(payload);
+  const markdown = writeMarkdownPayload(
+    payloadWithLocalMediaLinks(payload, mediaPayloads),
+    outputDir,
+  );
+  const mediaFiles = mediaPayloads.map((file) =>
     writePayloadFile(
       file,
       outputDir,
@@ -359,9 +637,49 @@ const failureFromError = (
     index,
     chatId: item.chatId || null,
     title: item.title || null,
-    error: err instanceof Error ? err.message : String(record.message || err || 'erro sem detalhe'),
+    error:
+      readableText(err instanceof Error ? err.message : record.message || err) ||
+      'erro sem detalhe',
     code: stringOrNull(record.code) || null,
   };
+};
+
+const isTransientPrivateReadError = (err: unknown): boolean => {
+  const record = err && typeof err === 'object' ? (err as AnyRecord) : {};
+  const code = stringOrNull(record.code) || '';
+  const message = readableText(err) || '';
+  const signal = `${code} ${message}`.toLowerCase();
+  return (
+    [
+      'browserbackground_failed',
+      'bridge_private_read_failed',
+      'bridge_private_read_tool_error',
+      'bridge_private_read_unavailable',
+      'native_broker_unavailable',
+      'command_timeout',
+      'extension_request_timeout',
+    ].includes(code.toLowerCase()) ||
+    signal.includes('timeout') ||
+    signal.includes('tempor') ||
+    signal.includes('unavailable') ||
+    signal.includes('background') ||
+    signal.includes('broker')
+  );
+};
+
+const browserKeepAliveMsForBatch = ({
+  args,
+  requested,
+  readTimeoutMs,
+}: {
+  args: PrivateApiSelectedExportArgs;
+  requested: number;
+  readTimeoutMs: number;
+}): number => {
+  const explicit = Number(args.browserKeepAliveMs);
+  if (Number.isFinite(explicit) && explicit > 0) return Math.max(60_000, explicit);
+  const estimated = Math.max(1, requested) * Math.min(readTimeoutMs + 5000, 120_000);
+  return Math.min(30 * 60_000, Math.max(15 * 60_000, estimated));
 };
 
 const normalizeItems = (args: PrivateApiSelectedExportArgs): PrivateApiSelectedExportItem[] => {
@@ -442,36 +760,7 @@ export const runPrivateApiSelectedExport = async (
   }
   const outputDir = resolveOutputDir(args.outputDir);
   mkdirSync(outputDir, { recursive: true });
-
-  if (shouldAttemptBridgePrivateExport(args, items)) {
-    try {
-      return await runPrivateApiSelectedExportViaBridge({
-        bridgeUrl: args.bridgeUrl,
-        items,
-        expectedCount: args.expectedCount,
-        outputDir,
-        limit: args.limit,
-        waitMs: args.waitMs,
-        privateReadWaitMs: args.privateReadWaitMs,
-        timeoutMs: args.timeoutMs,
-        pollMs: args.pollMs,
-        delayMs: args.delayMs,
-        clientId: args.clientId,
-        tabId: args.tabId,
-        claimId: args.claimId,
-        sessionId: args.sessionId,
-        openIfMissing: args.openIfMissing,
-        wakeBrowser: args.wakeBrowser,
-        activateTab: args.activateTab,
-        allowReload: args.allowReload,
-        python: args.python,
-        cookiesJson: args.cookiesJson,
-        onProgress: args.onProgress,
-      });
-    } catch (err) {
-      if (!bridgePrivateExportStartAllowsPythonFallback(err)) throw err;
-    }
-  }
+  const useBridgePrivateRead = shouldAttemptBridgePrivateExport(args, items);
 
   let requested = Math.max(
     items.length,
@@ -511,55 +800,57 @@ export const runPrivateApiSelectedExport = async (
   };
 
   let latestJob = emit('running', null, 'Preparando API privada');
-  const bootstrapTimeoutMs = numberInRange(
-    args.bootstrapTimeoutMs ?? process.env.GME_GEMINI_WEBAPI_BOOTSTRAP_TIMEOUT_MS,
-    180_000,
-    30_000,
-    300_000,
-  );
-  const bootstrapResult = await runtimeDeps.bootstrapPythonSidecar({
-    timeoutMs: bootstrapTimeoutMs,
-    python: args.python,
-  });
-  if (!bootstrapResult.ok) {
-    failures.push({
-      index: 0,
-      chatId: null,
-      title: null,
-      error: bootstrapResult.message,
-      code: bootstrapResult.code,
-    });
-    return emit(
-      'failed',
-      null,
-      'Preparacao da API privada falhou',
-      runtimeDeps.now().toISOString(),
+  if (!useBridgePrivateRead) {
+    const bootstrapTimeoutMs = numberInRange(
+      args.bootstrapTimeoutMs ?? process.env.GME_GEMINI_WEBAPI_BOOTSTRAP_TIMEOUT_MS,
+      180_000,
+      30_000,
+      300_000,
     );
-  }
+    const bootstrapResult = await runtimeDeps.bootstrapPythonSidecar({
+      timeoutMs: bootstrapTimeoutMs,
+      python: args.python,
+    });
+    if (!bootstrapResult.ok) {
+      failures.push({
+        index: 0,
+        chatId: null,
+        title: null,
+        error: bootstrapResult.message,
+        code: bootstrapResult.code,
+      });
+      return emit(
+        'failed',
+        null,
+        'Preparacao da API privada falhou',
+        runtimeDeps.now().toISOString(),
+      );
+    }
 
-  latestJob = emit('running', null, 'Verificando sessão da API privada');
-  const sessionResult = await runtimeDeps.runSessionStatus({
-    timeoutMs: args.waitMs ?? args.privateReadWaitMs ?? args.timeoutMs,
-    python: args.python,
-    cookiesJson: args.cookiesJson,
-  });
-  if (sessionResult?.ok !== true || sessionResult.authenticated !== true) {
-    failures.push({
-      index: 0,
-      chatId: null,
-      title: null,
-      error:
-        stringOrNull(sessionResult?.message) ||
-        stringOrNull(sessionResult?.error) ||
-        'Sessao da API privada nao autenticada.',
-      code: stringOrNull(sessionResult?.code) || 'private_api_session_unavailable',
+    latestJob = emit('running', null, 'Verificando sessão da API privada');
+    const sessionResult = await runtimeDeps.runSessionStatus({
+      timeoutMs: args.waitMs ?? args.privateReadWaitMs ?? args.timeoutMs,
+      python: args.python,
+      cookiesJson: args.cookiesJson,
     });
-    return emit(
-      'failed',
-      null,
-      'Sessão da API privada precisa de login',
-      runtimeDeps.now().toISOString(),
-    );
+    if (sessionResult?.ok !== true || sessionResult.authenticated !== true) {
+      failures.push({
+        index: 0,
+        chatId: null,
+        title: null,
+        error:
+          stringOrNull(sessionResult?.message) ||
+          stringOrNull(sessionResult?.error) ||
+          'Sessao da API privada nao autenticada.',
+        code: stringOrNull(sessionResult?.code) || 'private_api_session_unavailable',
+      });
+      return emit(
+        'failed',
+        null,
+        'Sessão da API privada precisa de login',
+        runtimeDeps.now().toISOString(),
+      );
+    }
   }
 
   if (items.length === 0 && args.recent === true) {
@@ -610,8 +901,26 @@ export const runPrivateApiSelectedExport = async (
     5_000,
     120_000,
   );
+  const maxReadAttempts = numberInRange(
+    args.maxReadAttempts ?? (useBridgePrivateRead ? process.env.GME_PRIVATE_READ_MAX_ATTEMPTS : 1),
+    useBridgePrivateRead ? 2 : 1,
+    1,
+    5,
+  );
   const limit = numberInRange(args.limit, 200, 1, 2000);
   const delayMs = numberInRange(args.delayMs, 0, 0, 60_000);
+  const browserKeepAliveMs = browserKeepAliveMsForBatch({ args, requested, readTimeoutMs });
+  const ensureBrowserBackgroundLease = async () => {
+    if (!useBridgePrivateRead) return;
+    try {
+      await runtimeDeps.ensureBrowserKeepAlive({
+        reason: 'private-api-selected-export',
+        idleCloseMs: browserKeepAliveMs,
+      });
+    } catch {
+      // A leitura privada abaixo ainda pode funcionar; falha de keepalive vira evidência no próprio read.
+    }
+  };
 
   for (const [index, item] of items.entries()) {
     const current = {
@@ -624,28 +933,95 @@ export const runPrivateApiSelectedExport = async (
     try {
       latestJob = emit('running', current, 'Lendo conversa pela API privada');
       const readStartedAt = Date.now();
-      const readResult = await runtimeDeps.runReadChat({
-        chatId: item.chatId,
-        url: item.url || undefined,
-        title: item.title || undefined,
-        timeoutMs: readTimeoutMs,
-        limit,
-        python: args.python,
-        cookiesJson: args.cookiesJson,
-        downloadAssets: true,
-        assetsRelDir: `assets/${item.chatId}`,
-      });
-      if (!readResult.ok) {
-        throw Object.assign(new Error(readResult.message), {
-          code: readResult.code,
+      let readResult: AnyRecord | GeminiWebapiPythonReadChatResult | null = null;
+      for (let attempt = 1; attempt <= maxReadAttempts; attempt += 1) {
+        try {
+          await ensureBrowserBackgroundLease();
+          readResult = useBridgePrivateRead
+            ? await runtimeDeps.runBrowserBackgroundReadChat({
+                args,
+                item,
+                timeoutMs: readTimeoutMs,
+              })
+            : await runtimeDeps.runReadChat({
+                chatId: item.chatId,
+                url: item.url || undefined,
+                title: item.title || undefined,
+                timeoutMs: readTimeoutMs,
+                limit,
+                python: args.python,
+                cookiesJson: args.cookiesJson,
+                downloadAssets: true,
+                assetsRelDir: `assets/${item.chatId}`,
+              });
+          if (readResult?.ok === false) {
+            const failure = readResult as AnyRecord;
+            throw Object.assign(
+              new Error(
+                readableText(failure.message) ||
+                  readableText(failure.error) ||
+                  'A leitura privada da conversa falhou.',
+              ),
+              {
+                code: stringOrNull(failure.code) || 'private_api_read_failed',
+              },
+            );
+          }
+          break;
+        } catch (err) {
+          const canRetry = attempt < maxReadAttempts && isTransientPrivateReadError(err);
+          if (!canRetry) throw err;
+          if (useBridgePrivateRead) {
+            latestJob = emit('running', current, 'Recuperando sessão do navegador');
+            const record = err && typeof err === 'object' ? (err as AnyRecord) : {};
+            try {
+              await runtimeDeps.recoverBrowserBackgroundSession({
+                args,
+                item,
+                error: {
+                  code: stringOrNull(record.code) || null,
+                  message: readableText(err),
+                },
+                timeoutMs: readTimeoutMs,
+              });
+            } catch {
+              // A proxima tentativa ainda renova o lease; se falhar, o erro final fica no item.
+            }
+          }
+          latestJob = emit('running', current, 'Leitura privada falhou; tentando novamente');
+          await runtimeDeps.sleep(Math.min(500 * attempt, 2_000));
+          latestJob = emit('running', current, 'Lendo conversa pela API privada');
+        }
+      }
+      if (!readResult) {
+        throw Object.assign(new Error('A leitura privada nao retornou resultado.'), {
+          code: 'private_api_read_empty',
         });
+      }
+      if (!readResult.ok) {
+        const failure = readResult as AnyRecord;
+        throw Object.assign(
+          new Error(
+            readableText(failure.message) ||
+              readableText(failure.error) ||
+              'A leitura privada da conversa falhou.',
+          ),
+          {
+            code: stringOrNull(failure.code) || 'private_api_read_failed',
+          },
+        );
       }
 
       latestJob = emit('running', current, 'Validando Markdown e datas');
       const collected = privateReadExportResultToCollectedPayload({
         activeClient: null,
         conversation: item,
-        result: { ...readResult, adapter: 'privateApiGeminiWebapi' },
+        result: {
+          ...readResult,
+          adapter:
+            stringOrNull((readResult as AnyRecord).adapter) ||
+            (useBridgePrivateRead ? 'browserBackground' : 'privateApiGeminiWebapi'),
+        },
         privateReadStartedAt: readStartedAt,
         privateReadFinishedAt: Date.now(),
       });

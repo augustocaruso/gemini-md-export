@@ -298,6 +298,36 @@ test('native broker exposes extension status through runtime actions', async () 
   assert.equal(result.contentSelfHeal.status, 'ok');
 });
 
+test('native broker can ask the service worker to keep native/offscreen context alive', async () => {
+  const calls = [];
+  const result = await handleNativeBrowserBrokerCommand(
+    {
+      command: 'extension.keepAlive',
+      payload: { reason: 'fix-vault-private-repair', idleCloseMs: 900000 },
+    },
+    { runtime: { lastError: null }, tabs: { query: (_query, callback) => callback([]) } },
+    {
+      keepAlive: async (payload) => {
+        calls.push(payload);
+        return {
+          ok: true,
+          status: 'ready',
+          idleCloseAt: '2026-06-03T03:30:00.000Z',
+        };
+      },
+    },
+  );
+
+  assert.equal(result.ok, true);
+  assert.equal(result.status, 'ready');
+  assert.deepEqual(calls, [
+    {
+      reason: 'fix-vault-private-repair',
+      idleCloseMs: 900000,
+    },
+  ]);
+});
+
 test('native broker can ask the service worker to self-heal managed content scripts', async () => {
   const calls = [];
   const result = await handleNativeBrowserBrokerCommand(

@@ -15,6 +15,7 @@ import {
   normalizeGeminiPrivateReadChatSnapshot,
   toGeminiPrivateChatId,
 } from '../build/ts/core/gemini-private-protocol.js';
+import { assetRefsFromChatSnapshot, buildAssetFetchPlan } from '../build/ts/core/assets.js';
 import { createTurndownMarkdownRenderer } from '../build/ts/core/markdown-renderer/turndown-renderer.js';
 
 const chatId = 'dbe5dd4b50b09c74';
@@ -116,6 +117,130 @@ test('private protocol decodes READ_CHAT batch frame into a ChatSnapshot', () =>
   assert.equal(snapshot.turns[3].attachments[0].kind, 'artifact');
   assert.equal(snapshot.evidence[0].source, 'gemini-private-api');
   assert.equal(snapshot.evidence[0].confidence, 'strong');
+});
+
+test('private protocol reads assistant candidates nested in the current READ_CHAT shape', () => {
+  const responseBody = [
+    [
+      [
+        ['conversation', 'reply-1'],
+        null,
+        [['Prompt from current wire shape']],
+        [
+          [
+            [
+              'candidate-1',
+              ['Answer from current wire shape'],
+              null,
+              null,
+              null,
+              null,
+              null,
+              null,
+              [2],
+            ],
+          ],
+        ],
+      ],
+    ],
+  ];
+
+  const snapshot = normalizeGeminiPrivateReadChatSnapshot({
+    requestedChatId: privateChatId,
+    payload: responseBody,
+    title: 'Current shape',
+  });
+
+  assert.equal(snapshot.metadata.assistantTurnCount, 1);
+  assert.deepEqual(
+    snapshot.turns.map((turn) => [turn.role, turn.markdown]),
+    [
+      ['user', 'Prompt from current wire shape'],
+      ['assistant', 'Answer from current wire shape'],
+    ],
+  );
+  assert.equal(snapshot.evidence[0].confidence, 'strong');
+});
+
+test('private protocol preserves READ_CHAT turn timestamps in the shared snapshot', () => {
+  const responseBody = [
+    [
+      [
+        ['conversation', 'reply-1'],
+        null,
+        [['First prompt']],
+        [[['candidate-1', ['First answer']]]],
+        [1_779_225_124],
+      ],
+      [
+        ['conversation', 'reply-2'],
+        null,
+        [['Second prompt']],
+        [[['candidate-2', ['Second answer']]]],
+        [1_779_225_256_000],
+      ],
+    ],
+  ];
+
+  const snapshot = normalizeGeminiPrivateReadChatSnapshot({
+    requestedChatId: privateChatId,
+    payload: responseBody,
+    title: 'Dated private API chat',
+  });
+
+  assert.deepEqual(
+    snapshot.turns.map((turn) => [turn.role, turn.createdAt]),
+    [
+      ['user', '2026-05-19T21:12:04Z'],
+      ['assistant', '2026-05-19T21:12:04Z'],
+      ['user', '2026-05-19T21:14:16Z'],
+      ['assistant', '2026-05-19T21:14:16Z'],
+    ],
+  );
+  assert.equal(snapshot.metadata.dateCreated, '2026-05-19T21:12:04Z');
+  assert.equal(snapshot.metadata.dateLastMessage, '2026-05-19T21:14:16Z');
+});
+
+test('private protocol extracts user image attachments from READ_CHAT asset text blocks', () => {
+  const imageUrl =
+    'https://lh3.googleusercontent.com/gg/AEir0wLQOPbc_yGvp12iftQL84kO1cTnEpEqvtn1CDKka56Yz';
+  const responseBody = [
+    [
+      [
+        null,
+        null,
+        [
+          [
+            [
+              'Me mostre supra de st com infra de pr',
+              'Screenshot_20260424_153354_com.android.chrome.jpg',
+              imageUrl,
+              '$AQbORABynmwCyobLCy1IE1nJsFSvEa6thJvoRwJcUPOcfOikGQ7Acci',
+              'image/jpeg',
+            ],
+          ],
+        ],
+        [[null, ['Resposta com analise do ECG']]],
+      ],
+    ],
+  ];
+
+  const snapshot = normalizeGeminiPrivateReadChatSnapshot({
+    requestedChatId: privateChatId,
+    payload: responseBody,
+    title: 'ECG com imagem',
+  });
+
+  assert.equal(snapshot.turns[0].markdown, 'Me mostre supra de st com infra de pr');
+  assert.equal(snapshot.turns[0].attachments.length, 1);
+  assert.deepEqual(snapshot.turns[0].attachments[0], {
+    kind: 'image',
+    label: 'Screenshot_20260424_153354_com.android.chrome.jpg',
+    url: imageUrl,
+  });
+  const plan = buildAssetFetchPlan(assetRefsFromChatSnapshot(snapshot));
+  assert.equal(plan.requests.length, 1);
+  assert.equal(plan.requests[0].url, imageUrl);
 });
 
 test('private protocol reports parse diagnostics separately from RPC emptiness', () => {

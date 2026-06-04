@@ -75,10 +75,14 @@ export type NativeBrowserBrokerCommand = Readonly<{
     | 'tabs.release'
     | 'tabs.activate'
     | 'tabs.reload'
+    | 'extension.keepAlive'
     | 'extension.status'
     | 'extension.selfHealContentScripts'
     | 'extension.reloadManagedTabs'
-    | 'extension.reloadSelf';
+    | 'extension.reloadSelf'
+    | 'privateApi.sessionStatus'
+    | 'privateApi.listChats'
+    | 'privateApi.readChat';
   payload?: {
     tabId?: number | null;
     claimId?: string | null;
@@ -90,6 +94,10 @@ export type NativeBrowserBrokerCommand = Readonly<{
     force?: boolean | null;
     focusWindow?: boolean | null;
     timeoutMs?: number | null;
+    idleCloseMs?: number | null;
+    limit?: number | null;
+    maxTabs?: number | null;
+    chatId?: string | null;
     tabIds?: readonly unknown[] | null;
     relatedTabIds?: readonly unknown[] | null;
     visualGroupTabId?: number | null;
@@ -98,10 +106,14 @@ export type NativeBrowserBrokerCommand = Readonly<{
 }>;
 
 type NativeBrowserBrokerRuntimeActions = Readonly<{
+  keepAlive?: (payload: NativeBrowserBrokerCommand['payload']) => Promise<unknown>;
   extensionStatus?: () => unknown;
   selfHealContentScripts?: (payload: NativeBrowserBrokerCommand['payload']) => Promise<unknown>;
   reloadManagedTabs?: (payload: NativeBrowserBrokerCommand['payload']) => Promise<unknown>;
   reloadSelf?: (payload: NativeBrowserBrokerCommand['payload']) => Promise<unknown>;
+  privateApiSessionStatus?: (payload: NativeBrowserBrokerCommand['payload']) => Promise<unknown>;
+  privateApiListChats?: (payload: NativeBrowserBrokerCommand['payload']) => Promise<unknown>;
+  privateApiReadChat?: (payload: NativeBrowserBrokerCommand['payload']) => Promise<unknown>;
 }>;
 
 const managedTabQueryUrls = [
@@ -463,6 +475,16 @@ export const handleNativeBrowserBrokerCommand = async (
   chromeApi: ChromeNativeBrokerApi = globalChrome() || {},
   runtimeActions: NativeBrowserBrokerRuntimeActions = {},
 ) => {
+  if (request.command === 'extension.keepAlive') {
+    if (!runtimeActions.keepAlive) {
+      return {
+        ok: false as const,
+        code: 'extension_keepalive_unavailable',
+      };
+    }
+    return runtimeActions.keepAlive(request.payload || {});
+  }
+
   if (request.command === 'extension.status') {
     return (
       runtimeActions.extensionStatus?.() ?? {
@@ -500,6 +522,36 @@ export const handleNativeBrowserBrokerCommand = async (
       };
     }
     return runtimeActions.reloadSelf(request.payload || {});
+  }
+
+  if (request.command === 'privateApi.sessionStatus') {
+    if (!runtimeActions.privateApiSessionStatus) {
+      return {
+        ok: false as const,
+        code: 'private_api_session_status_unavailable',
+      };
+    }
+    return runtimeActions.privateApiSessionStatus(request.payload || {});
+  }
+
+  if (request.command === 'privateApi.listChats') {
+    if (!runtimeActions.privateApiListChats) {
+      return {
+        ok: false as const,
+        code: 'private_api_list_chats_unavailable',
+      };
+    }
+    return runtimeActions.privateApiListChats(request.payload || {});
+  }
+
+  if (request.command === 'privateApi.readChat') {
+    if (!runtimeActions.privateApiReadChat) {
+      return {
+        ok: false as const,
+        code: 'private_api_read_chat_unavailable',
+      };
+    }
+    return runtimeActions.privateApiReadChat(request.payload || {});
   }
 
   const tabs = await queryManagedTabs(chromeApi);
@@ -627,10 +679,14 @@ const isBrowserBrokerCommand = (
   command === 'tabs.release' ||
   command === 'tabs.activate' ||
   command === 'tabs.reload' ||
+  command === 'extension.keepAlive' ||
   command === 'extension.status' ||
   command === 'extension.selfHealContentScripts' ||
   command === 'extension.reloadManagedTabs' ||
-  command === 'extension.reloadSelf';
+  command === 'extension.reloadSelf' ||
+  command === 'privateApi.sessionStatus' ||
+  command === 'privateApi.listChats' ||
+  command === 'privateApi.readChat';
 
 const unsupportedCommandResponse = (
   request: Pick<NativeBrokerRequest, 'id'>,

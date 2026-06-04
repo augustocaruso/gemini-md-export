@@ -714,7 +714,7 @@ test('MCP implementa afinidade confiável por claim de aba', () => {
   assert.match(backgroundSource, /chrome\.runtime\.onInstalled\.addListener/);
   assert.match(backgroundSource, /message\?\.type === 'RELOAD_SELF'/);
   assert.match(buildSource, /'tabGroups'/);
-  assert.doesNotMatch(buildSource, /'alarms'/);
+  assert.match(buildSource, /'alarms'/);
 });
 
 test('MCP prefere native browser broker antes de fallback por heartbeat', () => {
@@ -776,15 +776,31 @@ test('browser_status diagnostica e tenta self-heal sem depender do guard wrapper
 test('browser readiness expõe status estruturado do native broker', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'mcp-server.js'), 'utf-8');
   const nativeGateSource = readFileSync(resolve(ROOT, 'src', 'mcp', 'native-release-gate.ts'), 'utf-8');
+  const browserReadyDiagnosticsSource = readFileSync(
+    resolve(ROOT, 'src', 'mcp', 'browser-ready-diagnostics.ts'),
+    'utf-8',
+  );
   const readyBlock = source.match(
     /const buildLightweightBrowserReady = async \(args = \{\}\) => \{[\s\S]*?\n\};\n\nconst normalizeLimit/,
   )?.[0];
 
   assert.ok(readyBlock, 'buildLightweightBrowserReady deve existir');
   assert.match(source, /createNativeBrokerStatusProbe\(/);
-  assert.match(readyBlock, /const nativeBrokerStatus = await probeNativeBrowserBrokerStatus\(\{\s*allowWake:\s*true/);
+  assert.match(readyBlock, /const nativeBrokerReadyWakeDecision = decideNativeBrokerReadyWake\(/);
+  assert.match(readyBlock, /allowWake:\s*nativeBrokerReadyWakeDecision\.allowWake/);
+  assert.doesNotMatch(
+    readyBlock,
+    /probeNativeBrowserBrokerStatus\(\{\s*allowWake:\s*true/,
+    'ready/status nao deve acordar o broker nativo incondicionalmente',
+  );
   assert.match(readyBlock, /nativeBroker:\s*nativeBrokerStatus/);
   assert.match(readyBlock, /nativeBrokerBlockingIssueForReady/);
+  assert.match(readyBlock, /nextAction,\s*\n\s*mode/);
+  assert.match(source, /diagnoseNativeHost/);
+  assert.match(source, /enrichNativeBrokerStatusWithInstallDiagnostic/);
+  assert.match(browserReadyDiagnosticsSource, /native_host_manifest_target_missing/);
+  assert.match(source, /browserReadyNextAction/);
+  assert.match(browserReadyDiagnosticsSource, /extension_control_channel_unavailable/);
   assert.match(nativeGateSource, /nativeBrokerStatus\.available !== true/);
 });
 
@@ -803,7 +819,8 @@ test('browser readiness inclui diagnostico do tab orchestrator FSM', () => {
   assert.match(readyBlock, /mode:\s*'diagnostic'/);
   assert.match(readyBlock, /desiredPageKind:\s*'chat'/);
   assert.match(readyBlock, /const tabOrchestratorBlockingIssue = tabOrchestratorBlockingIssueForReady\(/);
-  assert.match(readyBlock, /blockingIssue: tabOrchestratorBlockingIssue \|\| blockingIssue/);
+  assert.match(readyBlock, /const effectiveBlockingIssue = tabOrchestratorBlockingIssue \|\| blockingIssue/);
+  assert.match(readyBlock, /blockingIssue: effectiveBlockingIssue/);
   assert.match(readyBlock, /tabOrchestrator:\s*summarizeTabOrchestratorPlan\(tabOrchestratorPlan\)/);
 });
 
@@ -967,7 +984,13 @@ test('MCP acorda native broker pelo service worker antes de declarar socket mort
   assert.match(nativeGateSource, /reason:\s*'mcp-native-broker-wake'/);
   assert.match(source, /createNativeBrokerStatusProbe\(/);
   assert.match(probeBlock, /enqueueCommand/);
-  assert.match(readyBlock, /probeNativeBrowserBrokerStatus\(\{\s*allowWake:\s*true/);
+  assert.match(readyBlock, /const nativeBrokerReadyWakeDecision = decideNativeBrokerReadyWake\(/);
+  assert.match(readyBlock, /allowWake:\s*nativeBrokerReadyWakeDecision\.allowWake/);
+  assert.doesNotMatch(
+    readyBlock,
+    /probeNativeBrowserBrokerStatus\(\{\s*allowWake:\s*true/,
+    'ready/status nao deve tentar ensure-native-broker sem pedido explicito ou canal confiavel',
+  );
 });
 
 test('reload de abas existentes pode atualizar extensao sem abrir navegador', () => {

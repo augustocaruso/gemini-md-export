@@ -5,6 +5,7 @@ export type FixVaultStepStatus = 'completed' | 'blocked' | 'failed' | 'skipped';
 export type FixVaultStepName =
   | 'repair-audit'
   | 'metadata-diagnosis'
+  | 'private-api-repair'
   | 'web-repair'
   | 'metadata-backfill'
   | 'vault-validation';
@@ -18,7 +19,7 @@ export type FixVaultProgressPhase =
 export const FIX_VAULT_STEP_ORDER = [
   'repair-audit',
   'metadata-diagnosis',
-  'web-repair',
+  'private-api-repair',
   'metadata-backfill',
   'vault-validation',
 ] as const satisfies readonly FixVaultStepName[];
@@ -44,8 +45,8 @@ export type MetadataDiagnosisStep = {
   reportPath: string;
 };
 
-export type WebRepairStep = {
-  name: 'web-repair';
+export type ChatRepairStep = {
+  name: 'private-api-repair' | 'web-repair';
   status: Extract<FixVaultStepStatus, 'completed' | 'blocked' | 'failed' | 'skipped'>;
   exitCode: number;
   targetCount: number;
@@ -68,17 +69,38 @@ export type VaultValidationStep = {
 export type FixVaultStep =
   | RepairAuditStep
   | MetadataDiagnosisStep
-  | WebRepairStep
+  | ChatRepairStep
   | MetadataBackfillStep
   | VaultValidationStep;
 
 export type FixVaultStepTuple = [
   RepairAuditStep,
   MetadataDiagnosisStep,
-  WebRepairStep,
+  ChatRepairStep,
   MetadataBackfillStep,
   VaultValidationStep,
 ];
+
+export type FixVaultChatRepairSummary = {
+  adapter: 'private_api' | 'web';
+  targetCount: number;
+  exitCode: number;
+  skipped: boolean;
+  unavailable?: {
+    code: string;
+    message: string;
+    nextAction?: string;
+    failedChatIds?: string[];
+    failureCodeCounts?: Record<string, number>;
+    failureSamples?: Array<{
+      index: number;
+      chatId: string | null;
+      title: string | null;
+      code: string | null;
+      error: string;
+    }>;
+  } | null;
+};
 
 export type FixVaultReportSummary = {
   repair: {
@@ -87,17 +109,9 @@ export type FixVaultReportSummary = {
     takeoutEvidence: unknown;
   };
   diagnosis: MetadataBackfillSummary | null;
-  webRepair: {
-    targetCount: number;
-    exitCode: number;
-    skipped: boolean;
-    unavailable?: {
-      code: string;
-      message: string;
-      nextAction?: string;
-      failedChatIds?: string[];
-    } | null;
-  };
+  chatRepair: FixVaultChatRepairSummary;
+  /** @deprecated Use chatRepair. Kept as a schema-v1 compatibility alias. */
+  webRepair: Omit<FixVaultChatRepairSummary, 'adapter'>;
   metadata: MetadataBackfillSummary | null;
 };
 

@@ -19,8 +19,12 @@ export type ExtensionClientForCdp = Readonly<{
 }>;
 
 export type CdpRuntimeInput = Readonly<{
+  allowHttpBrowserFallback?: boolean | null;
   cdpUrl?: string | null;
   defaultCdpUrl?: string | null;
+  defaultDevToolsActivePortFile?: string | null;
+  devToolsActivePortContents?: string | null;
+  devToolsActivePortFile?: string | null;
   controlPlane?: string | null;
   chatId?: string | null;
 }>;
@@ -69,7 +73,13 @@ export const buildCdpControlSnapshot = async (
     const buildSnapshot = deps.buildSnapshot || buildCdpBrowserSnapshot;
     return {
       attempted: true,
-      ...(await buildSnapshot({ endpoint })),
+      ...(await buildSnapshot({
+        endpoint,
+        allowHttpBrowserFallback: input.allowHttpBrowserFallback === true,
+        devToolsActivePortContents: input.devToolsActivePortContents || null,
+        devToolsActivePortFile:
+          input.devToolsActivePortFile || input.defaultDevToolsActivePortFile || null,
+      })),
     };
   } catch (err) {
     return {

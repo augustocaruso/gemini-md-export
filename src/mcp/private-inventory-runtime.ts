@@ -16,9 +16,14 @@ export type PrivateInventoryDeps = Readonly<{
   normalizeConversationChatId(value: unknown): string | null;
   summarizeClient(client: AnyRecord | null): AnyRecord | null;
   getSelectableGeminiClients(): AnyRecord[];
+  getCommandReadyGeminiClients?(): AnyRecord[];
   normalizeClientSelector(args: AnyRecord): AnyRecord;
   requireClient(selector: AnyRecord): AnyRecord;
   claimForSession(sessionId?: unknown): unknown;
+  nativeBrowserBroker?: {
+    privateApiSessionStatus?(payload?: AnyRecord, options?: AnyRecord): Promise<AnyRecord>;
+    privateApiListChats?(payload?: AnyRecord, options?: AnyRecord): Promise<AnyRecord>;
+  };
 }>;
 
 export const privateInventoryLimit = (args: AnyRecord = {}, fallback = 200): number =>
@@ -94,7 +99,34 @@ const listViaBrowserBackground = async (
   );
   if (!result?.ok) return result;
   const conversations = (Array.isArray(result.chats) ? result.chats : [])
-    .map((chat) => conversationFromChat(chat, 'private-api-browser', deps))
+    .map((chat: AnyRecord) => conversationFromChat(chat, 'private-api-browser', deps))
+    .filter(Boolean);
+  return {
+    ok: true,
+    source: 'browser-background',
+    conversations,
+    count: conversations.length,
+    transport: result.transport || null,
+  };
+};
+
+const listViaNativeBrowserBroker = async (
+  args: AnyRecord,
+  deps: PrivateInventoryDeps,
+): Promise<AnyRecord | null> => {
+  if (!deps.nativeBrowserBroker?.privateApiListChats) return null;
+  const timeoutMs = Math.max(5000, Number(args.privateInventoryWaitMs || args.waitMs || 30_000));
+  const nativeResponse = await deps.nativeBrowserBroker.privateApiListChats(
+    {
+      limit: privateInventoryLimit(args, args.limit || 200),
+      timeoutMs,
+    },
+    { allowFallback: true },
+  );
+  const result = nativeResponse?.ok === true ? nativeResponse.result : nativeResponse;
+  if (!result?.ok) return result || { ok: false, code: 'native_private_inventory_failed' };
+  const conversations = (Array.isArray(result.chats) ? result.chats : [])
+    .map((chat: AnyRecord) => conversationFromChat(chat, 'private-api-browser', deps))
     .filter(Boolean);
   return {
     ok: true,
@@ -135,6 +167,23 @@ export const listPrivateChatsForClient = async (
 ): Promise<AnyRecord | null> => {
   if (args.privateInventory === false) return null;
   const attempts: AnyRecord[] = [];
+  try {
+    const nativeResult = await listViaNativeBrowserBroker(args, deps);
+    if (nativeResult?.ok) {
+      applyPrivateInventoryToClient(client, nativeResult, args);
+      return { ...nativeResult, attempts };
+    }
+    if (nativeResult)
+      attempts.push({ adapter: 'browserBackground', ...summarizeFailure(nativeResult) });
+  } catch (err: any) {
+    attempts.push({
+      adapter: 'browserBackground',
+      ok: false,
+      code: err?.code || 'native_private_inventory_failed',
+      message: err?.message || String(err),
+    });
+  }
+
   if (client?.clientId && deps.commandChannelReadyForClient(client)) {
     try {
       const browserResult = await listViaBrowserBackground(client, args, deps);
@@ -344,20 +393,78 @@ const supportLegacyToolNames: Record<string, string> = {
 export const privateSupportLegacyToolName = (action: unknown): string =>
   supportLegacyToolNames[String(action || 'diagnose')] || supportLegacyToolNames.diagnose;
 
+const commandReadyGeminiClients = (deps: PrivateInventoryDeps): AnyRecord[] =>
+  typeof deps.getCommandReadyGeminiClients === 'function'
+    ? deps
+        .getCommandReadyGeminiClients()
+        .filter((client) => deps.commandChannelReadyForClient(client))
+    : [];
+
+const clientMatchesSessionSelector = (client: AnyRecord, selector: AnyRecord): boolean => {
+  if (selector.clientId) return client?.clientId === selector.clientId;
+  if (selector.tabId !== null && selector.tabId !== undefined) {
+    return String(client?.tabId ?? '') === String(selector.tabId);
+  }
+  return false;
+};
+
 const browserClientForSessionStatus = (args: AnyRecord, deps: PrivateInventoryDeps) => {
   const selector = deps.normalizeClientSelector(args);
+  const readyClients = commandReadyGeminiClients(deps);
   if (
     selector.clientId ||
     selector.tabId !== null ||
     selector.claimId ||
     deps.claimForSession(selector.sessionId)
   ) {
-    return deps.requireClient(selector);
+    try {
+      return deps.requireClient(selector);
+    } catch (err) {
+      const readyMatch = readyClients.find((client) =>
+        clientMatchesSessionSelector(client, selector),
+      );
+      if (readyMatch) return readyMatch;
+      throw err;
+    }
   }
   return (
     deps.getSelectableGeminiClients().find((client) => deps.commandChannelReadyForClient(client)) ||
+    readyClients[0] ||
     null
   );
+};
+
+const disconnectedExtensionRuntimeCodes = new Set([
+  'native_broker_unavailable',
+  'native_broker_disconnected',
+  'native_broker_not_ready',
+  'native_private_session_failed',
+]);
+
+const browserOnlySessionNextAction = (
+  attempts: readonly AnyRecord[],
+  browserClient: AnyRecord | null,
+) => {
+  const nativeRuntimeDisconnected =
+    !browserClient &&
+    attempts.some(
+      (attempt) =>
+        attempt.adapter === 'browserBackground' &&
+        disconnectedExtensionRuntimeCodes.has(String(attempt.code || '')),
+    );
+
+  if (nativeRuntimeDisconnected) {
+    return {
+      code: 'extension_runtime_not_connected',
+      message:
+        'Recarregue a extensao e a aba do Gemini no navegador logado; depois rode auth status novamente.',
+    };
+  }
+
+  return {
+    code: 'browser_session_not_connected',
+    message: 'Abra o Gemini no navegador logado e aguarde a extensao conectar.',
+  };
 };
 
 export const checkPrivateSessionStatus = async (
@@ -365,6 +472,41 @@ export const checkPrivateSessionStatus = async (
   deps: PrivateInventoryDeps,
 ): Promise<AnyRecord> => {
   const attempts: AnyRecord[] = [];
+  if (deps.nativeBrowserBroker?.privateApiSessionStatus) {
+    try {
+      const timeoutMs = Math.max(5000, Number(args.waitMs || 20_000));
+      const nativeResponse = await deps.nativeBrowserBroker.privateApiSessionStatus(
+        { timeoutMs },
+        { allowFallback: true },
+      );
+      const nativeResult = nativeResponse?.ok === true ? nativeResponse.result : nativeResponse;
+      attempts.push({
+        adapter: 'browserBackground',
+        ...summarizeFailure(nativeResult),
+        authenticated: nativeResult?.authenticated === true,
+        transport: nativeResult?.transport || null,
+      });
+      if (nativeResult?.ok && nativeResult.authenticated === true) {
+        return {
+          ok: true,
+          action: 'session_status',
+          authenticated: true,
+          selectedAdapter: 'browserBackground',
+          client: null,
+          attempts,
+          nextAction: { code: 'ready', message: 'Sessao do navegador pronta para API privada.' },
+        };
+      }
+    } catch (err: any) {
+      attempts.push({
+        adapter: 'browserBackground',
+        ok: false,
+        code: err?.code || 'native_private_session_failed',
+        message: err?.message || String(err),
+      });
+    }
+  }
+
   let browserClient: AnyRecord | null = null;
   try {
     browserClient = browserClientForSessionStatus(args, deps);
@@ -410,6 +552,18 @@ export const checkPrivateSessionStatus = async (
         message: err?.message || String(err),
       });
     }
+  }
+
+  if (args.pythonFallback === false) {
+    return {
+      ok: false,
+      action: 'session_status',
+      authenticated: false,
+      selectedAdapter: null,
+      client: browserClient ? deps.summarizeClient(browserClient) : null,
+      attempts,
+      nextAction: browserOnlySessionNextAction(attempts, browserClient),
+    };
   }
 
   const pythonResult = await runGeminiWebapiPythonSessionStatus({

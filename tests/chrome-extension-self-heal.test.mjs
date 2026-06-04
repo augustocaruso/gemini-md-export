@@ -137,6 +137,10 @@ test('content script responde ping do service worker e evita dupla injecao do me
   assert.match(source, /RUNTIME_GUARD_KEY/);
   assert.match(source, /__geminiMdExportModernRuntime/);
   assert.match(source, /const quiesceExistingRuntime = \(runtime\) =>/);
+  assert.match(source, /transitionContentRuntimeGuard/);
+  assert.match(source, /runtimeGuardDecision\.effects\.includes\('return-existing'\)/);
+  assert.match(source, /runtime\.status = \(\) => contentScriptRuntimeStatus\(\)/);
+  assert.match(source, /heartbeatTimerActive: !!bridgeState\.heartbeatTimer/);
   assert.match(source, /runtime\.stop\('runtime-superseded'\)/);
   assert.match(source, /TAB_IGNORE_CHANGED_EVENT_BOOTSTRAP/);
   assert.match(source, /runtime\.stop = \(\) => \{[\s\S]*stopExtensionBridge\(\)/);

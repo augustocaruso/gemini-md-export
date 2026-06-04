@@ -131,6 +131,49 @@ test('blocker-aware tab lifecycle tracks tabs opened by the launcher', () => {
   assert.equal(observed.state.managedTabs[0].targetUrl, 'https://gemini.google.com/app');
 });
 
+test('blocker-aware tab lifecycle prunes stale tab-id-less managed launch records', () => {
+  const state = browserTabLifecycleStateFromLaunchState(
+    {
+      tabLifecycle: {
+        status: 'idle',
+        managedTabs: [
+          {
+            managed: true,
+            launchId: 'old-1',
+            source: 'cli',
+            targetUrl: 'https://gemini.google.com/app',
+            createdAtMs: 1000,
+            updatedAtMs: 1000,
+          },
+          {
+            managed: true,
+            launchId: 'fresh-1',
+            source: 'cli',
+            targetUrl: 'https://gemini.google.com/app',
+            createdAtMs: 59_000,
+            updatedAtMs: 59_000,
+          },
+          {
+            managed: true,
+            tabId: 42,
+            launchId: 'old-with-tab',
+            source: 'cli',
+            targetUrl: 'https://gemini.google.com/app',
+            createdAtMs: 1000,
+            updatedAtMs: 1000,
+          },
+        ],
+      },
+    },
+    121_000,
+  );
+
+  assert.deepEqual(
+    state.managedTabs.map((tab) => tab.launchId),
+    ['fresh-1', 'old-with-tab'],
+  );
+});
+
 test('blocker-aware tab lifecycle marks managed launch as blocked when sorry appears after launch', () => {
   const start = transitionBrowserTabLifecycle(
     browserTabLifecycleStateFromLaunchState(null, 1000),

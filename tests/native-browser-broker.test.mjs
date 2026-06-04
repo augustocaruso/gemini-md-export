@@ -15,6 +15,7 @@ import {
   clientSupportsNativeBrokerWakeCommand,
   createNativeBrokerTabsActionRunner,
   createTabClaimRelease,
+  decideNativeBrokerReadyWake,
   selectNativeBrokerWakeClient,
   shouldAttemptNativeBrokerWake,
 } from '../build/ts/mcp/native-release-gate.js';
@@ -331,6 +332,42 @@ test('native broker wake targets only clients that announce the wake capability'
       commandChannelReadyForClient: () => true,
     }),
     null,
+  );
+});
+
+test('browser ready only wakes native broker with explicit intent or command-ready client', () => {
+  assert.deepEqual(
+    decideNativeBrokerReadyWake({
+      explicit: false,
+      matchingClientCount: 1,
+      commandReadyClientCount: 0,
+    }),
+    {
+      allowWake: false,
+      reason: 'command_channel_not_ready',
+    },
+  );
+  assert.deepEqual(
+    decideNativeBrokerReadyWake({
+      explicit: false,
+      matchingClientCount: 1,
+      commandReadyClientCount: 1,
+    }),
+    {
+      allowWake: true,
+      reason: 'command_channel_ready',
+    },
+  );
+  assert.deepEqual(
+    decideNativeBrokerReadyWake({
+      explicit: true,
+      matchingClientCount: 0,
+      commandReadyClientCount: 0,
+    }),
+    {
+      allowWake: true,
+      reason: 'explicit',
+    },
   );
 });
 

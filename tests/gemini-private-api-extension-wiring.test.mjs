@@ -24,6 +24,8 @@ test('content script forwards private-api-read-chat without arbitrary eval', () 
   assert.match(source, /command\.type === 'private-api-list-chats'/);
   assert.match(source, /command\.type === 'private-api-session-status'/);
   assert.match(source, /gemini-md-export\/private-api-read-chat/);
+  assert.match(source, /readGeminiPrivateChatFromContent/);
+  assert.match(source, /shouldUseContentPrivateApiFallback/);
   assert.doesNotMatch(source, /eval\(/);
 });
 
@@ -54,6 +56,9 @@ test('MCP exposes private_read as deliberate gemini_chats action', () => {
 
   assert.match(source, /private_read/);
   assert.match(source, /createMcpPrivateReadRuntimes/);
+  const privateReadRuntimeInit =
+    source.match(/const privateRead = createMcpPrivateReadRuntimes\(\{[\s\S]*?\n\}\);/)?.[0] || '';
+  assert.match(privateReadRuntimeInit, /nativeBrowserBroker/);
   assert.match(source, /gemini-webapi-python/);
   assert.match(source, /action === 'private_read'/);
   assert.match(source, /privateRead\.run\(args\)/);

@@ -29,7 +29,7 @@
     "src/job-progress-broadcast.mjs": 157,
     "src/job-trace.mjs": 897,
     "src/mcp-server-errors.mjs": 75,
-    "src/mcp-server.js": 71169,
+    "src/mcp-server.js": 71338,
     "src/native-host.mjs": 14,
     "src/notebook-return-plan.mjs": 158,
     "src/offscreen.js": 161,

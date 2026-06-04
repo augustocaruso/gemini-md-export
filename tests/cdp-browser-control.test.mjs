@@ -98,6 +98,27 @@ class FakeWebSocket {
   }
 }
 
+class FailingWebSocket {
+  static instances = [];
+
+  constructor(url) {
+    this.url = url;
+    this.sent = [];
+    this.closed = false;
+    FailingWebSocket.instances.push(this);
+    queueMicrotask(() => this.onerror?.({ type: 'error' }));
+  }
+
+  send(payload) {
+    this.sent.push(JSON.parse(payload));
+  }
+
+  close() {
+    this.closed = true;
+    this.onclose?.({ type: 'close' });
+  }
+}
+
 test('normaliza endpoint CDP sem barra final', () => {
   assert.equal(normalizeCdpEndpoint('127.0.0.1:9222/'), 'http://127.0.0.1:9222');
   assert.equal(normalizeCdpEndpoint('http://localhost:9222///'), 'http://localhost:9222');
@@ -141,7 +162,11 @@ test('lista targets CDP e monta snapshot com bloqueio acionavel', async () => {
   assert.equal(targets.length, 2);
   assert.equal(targets[1].chatId, '88a98a108cdcfb61');
 
-  const snapshot = await buildCdpBrowserSnapshot({ endpoint: 'http://127.0.0.1:9222', fetchImpl });
+  const snapshot = await buildCdpBrowserSnapshot({
+    endpoint: 'http://127.0.0.1:9222',
+    fetchImpl,
+    allowHttpBrowserFallback: true,
+  });
   assert.equal(snapshot.ok, true);
   assert.equal(snapshot.controlPlane, 'cdp');
   assert.equal(snapshot.blocker?.code, 'google_verification_required');
@@ -176,6 +201,59 @@ test('snapshot CDP usa Browser WebSocket primeiro quando o navegador anuncia web
     fetchImpl.calls.map((call) => call.key),
     ['GET /json/version'],
   );
+});
+
+test('snapshot CDP nao cai para /json/list quando Browser WebSocket falha sem opt-in', async () => {
+  FailingWebSocket.instances = [];
+  const fetchImpl = makeFetch({
+    'GET /json/version': jsonResponse({
+      Browser: 'Chrome/126',
+      webSocketDebuggerUrl: 'ws://127.0.0.1:9222/devtools/browser/abc',
+    }),
+    'GET /json/list': () => {
+      throw new Error('HTTP target listing must stay disabled by default');
+    },
+  });
+
+  await assert.rejects(
+    () =>
+      buildCdpBrowserSnapshot({
+        endpoint: 'http://127.0.0.1:9222',
+        fetchImpl,
+        WebSocketImpl: FailingWebSocket,
+        timeoutMs: 1000,
+      }),
+    /Falha no WebSocket CDP|Timeout CDP/,
+  );
+
+  assert.deepEqual(
+    fetchImpl.calls.map((call) => call.key),
+    ['GET /json/version'],
+  );
+});
+
+test('snapshot CDP rejeita endpoint 9222 que pertence a app WebView e nao ao navegador', async () => {
+  FakeWebSocket.instances = [];
+  const fetchImpl = makeFetch({
+    'GET /json/version': jsonResponse({
+      Browser: 'Edg/148.0.3967.96',
+      'User-Agent': 'LenovoVantage/3.0.0.191',
+      webSocketDebuggerUrl: 'ws://127.0.0.1:9222/devtools/browser/lenovo',
+    }),
+  });
+
+  await assert.rejects(
+    () =>
+      buildCdpBrowserSnapshot({
+        endpoint: 'http://127.0.0.1:9222',
+        fetchImpl,
+        WebSocketImpl: FakeWebSocket,
+        timeoutMs: 1000,
+      }),
+    (err) => err?.code === 'cdp_unrelated_endpoint',
+  );
+
+  assert.equal(FakeWebSocket.instances.length, 0);
 });
 
 test('seleciona target Gemini por chatId e ativa pelo endpoint CDP HTTP', async () => {

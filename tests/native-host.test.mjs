@@ -172,16 +172,39 @@ test('native broker wake waits for persistent hello without opening a second pin
   assert.match(contentSource, /brokerOnly:\s*true/);
 });
 
-test('service worker abre native broker no startup antes do self-heal de abas', () => {
+test('service worker registra listener de mensagens antes de iniciar native broker no startup', () => {
   const source = readFileSync(resolve(ROOT, 'src', 'extension-background.ts'), 'utf-8');
   const startBlock =
     source.match(/const handleServiceWorkerStart = async \(\) => \{[\s\S]*?\n\};/)?.[0] || '';
+  const listenerIndex = source.indexOf('chrome.runtime.onMessage.addListener');
+  const startupIndex = source.indexOf('void handleServiceWorkerStart();');
 
   assert.match(startBlock, /ensureNativeBrokerPort\(\{ reason: 'service-worker-start' \}\)/);
+  assert.ok(listenerIndex >= 0, 'listener principal de mensagens deve existir');
+  assert.ok(startupIndex >= 0, 'bootstrap do service worker deve existir');
+  assert.ok(
+    listenerIndex < startupIndex,
+    'ping/info precisam estar registrados antes de qualquer inicializacao pesada',
+  );
   assert.ok(
     startBlock.indexOf("ensureNativeBrokerPort({ reason: 'service-worker-start' })") <
       startBlock.indexOf('consumePendingGeminiTabsReload()'),
     'native broker deve abrir antes do self-heal depender dele',
+  );
+});
+
+test('service worker registra alarme de keepalive para acordar o native broker', () => {
+  const source = readFileSync(resolve(ROOT, 'src', 'extension-background.ts'), 'utf-8');
+  const startBlock =
+    source.match(/const handleServiceWorkerStart = async \(\) => \{[\s\S]*?\n\};/)?.[0] || '';
+
+  assert.match(source, /NATIVE_BROKER_KEEPALIVE_ALARM/);
+  assert.match(source, /NATIVE_BROKER_KEEPALIVE_PERIOD_MINUTES/);
+  assert.match(source, /ensureNativeBrokerKeepaliveAlarm/);
+  assert.match(startBlock, /ensureNativeBrokerKeepaliveAlarm\(\{\s*reason: 'service-worker-start'/);
+  assert.match(
+    source,
+    /alarm\?\.name === NATIVE_BROKER_KEEPALIVE_ALARM[\s\S]*ensureNativeBrokerPort\(\{\s*reason: 'native-broker-keepalive-alarm'/,
   );
 });
 

@@ -11,6 +11,7 @@ import {
 import { basename, dirname, join, relative, resolve } from 'node:path';
 import {
   buildFixVaultCombinedReport,
+  buildFixVaultPrivateRepairExportOptions,
   buildFixVaultPrivateRepairTargets,
   buildFixVaultRepairAdapterPlan,
   buildMetadataArgs,
@@ -23,11 +24,13 @@ import {
 } from '../core/fix-vault-flow.js';
 import { buildFixVaultMetadataStatus } from '../core/metadata-backfill-contract.js';
 import { loadMarkdownDbFixVaultRecords } from '../mcp/markdown-db-vault-adapter.js';
+import { resolveGeminiMdExportVaultDir } from './config-store.js';
 import {
   type PrivateApiSelectedExportJob,
   runPrivateApiSelectedExport,
   summarizePrivateApiSelectedExportJob,
 } from './private-api-selected-export.js';
+import { applyPrivateApiSessionDefaults } from './private-api-session-store.js';
 
 type CliStreams = {
   stdout?: NodeJS.WritableStream & { isTTY?: boolean };
@@ -45,6 +48,8 @@ type RepairRunResult = {
   stderrText: string;
   skipped?: boolean;
 };
+
+type PreparePrivateApiRepair = () => Promise<void> | void;
 
 const reportTimestamp = () =>
   new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, '').replace('T', '-');
@@ -96,7 +101,23 @@ const backupPrivateRepairTargets = ({
 const mediaFailureCountFor = (job: PrivateApiSelectedExportJob): number =>
   job.savedFiles.reduce((sum, file) => sum + Number(file.mediaFailureCount || 0), 0);
 
-const privateRepairUnavailableForJob = (job: PrivateApiSelectedExportJob) => {
+const failureCodeCountsFor = (job: Pick<PrivateApiSelectedExportJob, 'failures'>) =>
+  job.failures.reduce<Record<string, number>>((counts, failure) => {
+    const code = failure.code || 'unknown';
+    counts[code] = (counts[code] || 0) + 1;
+    return counts;
+  }, {});
+
+const failureSamplesFor = (job: Pick<PrivateApiSelectedExportJob, 'failures'>) =>
+  job.failures.slice(0, 10).map((failure) => ({
+    index: failure.index,
+    chatId: failure.chatId,
+    title: failure.title,
+    code: failure.code,
+    error: failure.error,
+  }));
+
+export const privateRepairUnavailableForJob = (job: PrivateApiSelectedExportJob) => {
   const mediaFailureCount = mediaFailureCountFor(job);
   if (job.failureCount > 0) {
     return {
@@ -107,6 +128,8 @@ const privateRepairUnavailableForJob = (job: PrivateApiSelectedExportJob) => {
       failedChatIds: job.failures
         .map((failure) => failure.chatId)
         .filter((chatId): chatId is string => Boolean(chatId)),
+      failureCodeCounts: failureCodeCountsFor(job),
+      failureSamples: failureSamplesFor(job),
     };
   }
   if (mediaFailureCount > 0) {
@@ -170,6 +193,50 @@ const markdownDbUnavailableRunResult = (err: unknown): RepairRunResult => ({
   stderrText: err instanceof Error ? err.message : String(err),
   skipped: false,
 });
+
+const privateRepairPreflightUnavailableRunResult = (
+  err: unknown,
+  targets: FixVaultPrivateRepairTarget[],
+): RepairRunResult => {
+  const record = err && typeof err === 'object' ? (err as Record<string, unknown>) : {};
+  const message =
+    err instanceof Error
+      ? err.message
+      : typeof err === 'string'
+        ? err
+        : 'A sessao privada do navegador nao ficou pronta para reparar o vault.';
+  const nextAction =
+    typeof record.nextAction === 'string'
+      ? record.nextAction
+      : 'Abra o Gemini no navegador logado, aguarde a extensao conectar e rode fix-vault novamente.';
+  return {
+    exitCode: 1,
+    stdoutText: `${JSON.stringify(
+      {
+        ok: false,
+        mode: 'private-api',
+        webRepairUnavailable: {
+          code:
+            typeof record.code === 'string'
+              ? record.code
+              : 'gemini_private_api_session_unavailable',
+          message,
+          nextAction,
+          failedChatIds: targets.map((target) => target.chatId),
+        },
+        statusCounts: {
+          repaired: 0,
+          failed: targets.length,
+          mediaFailures: 0,
+        },
+      },
+      null,
+      2,
+    )}\n`,
+    stderrText: message,
+    skipped: false,
+  };
+};
 
 const loadFixVaultMarkdownDbRecords = async ({
   vaultDir,
@@ -262,6 +329,7 @@ const runPrivateApiRepair = async ({
   format,
   backupDir,
   vaultDir,
+  preparePrivateApiRepair,
 }: {
   targets: FixVaultPrivateRepairTarget[];
   parsed: ParsedCommand;
@@ -269,71 +337,77 @@ const runPrivateApiRepair = async ({
   format: string;
   backupDir: string;
   vaultDir: string;
+  preparePrivateApiRepair?: PreparePrivateApiRepair;
 }): Promise<RepairRunResult> => {
   const stdout = streams.stdout || process.stdout;
   backupPrivateRepairTargets({ targets, backupDir, vaultDir });
   let lastProgressKey = '';
-  const job = await runPrivateApiSelectedExport({
-    items: targets.map((target) => ({
-      chatId: target.chatId,
-      title: target.title,
-      url: target.url,
-      sourcePath: target.sourcePath,
-      outputDir: target.outputDir,
-      filename: target.filename,
-    })),
-    expectedCount: targets.length,
-    bridgeUrl: parsed.flags.bridgeUrl,
-    limit: parsed.flags.limit,
-    waitMs: parsed.flags.waitMs,
-    privateReadWaitMs: parsed.flags.privateReadWaitMs,
-    timeoutMs: parsed.flags.timeoutMs,
-    pollMs: parsed.flags.pollMs,
-    clientId: parsed.flags.clientId,
-    tabId: parsed.flags.tabId,
-    claimId: parsed.flags.claimId,
-    sessionId: parsed.flags.sessionId || parsed.flags.session,
-    openIfMissing: parsed.flags.openIfMissing,
-    wakeBrowser: parsed.flags.wakeBrowser,
-    activateTab: parsed.flags.activateTab,
-    allowReload: parsed.flags.allowReload,
-    bootstrapTimeoutMs: parsed.flags.bootstrapTimeoutMs,
-    python: parsed.flags.python,
-    cookiesJson: parsed.flags.cookiesJson,
-    delayMs: parsed.flags.delayMs,
-    onProgress: (progress) => {
-      const active = progress.current && progress.status === 'running' ? 1 : 0;
-      const count = Math.min(progress.requested, progress.completed + active);
-      const key = `${progress.status}:${progress.completed}:${progress.current?.chatId || ''}:${progress.progressMessage}`;
-      if (key === lastProgressKey) return;
-      lastProgressKey = key;
-      const unifiedPrepMessages = new Set([
-        'Lendo conversa pela API privada',
-        'Export privado em andamento',
-        'Export privado unificado',
-      ]);
-      const pythonPrepMessages = new Set([
-        'Preparando API privada',
-        'Preparacao da API privada falhou',
-        'Listando conversas pela API privada',
-      ]);
-      const message = unifiedPrepMessages.has(progress.progressMessage)
-        ? `Preparando export privado unificado (${count}/${progress.requested})`
-        : progress.progressMessage === 'Export privado concluido'
-          ? `Export privado unificado concluido (${count}/${progress.requested})`
-          : pythonPrepMessages.has(progress.progressMessage)
-            ? `${progress.progressMessage} (${count}/${progress.requested})`
-            : `Reparando exports/assets pela API privada (${count}/${progress.requested})`;
-      stdout.write(
-        formatFixVaultProgressLine({
-          format,
-          current: 3,
-          total: 5,
-          message,
-        }),
-      );
+  const shouldRunBrowserPreflight =
+    !parsed.flags.cookiesJson && !parsed.flags.python && !process.env.GME_GEMINI_WEBAPI_RUNNER;
+  if (shouldRunBrowserPreflight) {
+    try {
+      await preparePrivateApiRepair?.();
+    } catch (err) {
+      return privateRepairPreflightUnavailableRunResult(err, targets);
+    }
+  }
+  const exportOptions = buildFixVaultPrivateRepairExportOptions(parsed.flags);
+  const job = await runPrivateApiSelectedExport(
+    {
+      items: targets.map((target) => ({
+        chatId: target.chatId,
+        title: target.title,
+        url: target.url,
+        sourcePath: target.sourcePath,
+        outputDir: target.outputDir,
+        filename: target.filename,
+      })),
+      expectedCount: targets.length,
+      ...exportOptions,
+      onProgress: (progress) => {
+        const active = progress.current && progress.status === 'running' ? 1 : 0;
+        const count = Math.min(progress.requested, progress.completed + active);
+        const key = `${progress.status}:${progress.completed}:${progress.current?.chatId || ''}:${progress.progressMessage}`;
+        if (key === lastProgressKey) return;
+        lastProgressKey = key;
+        const unifiedPrepMessages = new Set([
+          'Lendo conversa pela API privada',
+          'Export privado em andamento',
+          'Export privado unificado',
+        ]);
+        const pythonPrepMessages = new Set([
+          'Preparando API privada',
+          'Preparacao da API privada falhou',
+          'Listando conversas pela API privada',
+        ]);
+        const message = unifiedPrepMessages.has(progress.progressMessage)
+          ? `Preparando export privado unificado (${count}/${progress.requested})`
+          : progress.progressMessage === 'Recuperando sessão do navegador'
+            ? `Recuperando sessão do navegador (${count}/${progress.requested})`
+            : progress.progressMessage === 'Export privado concluido'
+              ? `Export privado unificado concluido (${count}/${progress.requested})`
+              : pythonPrepMessages.has(progress.progressMessage)
+                ? `${progress.progressMessage} (${count}/${progress.requested})`
+                : `Reparando exports/assets pela API privada (${count}/${progress.requested})`;
+        stdout.write(
+          formatFixVaultProgressLine({
+            format,
+            current: 3,
+            total: 5,
+            message,
+          }),
+        );
+      },
     },
-  });
+    preparePrivateApiRepair
+      ? {
+          recoverBrowserBackgroundSession: async () => {
+            await preparePrivateApiRepair();
+            return { ok: true };
+          },
+        }
+      : {},
+  );
   return privateRepairRunResult(job);
 };
 
@@ -343,20 +417,29 @@ export const runFixVaultCommand = async ({
   packageRoot,
   repairPath,
   metadataPath,
+  preparePrivateApiRepair,
 }: {
   parsed: ParsedCommand;
   streams?: CliStreams;
   packageRoot: string;
   repairPath: string;
   metadataPath: string;
+  preparePrivateApiRepair?: PreparePrivateApiRepair;
 }) => {
-  const vaultDir = parsed.flags.vaultDir || parsed.positionals[0];
-  if (!vaultDir) throw new Error('Informe vaultDir para fix-vault.');
+  const effectiveFlags = applyPrivateApiSessionDefaults(parsed.flags);
+  const effectiveParsed = { ...parsed, flags: effectiveFlags };
+  const vaultDirResolution = resolveGeminiMdExportVaultDir({
+    explicitVaultDir: effectiveFlags.vaultDir || parsed.positionals[0],
+  });
+  if (!vaultDirResolution.ok || !vaultDirResolution.vaultDir) {
+    throw new Error(vaultDirResolution.nextAction.message);
+  }
+  const vaultDir = vaultDirResolution.vaultDir;
   const resolvedVaultDir = resolve(vaultDir);
   if (!existsSync(resolvedVaultDir)) throw new Error(`Vault nao encontrado: ${resolvedVaultDir}`);
 
   const reportPath = resolve(
-    parsed.flags.report ||
+    effectiveFlags.report ||
       `${resolvedVaultDir}/.gemini-md-export-fix/fix-vault-${reportTimestamp()}.json`,
   );
   const reportDir = dirname(reportPath);
@@ -366,7 +449,7 @@ export const runFixVaultCommand = async ({
   mkdirSync(reportDir, { recursive: true });
 
   const stdout = streams.stdout || process.stdout;
-  const format = selectFixVaultFormat(parsed.flags, stdout);
+  const format = selectFixVaultFormat(effectiveFlags, stdout);
   const writePhase = (current: number, total: number, message: string) =>
     stdout.write(formatFixVaultProgressLine({ format, current, total, message }));
 
@@ -376,7 +459,7 @@ export const runFixVaultCommand = async ({
     args: buildRepairAuditArgs({
       vaultDir: resolvedVaultDir,
       repairReportDir,
-      takeout: parsed.flags.takeout || '',
+      takeout: effectiveFlags.takeout || '',
     }),
     streams,
     packageRoot,
@@ -392,7 +475,7 @@ export const runFixVaultCommand = async ({
           args: buildMetadataArgs({
             vaultDir: resolvedVaultDir,
             reportPath: metadataDiagnosisReportPath,
-            flags: parsed.flags,
+            flags: effectiveFlags,
             diagnoseOnly: true,
           }),
           streams,
@@ -409,9 +492,10 @@ export const runFixVaultCommand = async ({
     vaultDir: resolvedVaultDir,
     diagnosisReport,
   });
+  writePhase(2, 5, 'Indexando vault com MarkdownDB');
   const markdownDb = await loadFixVaultMarkdownDbRecords({
     vaultDir: resolvedVaultDir,
-    enabled: parsed.flags.privateApi !== false,
+    enabled: effectiveFlags.privateApi !== false,
   });
   const repairTargets = buildFixVaultPrivateRepairTargets({
     vaultDir: resolvedVaultDir,
@@ -420,8 +504,8 @@ export const runFixVaultCommand = async ({
   });
   const repairAdapterPlan = buildFixVaultRepairAdapterPlan({
     flags: {
-      privateApi: parsed.flags.privateApi,
-      openIfMissing: parsed.flags.openIfMissing,
+      privateApi: effectiveFlags.privateApi,
+      openIfMissing: effectiveFlags.openIfMissing,
     },
     targets: repairTargets,
   });
@@ -453,7 +537,7 @@ export const runFixVaultCommand = async ({
             args: buildWebRepairArgs({
               vaultDir: resolvedVaultDir,
               repairReportDir,
-              flags: parsed.flags,
+              flags: effectiveFlags,
               repairTargetPaths,
             }),
             streams,
@@ -468,11 +552,12 @@ export const runFixVaultCommand = async ({
           })
         : await runPrivateApiRepair({
             targets: repairTargets,
-            parsed,
+            parsed: effectiveParsed,
             streams,
             format,
             backupDir: resolve(repairReportDir, 'private-api-backups', reportTimestamp()),
             vaultDir: resolvedVaultDir,
+            preparePrivateApiRepair,
           });
     } else {
       writePhase(3, 5, 'Nenhum export suspeito para reexportar');
@@ -504,7 +589,7 @@ export const runFixVaultCommand = async ({
       args: buildMetadataArgs({
         vaultDir: resolvedVaultDir,
         reportPath: metadataReportPath,
-        flags: parsed.flags,
+        flags: effectiveFlags,
       }),
       streams,
       packageRoot,
@@ -526,9 +611,10 @@ export const runFixVaultCommand = async ({
   const combined = buildFixVaultCombinedReport({
     generatedAt: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
     vaultDir: resolvedVaultDir,
-    takeout: parsed.flags.takeout ? basename(parsed.flags.takeout) : null,
+    takeout: effectiveFlags.takeout ? basename(effectiveFlags.takeout) : null,
     repairExitCode: repair.exitCode,
     diagnosisExitCode: diagnosis.exitCode,
+    repairAdapter: usePrivateApiRepair ? 'private_api' : 'web',
     webRepairExitCode: webRepair.exitCode,
     webRepairSkipped: webRepair.skipped === true,
     webRepairTargetCount: repairTargetPaths.length,
@@ -554,7 +640,7 @@ export const runFixVaultCommand = async ({
   stdout.write(`Fix vault: relatorio combinado em ${reportPath}\n`);
 
   const exitCode = repair.exitCode || webRepair.exitCode || metadata.exitCode || 0;
-  if (parsed.flags.resultJson === true) {
+  if (effectiveFlags.resultJson === true) {
     stdout.write(`RESULT_JSON ${JSON.stringify(combined)}\n`);
   }
   return { exitCode, result: combined };

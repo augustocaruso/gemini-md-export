@@ -32,6 +32,7 @@ const LAST_RUNTIME_BUILD_KEY = 'gemini-md-export.lastRuntimeBuild.v1';
 const LAST_MANAGED_TABS_RELOAD_KEY = 'gemini-md-export.lastManagedTabsReload.v1';
 const TAB_CLAIMS_STORAGE_KEY = 'gemini-md-export.tabClaims.v1';
 const TAB_CLAIM_ALARM_PREFIX = 'gemini-md-export.tabClaimExpiry.';
+const NATIVE_BROKER_KEEPALIVE_ALARM = 'gemini-md-export.nativeBrokerKeepalive';
 const TAB_GROUP_NONE = -1;
 const GEMINI_TAB_URL_PATTERN = 'https://gemini.google.com/*';
 const ACTIVITY_TAB_URL_PATTERN = 'https://myactivity.google.com/product/gemini*';
@@ -58,6 +59,7 @@ const CONTENT_SCRIPT_POST_INJECT_PING_DELAY_MS = 180;
 const GEMINI_TAB_RELOAD_SETTLE_MS = 900;
 const MANAGED_TABS_RELOAD_COOLDOWN_MS = 30_000;
 const MANAGED_TAB_SELF_HEAL_DELAY_MS = 350;
+const NATIVE_BROKER_KEEPALIVE_PERIOD_MINUTES = 1;
 const ARTIFACT_CAPTURE_CACHE_LIMIT = 60;
 const TAB_CLAIM_COLORS = new Set([
   'grey',
@@ -95,6 +97,27 @@ const nativeBrokerPort = createNativeBrokerPort({
     };
   },
   runtimeActions: {
+    keepAlive: async (payload = {}) => {
+      const reason = payload.reason || 'native-broker-keepalive';
+      const idleCloseMs = Math.max(
+        OFFSCREEN_IDLE_CLOSE_MS,
+        Number(payload.idleCloseMs || payload.timeoutMs || 0) || 0,
+      );
+      ensureNativeBrokerKeepaliveAlarm({ reason });
+      const nativeBroker = ensureNativeBrokerPort({ reason });
+      const offscreen = await ensureOffscreenDocument({
+        reason,
+        idleCloseMs,
+      });
+      return {
+        ok: offscreen.ok === true,
+        status: offscreen.status || (offscreen.ok ? 'ready' : 'unavailable'),
+        reason,
+        idleCloseMs,
+        nativeBroker,
+        offscreen,
+      };
+    },
     extensionStatus: () => extensionInfo(),
     selfHealContentScripts: (payload = {}) =>
       selfHealGeminiTabs({
@@ -132,6 +155,18 @@ const nativeBrokerPort = createNativeBrokerPort({
         runtime: currentRuntimeInfo(),
       };
     },
+    privateApiSessionStatus: (payload = {}) =>
+      checkGeminiPrivateSession({ timeoutMs: payload.timeoutMs }),
+    privateApiListChats: (payload = {}) =>
+      listGeminiPrivateChats({ limit: payload.limit, timeoutMs: payload.timeoutMs }),
+    privateApiReadChat: (payload = {}) =>
+      readGeminiPrivateChat({
+        chatId: payload.chatId,
+        title: payload.title || null,
+        timeoutMs: payload.timeoutMs,
+        downloadAssets: payload.downloadAssets === true,
+        assetsRelDir: payload.assetsRelDir || null,
+      }),
   },
 });
 
@@ -270,6 +305,22 @@ const scheduleTabClaimExpiryAlarm = (tabId, expiresAtMs) => {
     when: Math.max(Date.now() + 1000, expiresAtMs),
   });
   return { ok: true, tabId, when: expiresAtMs };
+};
+
+const ensureNativeBrokerKeepaliveAlarm = ({ reason = 'manual' } = {}) => {
+  if (!chrome.alarms?.create) {
+    return { ok: false, reason, code: 'alarms-api-unavailable' };
+  }
+  chrome.alarms.create(NATIVE_BROKER_KEEPALIVE_ALARM, {
+    delayInMinutes: NATIVE_BROKER_KEEPALIVE_PERIOD_MINUTES,
+    periodInMinutes: NATIVE_BROKER_KEEPALIVE_PERIOD_MINUTES,
+  });
+  return {
+    ok: true,
+    reason,
+    alarmName: NATIVE_BROKER_KEEPALIVE_ALARM,
+    periodInMinutes: NATIVE_BROKER_KEEPALIVE_PERIOD_MINUTES,
+  };
 };
 
 const releaseTrackedTabClaimByTabId = async (
@@ -1580,6 +1631,8 @@ chrome.runtime.onInstalled.addListener((details) => {
     reason: details.reason,
     previousVersion: details.previousVersion || null,
   });
+  ensureNativeBrokerKeepaliveAlarm({ reason: `extension-${details.reason}` });
+  ensureNativeBrokerPort({ reason: `extension-${details.reason}` });
   cleanupStaleTabClaimVisuals(`extension-${details.reason}`).finally(() => {
     startManagedContentSelfHeal({
       reason: `extension-${details.reason}`,
@@ -1590,6 +1643,8 @@ chrome.runtime.onInstalled.addListener((details) => {
 });
 
 chrome.runtime.onStartup?.addListener?.(() => {
+  ensureNativeBrokerKeepaliveAlarm({ reason: 'browser-startup' });
+  ensureNativeBrokerPort({ reason: 'browser-startup' });
   restoreTabClaimExpiryAlarms('browser-startup');
   setTimeout(() => {
     selfHealGeminiTabs({
@@ -1798,6 +1853,7 @@ const consumePendingGeminiTabsReload = async () => {
 
 const handleServiceWorkerStart = async () => {
   restoreTabClaimExpiryAlarms('service-worker-start');
+  ensureNativeBrokerKeepaliveAlarm({ reason: 'service-worker-start' });
   ensureNativeBrokerPort({ reason: 'service-worker-start' });
   const consumedPendingReload = await consumePendingGeminiTabsReload();
   if (!consumedPendingReload) {
@@ -1811,9 +1867,12 @@ const handleServiceWorkerStart = async () => {
   }
 };
 
-void handleServiceWorkerStart();
-
 chrome.alarms?.onAlarm?.addListener?.((alarm) => {
+  if (alarm?.name === NATIVE_BROKER_KEEPALIVE_ALARM) {
+    ensureNativeBrokerKeepaliveAlarm({ reason: 'native-broker-keepalive-alarm' });
+    ensureNativeBrokerPort({ reason: 'native-broker-keepalive-alarm' });
+    return;
+  }
   const tabId = tabIdFromClaimAlarmName(alarm?.name);
   if (!Number.isInteger(tabId)) return;
   releaseTrackedTabClaimByTabId(tabId, {
@@ -2324,6 +2383,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     readGeminiPrivateChat({
       chatId: message.chatId,
       title: message.title || sender?.tab?.title || null,
+      timeoutMs: message.timeoutMs,
     }).then(sendResponse);
     return true;
   }
@@ -2331,12 +2391,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === 'gemini-md-export/private-api-list-chats') {
     listGeminiPrivateChats({
       limit: message.limit,
+      timeoutMs: message.timeoutMs,
     }).then(sendResponse);
     return true;
   }
 
   if (message?.type === 'gemini-md-export/private-api-session-status') {
-    checkGeminiPrivateSession().then(sendResponse);
+    checkGeminiPrivateSession({ timeoutMs: message.timeoutMs }).then(sendResponse);
     return true;
   }
 
@@ -2466,3 +2527,5 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     });
   }
 });
+
+void handleServiceWorkerStart();
