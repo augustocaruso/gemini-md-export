@@ -1,0 +1,47 @@
+{
+  "name": "gemini-md-export",
+  "version": "0.8.60",
+  "description": "Userscript para exportar conversas do Gemini web como Markdown com frontmatter.",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "gemini-md-export": "./bin/gemini-md-export.mjs",
+    "gemini-md-export-native-host": "./bin/gemini-md-export-native-host.mjs"
+  },
+  "scripts": {
+    "test": "npm run build && node scripts/run-tests.mjs",
+    "test:browser-authority": "npm run build:ts && node --test tests/browser-authority-fsm.test.mjs tests/browser-authority-lease-gate.test.mjs tests/browser-authority-mcp-runtime.test.mjs tests/browser-authority-bypass.test.mjs tests/browser-side-effects.test.mjs tests/export-adapter-policy.test.mjs tests/private-api-selected-export.test.mjs tests/fix-vault-flow.test.mjs",
+    "build": "npm run build:ts && node scripts/build.mjs",
+    "build:ts": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "format": "biome format --write .",
+    "lint": "biome lint .",
+    "check": "biome check .",
+    "capture:native-style": "npm run build:ts && node build/ts/cli/capture-native-style.js",
+    "mcp": "node src/mcp-server.js",
+    "smoke:bridge": "node scripts/bridge-smoke.mjs --spawn",
+    "smoke:export-integrity": "npm run build:ts && node scripts/smoke-export-integrity.mjs",
+    "install:macos": "bash scripts/install-macos.sh",
+    "publish:gemini-cli-extension": "npm run build && node scripts/publish-gemini-cli-extension-branch.mjs",
+    "install:windows": "node scripts/install-windows.mjs",
+    "release:windows": "node scripts/build-release-windows.mjs",
+    "release:windows:prebuilt": "node scripts/build-release-windows-prebuilt.mjs"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.15",
+    "@types/node": "^25.9.1",
+    "@types/turndown": "^5.0.6",
+    "jsdom": "^24.1.0",
+    "typescript": "^6.0.3"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "mddb": "^0.9.5",
+    "turndown": "^7.2.4"
+  },
+  "overrides": {
+    "sqlite3": "6.0.1"
+  }
+}

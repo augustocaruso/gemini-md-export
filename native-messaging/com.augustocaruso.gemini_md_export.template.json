@@ -1,0 +1,9 @@
+{
+  "name": "com.augustocaruso.gemini_md_export",
+  "description": "Gemini Markdown Export native host",
+  "path": "__ABSOLUTE_PATH_TO_GEMINI_MD_EXPORT_NATIVE_HOST__",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://__EXTENSION_ID__/"
+  ]
+}

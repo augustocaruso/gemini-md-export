@@ -1,0 +1,36 @@
+description = "Corrige o back catalog Gemini: auditoria, YAML canonico e datas."
+prompt = """
+Corrija o catalogo/vault de notas Markdown exportadas do Gemini.
+
+Argumentos do usuario: {{args}}
+
+Contrato:
+- Se o usuario nao informou uma pasta/vault, pergunte antes de prosseguir.
+- Este e o unico comando publico para esse fluxo. Nao exponha `repair-vault`
+  como comando publico; trate reparo de conteudo como subfluxo interno do
+  fix-vault.
+- Use o runner publico:
+  `${extensionPath}/bin/gemini-md-export.mjs fix-vault <vaultDir> --report <report.json> --tui --result-json`.
+- Se o usuario informou arquivo Takeout/My Activity, passe tambem:
+  `--takeout <Minhaatividade.html|MyActivity.json>`.
+- Em Gemini CLI interativo, mantenha `--tui --result-json`: a TUI e para o
+  usuario acompanhar o progresso; a linha final `RESULT_JSON {...}` e para o
+  agente validar status, warnings e caminho do relatorio.
+- O runner chama internamente:
+  `${extensionPath}/scripts/vault-repair.mjs ...` para auditoria/evidencia de
+  integridade, e
+  `${extensionPath}/scripts/chat-metadata-backfill.mjs ...` para normalizar YAML
+  e preencher datas.
+- O Takeout deve ser usado primeiro como fonte offline de datas/evidencia. My
+  Activity deve tentar resolver as datas remanescentes quando estiver disponivel.
+- Se My Activity nao estiver conectado, explique em portugues simples que o
+  usuario deve abrir https://myactivity.google.com/product/gemini e recarregar
+  manualmente o card da extensao se a permissao nova ainda nao entrou no runtime
+  do navegador.
+- Reports nao devem conter prompt, resposta, HTML ou Markdown cru: somente
+  hashes, tamanhos, scores, contagens, datas e status.
+- Nunca reporte sucesso se o `RESULT_JSON` final tiver `ok: false`, status
+  bloqueado/falho ou warnings de assets/datas sem explicar a acao seguinte.
+- Ao final, reporte contagens de arquivos atualizados, matched/unresolved,
+  avisos de My Activity e o caminho do relatorio combinado.
+"""

@@ -1,0 +1,2232 @@
+// @ts-nocheck
+// Transitional MV3 service worker source. New browser broker logic must live in
+// typed modules imported from this file; do not add new large JS-only blocks.
+// Service worker mínimo da extensão MV3.
+// Nesta primeira etapa ele existe principalmente para firmar a arquitetura
+// de extensão e servir de ponto de integração futura com helper local,
+// native messaging ou automações.
+import { captureTabClipWithDebugger } from './browser/background/chrome-debugger-controller.js';
+import { checkGeminiPrivateSession, listGeminiPrivateChats, readGeminiPrivateChat, } from './browser/background/gemini-private-api-client.js';
+import { decideManagedTabsReload, managedTabsReloadRuntimeKey, } from './browser/background/managed-tabs-reload-policy.js';
+import { createNativeBrokerPort } from './browser/background/native-broker-client.js';
+import { selectClaimVisualCompanionTabIds } from './browser/background/tab-claim-companion-tabs.js';
+import { looksLikeManagedClaimGroupTitle } from './browser/background/tab-claim-managed-group.js';
+import { storedManagedClaimGroupIdForRelease, trackedTabIdsForClaimRelease, trackedTabIdsForOwnedClaimRelease, } from './browser/background/tab-claim-release.js';
+import { activateTabWithDebugger } from './browser/shared/chrome-debugger.js';
+const EXTENSION_PROTOCOL_VERSION = Number('__EXTENSION_PROTOCOL_VERSION__');
+const PENDING_GEMINI_TABS_RELOAD_KEY = 'gemini-md-export.pendingGeminiTabsReload';
+const LAST_RUNTIME_BUILD_KEY = 'gemini-md-export.lastRuntimeBuild.v1';
+const LAST_MANAGED_TABS_RELOAD_KEY = 'gemini-md-export.lastManagedTabsReload.v1';
+const TAB_CLAIMS_STORAGE_KEY = 'gemini-md-export.tabClaims.v1';
+const TAB_CLAIM_ALARM_PREFIX = 'gemini-md-export.tabClaimExpiry.';
+const NATIVE_BROKER_KEEPALIVE_ALARM = 'gemini-md-export.nativeBrokerKeepalive';
+const TAB_GROUP_NONE = -1;
+const GEMINI_TAB_URL_PATTERN = 'https://gemini.google.com/*';
+const ACTIVITY_TAB_URL_PATTERN = 'https://myactivity.google.com/product/gemini*';
+const GOOGLE_SORRY_TAB_URL_PATTERN = 'https://www.google.com/sorry/*';
+const GOOGLE_ACCOUNT_TAB_URL_PATTERN = 'https://accounts.google.com/*';
+const MANAGED_CONTENT_TAB_URL_PATTERNS = [
+    GEMINI_TAB_URL_PATTERN,
+    ACTIVITY_TAB_URL_PATTERN,
+    GOOGLE_SORRY_TAB_URL_PATTERN,
+    GOOGLE_ACCOUNT_TAB_URL_PATTERN,
+];
+const CONTENT_SCRIPT_FILE = 'content.js';
+const ACTIVITY_CONTENT_SCRIPT_FILE = 'activity-content-script.js';
+const GOOGLE_BLOCKER_CONTENT_SCRIPT_FILE = 'google-blocker-content-script.js';
+const CONTENT_SCRIPT_PING_TYPE = 'gemini-md-export/content-ping';
+const NATIVE_HOST_NAME = 'com.augustocaruso.gemini_md_export';
+const NATIVE_HOST_REQUEST_TIMEOUT_MS = 2500;
+const OFFSCREEN_DOCUMENT_PATH = 'offscreen.html';
+const OFFSCREEN_IDLE_CLOSE_MS = 120_000;
+const TAB_BROKER_CLIENT_STALE_MS = 45_000;
+const CONTENT_SCRIPT_SELF_HEAL_COOLDOWN_MS = 10_000;
+const CONTENT_SCRIPT_POST_INJECT_PING_ATTEMPTS = 5;
+const CONTENT_SCRIPT_POST_INJECT_PING_DELAY_MS = 180;
+const GEMINI_TAB_RELOAD_SETTLE_MS = 900;
+const MANAGED_TABS_RELOAD_COOLDOWN_MS = 30_000;
+const MANAGED_TAB_SELF_HEAL_DELAY_MS = 350;
+const NATIVE_BROKER_KEEPALIVE_PERIOD_MINUTES = 1;
+const ARTIFACT_CAPTURE_CACHE_LIMIT = 60;
+const TAB_CLAIM_COLORS = new Set([
+    'grey',
+    'blue',
+    'red',
+    'yellow',
+    'green',
+    'pink',
+    'purple',
+    'cyan',
+    'orange',
+]);
+const TAB_CLAIM_DEFAULT_LABEL = '✨ Em uso';
+const TAB_CLAIM_BADGE_TEXT = '✓';
+const CLAIM_LABEL_MAX_GRAPHEMES = 16;
+const contentScriptSelfHealCooldowns = new Map();
+const managedTabSelfHealTimers = new Map();
+let lastContentScriptSelfHeal = null;
+let lastNativeHostProbe = null;
+let lastOffscreenStatus = null;
+let offscreenIdleCloseTimer = 0;
+const tabBrokerRegistry = new Map();
+const tabClaimExpiryTimers = new Map();
+const artifactCaptureCache = [];
+let managedTabsReloadInFlight = null;
+const nativeBrokerPort = createNativeBrokerPort({
+    chromeApi: chrome,
+    hostName: NATIVE_HOST_NAME,
+    onStatus: (status) => {
+        lastNativeHostProbe = {
+            ...(lastNativeHostProbe || {}),
+            nativeBroker: status,
+            checkedAt: new Date().toISOString(),
+        };
+    },
+    runtimeActions: {
+        keepAlive: async (payload = {}) => {
+            const reason = payload.reason || 'native-broker-keepalive';
+            const idleCloseMs = Math.max(OFFSCREEN_IDLE_CLOSE_MS, Number(payload.idleCloseMs || payload.timeoutMs || 0) || 0);
+            ensureNativeBrokerKeepaliveAlarm({ reason });
+            const nativeBroker = ensureNativeBrokerPort({ reason });
+            const offscreen = await ensureOffscreenDocument({
+                reason,
+                idleCloseMs,
+            });
+            return {
+                ok: offscreen.ok === true,
+                status: offscreen.status || (offscreen.ok ? 'ready' : 'unavailable'),
+                reason,
+                idleCloseMs,
+                nativeBroker,
+                offscreen,
+            };
+        },
+        extensionStatus: () => extensionInfo(),
+        selfHealContentScripts: (payload = {}) => selfHealGeminiTabs({
+            reason: payload.reason || 'native-broker-self-heal',
+            force: payload.force !== false,
+            tabId: payload.tabId,
+            tabIds: payload.tabIds,
+            maxTabs: payload.maxTabs,
+        }),
+        reloadManagedTabs: async (payload = {}) => {
+            const reload = await reloadGeminiTabs(payload.reason || 'native-broker-managed-tabs-reload', {
+                force: payload.force !== false,
+                explicit: payload.explicit !== false,
+            });
+            return {
+                ...reload,
+                reloadMode: 'managed-tabs',
+            };
+        },
+        reloadSelf: async (payload = {}) => {
+            const reason = payload.reason || 'native-broker-reload-self';
+            await storageSet({
+                reason,
+                requestedAt: new Date().toISOString(),
+                source: 'native-broker',
+            });
+            await cleanupStaleTabClaimVisuals(reason);
+            setTimeout(() => {
+                chrome.runtime.reload();
+            }, 300);
+            return {
+                ok: true,
+                reloading: true,
+                reason,
+                runtime: currentRuntimeInfo(),
+            };
+        },
+        privateApiSessionStatus: (payload = {}) => checkGeminiPrivateSession({ timeoutMs: payload.timeoutMs }),
+        privateApiListChats: (payload = {}) => listGeminiPrivateChats({ limit: payload.limit, timeoutMs: payload.timeoutMs }),
+        privateApiReadChat: (payload = {}) => readGeminiPrivateChat({
+            chatId: payload.chatId,
+            title: payload.title || null,
+            timeoutMs: payload.timeoutMs,
+            downloadAssets: payload.downloadAssets === true,
+            assetsRelDir: payload.assetsRelDir || null,
+        }),
+    },
+});
+const clampText = (value, maxLength) => String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLength);
+const sanitizeClaimLabel = (value) => Array.from(String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim() || TAB_CLAIM_DEFAULT_LABEL)
+    .slice(0, CLAIM_LABEL_MAX_GRAPHEMES)
+    .join('');
+const sanitizeClaimColor = (value) => {
+    const color = String(value || '').toLowerCase();
+    return TAB_CLAIM_COLORS.has(color) ? color : 'green';
+};
+const extensionInfo = (sender = {}) => {
+    const manifest = chrome.runtime.getManifest();
+    const tab = sender.tab || null;
+    return {
+        ok: true,
+        extensionVersion: manifest.version,
+        version: manifest.version,
+        protocolVersion: EXTENSION_PROTOCOL_VERSION,
+        extensionId: chrome.runtime.id,
+        manifestVersion: manifest.manifest_version,
+        buildStamp: '__BUILD_STAMP__',
+        source: 'service-worker',
+        tabId: tab?.id ?? null,
+        windowId: tab?.windowId ?? null,
+        isActiveTab: tab?.active ?? null,
+        selfHeal: lastContentScriptSelfHeal,
+        nativeHost: lastNativeHostProbe,
+        offscreen: lastOffscreenStatus,
+        tabBroker: summarizeTabBrokerRegistry({ currentTabId: tab?.id ?? null }),
+    };
+};
+const currentRuntimeInfo = () => {
+    const manifest = chrome.runtime.getManifest();
+    return {
+        extensionVersion: manifest.version,
+        version: manifest.version,
+        protocolVersion: EXTENSION_PROTOCOL_VERSION,
+        buildStamp: '__BUILD_STAMP__',
+    };
+};
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const storageGet = (key) => new Promise((resolve) => {
+    if (!chrome.storage?.local) {
+        resolve(null);
+        return;
+    }
+    chrome.storage.local.get(key, (items = {}) => {
+        if (chrome.runtime.lastError) {
+            resolve(null);
+            return;
+        }
+        resolve(items[key] || null);
+    });
+});
+const storageSetKey = (key, value) => new Promise((resolve) => {
+    if (!chrome.storage?.local) {
+        resolve(false);
+        return;
+    }
+    chrome.storage.local.set({ [key]: value }, () => {
+        resolve(!chrome.runtime.lastError);
+    });
+});
+const storageSet = (value) => storageSetKey(PENDING_GEMINI_TABS_RELOAD_KEY, value);
+const storageRemove = (key) => new Promise((resolve) => {
+    if (!chrome.storage?.local) {
+        resolve(false);
+        return;
+    }
+    chrome.storage.local.remove(key, () => {
+        resolve(!chrome.runtime.lastError);
+    });
+});
+const getTrackedTabClaims = async () => {
+    const value = await storageGet(TAB_CLAIMS_STORAGE_KEY);
+    return value && typeof value === 'object' ? value : {};
+};
+const setTrackedTabClaims = (claims) => storageSetKey(TAB_CLAIMS_STORAGE_KEY, claims || {});
+const clearTabClaimExpiryTimer = (tabId) => {
+    const key = String(tabId);
+    const timer = tabClaimExpiryTimers.get(key);
+    if (!timer)
+        return;
+    clearTimeout(timer);
+    tabClaimExpiryTimers.delete(key);
+};
+const tabClaimAlarmName = (tabId) => `${TAB_CLAIM_ALARM_PREFIX}${tabId}`;
+const tabIdFromClaimAlarmName = (name) => {
+    if (!String(name || '').startsWith(TAB_CLAIM_ALARM_PREFIX))
+        return null;
+    const tabId = Number(String(name).slice(TAB_CLAIM_ALARM_PREFIX.length));
+    return Number.isInteger(tabId) ? tabId : null;
+};
+const clearTabClaimExpiryAlarm = (tabId) => new Promise((resolve) => {
+    if (!chrome.alarms?.clear || !Number.isInteger(tabId)) {
+        resolve({ ok: false, reason: 'alarms-api-unavailable' });
+        return;
+    }
+    chrome.alarms.clear(tabClaimAlarmName(tabId), (cleared) => {
+        resolve({ ok: !chrome.runtime.lastError, cleared: cleared === true });
+    });
+});
+const scheduleTabClaimExpiryAlarm = (tabId, expiresAtMs) => {
+    if (!chrome.alarms?.create || !Number.isInteger(tabId) || !Number.isFinite(expiresAtMs)) {
+        return { ok: false, reason: 'alarms-api-unavailable' };
+    }
+    chrome.alarms.create(tabClaimAlarmName(tabId), {
+        when: Math.max(Date.now() + 1000, expiresAtMs),
+    });
+    return { ok: true, tabId, when: expiresAtMs };
+};
+const ensureNativeBrokerKeepaliveAlarm = ({ reason = 'manual' } = {}) => {
+    if (!chrome.alarms?.create) {
+        return { ok: false, reason, code: 'alarms-api-unavailable' };
+    }
+    chrome.alarms.create(NATIVE_BROKER_KEEPALIVE_ALARM, {
+        delayInMinutes: NATIVE_BROKER_KEEPALIVE_PERIOD_MINUTES,
+        periodInMinutes: NATIVE_BROKER_KEEPALIVE_PERIOD_MINUTES,
+    });
+    return {
+        ok: true,
+        reason,
+        alarmName: NATIVE_BROKER_KEEPALIVE_ALARM,
+        periodInMinutes: NATIVE_BROKER_KEEPALIVE_PERIOD_MINUTES,
+    };
+};
+const releaseTrackedTabClaimByTabId = async (tabId, { claimId = null, reason = 'background-release' } = {}) => {
+    if (!Number.isInteger(tabId))
+        return { ok: false, reason: 'tab-id-unavailable', tabId };
+    const claims = await getTrackedTabClaims();
+    const key = String(tabId);
+    const existing = claims[key] || null;
+    const requestedClaimId = clampText(claimId, 80);
+    if (existing?.claimId && requestedClaimId && existing.claimId !== requestedClaimId) {
+        return {
+            ok: false,
+            reason: 'claim-id-mismatch',
+            tabId,
+            activeClaimId: existing.claimId,
+            requestedClaimId,
+        };
+    }
+    clearTabClaimExpiryTimer(tabId);
+    await clearTabClaimExpiryAlarm(tabId);
+    const tab = await chromeGetTab(tabId);
+    const releaseTabIds = trackedTabIdsForOwnedClaimRelease(tabId, existing, claims);
+    const protectedTabIds = trackedTabIdsForClaimRelease(tabId, existing).filter((releaseTabId) => !releaseTabIds.includes(releaseTabId));
+    let groupId = storedManagedClaimGroupIdForRelease(existing);
+    let shouldUngroup = Number.isInteger(groupId);
+    if (!shouldUngroup && Number.isInteger(tab?.groupId) && tab.groupId !== TAB_GROUP_NONE) {
+        const group = await chromeGetTabGroup(tab.groupId);
+        if (looksLikeManagedClaimGroupTitle(group?.title)) {
+            shouldUngroup = true;
+            groupId = tab.groupId;
+        }
+    }
+    let visual = { mode: existing?.mode || 'none', tabId, groupId, released: false, reason };
+    if (shouldUngroup) {
+        const ungroupResults = [];
+        for (const releaseTabId of releaseTabIds) {
+            const releaseTab = await chromeGetTab(releaseTabId);
+            if (Number.isInteger(groupId) &&
+                Number.isInteger(releaseTab?.groupId) &&
+                releaseTab.groupId !== groupId) {
+                continue;
+            }
+            ungroupResults.push(await chromeUngroupTab(releaseTabId));
+        }
+        const ungrouped = {
+            ok: ungroupResults.length > 0 && ungroupResults.every((item) => item.ok),
+            reason: ungroupResults.find((item) => item.reason)?.reason || reason,
+        };
+        visual = {
+            mode: 'tab-group',
+            tabId,
+            tabIds: releaseTabIds,
+            groupId,
+            released: ungrouped.ok,
+            reason: ungrouped.reason || reason,
+        };
+        const protectedClaim = protectedTabIds
+            .map((protectedTabId) => claims[String(protectedTabId)] || null)
+            .find((claim) => claim?.mode === 'tab-group' && claim.groupId === groupId);
+        if (protectedClaim?.label || protectedClaim?.color) {
+            await chromeUpdateTabGroup(groupId, {
+                ...(protectedClaim.label ? { title: protectedClaim.label } : {}),
+                ...(protectedClaim.color ? { color: protectedClaim.color } : {}),
+            });
+        }
+    }
+    for (const releaseTabId of releaseTabIds) {
+        await clearActionBadge(releaseTabId);
+    }
+    delete claims[key];
+    await setTrackedTabClaims(claims);
+    return {
+        ok: true,
+        tabId,
+        claimId: existing?.claimId || requestedClaimId || null,
+        visual,
+    };
+};
+const scheduleTabClaimExpiry = (tabId, claim = {}) => {
+    clearTabClaimExpiryTimer(tabId);
+    const expiresAt = Date.parse(claim.expiresAt || '');
+    if (!Number.isFinite(expiresAt))
+        return;
+    scheduleTabClaimExpiryAlarm(tabId, expiresAt);
+    const delayMs = Math.max(0, expiresAt - Date.now());
+    ensureOffscreenDocument({
+        reason: 'tab-claim-expiry-watch',
+        idleCloseMs: Math.min(15 * 60_000, Math.max(OFFSCREEN_IDLE_CLOSE_MS, delayMs + 30_000)),
+    }).catch(() => {
+        // Offscreen é reforço de confiabilidade; o timer normal e o release
+        // explícito continuam sendo o caminho principal.
+    });
+    const timer = setTimeout(() => {
+        tabClaimExpiryTimers.delete(String(tabId));
+        releaseTrackedTabClaimByTabId(tabId, {
+            claimId: claim.claimId || null,
+            reason: 'claim-expired',
+        });
+    }, delayMs);
+    tabClaimExpiryTimers.set(String(tabId), timer);
+};
+const restoreTabClaimExpiryAlarms = async (reason = 'service-worker-start') => {
+    const claims = await getTrackedTabClaims();
+    const entries = Object.entries(claims || {});
+    if (!entries.length)
+        return { ok: true, reason, scheduled: 0, released: 0 };
+    let scheduled = 0;
+    let released = 0;
+    let pruned = 0;
+    for (const [key, claim] of entries) {
+        const tabId = Number(key);
+        if (!Number.isInteger(tabId)) {
+            delete claims[key];
+            pruned += 1;
+            continue;
+        }
+        const expiresAt = Date.parse(claim?.expiresAt || '');
+        if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+            await releaseTrackedTabClaimByTabId(tabId, {
+                claimId: claim?.claimId || null,
+                reason: `${reason}-expired`,
+            });
+            delete claims[key];
+            released += 1;
+            continue;
+        }
+        scheduleTabClaimExpiry(tabId, claim);
+        scheduled += 1;
+    }
+    if (pruned > 0) {
+        await setTrackedTabClaims(claims);
+    }
+    return { ok: true, reason, scheduled, released, pruned };
+};
+const pruneTabBrokerRegistry = () => {
+    const now = Date.now();
+    for (const [tabId, entry] of tabBrokerRegistry.entries()) {
+        if (now - Number(entry.updatedAtMs || 0) > TAB_BROKER_CLIENT_STALE_MS) {
+            tabBrokerRegistry.delete(tabId);
+        }
+    }
+};
+const summarizeTabBrokerRegistry = ({ currentTabId = null } = {}) => {
+    pruneTabBrokerRegistry();
+    const entries = Array.from(tabBrokerRegistry.values()).map((entry, index) => ({
+        index: index + 1,
+        tabId: entry.tabId,
+        windowId: entry.windowId,
+        url: entry.url,
+        title: entry.title,
+        chatId: entry.chatId,
+        version: entry.version,
+        protocolVersion: entry.protocolVersion,
+        buildStamp: entry.buildStamp,
+        tabClaim: entry.tabClaim || null,
+        activeTabOperation: entry.activeTabOperation || null,
+        isActiveTab: entry.isActiveTab === true,
+        updatedAt: entry.updatedAt,
+        staleAfterMs: TAB_BROKER_CLIENT_STALE_MS,
+        current: currentTabId !== null && entry.tabId === currentTabId,
+    }));
+    return {
+        ok: true,
+        staleAfterMs: TAB_BROKER_CLIENT_STALE_MS,
+        tabCount: entries.length,
+        busyTabCount: entries.filter((entry) => entry.activeTabOperation).length,
+        claimedTabCount: entries.filter((entry) => entry.tabClaim).length,
+        tabs: entries,
+    };
+};
+const updateTabBrokerRegistry = (message = {}, sender = {}) => {
+    const status = message.status || {};
+    const bridge = status.bridge || {};
+    const senderTab = sender.tab || {};
+    const tabId = Number(senderTab.id ?? bridge.tabId ?? status.tabId);
+    if (!Number.isInteger(tabId)) {
+        return { ok: false, reason: 'tab-id-unavailable' };
+    }
+    const now = Date.now();
+    const entry = {
+        tabId,
+        windowId: Number(senderTab.windowId ?? bridge.windowId ?? status.windowId) || null,
+        url: status.url || senderTab.url || null,
+        title: status.title || senderTab.title || null,
+        chatId: status.chatId || null,
+        version: status.version || status.extensionVersion || null,
+        protocolVersion: status.protocolVersion ?? null,
+        buildStamp: status.buildStamp || null,
+        tabClaim: message.tabClaim || status.tabClaim || null,
+        activeTabOperation: message.activeTabOperation || status.activeTabOperation || null,
+        isActiveTab: senderTab.active ?? bridge.isActiveTab ?? null,
+        updatedAt: new Date(now).toISOString(),
+        updatedAtMs: now,
+        reason: message.reason || 'content-script-update',
+    };
+    tabBrokerRegistry.set(tabId, entry);
+    return { ok: true, entry, broker: summarizeTabBrokerRegistry({ currentTabId: tabId }) };
+};
+const chromeGetTab = (tabId) => new Promise((resolve) => {
+    if (!chrome.tabs?.get || !Number.isInteger(tabId)) {
+        resolve(null);
+        return;
+    }
+    chrome.tabs.get(tabId, (tab) => {
+        if (chrome.runtime.lastError) {
+            resolve(null);
+            return;
+        }
+        resolve(tab || null);
+    });
+});
+const chromeUpdateTab = (tabId, updateProperties) => new Promise((resolve) => {
+    if (!chrome.tabs?.update || !Number.isInteger(tabId)) {
+        resolve({ ok: false, reason: 'tabs-update-api-unavailable', tabId });
+        return;
+    }
+    chrome.tabs.update(tabId, updateProperties, (tab) => {
+        if (chrome.runtime.lastError) {
+            resolve({ ok: false, reason: chrome.runtime.lastError.message, tabId });
+            return;
+        }
+        resolve({ ok: true, tab: tab || null, tabId });
+    });
+});
+const chromeFocusWindow = (windowId) => new Promise((resolve) => {
+    if (!chrome.windows?.update || !Number.isInteger(windowId)) {
+        resolve({ ok: false, reason: 'windows-update-api-unavailable', windowId });
+        return;
+    }
+    chrome.windows.update(windowId, { focused: true }, (windowInfo) => {
+        if (chrome.runtime.lastError) {
+            resolve({ ok: false, reason: chrome.runtime.lastError.message, windowId });
+            return;
+        }
+        resolve({ ok: true, window: windowInfo || null, windowId });
+    });
+});
+const chromeGetTabGroup = (groupId) => new Promise((resolve) => {
+    if (!chrome.tabGroups?.get || !Number.isInteger(groupId)) {
+        resolve(null);
+        return;
+    }
+    chrome.tabGroups.get(groupId, (group) => {
+        if (chrome.runtime.lastError) {
+            resolve(null);
+            return;
+        }
+        resolve(group || null);
+    });
+});
+const urlMatchesExtensionPattern = (url, pattern) => {
+    const value = String(url || '');
+    const expected = String(pattern || '');
+    if (!value || !expected)
+        return false;
+    if (expected.endsWith('*'))
+        return value.startsWith(expected.slice(0, -1));
+    return value === expected;
+};
+const managedContentScriptFileForUrl = (url) => {
+    if (urlMatchesExtensionPattern(url, GEMINI_TAB_URL_PATTERN))
+        return CONTENT_SCRIPT_FILE;
+    if (urlMatchesExtensionPattern(url, ACTIVITY_TAB_URL_PATTERN))
+        return ACTIVITY_CONTENT_SCRIPT_FILE;
+    if (urlMatchesExtensionPattern(url, GOOGLE_SORRY_TAB_URL_PATTERN) ||
+        urlMatchesExtensionPattern(url, GOOGLE_ACCOUNT_TAB_URL_PATTERN)) {
+        return GOOGLE_BLOCKER_CONTENT_SCRIPT_FILE;
+    }
+    return null;
+};
+const chromeQueryManagedContentTabs = () => new Promise((resolve) => {
+    if (!chrome.tabs?.query) {
+        resolve({ ok: false, reason: 'tabs-query-api-unavailable', tabs: [] });
+        return;
+    }
+    chrome.tabs.query({ url: MANAGED_CONTENT_TAB_URL_PATTERNS }, (tabs = []) => {
+        if (chrome.runtime.lastError) {
+            resolve({
+                ok: false,
+                reason: chrome.runtime.lastError.message,
+                tabs: [],
+            });
+            return;
+        }
+        resolve({ ok: true, tabs });
+    });
+});
+const chromeQueryGeminiTabs = chromeQueryManagedContentTabs;
+const queryActivityCompanionTabsForClaim = async (claimedTab, requestedRelatedTabIds = []) => {
+    const listed = await chromeQueryManagedContentTabs();
+    if (!listed.ok)
+        return [];
+    return selectClaimVisualCompanionTabIds(claimedTab || {}, Array.isArray(listed.tabs) ? listed.tabs : [], requestedRelatedTabIds);
+};
+const chromeSendTabMessage = (tabId, message, { timeoutMs = 1500 } = {}) => new Promise((resolve) => {
+    if (!chrome.tabs?.sendMessage || !Number.isInteger(tabId)) {
+        resolve({ ok: false, reason: 'tabs-send-message-api-unavailable' });
+        return;
+    }
+    let settled = false;
+    let timer = 0;
+    const finish = (value) => {
+        if (settled)
+            return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+    };
+    timer = setTimeout(() => {
+        finish({ ok: false, reason: 'content-script-ping-timeout' });
+    }, timeoutMs);
+    chrome.tabs.sendMessage(tabId, message, (response) => {
+        if (chrome.runtime.lastError) {
+            finish({ ok: false, reason: chrome.runtime.lastError.message });
+            return;
+        }
+        finish({ ok: true, response: response || null });
+    });
+});
+const pingContentScript = (tabId, { timeoutMs = 1500 } = {}) => chromeSendTabMessage(tabId, {
+    type: CONTENT_SCRIPT_PING_TYPE,
+    expected: currentRuntimeInfo(),
+}, { timeoutMs });
+const normalizeTabIdList = (value) => {
+    const values = Array.isArray(value)
+        ? value
+        : value === undefined || value === null
+            ? []
+            : [value];
+    return Array.from(new Set(values.map((item) => Number(item)).filter((item) => Number.isInteger(item) && item > 0)));
+};
+const selectContentScriptSelfHealTabs = (tabs = [], { tabId = null, tabIds = null, maxTabs = null } = {}) => {
+    const requestedIds = new Set([...normalizeTabIdList(tabIds), ...normalizeTabIdList(tabId)]);
+    const selected = requestedIds.size > 0
+        ? tabs.filter((tab) => requestedIds.has(Number(tab?.id)))
+        : Array.isArray(tabs)
+            ? tabs
+            : [];
+    const limit = Number(maxTabs);
+    if (requestedIds.size === 0 && Number.isFinite(limit) && limit > 0) {
+        return selected.slice(0, limit);
+    }
+    return selected;
+};
+const activateSenderTab = async (message, sender = {}) => {
+    const requestedTabId = Number(message.tabId);
+    const tabId = Number.isInteger(requestedTabId) ? requestedTabId : sender.tab?.id;
+    if (!Number.isInteger(tabId)) {
+        return { ok: false, reason: 'sender-tab-unavailable', tabId: null };
+    }
+    const before = await chromeGetTab(tabId);
+    const debuggerActivation = await activateTabWithDebugger(tabId, {
+        chromeApi: chrome,
+        reason: message.reason || 'activate-tab',
+        disableDebugger: message.disableDebugger === true,
+    });
+    const activated = debuggerActivation.ok === true
+        ? { ok: true, tab: { active: true }, reason: debuggerActivation.reason }
+        : await chromeUpdateTab(tabId, { active: true });
+    const focusedWindow = message.focusWindow === true
+        ? await chromeFocusWindow(before?.windowId ?? sender.tab?.windowId)
+        : null;
+    const after = await chromeGetTab(tabId);
+    const isActiveTab = after?.active ?? activated.tab?.active ?? null;
+    return {
+        ok: (debuggerActivation.ok === true || activated.ok === true) && isActiveTab !== false,
+        reason: debuggerActivation.ok === true
+            ? debuggerActivation.reason
+            : activated.ok === true
+                ? message.reason || 'activate-tab'
+                : activated.reason,
+        mode: debuggerActivation.ok === true ? debuggerActivation.mode : 'tabs-api',
+        debuggerActivation,
+        tabId,
+        windowId: sender.tab?.windowId ?? null,
+        wasActive: before?.active ?? null,
+        isActiveTab,
+        focusedWindow,
+    };
+};
+const contentScriptMatchesCurrentRuntime = (response) => {
+    const expected = currentRuntimeInfo();
+    return (response?.ok === true &&
+        Number(response.protocolVersion) === Number(expected.protocolVersion) &&
+        String(response.extensionVersion || response.version || '') ===
+            String(expected.extensionVersion) &&
+        String(response.buildStamp || '') === String(expected.buildStamp || ''));
+};
+const chromeExecuteContentScript = (tabId, scriptFile = CONTENT_SCRIPT_FILE) => new Promise((resolve) => {
+    if (!chrome.scripting?.executeScript || !Number.isInteger(tabId)) {
+        resolve({ ok: false, reason: 'scripting-api-unavailable' });
+        return;
+    }
+    chrome.scripting.executeScript({
+        target: { tabId },
+        files: [scriptFile],
+    }, (results) => {
+        if (chrome.runtime.lastError) {
+            resolve({ ok: false, reason: chrome.runtime.lastError.message });
+            return;
+        }
+        resolve({ ok: true, resultCount: Array.isArray(results) ? results.length : 0 });
+    });
+});
+const waitForContentScriptAfterInjection = async (tabId) => {
+    let lastPing = null;
+    for (let attempt = 1; attempt <= CONTENT_SCRIPT_POST_INJECT_PING_ATTEMPTS; attempt += 1) {
+        await sleep(CONTENT_SCRIPT_POST_INJECT_PING_DELAY_MS);
+        lastPing = await pingContentScript(tabId, { timeoutMs: 1200 });
+        if (contentScriptMatchesCurrentRuntime(lastPing.response)) {
+            return {
+                ok: true,
+                attempt,
+                ping: lastPing,
+            };
+        }
+    }
+    return {
+        ok: false,
+        attempt: CONTENT_SCRIPT_POST_INJECT_PING_ATTEMPTS,
+        ping: lastPing,
+    };
+};
+const ensureContentScriptForTab = async (tab, options = {}) => {
+    const tabId = Number(tab?.id);
+    const force = options.force === true;
+    const reason = options.reason || 'self-heal';
+    const url = tab?.url || tab?.pendingUrl || '';
+    const scriptFile = options.scriptFile || managedContentScriptFileForUrl(url);
+    if (!Number.isInteger(tabId)) {
+        return { ok: false, reason: 'tab-id-unavailable', tabId: null };
+    }
+    if (!scriptFile) {
+        return {
+            ok: false,
+            status: 'unmanaged-url',
+            reason,
+            tabId,
+            url: url || null,
+            injected: false,
+        };
+    }
+    const before = await pingContentScript(tabId);
+    if (contentScriptMatchesCurrentRuntime(before.response)) {
+        return {
+            ok: true,
+            status: 'already-current',
+            reason,
+            tabId,
+            url: url || null,
+            scriptFile,
+            injected: false,
+            before: before.response,
+        };
+    }
+    const now = Date.now();
+    const cooldown = contentScriptSelfHealCooldowns.get(tabId);
+    if (!force && cooldown && now - cooldown.at < CONTENT_SCRIPT_SELF_HEAL_COOLDOWN_MS) {
+        return {
+            ok: false,
+            status: 'cooldown',
+            reason,
+            tabId,
+            url: url || null,
+            scriptFile,
+            injected: false,
+            before: before.response || null,
+            pingError: before.reason || null,
+            cooldownMs: CONTENT_SCRIPT_SELF_HEAL_COOLDOWN_MS - (now - cooldown.at),
+        };
+    }
+    contentScriptSelfHealCooldowns.set(tabId, {
+        at: now,
+        reason,
+        buildStamp: currentRuntimeInfo().buildStamp,
+        scriptFile,
+    });
+    const injected = await chromeExecuteContentScript(tabId, scriptFile);
+    if (!injected.ok) {
+        return {
+            ok: false,
+            status: 'inject-failed',
+            reason,
+            tabId,
+            url: url || null,
+            scriptFile,
+            injected: false,
+            before: before.response || null,
+            pingError: before.reason || null,
+            injectError: injected.reason || null,
+        };
+    }
+    const after = await waitForContentScriptAfterInjection(tabId);
+    return {
+        ok: after.ok,
+        status: after.ok ? 'injected-current' : 'injected-unconfirmed',
+        reason,
+        tabId,
+        url: url || null,
+        scriptFile,
+        injected: true,
+        before: before.response || null,
+        pingError: before.reason || null,
+        after: after.ping?.response || null,
+        afterError: after.ping?.reason || null,
+        attempts: after.attempt,
+        buildStampBefore: before.response?.buildStamp || null,
+        buildStampAfter: after.ping?.response?.buildStamp || null,
+    };
+};
+const selfHealGeminiTabs = async ({ reason = 'self-heal', force = false, tabId = null, tabIds = null, maxTabs = null, } = {}) => {
+    const startedAt = Date.now();
+    const queried = await chromeQueryGeminiTabs();
+    if (!queried.ok) {
+        lastContentScriptSelfHeal = {
+            ok: false,
+            reason,
+            status: 'query-failed',
+            error: queried.reason || null,
+            at: new Date().toISOString(),
+        };
+        return lastContentScriptSelfHeal;
+    }
+    const targetTabs = selectContentScriptSelfHealTabs(queried.tabs, { tabId, tabIds, maxTabs });
+    const results = [];
+    for (const tab of targetTabs) {
+        results.push(await ensureContentScriptForTab(tab, { reason, force }));
+    }
+    const injected = results.filter((item) => item.injected).length;
+    const current = results.filter((item) => item.ok).length;
+    const failed = results.filter((item) => !item.ok && item.status !== 'cooldown').length;
+    lastContentScriptSelfHeal = {
+        ok: failed === 0,
+        reason,
+        status: failed === 0 ? 'ok' : 'partial',
+        at: new Date().toISOString(),
+        durationMs: Math.max(0, Date.now() - startedAt),
+        tabCount: targetTabs.length,
+        totalManagedTabCount: queried.tabs.length,
+        skippedManagedTabCount: Math.max(0, queried.tabs.length - targetTabs.length),
+        targetTabIds: targetTabs.map((tab) => tab?.id).filter(Number.isInteger),
+        current,
+        injected,
+        failed,
+        results,
+    };
+    console.log('[gemini-md-export/ext]', 'self-heal content script', lastContentScriptSelfHeal);
+    return lastContentScriptSelfHeal;
+};
+const scheduleManagedTabSelfHeal = (tab, { reason = 'managed-tab-updated', force = false, delayMs = MANAGED_TAB_SELF_HEAL_DELAY_MS } = {}) => {
+    const tabId = Number(tab?.id);
+    const url = tab?.url || tab?.pendingUrl || '';
+    const scriptFile = managedContentScriptFileForUrl(url);
+    if (!Number.isInteger(tabId) || !scriptFile)
+        return false;
+    clearTimeout(managedTabSelfHealTimers.get(tabId));
+    const timer = setTimeout(() => {
+        managedTabSelfHealTimers.delete(tabId);
+        ensureContentScriptForTab(tab, {
+            reason,
+            force,
+            scriptFile,
+        }).then((result) => {
+            lastContentScriptSelfHeal = {
+                ok: result.ok === true || result.status === 'cooldown',
+                reason,
+                status: result.status || (result.ok ? 'ok' : 'failed'),
+                at: new Date().toISOString(),
+                tabCount: 1,
+                current: result.ok ? 1 : 0,
+                injected: result.injected ? 1 : 0,
+                failed: result.ok || result.status === 'cooldown' ? 0 : 1,
+                results: [result],
+            };
+            console.log('[gemini-md-export/ext]', 'managed tab self-heal', lastContentScriptSelfHeal);
+        });
+    }, Math.max(0, Number(delayMs) || 0));
+    managedTabSelfHealTimers.set(tabId, timer);
+    return true;
+};
+const startManagedContentSelfHeal = ({ reason = 'service-worker-start', force = false, delayMs = MANAGED_TAB_SELF_HEAL_DELAY_MS, } = {}) => {
+    setTimeout(() => {
+        selfHealGeminiTabs({ reason, force });
+    }, Math.max(0, Number(delayMs) || 0));
+};
+const randomRequestId = () => {
+    try {
+        return crypto.randomUUID();
+    }
+    catch {
+        return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    }
+};
+const nativeHostRequest = (command, payload = {}, { timeoutMs = NATIVE_HOST_REQUEST_TIMEOUT_MS } = {}) => new Promise((resolve) => {
+    if (!chrome.runtime?.connectNative) {
+        resolve({ ok: false, code: 'native_messaging_unavailable' });
+        return;
+    }
+    const id = randomRequestId();
+    let settled = false;
+    let port = null;
+    let timer = 0;
+    const finish = (value) => {
+        if (settled)
+            return;
+        settled = true;
+        clearTimeout(timer);
+        try {
+            port?.disconnect?.();
+        }
+        catch {
+            // ignore stale native port
+        }
+        resolve(value);
+    };
+    try {
+        port = chrome.runtime.connectNative(NATIVE_HOST_NAME);
+    }
+    catch (err) {
+        finish({
+            ok: false,
+            code: 'native_host_connect_failed',
+            error: err?.message || String(err),
+        });
+        return;
+    }
+    timer = setTimeout(() => {
+        finish({ ok: false, code: 'native_host_timeout', timeoutMs });
+    }, timeoutMs);
+    port.onMessage.addListener((message) => {
+        if (message?.id !== id)
+            return;
+        finish(message || { ok: false, code: 'native_host_empty_response' });
+    });
+    port.onDisconnect.addListener(() => {
+        if (settled)
+            return;
+        finish({
+            ok: false,
+            code: 'native_host_disconnected',
+            error: chrome.runtime.lastError?.message || null,
+        });
+    });
+    try {
+        port.postMessage({
+            id,
+            command,
+            payload,
+            extension: currentRuntimeInfo(),
+        });
+    }
+    catch (err) {
+        finish({
+            ok: false,
+            code: 'native_host_post_failed',
+            error: err?.message || String(err),
+        });
+    }
+});
+const ensureNativeBrokerPort = ({ reason = 'manual' } = {}) => {
+    try {
+        const port = nativeBrokerPort.ensureConnected();
+        return { ok: true, reason, connected: !!port };
+    }
+    catch (err) {
+        return { ok: false, reason, error: err?.message || String(err) };
+    }
+};
+const ensureNativeBrokerReady = async ({ reason = 'manual', timeoutMs = NATIVE_HOST_REQUEST_TIMEOUT_MS, } = {}) => {
+    try {
+        const response = await nativeBrokerPort.ensureReady({ timeoutMs });
+        return {
+            ...(response || { ok: false, code: 'native_broker_ready_empty_response' }),
+            reason,
+            connected: response?.ok === true,
+        };
+    }
+    catch (err) {
+        return { ok: false, reason, error: err?.message || String(err) };
+    }
+};
+const probeNativeHost = async ({ reason = 'manual', timeoutMs = NATIVE_HOST_REQUEST_TIMEOUT_MS, brokerOnly = false, } = {}) => {
+    const startedAt = Date.now();
+    const nativeBroker = brokerOnly
+        ? await ensureNativeBrokerReady({ reason, timeoutMs })
+        : ensureNativeBrokerPort({ reason });
+    const result = brokerOnly
+        ? {
+            ok: nativeBroker?.ok === true,
+            code: nativeBroker?.ok === true ? null : nativeBroker?.code || 'native_broker_not_ready',
+            brokerOnly: true,
+        }
+        : await nativeHostRequest('ping', {}, { timeoutMs });
+    lastNativeHostProbe = {
+        ...result,
+        nativeBroker,
+        hostName: NATIVE_HOST_NAME,
+        reason,
+        checkedAt: new Date().toISOString(),
+        durationMs: Math.max(0, Date.now() - startedAt),
+    };
+    return lastNativeHostProbe;
+};
+const offscreenReason = () => {
+    if (chrome.offscreen?.Reason?.WORKERS)
+        return chrome.offscreen.Reason.WORKERS;
+    return 'WORKERS';
+};
+const hasOffscreenDocument = async () => {
+    if (!chrome.offscreen) {
+        return { ok: false, exists: false, reason: 'offscreen-api-unavailable' };
+    }
+    if (chrome.offscreen.hasDocument) {
+        return new Promise((resolve) => {
+            let settled = false;
+            const done = (value) => {
+                if (settled)
+                    return;
+                settled = true;
+                resolve(value);
+            };
+            try {
+                const maybePromise = chrome.offscreen.hasDocument((exists) => {
+                    if (chrome.runtime.lastError) {
+                        done({ ok: false, exists: false, reason: chrome.runtime.lastError.message });
+                        return;
+                    }
+                    done({ ok: true, exists: !!exists });
+                });
+                if (maybePromise?.then) {
+                    maybePromise.then((exists) => done({ ok: true, exists: !!exists }), (err) => done({ ok: false, exists: false, reason: err?.message || String(err) }));
+                }
+            }
+            catch (err) {
+                done({ ok: false, exists: false, reason: err?.message || String(err) });
+            }
+        });
+    }
+    return { ok: true, exists: false, reason: 'has-document-unavailable' };
+};
+const sendOffscreenPing = () => new Promise((resolve) => {
+    if (!chrome.runtime?.sendMessage) {
+        resolve({ ok: false, reason: 'runtime-message-unavailable' });
+        return;
+    }
+    chrome.runtime.sendMessage({ type: 'gemini-md-export/offscreen-ping' }, (response) => {
+        if (chrome.runtime.lastError) {
+            resolve({ ok: false, reason: chrome.runtime.lastError.message });
+            return;
+        }
+        resolve(response || { ok: false, reason: 'empty-offscreen-response' });
+    });
+});
+const clearOffscreenIdleTimer = () => {
+    if (!offscreenIdleCloseTimer)
+        return;
+    clearTimeout(offscreenIdleCloseTimer);
+    offscreenIdleCloseTimer = 0;
+};
+const scheduleOffscreenIdleClose = ({ reason = 'idle', idleCloseMs = OFFSCREEN_IDLE_CLOSE_MS, } = {}) => {
+    clearOffscreenIdleTimer();
+    const ms = Math.max(0, Number(idleCloseMs) || 0);
+    if (!ms)
+        return null;
+    const idleCloseAt = new Date(Date.now() + ms).toISOString();
+    offscreenIdleCloseTimer = setTimeout(() => {
+        offscreenIdleCloseTimer = 0;
+        closeOffscreenDocument({ reason: `${reason}-idle` });
+    }, ms);
+    return idleCloseAt;
+};
+const ensureOffscreenDocument = async ({ reason = 'manual', idleCloseMs = OFFSCREEN_IDLE_CLOSE_MS, } = {}) => {
+    const startedAt = Date.now();
+    const current = await hasOffscreenDocument();
+    if (!current.ok) {
+        lastOffscreenStatus = {
+            ok: false,
+            status: 'unavailable',
+            reason,
+            error: current.reason || null,
+            checkedAt: new Date().toISOString(),
+            durationMs: Math.max(0, Date.now() - startedAt),
+        };
+        return lastOffscreenStatus;
+    }
+    let created = false;
+    if (!current.exists) {
+        try {
+            await chrome.offscreen.createDocument({
+                url: OFFSCREEN_DOCUMENT_PATH,
+                reasons: [offscreenReason()],
+                justification: 'Manter um contexto leve de coordenação para diagnosticar native messaging e filas da extensão.',
+            });
+            created = true;
+        }
+        catch (err) {
+            lastOffscreenStatus = {
+                ok: false,
+                status: 'create-failed',
+                reason,
+                error: err?.message || String(err),
+                checkedAt: new Date().toISOString(),
+                durationMs: Math.max(0, Date.now() - startedAt),
+            };
+            return lastOffscreenStatus;
+        }
+    }
+    const ping = await sendOffscreenPing();
+    const idleCloseAt = scheduleOffscreenIdleClose({ reason, idleCloseMs });
+    lastOffscreenStatus = {
+        ok: ping.ok === true,
+        status: ping.ok === true ? 'ready' : 'ping-failed',
+        reason,
+        created,
+        active: true,
+        idleCloseAt,
+        checkedAt: new Date().toISOString(),
+        durationMs: Math.max(0, Date.now() - startedAt),
+        document: ping.ok === true ? ping : null,
+        lastKeepaliveAt: ping.lastKeepaliveAt || null,
+        keepaliveCount: ping.keepaliveCount ?? null,
+        error: ping.ok === true ? null : ping.reason || ping.error || null,
+    };
+    return lastOffscreenStatus;
+};
+const closeOffscreenDocument = async ({ reason = 'manual' } = {}) => {
+    clearOffscreenIdleTimer();
+    if (!chrome.offscreen?.closeDocument) {
+        return { ok: false, reason: 'offscreen-close-api-unavailable' };
+    }
+    try {
+        await chrome.offscreen.closeDocument();
+        lastOffscreenStatus = {
+            ok: true,
+            status: 'closed',
+            reason,
+            active: false,
+            checkedAt: new Date().toISOString(),
+        };
+        return lastOffscreenStatus;
+    }
+    catch (err) {
+        return { ok: false, reason: err?.message || String(err) };
+    }
+};
+const chromeGroupTabs = (tabIds, groupId = null) => new Promise((resolve) => {
+    const cleanTabIds = Array.from(new Set((Array.isArray(tabIds) ? tabIds : [tabIds]).map(Number).filter(Number.isInteger)));
+    if (!chrome.tabs?.group || cleanTabIds.length === 0) {
+        resolve({ ok: false, reason: 'tabs-group-api-unavailable' });
+        return;
+    }
+    const createProperties = Number.isInteger(groupId)
+        ? { tabIds: cleanTabIds, groupId }
+        : { tabIds: cleanTabIds };
+    chrome.tabs.group(createProperties, (createdGroupId) => {
+        if (chrome.runtime.lastError) {
+            resolve({ ok: false, reason: chrome.runtime.lastError.message });
+            return;
+        }
+        resolve({ ok: Number.isInteger(createdGroupId), groupId: createdGroupId });
+    });
+});
+const chromeGroupTab = (tabId) => chromeGroupTabs([tabId]);
+const chromeUpdateTabGroup = (groupId, updateProperties) => new Promise((resolve) => {
+    if (!chrome.tabGroups?.update || !Number.isInteger(groupId)) {
+        resolve({ ok: false, reason: 'tab-groups-api-unavailable' });
+        return;
+    }
+    chrome.tabGroups.update(groupId, updateProperties, (group) => {
+        if (chrome.runtime.lastError) {
+            resolve({ ok: false, reason: chrome.runtime.lastError.message });
+            return;
+        }
+        resolve({ ok: true, group });
+    });
+});
+const chromeUngroupTab = (tabId) => new Promise((resolve) => {
+    if (!chrome.tabs?.ungroup || !Number.isInteger(tabId)) {
+        resolve({ ok: false, reason: 'tabs-ungroup-api-unavailable' });
+        return;
+    }
+    chrome.tabs.ungroup(tabId, () => {
+        if (chrome.runtime.lastError) {
+            resolve({ ok: false, reason: chrome.runtime.lastError.message });
+            return;
+        }
+        resolve({ ok: true });
+    });
+});
+const setActionBadge = (tabId, text, color = '#188038') => new Promise((resolve) => {
+    if (!chrome.action?.setBadgeText || !Number.isInteger(tabId)) {
+        resolve({ ok: false, reason: 'action-badge-api-unavailable' });
+        return;
+    }
+    chrome.action.setBadgeText({ tabId, text }, () => {
+        if (chrome.runtime.lastError) {
+            resolve({ ok: false, reason: chrome.runtime.lastError.message });
+            return;
+        }
+        if (!chrome.action?.setBadgeBackgroundColor || !text) {
+            resolve({ ok: true });
+            return;
+        }
+        chrome.action.setBadgeBackgroundColor({ tabId, color }, () => {
+            resolve({ ok: !chrome.runtime.lastError });
+        });
+    });
+});
+const clearActionBadge = (tabId) => setActionBadge(tabId, '');
+const cleanupStaleTabClaimVisuals = async (reason = 'stale-claim-cleanup') => {
+    const claims = await getTrackedTabClaims();
+    const entries = Object.entries(claims || {});
+    if (!entries.length) {
+        return { ok: true, reason, cleaned: 0 };
+    }
+    let cleaned = 0;
+    for (const [key, claim] of entries) {
+        const tabId = Number(key);
+        if (!Number.isInteger(tabId)) {
+            delete claims[key];
+            cleaned += 1;
+            continue;
+        }
+        clearTabClaimExpiryTimer(tabId);
+        await clearTabClaimExpiryAlarm(tabId);
+        const releaseTabIds = trackedTabIdsForClaimRelease(tabId, claim);
+        if (claim?.mode === 'tab-group' && claim.originalGroupId === TAB_GROUP_NONE) {
+            for (const releaseTabId of releaseTabIds) {
+                const tab = await chromeGetTab(releaseTabId);
+                const stillOurGroup = Number.isInteger(claim.groupId) &&
+                    Number.isInteger(tab?.groupId) &&
+                    tab.groupId === claim.groupId;
+                if (stillOurGroup) {
+                    await chromeUngroupTab(releaseTabId);
+                }
+            }
+        }
+        for (const releaseTabId of releaseTabIds) {
+            if (await chromeGetTab(releaseTabId)) {
+                await clearActionBadge(releaseTabId);
+            }
+        }
+        delete claims[key];
+        cleaned += 1;
+    }
+    await setTrackedTabClaims(claims);
+    return { ok: true, reason, cleaned };
+};
+const applyTabClaim = async (message, sender = {}) => {
+    const tabId = sender.tab?.id;
+    if (!Number.isInteger(tabId)) {
+        return { ok: false, reason: 'sender-tab-unavailable' };
+    }
+    const claimId = clampText(message.claimId, 80);
+    if (!claimId) {
+        return { ok: false, reason: 'claim-id-required', tabId };
+    }
+    const label = sanitizeClaimLabel(message.label);
+    const color = sanitizeClaimColor(message.color);
+    const tab = await chromeGetTab(tabId);
+    const claims = await getTrackedTabClaims();
+    const existing = claims[String(tabId)] || null;
+    const visualGroupTabId = Number(message.visualGroupTabId ?? message.groupWithTabId);
+    const requestedRelatedTabIds = [
+        ...(Array.isArray(message.relatedTabIds) ? message.relatedTabIds : []),
+        ...(Number.isInteger(visualGroupTabId) ? [visualGroupTabId] : []),
+    ];
+    const companionRelatedTabIds = await queryActivityCompanionTabsForClaim(tab || sender.tab || { id: tabId }, requestedRelatedTabIds);
+    const relatedTabIdsForClaim = [...requestedRelatedTabIds, ...companionRelatedTabIds];
+    const relatedTabs = [];
+    for (const relatedTabId of Array.from(new Set(relatedTabIdsForClaim.map(Number)))) {
+        if (!Number.isInteger(relatedTabId) || relatedTabId === tabId)
+            continue;
+        const relatedTab = await chromeGetTab(relatedTabId);
+        const relatedUrl = relatedTab?.url || relatedTab?.pendingUrl || '';
+        if (!relatedTab || !managedContentScriptFileForUrl(relatedUrl))
+            continue;
+        if (Number.isInteger(tab?.windowId) &&
+            Number.isInteger(relatedTab.windowId) &&
+            tab.windowId !== relatedTab.windowId) {
+            continue;
+        }
+        relatedTabs.push(relatedTab);
+    }
+    const currentGroupId = Number.isInteger(tab?.groupId)
+        ? tab.groupId
+        : (existing?.groupId ?? TAB_GROUP_NONE);
+    const currentGroup = Number.isInteger(currentGroupId) && currentGroupId !== TAB_GROUP_NONE
+        ? await chromeGetTabGroup(currentGroupId)
+        : null;
+    const relatedGroupStates = [];
+    for (const relatedTab of relatedTabs) {
+        const groupId = Number.isInteger(relatedTab.groupId) ? relatedTab.groupId : TAB_GROUP_NONE;
+        const group = Number.isInteger(groupId) && groupId !== TAB_GROUP_NONE
+            ? await chromeGetTabGroup(groupId)
+            : null;
+        relatedGroupStates.push({
+            tabId: relatedTab.id,
+            groupId,
+            managed: looksLikeManagedClaimGroupTitle(group?.title),
+        });
+    }
+    const currentGroupIsManaged = looksLikeManagedClaimGroupTitle(currentGroup?.title);
+    const managedAnchorGroupId = currentGroupIsManaged && currentGroupId !== TAB_GROUP_NONE
+        ? currentGroupId
+        : (relatedGroupStates.find((item) => item.managed && item.groupId !== TAB_GROUP_NONE)
+            ?.groupId ?? null);
+    const targetTabIds = Array.from(new Set([tabId, ...relatedTabs.map((relatedTab) => relatedTab.id)].filter(Number.isInteger)));
+    const groupedTabIds = [tabId];
+    let visual = {
+        mode: 'action-badge',
+        tabId,
+        groupId: null,
+        reason: 'tab-groups-api-unavailable',
+    };
+    if (chrome.tabs?.group && chrome.tabGroups?.update) {
+        const alreadyOurGroup = existing?.mode === 'tab-group' &&
+            Number.isInteger(existing.groupId) &&
+            currentGroupId === existing.groupId;
+        const orphanedManagedGroup = !existing &&
+            Number.isInteger(currentGroupId) &&
+            currentGroupId !== TAB_GROUP_NONE &&
+            looksLikeManagedClaimGroupTitle(currentGroup?.title);
+        const targetGroupId = managedAnchorGroupId ?? (alreadyOurGroup || orphanedManagedGroup ? currentGroupId : null);
+        const blockedByUserGroup = (currentGroupId !== TAB_GROUP_NONE &&
+            !alreadyOurGroup &&
+            !orphanedManagedGroup &&
+            !currentGroupIsManaged) ||
+            relatedGroupStates.some((item) => item.groupId !== TAB_GROUP_NONE && item.groupId !== targetGroupId && !item.managed);
+        if (!blockedByUserGroup) {
+            const tabIdsToGroup = targetGroupId
+                ? targetTabIds.filter((candidateTabId) => {
+                    if (candidateTabId === tabId)
+                        return currentGroupId !== targetGroupId;
+                    const relatedState = relatedGroupStates.find((item) => item.tabId === candidateTabId);
+                    return relatedState?.groupId !== targetGroupId;
+                })
+                : targetTabIds;
+            const grouped = targetGroupId && tabIdsToGroup.length === 0
+                ? { ok: true, groupId: targetGroupId }
+                : targetGroupId
+                    ? await chromeGroupTabs(tabIdsToGroup, targetGroupId)
+                    : await chromeGroupTabs(targetTabIds);
+            if (grouped.ok) {
+                const updated = await chromeUpdateTabGroup(grouped.groupId, {
+                    title: label,
+                    color,
+                });
+                if (updated.ok) {
+                    groupedTabIds.splice(0, groupedTabIds.length, ...targetTabIds);
+                    visual = {
+                        mode: 'tab-group',
+                        tabId,
+                        tabIds: targetTabIds,
+                        groupId: grouped.groupId,
+                        color,
+                        label,
+                        reason: targetGroupId
+                            ? 'joined-existing-claim-group'
+                            : alreadyOurGroup
+                                ? 'updated-existing-claim-group'
+                                : orphanedManagedGroup
+                                    ? 'reclaimed-managed-claim-group'
+                                    : 'created-tab-group',
+                    };
+                }
+                else {
+                    if (!targetGroupId && !alreadyOurGroup && !orphanedManagedGroup) {
+                        for (const groupedTabId of targetTabIds) {
+                            await chromeUngroupTab(groupedTabId);
+                        }
+                    }
+                    visual = {
+                        mode: 'action-badge',
+                        tabId,
+                        groupId: grouped.groupId,
+                        reason: updated.reason || 'tab-group-update-failed',
+                        detail: updated.reason || null,
+                    };
+                }
+            }
+            else {
+                visual = {
+                    mode: 'action-badge',
+                    tabId,
+                    groupId: null,
+                    reason: grouped.reason || 'tab-group-create-failed',
+                    detail: grouped.reason || null,
+                };
+            }
+        }
+        else {
+            visual = {
+                mode: 'action-badge',
+                tabId,
+                groupId: currentGroupId,
+                reason: relatedGroupStates.some((item) => item.groupId !== TAB_GROUP_NONE && !item.managed)
+                    ? 'related-tab-already-in-user-group'
+                    : 'tab-already-in-user-group',
+            };
+        }
+    }
+    await setActionBadge(tabId, TAB_CLAIM_BADGE_TEXT);
+    const trackedClaim = {
+        claimId,
+        sessionId: clampText(message.sessionId, 120) || null,
+        label,
+        color,
+        mode: visual.mode,
+        groupId: visual.mode === 'tab-group' ? visual.groupId : null,
+        tabIds: visual.mode === 'tab-group' ? groupedTabIds : [tabId],
+        originalGroupId: visual.reason === 'reclaimed-managed-claim-group'
+            ? TAB_GROUP_NONE
+            : existing?.claimId === claimId
+                ? (existing.originalGroupId ?? TAB_GROUP_NONE)
+                : currentGroupId,
+        appliedAt: new Date().toISOString(),
+        expiresAt: message.expiresAt || null,
+    };
+    claims[String(tabId)] = trackedClaim;
+    await setTrackedTabClaims(claims);
+    scheduleTabClaimExpiry(tabId, trackedClaim);
+    return {
+        ok: true,
+        tabId,
+        claimId,
+        sessionId: trackedClaim.sessionId,
+        label,
+        color,
+        visual,
+    };
+};
+const releaseTabClaim = async (message, sender = {}) => {
+    const requestedTabId = Number(message?.tabId);
+    const tabId = Number.isInteger(requestedTabId) ? requestedTabId : sender.tab?.id;
+    if (!Number.isInteger(tabId)) {
+        return { ok: false, reason: 'sender-tab-unavailable' };
+    }
+    return releaseTrackedTabClaimByTabId(tabId, {
+        claimId: message.claimId || null,
+        reason: message.reason || 'content-script-release',
+    });
+};
+chrome.runtime.onInstalled.addListener((details) => {
+    console.log('[gemini-md-export/ext]', 'instalada', {
+        reason: details.reason,
+        previousVersion: details.previousVersion || null,
+    });
+    ensureNativeBrokerKeepaliveAlarm({ reason: `extension-${details.reason}` });
+    ensureNativeBrokerPort({ reason: `extension-${details.reason}` });
+    cleanupStaleTabClaimVisuals(`extension-${details.reason}`).finally(() => {
+        startManagedContentSelfHeal({
+            reason: `extension-${details.reason}`,
+            force: true,
+            delayMs: 500,
+        });
+    });
+});
+chrome.runtime.onStartup?.addListener?.(() => {
+    ensureNativeBrokerKeepaliveAlarm({ reason: 'browser-startup' });
+    ensureNativeBrokerPort({ reason: 'browser-startup' });
+    restoreTabClaimExpiryAlarms('browser-startup');
+    setTimeout(() => {
+        selfHealGeminiTabs({
+            reason: 'browser-startup',
+            force: false,
+        });
+    }, 800);
+});
+const markManagedTabsReload = async (reason, { force = false } = {}) => {
+    if (managedTabsReloadInFlight && force !== true) {
+        return {
+            ok: false,
+            status: 'in-flight',
+            reason,
+            previous: managedTabsReloadInFlight,
+        };
+    }
+    const previous = await storageGet(LAST_MANAGED_TABS_RELOAD_KEY);
+    const decision = decideManagedTabsReload({
+        previous,
+        runtimeKey: managedTabsReloadRuntimeKey(runtimeBuildSnapshot()),
+        reason,
+        cooldownMs: MANAGED_TABS_RELOAD_COOLDOWN_MS,
+        force,
+    });
+    if (decision.ok !== true)
+        return decision;
+    managedTabsReloadInFlight = decision.current;
+    await storageSetKey(LAST_MANAGED_TABS_RELOAD_KEY, decision.current);
+    return decision;
+};
+const finishManagedTabsReload = async (reloadLease, patch = {}) => {
+    if (reloadLease?.current?.reloadId &&
+        managedTabsReloadInFlight?.reloadId === reloadLease.current.reloadId) {
+        managedTabsReloadInFlight = null;
+    }
+    if (!reloadLease?.current)
+        return;
+    await storageSetKey(LAST_MANAGED_TABS_RELOAD_KEY, {
+        ...reloadLease.current,
+        ...patch,
+        completedAt: new Date().toISOString(),
+    });
+};
+const reloadGeminiTabs = (reason = 'manual', { force = false, explicit = false } = {}) => new Promise((resolve) => {
+    if (force !== true && explicit !== true) {
+        resolve({
+            ok: false,
+            status: 'explicit-reload-required',
+            reason,
+            skipped: true,
+            reloaded: 0,
+        });
+        return;
+    }
+    if (!chrome.tabs?.query || !chrome.tabs?.reload) {
+        resolve({ ok: false, reason: 'tabs-api-unavailable', reloaded: 0 });
+        return;
+    }
+    markManagedTabsReload(reason, { force }).then((reloadLease) => {
+        if (reloadLease?.ok === false) {
+            resolve({
+                ok: true,
+                status: reloadLease.status,
+                reason,
+                skipped: true,
+                reloaded: 0,
+                cooldownMs: reloadLease.cooldownMs,
+                skipReason: reloadLease.status,
+                previous: reloadLease.previous || null,
+            });
+            return;
+        }
+        chrome.tabs.query({ url: MANAGED_CONTENT_TAB_URL_PATTERNS }, (tabs = []) => {
+            if (chrome.runtime.lastError) {
+                finishManagedTabsReload(reloadLease, {
+                    ok: false,
+                    error: chrome.runtime.lastError.message,
+                    reloaded: 0,
+                }).finally(() => { });
+                resolve({
+                    ok: false,
+                    reason: chrome.runtime.lastError.message,
+                    reloaded: 0,
+                });
+                return;
+            }
+            let reloaded = 0;
+            for (const tab of tabs) {
+                if (!Number.isInteger(tab.id))
+                    continue;
+                chrome.tabs.reload(tab.id, { bypassCache: true }, () => {
+                    // Ignora tabs que sumiram no meio do reload.
+                    void chrome.runtime.lastError;
+                });
+                reloaded += 1;
+            }
+            console.log('[gemini-md-export/ext]', 'abas Gemini/My Activity recarregadas', {
+                reason,
+                reloaded,
+            });
+            finishManagedTabsReload(reloadLease, { reloaded }).finally(() => { });
+            resolve({ ok: true, reason, reloaded });
+        });
+    });
+});
+const reloadThenSelfHealGeminiTabs = async ({ reason = 'extension-runtime-refresh', force = true, forceReload = false, explicitReload = false, settleMs = GEMINI_TAB_RELOAD_SETTLE_MS, } = {}) => {
+    const reload = await reloadGeminiTabs(reason, { force: forceReload, explicit: explicitReload });
+    if (reload?.skipped === true) {
+        lastContentScriptSelfHeal = {
+            ok: true,
+            reason,
+            status: reload.skipReason || reload.status || 'reload-skipped',
+            reload,
+            reloaded: 0,
+        };
+        return lastContentScriptSelfHeal;
+    }
+    if (reload?.reloaded > 0 && settleMs > 0) {
+        await sleep(settleMs);
+    }
+    const selfHeal = await selfHealGeminiTabs({
+        reason: `${reason}-post-reload`,
+        force,
+    });
+    lastContentScriptSelfHeal = {
+        ...selfHeal,
+        reload,
+        reloaded: reload?.reloaded ?? 0,
+        status: reload?.ok === false
+            ? 'reload-failed'
+            : selfHeal?.status || (selfHeal?.ok ? 'ok' : 'partial'),
+        ok: reload?.ok !== false && selfHeal?.ok !== false,
+    };
+    return lastContentScriptSelfHeal;
+};
+const runtimeBuildSnapshot = () => {
+    const runtime = currentRuntimeInfo();
+    return {
+        extensionVersion: runtime.extensionVersion || runtime.version || null,
+        protocolVersion: runtime.protocolVersion ?? null,
+        buildStamp: runtime.buildStamp || null,
+    };
+};
+const sameRuntimeBuild = (left = {}, right = {}) => String(left.extensionVersion || '') === String(right.extensionVersion || '') &&
+    String(left.protocolVersion ?? '') === String(right.protocolVersion ?? '') &&
+    String(left.buildStamp || '') === String(right.buildStamp || '');
+const rememberCurrentRuntimeBuild = async ({ reason = 'runtime-build-observed' } = {}) => {
+    const current = runtimeBuildSnapshot();
+    await storageSetKey(LAST_RUNTIME_BUILD_KEY, {
+        ...current,
+        reason,
+        observedAt: new Date().toISOString(),
+    });
+    return current;
+};
+const refreshManagedTabsIfRuntimeChanged = async () => {
+    const previous = await storageGet(LAST_RUNTIME_BUILD_KEY);
+    const current = runtimeBuildSnapshot();
+    await rememberCurrentRuntimeBuild({ reason: 'runtime-start' });
+    if (previous && sameRuntimeBuild(previous, current)) {
+        return { ok: true, status: 'unchanged', previous, current };
+    }
+    await cleanupStaleTabClaimVisuals('extension-runtime-changed');
+    startManagedContentSelfHeal({
+        reason: 'extension-runtime-changed',
+        force: true,
+        delayMs: 500,
+    });
+    return { ok: true, status: 'scheduled-self-heal', previous: previous || null, current };
+};
+const consumePendingGeminiTabsReload = async () => {
+    const pending = await storageGet(PENDING_GEMINI_TABS_RELOAD_KEY);
+    if (!pending)
+        return false;
+    await storageRemove(PENDING_GEMINI_TABS_RELOAD_KEY);
+    await rememberCurrentRuntimeBuild({ reason: pending.reason || 'extension-self-reload' });
+    await cleanupStaleTabClaimVisuals(pending.reason || 'extension-self-reload');
+    startManagedContentSelfHeal({
+        reason: pending.reason || 'extension-self-reload',
+        force: true,
+        delayMs: 500,
+    });
+    return true;
+};
+const handleServiceWorkerStart = async () => {
+    restoreTabClaimExpiryAlarms('service-worker-start');
+    ensureNativeBrokerKeepaliveAlarm({ reason: 'service-worker-start' });
+    ensureNativeBrokerPort({ reason: 'service-worker-start' });
+    const consumedPendingReload = await consumePendingGeminiTabsReload();
+    if (!consumedPendingReload) {
+        const refresh = await refreshManagedTabsIfRuntimeChanged();
+        if (refresh?.status === 'unchanged') {
+            startManagedContentSelfHeal({
+                reason: 'service-worker-start',
+                force: false,
+            });
+        }
+    }
+};
+chrome.alarms?.onAlarm?.addListener?.((alarm) => {
+    if (alarm?.name === NATIVE_BROKER_KEEPALIVE_ALARM) {
+        ensureNativeBrokerKeepaliveAlarm({ reason: 'native-broker-keepalive-alarm' });
+        ensureNativeBrokerPort({ reason: 'native-broker-keepalive-alarm' });
+        return;
+    }
+    const tabId = tabIdFromClaimAlarmName(alarm?.name);
+    if (!Number.isInteger(tabId))
+        return;
+    releaseTrackedTabClaimByTabId(tabId, {
+        reason: 'claim-expiry-alarm',
+    });
+});
+chrome.tabs?.onRemoved?.addListener?.((tabId) => {
+    tabBrokerRegistry.delete(tabId);
+    clearTimeout(managedTabSelfHealTimers.get(tabId));
+    managedTabSelfHealTimers.delete(tabId);
+    clearTabClaimExpiryTimer(tabId);
+    clearTabClaimExpiryAlarm(tabId);
+    getTrackedTabClaims().then((claims) => {
+        if (!claims[String(tabId)])
+            return;
+        delete claims[String(tabId)];
+        setTrackedTabClaims(claims);
+    });
+});
+chrome.tabs?.onCreated?.addListener?.((tab = {}) => {
+    scheduleManagedTabSelfHeal(tab, {
+        reason: 'managed-tab-created',
+    });
+});
+chrome.tabs?.onUpdated?.addListener?.((tabId, changeInfo = {}, tab = {}) => {
+    if (changeInfo.url || changeInfo.status === 'loading' || changeInfo.status === 'complete') {
+        scheduleManagedTabSelfHeal({
+            ...tab,
+            id: tabId,
+            url: changeInfo.url || tab.url || tab.pendingUrl,
+        }, {
+            reason: changeInfo.status === 'complete' ? 'managed-tab-complete' : 'managed-tab-updated',
+        });
+    }
+    const existing = tabBrokerRegistry.get(tabId);
+    if (!existing)
+        return;
+    const now = Date.now();
+    tabBrokerRegistry.set(tabId, {
+        ...existing,
+        url: changeInfo.url || tab.url || existing.url,
+        title: tab.title || existing.title,
+        isActiveTab: tab.active ?? existing.isActiveTab,
+        navigationStatus: changeInfo.status || existing.navigationStatus || null,
+        updatedAt: new Date(now).toISOString(),
+        updatedAtMs: now,
+        reason: changeInfo.status === 'loading' ? 'tab-loading' : 'tab-updated',
+    });
+});
+chrome.tabs?.onActivated?.addListener?.((activeInfo = {}) => {
+    const tabId = Number(activeInfo.tabId);
+    if (!Number.isInteger(tabId))
+        return;
+    chromeGetTab(tabId).then((tab) => {
+        scheduleManagedTabSelfHeal(tab, {
+            reason: 'managed-tab-activated',
+        });
+    });
+});
+const arrayBufferToBase64 = (buffer) => {
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+    }
+    return btoa(binary);
+};
+const base64ToUint8Array = (value) => {
+    const binary = atob(String(value || ''));
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i += 1) {
+        bytes[i] = binary.charCodeAt(i);
+    }
+    return bytes;
+};
+const sha256Hex = async (bytes) => {
+    const digest = await crypto.subtle.digest('SHA-256', bytes);
+    return Array.from(new Uint8Array(digest))
+        .map((byte) => byte.toString(16).padStart(2, '0'))
+        .join('');
+};
+const artifactCaptureBytes = (payload = {}) => {
+    if (payload.bodyBase64)
+        return base64ToUint8Array(payload.bodyBase64);
+    return new TextEncoder().encode(String(payload.body || ''));
+};
+const summarizeArtifactCapture = (capture = {}, { includeBody = false } = {}) => {
+    const { body, bodyBase64, ...rest } = capture || {};
+    return {
+        ...rest,
+        ...(includeBody && body ? { body } : {}),
+        ...(includeBody && bodyBase64 ? { bodyBase64 } : {}),
+    };
+};
+const rememberArtifactCapture = async (message = {}, sender = {}) => {
+    const payload = message.payload || {};
+    if (payload.sourceOrigin !== 'https://gemini.google.com') {
+        return { ok: false, reason: 'untrusted-origin' };
+    }
+    if (!/^text\/html(?:\s*;|$)/i.test(String(payload.mimeType || '').trim())) {
+        return { ok: false, reason: 'unsupported-mime-type' };
+    }
+    if (!payload.body && !payload.bodyBase64) {
+        return { ok: false, reason: 'empty-body' };
+    }
+    const bytes = artifactCaptureBytes(payload);
+    const sha256 = await sha256Hex(bytes);
+    const tabId = sender.tab?.id ?? null;
+    const frameId = sender.frameId ?? null;
+    const locationHref = payload.locationHref || sender.url || null;
+    const now = new Date().toISOString();
+    const capture = {
+        source: 'postMessage',
+        body: payload.body || null,
+        bodyBase64: payload.bodyBase64 || null,
+        mimeType: payload.mimeType,
+        sha256,
+        byteLength: bytes.length,
+        tabId,
+        frameId,
+        documentId: sender.documentId || null,
+        locationHref,
+        locationOrigin: payload.locationOrigin || null,
+        locationPathname: payload.locationPathname || null,
+        title: payload.title || '',
+        capturedAt: payload.capturedAt || now,
+        receivedAt: now,
+    };
+    const cacheKey = [sha256, tabId ?? '', frameId ?? '', locationHref || ''].join('|');
+    const existingIndex = artifactCaptureCache.findIndex((item) => item.cacheKey === cacheKey);
+    if (existingIndex >= 0) {
+        artifactCaptureCache[existingIndex] = {
+            ...artifactCaptureCache[existingIndex],
+            ...capture,
+            cacheKey,
+        };
+    }
+    else {
+        artifactCaptureCache.push({ ...capture, cacheKey });
+    }
+    while (artifactCaptureCache.length > ARTIFACT_CAPTURE_CACHE_LIMIT) {
+        artifactCaptureCache.shift();
+    }
+    return {
+        ok: true,
+        stored: true,
+        cacheSize: artifactCaptureCache.length,
+        capture: summarizeArtifactCapture(capture),
+    };
+};
+const artifactCapturesForTab = (tabId) => artifactCaptureCache.filter((capture) => !Number.isInteger(tabId) || capture.tabId === tabId);
+const handleArtifactCapturesRequest = (message = {}, sender = {}) => {
+    const tabId = Number.isInteger(Number(message.tabId))
+        ? Number(message.tabId)
+        : Number.isInteger(sender.tab?.id)
+            ? sender.tab.id
+            : null;
+    const action = message.action || 'list';
+    if (action === 'clear') {
+        const before = artifactCaptureCache.length;
+        for (let i = artifactCaptureCache.length - 1; i >= 0; i -= 1) {
+            if (!Number.isInteger(tabId) || artifactCaptureCache[i].tabId === tabId) {
+                artifactCaptureCache.splice(i, 1);
+            }
+        }
+        return {
+            ok: true,
+            action,
+            tabId,
+            cleared: before - artifactCaptureCache.length,
+            cacheSize: artifactCaptureCache.length,
+        };
+    }
+    const captures = artifactCapturesForTab(tabId).map((capture) => summarizeArtifactCapture(capture, { includeBody: message.includeBodies === true }));
+    return {
+        ok: true,
+        action: 'list',
+        tabId,
+        captureCount: captures.length,
+        captures,
+    };
+};
+const fetchAsset = async (source) => {
+    const url = new URL(String(source || ''));
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+        throw new Error('URL de mídia inválida.');
+    }
+    const isGoogleMediaHost = /(?:^|\.)googleusercontent\.com$/i.test(url.hostname) ||
+        /(?:^|\.)usercontent\.goog$/i.test(url.hostname) ||
+        /(?:^|\.)google\.com$/i.test(url.hostname);
+    const fetchWithCredentials = async (credentials) => {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 7000);
+        try {
+            const response = await fetch(url.href, {
+                credentials,
+                cache: 'force-cache',
+                headers: {
+                    Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+                },
+                referrer: isGoogleMediaHost ? 'https://gemini.google.com/' : undefined,
+                referrerPolicy: isGoogleMediaHost ? 'strict-origin-when-cross-origin' : undefined,
+                signal: controller.signal,
+            });
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+            return response;
+        }
+        finally {
+            clearTimeout(timeoutId);
+        }
+    };
+    let response;
+    const credentialModes = isGoogleMediaHost ? ['include', 'omit'] : ['omit'];
+    const errors = [];
+    for (const credentials of credentialModes) {
+        try {
+            response = await fetchWithCredentials(credentials);
+            break;
+        }
+        catch (err) {
+            errors.push(`${credentials}: ${err?.message || String(err)}`);
+        }
+    }
+    if (!response)
+        throw new Error(errors.join('; '));
+    const blob = await response.blob();
+    return {
+        ok: true,
+        mimeType: blob.type || response.headers.get('content-type') || 'application/octet-stream',
+        contentBase64: arrayBufferToBase64(await blob.arrayBuffer()),
+    };
+};
+const renderedMediaClipFromMessage = (message) => {
+    const rect = message?.rect || message?.clip || {};
+    const maxSide = 4096;
+    const maxPixels = 12_000_000;
+    const x = Math.max(0, Number(rect.pageX ?? rect.x));
+    const y = Math.max(0, Number(rect.pageY ?? rect.y));
+    let width = Math.max(1, Number(rect.width));
+    let height = Math.max(1, Number(rect.height));
+    if (![x, y, width, height].every(Number.isFinite))
+        return null;
+    if (width > maxSide || height > maxSide || width * height > maxPixels) {
+        const factor = Math.min(maxSide / width, maxSide / height, Math.sqrt(maxPixels / (width * height)));
+        width = Math.max(1, Math.floor(width * factor));
+        height = Math.max(1, Math.floor(height * factor));
+    }
+    return { x, y, width, height, scale: 1 };
+};
+const captureRenderedMedia = async (message, sender = {}) => {
+    const tabId = Number(sender.tab?.id || message?.tabId);
+    if (!Number.isInteger(tabId) || tabId <= 0) {
+        return { ok: false, error: 'sender-tab-unavailable', code: 'sender-tab-unavailable' };
+    }
+    const clip = renderedMediaClipFromMessage(message);
+    if (!clip) {
+        return { ok: false, error: 'Recorte de mídia inválido.', code: 'invalid-media-clip' };
+    }
+    const captured = await captureTabClipWithDebugger(tabId, clip, { chromeApi: chrome });
+    if (!captured.ok) {
+        return {
+            ok: false,
+            error: captured.error,
+            code: captured.code,
+        };
+    }
+    return {
+        ok: true,
+        mimeType: captured.mimeType,
+        contentBase64: captured.contentBase64,
+        clip: captured.clip,
+    };
+};
+const artifactFrameProbeScript = (options = {}) => {
+    const maxSampleLength = Math.max(0, Math.min(5000, Number(options.maxSampleLength || 1200)));
+    const includeHtmlSample = options.includeHtmlSample === true;
+    const maxListItems = Math.max(1, Math.min(60, Number(options.maxListItems || 25)));
+    const sample = (value, limit = maxSampleLength) => {
+        const text = String(value || '')
+            .replace(/\s+/g, ' ')
+            .trim();
+        return text.length > limit ? `${text.slice(0, Math.max(0, limit - 3))}...` : text;
+    };
+    const attr = (el, name) => el.getAttribute?.(name) || '';
+    const collect = (selector, mapFn) => Array.from(document.querySelectorAll(selector))
+        .slice(0, maxListItems)
+        .map((el) => {
+        try {
+            return mapFn(el);
+        }
+        catch (err) {
+            return { error: err?.message || String(err) };
+        }
+    });
+    const hashText = (text) => {
+        let hash = 2166136261;
+        const source = String(text || '').slice(0, 200000);
+        for (let i = 0; i < source.length; i += 1) {
+            hash ^= source.charCodeAt(i);
+            hash = Math.imul(hash, 16777619);
+        }
+        return (hash >>> 0).toString(16).padStart(8, '0');
+    };
+    try {
+        const html = document.documentElement?.outerHTML || '';
+        const bodyText = document.body?.innerText || document.body?.textContent || '';
+        const path = location.pathname || '';
+        const htmlLower = html.slice(0, 200000).toLowerCase();
+        return {
+            ok: true,
+            url: location.href,
+            origin: location.origin,
+            pathname: path,
+            title: document.title || '',
+            readyState: document.readyState || '',
+            contentType: document.contentType || '',
+            htmlReadable: !!html,
+            htmlLength: html.length,
+            htmlHash: hashText(html),
+            htmlSample: includeHtmlSample ? sample(html) : '',
+            textLength: bodyText.length,
+            textSample: sample(bodyText, Math.min(maxSampleLength, 800)),
+            scriptCount: document.scripts?.length || 0,
+            iframeCount: document.querySelectorAll('iframe').length,
+            linkCount: document.querySelectorAll('link[href]').length,
+            scripts: collect('script[src]', (el) => ({
+                src: attr(el, 'src'),
+                type: attr(el, 'type'),
+            })),
+            iframes: collect('iframe[src], iframe[srcdoc]', (el) => ({
+                src: attr(el, 'src'),
+                hasSrcdoc: !!attr(el, 'srcdoc'),
+                sandbox: attr(el, 'sandbox'),
+                allow: attr(el, 'allow'),
+            })),
+            links: collect('link[href]', (el) => ({
+                rel: attr(el, 'rel'),
+                href: attr(el, 'href'),
+            })),
+            artifactSignals: {
+                geminiCodeImmersive: /\/gemini-code-immersive\//i.test(path) || htmlLower.includes('gemini-code-immersive'),
+                usercontentGoog: /(?:^|\.)usercontent\.goog$/i.test(location.hostname),
+                scfUsercontent: /(?:^|\.)scf\.usercontent\.goog$/i.test(location.hostname),
+            },
+        };
+    }
+    catch (err) {
+        return {
+            ok: false,
+            url: location.href,
+            origin: location.origin,
+            error: err?.message || String(err),
+            name: err?.name || null,
+        };
+    }
+};
+const probeArtifactFrames = (message = {}, sender = {}) => new Promise((resolve) => {
+    const tabId = Number(message.tabId || sender.tab?.id);
+    if (!Number.isInteger(tabId) || tabId <= 0) {
+        resolve({ ok: false, reason: 'tab-id-unavailable', tabId: null, frames: [] });
+        return;
+    }
+    if (!chrome.scripting?.executeScript) {
+        resolve({ ok: false, reason: 'scripting-api-unavailable', tabId, frames: [] });
+        return;
+    }
+    chrome.scripting.executeScript({
+        target: { tabId, allFrames: true },
+        func: artifactFrameProbeScript,
+        args: [
+            {
+                includeHtmlSample: message.includeHtmlSample === true,
+                maxSampleLength: message.maxSampleLength,
+                maxListItems: message.maxListItems,
+            },
+        ],
+    }, (results) => {
+        if (chrome.runtime.lastError) {
+            resolve({
+                ok: false,
+                reason: chrome.runtime.lastError.message,
+                tabId,
+                frames: [],
+            });
+            return;
+        }
+        const frames = Array.isArray(results)
+            ? results.map((entry) => ({
+                frameId: entry.frameId ?? null,
+                documentId: entry.documentId || null,
+                ...entry.result,
+            }))
+            : [];
+        resolve({
+            ok: true,
+            tabId,
+            frameCount: frames.length,
+            frames,
+        });
+    });
+});
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message?.type === 'gemini-md-export/ping') {
+        sendResponse(extensionInfo(sender));
+        return;
+    }
+    if (message?.type === 'GET_EXTENSION_INFO' || message?.type === 'gemini-md-export/get-info') {
+        sendResponse(extensionInfo(sender));
+        return;
+    }
+    if (message?.type === 'RELOAD_SELF' || message?.type === 'gemini-md-export/reload-self') {
+        storageSet({
+            reason: message.reason || 'self-reload',
+            expectedExtensionVersion: message.expectedExtensionVersion || null,
+            expectedProtocolVersion: message.expectedProtocolVersion || null,
+            expectedBuildStamp: message.expectedBuildStamp || null,
+            requestedAt: new Date().toISOString(),
+        })
+            .then(() => cleanupStaleTabClaimVisuals(message.reason || 'self-reload'))
+            .then(() => {
+            sendResponse({ ok: true, reloading: true });
+            setTimeout(() => {
+                chrome.runtime.reload();
+            }, 300);
+        });
+        return true;
+    }
+    if (message?.type === 'gemini-md-export/reload-gemini-tabs') {
+        reloadGeminiTabs(message.reason || 'content-script', {
+            force: message.force === true,
+            explicit: message.explicit === true,
+        }).then(sendResponse);
+        return true;
+    }
+    if (message?.type === 'gemini-md-export/activate-tab') {
+        activateSenderTab(message, sender).then(sendResponse);
+        return true;
+    }
+    if (message?.type === 'gemini-md-export/self-heal-gemini-tabs') {
+        selfHealGeminiTabs({
+            reason: message.reason || 'content-script',
+            force: message.force === true,
+        }).then(sendResponse);
+        return true;
+    }
+    if (message?.type === 'gemini-md-export/native-host-health') {
+        ensureOffscreenDocument({
+            reason: message.reason || 'native-host-health',
+            idleCloseMs: message.idleCloseMs || OFFSCREEN_IDLE_CLOSE_MS,
+        })
+            .then(() => probeNativeHost({
+            reason: message.reason || 'content-script',
+            timeoutMs: message.timeoutMs || NATIVE_HOST_REQUEST_TIMEOUT_MS,
+            brokerOnly: message.brokerOnly === true,
+        }))
+            .then(sendResponse);
+        return true;
+    }
+    if (message?.type === 'gemini-md-export/private-api-read-chat') {
+        readGeminiPrivateChat({
+            chatId: message.chatId,
+            title: message.title || sender?.tab?.title || null,
+            timeoutMs: message.timeoutMs,
+        }).then(sendResponse);
+        return true;
+    }
+    if (message?.type === 'gemini-md-export/private-api-list-chats') {
+        listGeminiPrivateChats({
+            limit: message.limit,
+            timeoutMs: message.timeoutMs,
+        }).then(sendResponse);
+        return true;
+    }
+    if (message?.type === 'gemini-md-export/private-api-session-status') {
+        checkGeminiPrivateSession({ timeoutMs: message.timeoutMs }).then(sendResponse);
+        return true;
+    }
+    if (message?.type === 'gemini-md-export/native-proxy-http') {
+        ensureOffscreenDocument({
+            reason: message.reason || 'native-proxy-http',
+            idleCloseMs: message.idleCloseMs || OFFSCREEN_IDLE_CLOSE_MS,
+        })
+            .then(() => nativeHostRequest('proxyHttp', {
+            bridgeUrl: message.bridgeUrl || 'http://127.0.0.1:47283',
+            path: message.path || '/',
+            method: message.method || 'GET',
+            payload: message.payload,
+            timeoutMs: message.timeoutMs || 10000,
+        }, {
+            timeoutMs: Math.max(NATIVE_HOST_REQUEST_TIMEOUT_MS, Number(message.timeoutMs || 10000) + 1200),
+        }))
+            .then(sendResponse);
+        return true;
+    }
+    if (message?.type === 'gemini-md-export/offscreen-keepalive') {
+        lastOffscreenStatus = {
+            ...(lastOffscreenStatus || {}),
+            ok: true,
+            status: 'keepalive',
+            active: true,
+            reason: lastOffscreenStatus?.reason || 'offscreen-keepalive',
+            checkedAt: new Date().toISOString(),
+            startedAt: message.startedAt || null,
+            uptimeMs: message.uptimeMs ?? null,
+            lastKeepaliveAt: message.lastKeepaliveAt || new Date().toISOString(),
+            keepaliveCount: message.keepaliveCount ?? null,
+        };
+        sendResponse({ ok: true });
+        return true;
+    }
+    if (message?.type === 'gemini-md-export/offscreen-status') {
+        const action = message.action || 'ensure';
+        if (action === 'close') {
+            closeOffscreenDocument({ reason: message.reason || 'content-script' }).then(sendResponse);
+            return true;
+        }
+        ensureOffscreenDocument({
+            reason: message.reason || 'content-script',
+            idleCloseMs: message.idleCloseMs || OFFSCREEN_IDLE_CLOSE_MS,
+        }).then(sendResponse);
+        return true;
+    }
+    if (message?.type === 'gemini-md-export/tab-broker-update') {
+        sendResponse(updateTabBrokerRegistry(message, sender));
+        return false;
+    }
+    if (message?.type === 'gemini-md-export/claim-tab') {
+        applyTabClaim(message, sender).then(sendResponse);
+        return true;
+    }
+    if (message?.type === 'gemini-md-export/release-tab-claim') {
+        releaseTabClaim(message, sender).then(sendResponse);
+        return true;
+    }
+    if (message?.type === 'gemini-md-export/fetch-asset') {
+        fetchAsset(message.source)
+            .then(sendResponse)
+            .catch((err) => {
+            sendResponse({
+                ok: false,
+                error: err?.message || String(err),
+            });
+        });
+        return true;
+    }
+    if (message?.type === 'gemini-md-export/capture-rendered-media') {
+        captureRenderedMedia(message, sender)
+            .then(sendResponse)
+            .catch((err) => {
+            sendResponse({
+                ok: false,
+                error: err?.message || String(err),
+                code: 'rendered-media-capture-failed',
+            });
+        });
+        return true;
+    }
+    if (message?.type === 'gemini-md-export/artifact-html-payload') {
+        rememberArtifactCapture(message, sender)
+            .then(sendResponse)
+            .catch((err) => {
+            sendResponse({
+                ok: false,
+                error: err?.message || String(err),
+            });
+        });
+        return true;
+    }
+    if (message?.type === 'gemini-md-export/artifact-captures') {
+        sendResponse(handleArtifactCapturesRequest(message, sender));
+        return false;
+    }
+    if (message?.type === 'gemini-md-export/probe-artifact-frames') {
+        probeArtifactFrames(message, sender).then(sendResponse);
+        return true;
+    }
+    if (message?.type === 'gemini-md-export/todo-helper') {
+        sendResponse({
+            ok: false,
+            reason: 'helper-not-implemented-yet',
+        });
+    }
+});
+void handleServiceWorkerStart();

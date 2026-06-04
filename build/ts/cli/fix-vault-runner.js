@@ -1,0 +1,489 @@
+import { spawn } from 'node:child_process';
+import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync, } from 'node:fs';
+import { basename, dirname, join, relative, resolve } from 'node:path';
+import { buildFixVaultCombinedReport, buildFixVaultPrivateRepairExportOptions, buildFixVaultPrivateRepairTargets, buildFixVaultRepairAdapterPlan, buildMetadataArgs, buildRepairAuditArgs, buildWebRepairArgs, diagnosisExitIsUsable, formatFixVaultProgressLine, repairTargetPathsFromDiagnosis, } from '../core/fix-vault-flow.js';
+import { buildFixVaultMetadataStatus } from '../core/metadata-backfill-contract.js';
+import { loadMarkdownDbFixVaultRecords } from '../mcp/markdown-db-vault-adapter.js';
+import { resolveGeminiMdExportVaultDir } from './config-store.js';
+import { runPrivateApiSelectedExport, summarizePrivateApiSelectedExportJob, } from './private-api-selected-export.js';
+import { applyPrivateApiSessionDefaults } from './private-api-session-store.js';
+const reportTimestamp = () => new Date().toISOString().replace(/[-:]/g, '').replace(/\..+$/, '').replace('T', '-');
+const readJsonIfExists = (filePath) => {
+    if (!filePath || !existsSync(filePath))
+        return null;
+    try {
+        return JSON.parse(readFileSync(filePath, 'utf-8'));
+    }
+    catch {
+        return null;
+    }
+};
+const parseJsonText = (text) => {
+    try {
+        return text ? JSON.parse(text) : null;
+    }
+    catch {
+        return null;
+    }
+};
+const copyFileWithParents = (from, to) => {
+    mkdirSync(dirname(to), { recursive: true });
+    copyFileSync(from, to);
+};
+const backupPrivateRepairTargets = ({ targets, backupDir, vaultDir, }) => {
+    const copiedAssets = new Set();
+    for (const target of targets) {
+        copyFileWithParents(target.sourcePath, join(backupDir, relative(vaultDir, target.sourcePath)));
+        const assetsDir = join(dirname(target.sourcePath), 'assets', target.chatId);
+        if (!existsSync(assetsDir) || !statSync(assetsDir).isDirectory())
+            continue;
+        if (copiedAssets.has(assetsDir))
+            continue;
+        copiedAssets.add(assetsDir);
+        const backupAssetsDir = join(backupDir, relative(vaultDir, assetsDir));
+        mkdirSync(dirname(backupAssetsDir), { recursive: true });
+        cpSync(assetsDir, backupAssetsDir, { recursive: true });
+    }
+};
+const mediaFailureCountFor = (job) => job.savedFiles.reduce((sum, file) => sum + Number(file.mediaFailureCount || 0), 0);
+const failureCodeCountsFor = (job) => job.failures.reduce((counts, failure) => {
+    const code = failure.code || 'unknown';
+    counts[code] = (counts[code] || 0) + 1;
+    return counts;
+}, {});
+const failureSamplesFor = (job) => job.failures.slice(0, 10).map((failure) => ({
+    index: failure.index,
+    chatId: failure.chatId,
+    title: failure.title,
+    code: failure.code,
+    error: failure.error,
+}));
+export const privateRepairUnavailableForJob = (job) => {
+    const mediaFailureCount = mediaFailureCountFor(job);
+    if (job.failureCount > 0) {
+        return {
+            code: 'gemini_private_api_repair_failed',
+            message: 'A API privada nao conseguiu reexportar todos os chats que precisavam de reparo.',
+            nextAction: 'Confirme que a sessao/cookies do Google estao validos e rode fix-vault novamente.',
+            failedChatIds: job.failures
+                .map((failure) => failure.chatId)
+                .filter((chatId) => Boolean(chatId)),
+            failureCodeCounts: failureCodeCountsFor(job),
+            failureSamples: failureSamplesFor(job),
+        };
+    }
+    if (mediaFailureCount > 0) {
+        return {
+            code: 'gemini_private_api_asset_download_failed',
+            message: 'A API privada reparou o Markdown, mas alguns assets nao foram baixados com sucesso.',
+            nextAction: 'Confirme que a sessao/cookies do Google estao validos e rode fix-vault novamente para completar os assets.',
+            failedChatIds: job.savedFiles
+                .filter((file) => Number(file.mediaFailureCount || 0) > 0)
+                .map((file) => file.chatId),
+        };
+    }
+    return null;
+};
+const privateRepairRunResult = (job) => {
+    const unavailable = privateRepairUnavailableForJob(job);
+    const summary = summarizePrivateApiSelectedExportJob(job);
+    return {
+        exitCode: unavailable ? 1 : 0,
+        stderrText: '',
+        stdoutText: `${JSON.stringify({
+            ok: !unavailable,
+            mode: 'private-api',
+            privateApiRepair: summary,
+            webRepairUnavailable: unavailable,
+            statusCounts: {
+                repaired: job.successCount,
+                failed: job.failureCount,
+                mediaFailures: mediaFailureCountFor(job),
+            },
+        }, null, 2)}\n`,
+    };
+};
+const markdownDbUnavailableRunResult = (err) => ({
+    exitCode: 1,
+    stdoutText: `${JSON.stringify({
+        ok: false,
+        mode: 'private-api',
+        webRepairUnavailable: {
+            code: 'markdown_db_unavailable',
+            message: 'Nao consegui preparar o indice Markdown para encontrar exports e assets do vault.',
+            nextAction: 'Atualize ou reinstale a extensao para restaurar as dependencias e rode fix-vault novamente.',
+            failedChatIds: [],
+            error: err instanceof Error ? err.message : String(err),
+        },
+    }, null, 2)}\n`,
+    stderrText: err instanceof Error ? err.message : String(err),
+    skipped: false,
+});
+const privateRepairPreflightUnavailableRunResult = (err, targets) => {
+    const record = err && typeof err === 'object' ? err : {};
+    const message = err instanceof Error
+        ? err.message
+        : typeof err === 'string'
+            ? err
+            : 'A sessao privada do navegador nao ficou pronta para reparar o vault.';
+    const nextAction = typeof record.nextAction === 'string'
+        ? record.nextAction
+        : 'Abra o Gemini no navegador logado, aguarde a extensao conectar e rode fix-vault novamente.';
+    return {
+        exitCode: 1,
+        stdoutText: `${JSON.stringify({
+            ok: false,
+            mode: 'private-api',
+            webRepairUnavailable: {
+                code: typeof record.code === 'string'
+                    ? record.code
+                    : 'gemini_private_api_session_unavailable',
+                message,
+                nextAction,
+                failedChatIds: targets.map((target) => target.chatId),
+            },
+            statusCounts: {
+                repaired: 0,
+                failed: targets.length,
+                mediaFailures: 0,
+            },
+        }, null, 2)}\n`,
+        stderrText: message,
+        skipped: false,
+    };
+};
+const loadFixVaultMarkdownDbRecords = async ({ vaultDir, enabled, }) => {
+    if (!enabled)
+        return { records: [], unavailable: null };
+    try {
+        const result = await loadMarkdownDbFixVaultRecords({ vaultDir });
+        return { records: result.records, unavailable: null };
+    }
+    catch (err) {
+        return { records: [], unavailable: markdownDbUnavailableRunResult(err) };
+    }
+};
+const selectFixVaultFormat = (flags, stdout) => {
+    if (flags.format === 'tui' && !stdout?.isTTY)
+        return 'plain';
+    if (flags.format && flags.format !== 'auto')
+        return flags.format;
+    return stdout?.isTTY && process.env.TERM !== 'dumb' ? 'tui' : 'plain';
+};
+const fixVaultProgressTickMs = () => {
+    const configured = Number(process.env.GEMINI_MD_EXPORT_PROGRESS_TICK_MS || 8000);
+    return Number.isFinite(configured) && configured > 0 ? Math.max(250, configured) : 8000;
+};
+const runNodeScript = async ({ scriptPath, args, streams, packageRoot, streamStdout = true, progress, }) => {
+    const stdout = streams.stdout || process.stdout;
+    const stderr = streams.stderr || process.stderr;
+    let stdoutText = '';
+    let stderrText = '';
+    const startedAt = Date.now();
+    const child = spawn(process.execPath, [scriptPath, ...args], {
+        cwd: packageRoot,
+        stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const progressTick = progress
+        ? setInterval(() => {
+            const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+            stdout.write(formatFixVaultProgressLine({
+                format: progress.format,
+                current: progress.current,
+                total: progress.total,
+                message: `${progress.message} (em andamento, ${elapsedSeconds}s)`,
+            }));
+        }, fixVaultProgressTickMs())
+        : null;
+    child.stdout.on('data', (chunk) => {
+        stdoutText += String(chunk);
+        if (streamStdout)
+            stdout.write(chunk);
+    });
+    child.stderr.on('data', (chunk) => {
+        stderrText += String(chunk);
+        stderr.write(chunk);
+    });
+    const exitCode = await new Promise((resolveExit) => {
+        child.on('exit', (code) => resolveExit(code ?? 1));
+    });
+    if (progressTick)
+        clearInterval(progressTick);
+    return { exitCode, stdoutText, stderrText };
+};
+const runPrivateApiRepair = async ({ targets, parsed, streams, format, backupDir, vaultDir, preparePrivateApiRepair, }) => {
+    const stdout = streams.stdout || process.stdout;
+    backupPrivateRepairTargets({ targets, backupDir, vaultDir });
+    let lastProgressKey = '';
+    const shouldRunBrowserPreflight = !parsed.flags.cookiesJson && !parsed.flags.python && !process.env.GME_GEMINI_WEBAPI_RUNNER;
+    if (shouldRunBrowserPreflight) {
+        try {
+            await preparePrivateApiRepair?.();
+        }
+        catch (err) {
+            return privateRepairPreflightUnavailableRunResult(err, targets);
+        }
+    }
+    const exportOptions = buildFixVaultPrivateRepairExportOptions(parsed.flags);
+    const job = await runPrivateApiSelectedExport({
+        items: targets.map((target) => ({
+            chatId: target.chatId,
+            title: target.title,
+            url: target.url,
+            sourcePath: target.sourcePath,
+            outputDir: target.outputDir,
+            filename: target.filename,
+        })),
+        expectedCount: targets.length,
+        ...exportOptions,
+        onProgress: (progress) => {
+            const active = progress.current && progress.status === 'running' ? 1 : 0;
+            const count = Math.min(progress.requested, progress.completed + active);
+            const key = `${progress.status}:${progress.completed}:${progress.current?.chatId || ''}:${progress.progressMessage}`;
+            if (key === lastProgressKey)
+                return;
+            lastProgressKey = key;
+            const unifiedPrepMessages = new Set([
+                'Lendo conversa pela API privada',
+                'Export privado em andamento',
+                'Export privado unificado',
+            ]);
+            const pythonPrepMessages = new Set([
+                'Preparando API privada',
+                'Preparacao da API privada falhou',
+                'Listando conversas pela API privada',
+            ]);
+            const message = unifiedPrepMessages.has(progress.progressMessage)
+                ? `Preparando export privado unificado (${count}/${progress.requested})`
+                : progress.progressMessage === 'Recuperando sessão do navegador'
+                    ? `Recuperando sessão do navegador (${count}/${progress.requested})`
+                    : progress.progressMessage === 'Export privado concluido'
+                        ? `Export privado unificado concluido (${count}/${progress.requested})`
+                        : pythonPrepMessages.has(progress.progressMessage)
+                            ? `${progress.progressMessage} (${count}/${progress.requested})`
+                            : `Reparando exports/assets pela API privada (${count}/${progress.requested})`;
+            stdout.write(formatFixVaultProgressLine({
+                format,
+                current: 3,
+                total: 5,
+                message,
+            }));
+        },
+    }, preparePrivateApiRepair
+        ? {
+            recoverBrowserBackgroundSession: async () => {
+                await preparePrivateApiRepair();
+                return { ok: true };
+            },
+        }
+        : {});
+    return privateRepairRunResult(job);
+};
+export const runFixVaultCommand = async ({ parsed, streams = {}, packageRoot, repairPath, metadataPath, preparePrivateApiRepair, }) => {
+    const effectiveFlags = applyPrivateApiSessionDefaults(parsed.flags);
+    const effectiveParsed = { ...parsed, flags: effectiveFlags };
+    const vaultDirResolution = resolveGeminiMdExportVaultDir({
+        explicitVaultDir: effectiveFlags.vaultDir || parsed.positionals[0],
+    });
+    if (!vaultDirResolution.ok || !vaultDirResolution.vaultDir) {
+        throw new Error(vaultDirResolution.nextAction.message);
+    }
+    const vaultDir = vaultDirResolution.vaultDir;
+    const resolvedVaultDir = resolve(vaultDir);
+    if (!existsSync(resolvedVaultDir))
+        throw new Error(`Vault nao encontrado: ${resolvedVaultDir}`);
+    const reportPath = resolve(effectiveFlags.report ||
+        `${resolvedVaultDir}/.gemini-md-export-fix/fix-vault-${reportTimestamp()}.json`);
+    const reportDir = dirname(reportPath);
+    const repairReportDir = resolve(reportDir, 'repair');
+    const metadataReportPath = resolve(reportDir, 'metadata-backfill.json');
+    const metadataDiagnosisReportPath = resolve(reportDir, 'metadata-diagnosis.json');
+    mkdirSync(reportDir, { recursive: true });
+    const stdout = streams.stdout || process.stdout;
+    const format = selectFixVaultFormat(effectiveFlags, stdout);
+    const writePhase = (current, total, message) => stdout.write(formatFixVaultProgressLine({ format, current, total, message }));
+    writePhase(1, 5, 'Diagnosticando Takeout e chats do vault');
+    const repair = await runNodeScript({
+        scriptPath: repairPath,
+        args: buildRepairAuditArgs({
+            vaultDir: resolvedVaultDir,
+            repairReportDir,
+            takeout: effectiveFlags.takeout || '',
+        }),
+        streams,
+        packageRoot,
+        streamStdout: false,
+        progress: { format, current: 1, total: 5, message: 'Diagnosticando Takeout e chats do vault' },
+    });
+    writePhase(2, 5, 'Conferindo datas e exports raw');
+    const diagnosis = repair.exitCode === 0
+        ? await runNodeScript({
+            scriptPath: metadataPath,
+            args: buildMetadataArgs({
+                vaultDir: resolvedVaultDir,
+                reportPath: metadataDiagnosisReportPath,
+                flags: effectiveFlags,
+                diagnoseOnly: true,
+            }),
+            streams,
+            packageRoot,
+            streamStdout: false,
+            progress: { format, current: 2, total: 5, message: 'Conferindo datas e exports raw' },
+        })
+        : { exitCode: 1, stdoutText: '', stderrText: 'repair_failed' };
+    const repairOutput = parseJsonText(repair.stdoutText) || {};
+    const repairSummary = readJsonIfExists(repairOutput.preliminaryReportPath);
+    const diagnosisReport = readJsonIfExists(metadataDiagnosisReportPath);
+    const diagnosisRepairTargetPaths = repairTargetPathsFromDiagnosis({
+        vaultDir: resolvedVaultDir,
+        diagnosisReport,
+    });
+    writePhase(2, 5, 'Indexando vault com MarkdownDB');
+    const markdownDb = await loadFixVaultMarkdownDbRecords({
+        vaultDir: resolvedVaultDir,
+        enabled: effectiveFlags.privateApi !== false,
+    });
+    const repairTargets = buildFixVaultPrivateRepairTargets({
+        vaultDir: resolvedVaultDir,
+        diagnosisReport,
+        vaultRecords: markdownDb.records,
+    });
+    const repairAdapterPlan = buildFixVaultRepairAdapterPlan({
+        flags: {
+            privateApi: effectiveFlags.privateApi,
+            openIfMissing: effectiveFlags.openIfMissing,
+        },
+        targets: repairTargets,
+    });
+    const usePrivateApiRepair = repairAdapterPlan.adapters.some((adapter) => adapter.kind === 'private_api');
+    const repairTargetPaths = !usePrivateApiRepair
+        ? diagnosisRepairTargetPaths
+        : repairTargets.map((target) => target.sourcePath);
+    let webRepair = {
+        exitCode: 0,
+        stdoutText: '',
+        stderrText: '',
+        skipped: true,
+    };
+    const diagnosisUsable = diagnosisExitIsUsable(diagnosis.exitCode);
+    if (diagnosisUsable) {
+        if (markdownDb.unavailable) {
+            writePhase(3, 5, 'Indice Markdown indisponivel para reparo');
+            webRepair = markdownDb.unavailable;
+        }
+        else if (repairTargetPaths.length > 0) {
+            const repairMessage = !usePrivateApiRepair
+                ? 'Reparando exports suspeitos pelo Gemini Web'
+                : 'Reparando exports e assets pela API privada';
+            writePhase(3, 5, repairMessage);
+            webRepair = !usePrivateApiRepair
+                ? await runNodeScript({
+                    scriptPath: repairPath,
+                    args: buildWebRepairArgs({
+                        vaultDir: resolvedVaultDir,
+                        repairReportDir,
+                        flags: effectiveFlags,
+                        repairTargetPaths,
+                    }),
+                    streams,
+                    packageRoot,
+                    streamStdout: false,
+                    progress: {
+                        format,
+                        current: 3,
+                        total: 5,
+                        message: repairMessage,
+                    },
+                })
+                : await runPrivateApiRepair({
+                    targets: repairTargets,
+                    parsed: effectiveParsed,
+                    streams,
+                    format,
+                    backupDir: resolve(repairReportDir, 'private-api-backups', reportTimestamp()),
+                    vaultDir: resolvedVaultDir,
+                    preparePrivateApiRepair,
+                });
+        }
+        else {
+            writePhase(3, 5, 'Nenhum export suspeito para reexportar');
+        }
+    }
+    const webRepairOutput = parseJsonText(webRepair.stdoutText) || {};
+    const webRepairUnavailable = webRepairOutput.webRepairUnavailable || null;
+    const webRepairWarnings = webRepairUnavailable
+        ? [
+            {
+                code: webRepairUnavailable.code || 'web_repair_unavailable',
+                message: webRepairUnavailable.message ||
+                    'O reparo pelo Gemini Web nao conseguiu abrir os chats desta conta.',
+                nextAction: webRepairUnavailable.nextAction ||
+                    'Use uma sessao do navegador logada na conta dona desses chats ou forneca outra fonte de reparo.',
+                unresolvedChatIds: webRepairUnavailable.failedChatIds || [],
+            },
+        ]
+        : [];
+    const canWriteMetadata = repair.exitCode === 0 && diagnosisUsable && webRepair.exitCode === 0;
+    let metadata;
+    if (canWriteMetadata) {
+        writePhase(4, 5, 'Atualizando datas do vault');
+        metadata = await runNodeScript({
+            scriptPath: metadataPath,
+            args: buildMetadataArgs({
+                vaultDir: resolvedVaultDir,
+                reportPath: metadataReportPath,
+                flags: effectiveFlags,
+            }),
+            streams,
+            packageRoot,
+            progress: { format, current: 4, total: 5, message: 'Atualizando datas do vault' },
+        });
+    }
+    else {
+        writePhase(4, 5, 'Datas bloqueadas ate o reparo terminar');
+        metadata = { exitCode: 2, stdoutText: '', stderrText: 'metadata_blocked_by_repair' };
+    }
+    writePhase(5, 5, 'Validando vault atualizado');
+    const metadataReport = canWriteMetadata ? readJsonIfExists(metadataReportPath) : null;
+    const metadataUi = buildFixVaultMetadataStatus({
+        exitCode: metadata.exitCode,
+        report: metadataReport,
+    });
+    if (metadataUi.activityWarningText)
+        stdout.write(metadataUi.activityWarningText);
+    const combined = buildFixVaultCombinedReport({
+        generatedAt: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+        vaultDir: resolvedVaultDir,
+        takeout: effectiveFlags.takeout ? basename(effectiveFlags.takeout) : null,
+        repairExitCode: repair.exitCode,
+        diagnosisExitCode: diagnosis.exitCode,
+        repairAdapter: usePrivateApiRepair ? 'private_api' : 'web',
+        webRepairExitCode: webRepair.exitCode,
+        webRepairSkipped: webRepair.skipped === true,
+        webRepairTargetCount: repairTargetPaths.length,
+        webRepairUnavailable,
+        metadataExitCode: metadata.exitCode,
+        repairReportDir,
+        repairPreliminaryReportPath: repairOutput.preliminaryReportPath || null,
+        metadataDiagnosisReportPath,
+        metadataReportPath,
+        repairSummary,
+        diagnosisSummary: diagnosisReport?.summary || null,
+        metadataSummary: metadataReport?.summary || null,
+        warnings: [...webRepairWarnings, ...metadataUi.warnings],
+    });
+    writeFileSync(reportPath, `${JSON.stringify(combined, null, 2)}\n`, 'utf-8');
+    const finalStep = combined.steps[combined.steps.length - 1];
+    const finalMessage = combined.ok
+        ? 'Fluxo concluido'
+        : finalStep?.status === 'failed'
+            ? 'Fluxo falhou'
+            : 'Fluxo bloqueado';
+    writePhase(5, 5, finalMessage);
+    stdout.write(`Fix vault: relatorio combinado em ${reportPath}\n`);
+    const exitCode = repair.exitCode || webRepair.exitCode || metadata.exitCode || 0;
+    if (effectiveFlags.resultJson === true) {
+        stdout.write(`RESULT_JSON ${JSON.stringify(combined)}\n`);
+    }
+    return { exitCode, result: combined };
+};

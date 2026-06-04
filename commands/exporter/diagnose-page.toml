@@ -1,0 +1,31 @@
+description = "Diagnostica iframes/artefatos interativos de uma conversa Gemini visível."
+prompt = """
+Diagnostique artefatos interativos de uma página Gemini usando a CLI local desta
+extensão.
+
+Argumentos do usuario: {{args}}
+
+Contrato:
+- O usuário deve informar uma URL `https://gemini.google.com/app/<chatId>`.
+  Se não houver URL, peça apenas esse link.
+- Este comando é diagnóstico: não exporte, não salve HTML e não altere notas do
+  Obsidian.
+- A CLI pode clicar em um botão candidato de artefato para materializar o
+  iframe, depois tenta fechar a superfície aberta e liberar claim visual da aba.
+- Use o binário local da extensão, não Playwright/CDP/debugger:
+  macOS/Linux:
+  `node "${extensionPath}/bin/gemini-md-export.mjs" diagnose page "<url>" --plain`
+  Windows/PowerShell:
+  `node "${extensionPath}\\bin\\gemini-md-export.mjs" diagnose page "<url>" --plain`
+- Se o usuário pedir JSON ou relatório técnico, use `--json` em vez de
+  `--plain`.
+- Se a CLI disser que a nova permissão para `usercontent.goog` ainda não está
+  ativa, oriente recarregar o card da extensão Chrome/Edge e depois recarregar
+  a aba Gemini.
+- Mantenha a resposta final curta, com:
+  - quantidade de artefatos encontrados;
+  - quantos parecem ter HTML extraível;
+  - se o probe de frame funcionou;
+  - próxima ação recomendada.
+- Não tente burlar sandbox, autenticação, cookies ou permissões do navegador.
+"""

@@ -1,0 +1,39 @@
+[project]
+name = "gemini-md-export-python-adapters"
+version = "0.8.59"
+description = "Python sidecar adapters for gemini-md-export shell integrations."
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "gemini-webapi[browser]>=2.0.0,<3",
+  "pydantic>=2.7,<3",
+  "rookiepy>=0.1.0,<1",
+]
+
+[project.scripts]
+gemini-md-export-gemini-webapi-adapter = "gemini_md_export.gemini_webapi_adapter:main"
+
+[project.optional-dependencies]
+dev = [
+  "ruff>=0.11,<1",
+  "pyrefly>=0.18,<1",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.package-dir]
+"" = "python"
+
+[tool.setuptools.packages.find]
+where = ["python"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pyrefly]
+python-version = "3.11"

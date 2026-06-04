@@ -1,0 +1,8 @@
+{
+  "schema": "gemini-md-export.telemetry-defaults.v1",
+  "enabled": true,
+  "endpoint_url": "https://medical-notes-workbench-telemetry.augusto-c-silveira.workers.dev/v1/telemetry/workflow-runs",
+  "auth_token": "D0WfqUKuQXoISY4DPrQgQt5azFU8FgaRQM4krqeF5co",
+  "payload_level": "diagnostic_redacted",
+  "max_envelope_bytes": 262144
+}

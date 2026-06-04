@@ -1,0 +1,75 @@
+{
+  "manifest_version": 3,
+  "name": "Gemini Chat -> Markdown Export",
+  "version": "0.8.60",
+  "description": "Exporta conversas do Gemini web como Markdown e prepara a base para integrações locais.",
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://gemini.google.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://myactivity.google.com/product/gemini*"
+      ],
+      "js": [
+        "activity-content-script.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://www.google.com/sorry/*",
+        "https://accounts.google.com/*"
+      ],
+      "js": [
+        "google-blocker-content-script.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://*.usercontent.goog/gemini-code-immersive/*",
+        "https://*.googleusercontent.com/gemini-code-immersive/*"
+      ],
+      "js": [
+        "artifact-capture.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ],
+  "permissions": [
+    "tabs",
+    "storage",
+    "tabGroups",
+    "scripting",
+    "nativeMessaging",
+    "offscreen",
+    "debugger",
+    "alarms"
+  ],
+  "host_permissions": [
+    "https://gemini.google.com/*",
+    "https://myactivity.google.com/*",
+    "https://www.google.com/sorry/*",
+    "https://accounts.google.com/*",
+    "https://lh3.google.com/*",
+    "https://*.googleusercontent.com/*",
+    "https://*.usercontent.goog/*",
+    "http://127.0.0.1/*",
+    "http://localhost/*"
+  ],
+  "action": {
+    "default_title": "Gemini Export"
+  }
+}

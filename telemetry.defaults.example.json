@@ -1,0 +1,8 @@
+{
+  "schema": "gemini-md-export.telemetry-defaults.v1",
+  "enabled": true,
+  "endpoint_url": "https://SEU-WORKER.workers.dev/v1/telemetry/workflow-runs",
+  "auth_token": "INGEST_TOKEN_DO_WORKER",
+  "payload_level": "diagnostic_redacted",
+  "max_envelope_bytes": 262144
+}
